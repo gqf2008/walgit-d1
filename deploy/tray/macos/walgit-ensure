@@ -1,88 +1,16 @@
 #!/usr/bin/env bash
-# walgit-ensure — 确保本机 walgit 服务在跑（幂等）；status / stop 子命令
-# 端口与服务同源:读 $BASE/walgit.toml 的 [server].listen,默认 127.0.0.1:8081。
+# walgit-ensure — 兼容壳。服务生命周期已经由 **walgit 二进制**负责
+# (`walgit service start|stop|status`),这个脚本不再自己判断存活、不再起
+# screen、不再截断日志;它只把旧名字转发过去,给旧版托盘/安装器/文档一个入口。
 set -euo pipefail
-
-BASE="${WALGIT_DEPLOY_DIR:-$HOME/walgit}"
-
-# 输出 [server].listen 的值(只认第一个 listen = "...");找不到回退默认。
-read_listen() {
-  local cfg="${WALGIT_CONFIG:-$BASE/walgit.toml}" l=""
-  if [ -f "$cfg" ]; then
-    l="$(awk -F'"' '/^[[:space:]]*listen[[:space:]]*=/{print $2; exit}' "$cfg" 2>/dev/null || true)"
-  fi
-  [ -n "$l" ] || l="127.0.0.1:8081"
-  printf '%s' "$l"
-}
-# release-install.sh 显式传入解析结果,保证 stop/start 与健康检查同端口。
-LISTEN="${WALGIT_LISTEN:-$(read_listen)}"
-PORT="${LISTEN##*:}"
-case "$PORT" in
-  ''|*[!0-9]*) PORT=8081 ;;
-esac
-URL="http://$LISTEN"
-HEALTH_URL="$URL/healthz"
-
-is_running() {
-  curl -sf -o /dev/null --max-time 2 "$HEALTH_URL" 2>/dev/null
-}
-
-get_pid() {
-  lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1
-}
-
-case "${1:-ensure}" in
-  status)
-    if is_running; then
-      pid="$(get_pid)"
-      echo "walgit: running (pid ${pid:-?}) — $URL"
-    else
-      echo "walgit: not running — $URL"
-      exit 1
-    fi
-    exit 0
-    ;;
-  stop)
-    screen -S "${WALGIT_SCREEN_SESSION:-walgit-server}" -X quit 2>/dev/null || true
-    pid="$(get_pid || true)"
-    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
-    # 等待完全退出（最多 10s）
-    for ((i = 0; i < 10; i++)); do
-      if ! is_running && [ -z "$(get_pid || true)" ]; then
-        echo "walgit: stopped"
-        exit 0
-      fi
-      sleep 1
-    done
-    echo "walgit: stop failed — still running" >&2
-    exit 1
-    ;;
-  ensure|start|"")
-    if is_running; then
-      echo "walgit: already running (pid $(get_pid)) — $URL"
-      exit 0
-    fi
-    # 校验部署完整性(凭证可选:全新部署走 /setup 向导配置 store)
-    if [ ! -x "$BASE/walgit" ] || [ ! -f "$BASE/walgit.toml" ] || [ ! -x "$BASE/run-walgit.sh" ]; then
-      echo "walgit: 部署不完整（缺 $BASE 下的 walgit / walgit.toml / run-walgit.sh）" >&2
-      exit 1
-    fi
-    # screen 保活启动（exec 会话会回收裸后台进程）
-    screen -dmS "${WALGIT_SCREEN_SESSION:-walgit-server}" bash -c "cd $BASE && ./run-walgit.sh > $BASE/server.log 2>&1; echo EXIT=\$? >> $BASE/server.log"
-    # 等待就绪（最多 15s）
-    for ((i = 0; i < 15; i++)); do
-      if is_running; then
-        echo "walgit: started (pid $(get_pid)) — $URL"
-        exit 0
-      fi
-      sleep 1
-    done
-    echo "walgit: 启动失败，日志尾部：" >&2
-    tail -5 "$BASE/server.log" 2>/dev/null >&2 || true
-    exit 1
-    ;;
+BASE="${WALGIT_DEPLOY_DIR:-$HOME/.walgit}"
+CONFIG="${WALGIT_CONFIG:-$BASE/walgit.toml}"
+case "${1:-start}" in
+  ensure|start|"") verb=start ;;
+  stop|status|restart) verb="$1" ;;
   *)
-    echo "用法: walgit-ensure [ensure|status|stop]" >&2
+    echo "用法: walgit-ensure [start|stop|status|restart]（= walgit service …）" >&2
     exit 2
     ;;
 esac
+exec "$BASE/walgit" service "$verb" --config "$CONFIG"

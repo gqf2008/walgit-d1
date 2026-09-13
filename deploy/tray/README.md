@@ -12,7 +12,9 @@ GitHub Release 与源码仓库；Rust 托盘保留源码仓库检测与安装器
 ## 菜单(两个实现一致)
 
 - **状态行**:`walgit 服务:运行中 · <版本>`(5 秒轮询 /healthz)
-- **启动 / 停止服务**:macOS 走 `walgit-ensure`(screen 保活);Windows/Linux
+- **启动 / 停止服务**:统一走 `walgit service start|stop|status|restart`（存活判断、
+  起停、pidfile、日志轮转都在**二进制**里；`walgit-ensure` 现在只是转发壳）。
+  历史上 macOS 曾用 `walgit-ensure` + screen 保活，Windows/Linux
   分离进程启动部署目录下的 `walgit(.exe) serve`,pid 写 `walgit.pid`
 - **版本升级状态行**(abb 式状态机):
   `版本 <version> · 检查更新…` → `正在检查更新…` → `已是最新 ✓(点击重查)`
@@ -42,7 +44,7 @@ Release 升级管线:下载 DMG → 校验 GitHub `sha256`(精确等值)→ 校�
 ## 约定
 
 - 部署目录:`$HOME/walgit`(Windows:`%USERPROFILE%\walgit`),内含
-  `walgit(.exe)` + `walgit.toml`;macOS 另需 `walgit-ensure` 与
+  `walgit(.exe)` + `walgit.toml`（部署家目录 `~/.walgit`）;macOS 另需 `walgit-ensure` 与
   `run-walgit.sh`(release DMG 的托盘首次启动会自动落盘这四件骨架,
   已存在的文件不覆盖;凭证 `~/walgit/.r2-credentials` 由使用者自填)。
   macOS 首次启动还会幂等建 `/usr/local/bin/walgit` 软链 → 部署二进制,
@@ -76,7 +78,7 @@ notary profile 为 `voicecall-notary`；非交互环境可显式传
 `NOTARY_KEYCHAIN`。
 
 需要 Xcode Command Line Tools(swiftc)。`build.sh` 把 walgit 二进制 +
-`run-walgit.sh` + `walgit-ensure` + `release-install.sh` + `walgit.toml.template`
+`run-walgit.sh` + `walgit-ensure`(转发壳) + `release-install.sh` + `walgit.toml.template`
 打进 app Resources——首次启动 bootstrap 到 `~/walgit`(幂等),产物做
 ad-hoc 整体签名,独立 `codesign --verify --deep --strict` 可过。`build-dmg.sh`
 走全链:app 签名+公证+装订 → hdiutil 出 DMG(拖放安装)→ DMG 签名+公证+

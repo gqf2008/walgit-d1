@@ -31,7 +31,7 @@ swiftc -O -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swif
 # 内嵌 Mach-O 先 ad-hoc 垫底;build-dmg.sh 会用 Developer ID 重签后公证。
 cp "$WALGIT_BIN" "$RES_DIR/walgit"
 codesign --force --sign - "$RES_DIR/walgit" 2>/dev/null || true
-cp run-walgit.sh walgit-ensure release-install.sh "$RES_DIR/"
+cp run-walgit.sh release-install.sh "$RES_DIR/"
 cp walgit.toml.template "$RES_DIR/walgit.toml"
 printf '%s\n' "$VERSION" > "$RES_DIR/skeleton.version"
 cat > "$APP/Contents/Info.plist" <<PLIST

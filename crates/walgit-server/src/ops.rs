@@ -59,6 +59,15 @@ pub const OPS: &[OpSpec] = &[
         mutating: false,
     },
     OpSpec {
+        id: "gc",
+        label: "Bucket GC",
+        description: "Reclaim superseded packs: delete the packs a COMPACT entry dropped once their \
+                      marker is older than compaction.retention_superseded (the provenance window). At most `max` packs per call (default 32). Ref-level: \
+                      reads the manifest and marker objects, never pack data.",
+        params: &["max"],
+        mutating: true,
+    },
+    OpSpec {
         id: "repair",
         label: "Repair",
         description: "Fetch the objects the last fsck found missing from upstream.git and publish them \
@@ -194,6 +203,523 @@ pub async fn read_fsck(
     use walgit_store::ObjectStoreExt;
     match handle.store().get_bytes(walgit_proto::keys::FSCK).await {
         Ok(Some((_, bytes))) => walgit_proto::v1::FsckReport::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+
+/// One bounded bucket-GC unit: delete superseded packs that have aged past
+/// `compaction.retention_superseded` (#175).
+///
+/// `Manifest.packs` is the live set. A pack a COMPACT entry dropped is found by
+/// its `wal/<checksum>.superseded` marker, written when that entry committed
+/// (`publish_compact_impl`) — the manifest alone cannot express *when* a pack
+/// left the live set, and the superseding log entry is eventually folded into a
+/// checkpoint. Only marked packs are candidates, which is also what protects a
+/// pack a concurrent publisher uploaded but has not CAS'd yet: no marker, no
+/// candidate.
+///
+/// Bounded by `max` (D22: one unit of the most important missing work).
+async fn gc_superseded_packs(
+    handle: &RepoHandle,
+    max: usize,
+    lease_ttl: std::time::Duration,
+    owner: &str,
+    token: &str,
+    lost: &std::sync::atomic::AtomicBool,
+    log: Log<'_>,
+) -> Result<(u64, u64, bool), String> {
+    use futures::StreamExt;
+    use prost::Message;
+    use std::sync::atomic::Ordering;
+    use walgit_proto::keys;
+    use walgit_proto::v1::SupersededPack;
+    use walgit_store::ObjectStore;
+
+    // Fresh refs *first*: the retention window (D24: `[compaction]` is a
+    // per-repo settings section), the live set and the marker ages must all
+    // come from one generation. Reading a stale cached handle would let another
+    // instance's settings change land after we captured the window (#175).
+    let (retention, live) = {
+        let _guard = handle.sync_refs().await.map_err(|e| e.to_string())?;
+        let retention = handle.effective_config().compaction.retention_superseded;
+        let live: std::collections::HashSet<String> = handle
+            .manifest()
+            .packs
+            .iter()
+            .map(|p| p.checksum.clone())
+            .collect();
+        (retention, live)
+    };
+    let now = std::time::SystemTime::now();
+
+    // Crash/lease-loss recovery. A claim whose holder died must never stay
+    // forever: with a marker still present the checksum can never be reclaimed
+    // (and every push/compact regenerating those bytes is refused); with the
+    // marker already retired it can never even become a candidate again. Either
+    // way this pass — which holds the lease — takes it over, but only once the
+    // claim is older than a few lease TTLs: a younger claim may still belong to
+    // a live pass whose lease we simply cannot see. "Not ours" is judged on
+    // `(owner, token)`: a different token of the *same* instance is a different
+    // holder.
+    let grace = (lease_ttl.saturating_mul(3)).max(std::time::Duration::from_secs(300));
+    // Marker gone ⇒ nothing left to reclaim: release the stale claim by an
+    // exact compare-and-remove.
+    let mut orphan_claims: Vec<(String, String, String)> = Vec::new();
+    // Marker still there ⇒ adopt it: the same CAS compare-removes the stale
+    // tuple and adds ours, so the pass can then finish the reclamation.
+    let mut takeovers: Vec<(String, String, String)> = Vec::new();
+    // Checksums this pass adopted above; if the scan then finds nothing to do
+    // (the marker vanished between our GET and the take-over CAS) they carry no
+    // work and must be released, or the publisher is refused until the next
+    // `gc_interval`.
+    let mut adopted: Vec<String> = Vec::new();
+    for claim in handle.manifest().reclaiming.clone() {
+        let ours = claim.owner == owner && claim.token == token;
+        if ours || live.contains(&claim.checksum) {
+            continue;
+        }
+        // A missing `since` is not evidence of age: keep the claim.
+        let old_enough = claim
+            .since
+            .as_ref()
+            .map(walgit_proto::time::to_system)
+            .is_some_and(|t| now.duration_since(t).unwrap_or_default() >= grace);
+        if !old_enough {
+            continue;
+        }
+        match handle
+            .store()
+            .get_bytes(&keys::superseded_key(&claim.checksum))
+            .await
+        {
+            Ok(None) => orphan_claims.push((claim.checksum, claim.owner, claim.token)),
+            Ok(Some(_)) => takeovers.push((claim.checksum, claim.owner, claim.token)),
+            Err(e) => log(format!(
+                "gc: reading marker for {} failed ({e})",
+                claim.checksum
+            )),
+        }
+    }
+    if !orphan_claims.is_empty() || !takeovers.is_empty() {
+        // One CAS: release the retired ones, adopt the rest. `recover` is the
+        // exact compare-and-remove list — it must carry BOTH kinds, or the
+        // adoption below is a no-op (the stale tuple is still there and `add`
+        // never overwrites an existing claim).
+        let adopt: Vec<String> = takeovers.iter().map(|(c, _, _)| c.clone()).collect();
+        let mut recover: Vec<(String, String, String)> = orphan_claims.clone();
+        recover.extend(takeovers.iter().cloned());
+        handle
+            .update_reclaiming(&adopt, &[], &recover, token)
+            .await
+            .map_err(|e| e.to_string())?;
+        adopted.extend(adopt);
+        if !orphan_claims.is_empty() {
+            log(format!(
+                "gc: released {} claim(s) whose marker was already retired",
+                orphan_claims.len()
+            ));
+        }
+        if !takeovers.is_empty() {
+            log(format!(
+                "gc: took over {} stale claim(s) from dead holder(s)",
+                takeovers.len()
+            ));
+        }
+    }
+
+    // Collect markers that have aged past the retention window *and* whose pack
+    // is not live in that same generation. Reading each marker is one GET; the
+    // listing is bounded by the number of packs a repo ever superseded within
+    // the window, not by its object count. Dropping live checksums before the
+    // bound below is what keeps an old marker on a re-adopted pack from
+    // spending quota and starving real candidates.
+    let mut candidates: Vec<(String, std::time::SystemTime)> = Vec::new();
+    let mut scanned = 0u64;
+    {
+        let mut stream = handle.store().list(keys::SUPERSEDED_DIR, None);
+        while let Some(m) = stream.next().await {
+            let m = m.map_err(|e| e.to_string())?;
+            if !m.key.starts_with(keys::SUPERSEDED_DIR) {
+                continue;
+            }
+            scanned += 1;
+            let Some((_, raw)) = handle
+                .store()
+                .get_bytes(&m.key)
+                .await
+                .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            let marker = SupersededPack::decode(raw.as_ref()).map_err(|e| e.to_string())?;
+            if live.contains(&marker.checksum) {
+                continue;
+            }
+            let Some(at) = marker
+                .superseded_at
+                .as_ref()
+                .map(walgit_proto::time::to_system)
+            else {
+                continue;
+            };
+            if now.duration_since(at).unwrap_or_default() <= retention {
+                continue;
+            }
+            candidates.push((marker.checksum, at));
+        }
+    }
+    // Adopted checksums that did not become candidates carry no work: their
+    // marker vanished between our GET and the take-over CAS, or it is not aged
+    // yet. Release them now rather than refusing publishers until the next
+    // `gc_interval`.
+    if !adopted.is_empty() {
+        let pending: std::collections::HashSet<&str> =
+            candidates.iter().map(|(c, _)| c.as_str()).collect();
+        let idle: Vec<String> = adopted
+            .iter()
+            .filter(|c| !pending.contains(c.as_str()))
+            .cloned()
+            .collect();
+        if !idle.is_empty() {
+            handle
+                .update_reclaiming(&[], &idle, &[], token)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    if candidates.is_empty() {
+        return Ok((0, 0, true));
+    }
+    // Oldest first: a partial unit should reclaim the longest-dead packs.
+    candidates.sort_by_key(|(_, at)| *at);
+    // Anything past the bound is real work this pass did not do: the unit must
+    // stay due, not wait a whole `gc_interval`.
+    let truncated = candidates.len() > max;
+    candidates.truncate(max);
+    let checksums: Vec<String> = candidates.iter().map(|(c, _)| c.clone()).collect();
+
+    // List the candidates in `Manifest.reclaiming` *before* touching any
+    // object: that CAS is what orders reclamation against adoption. A publisher
+    // that would put one of these checksums back into `packs` refuses while it
+    // is listed (both sides go through the manifest CAS, so exactly one wins).
+    // Claims another live holder already has are left to it.
+    let before_claim = handle.manifest();
+    let claimable: Vec<String> = checksums
+        .iter()
+        .filter(|c| {
+            // Only claims this pass already owns are skipped: a claim held by
+            // anyone else (another owner, or another token) was either taken
+            // over above or is fresh and must be left alone.
+            !before_claim
+                .reclaiming
+                .iter()
+                .any(|r| &r.checksum == *c && !(r.owner == owner && r.token == token))
+        })
+        .cloned()
+        .collect();
+    drop(before_claim);
+    let claim_manifest = handle
+        .update_reclaiming(&claimable, &[], &[], token)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Only claims carrying *this* pass's fence are ours to delete; the helper
+    // skips live checksums and anything another owner listed.
+    let owned: std::collections::HashSet<String> = claim_manifest
+        .reclaiming
+        .iter()
+        .filter(|r| r.owner == owner && r.token == token)
+        .map(|r| r.checksum.clone())
+        .collect();
+    let live: std::collections::HashSet<String> = claim_manifest
+        .packs
+        .iter()
+        .map(|p| p.checksum.clone())
+        .collect();
+    // The claim CAS is the generation every deletion below linearizes in, so
+    // the retention window must be the one from *that* manifest — another
+    // instance may have published new settings since our first sync.
+    let retention = handle
+        .effective_config_for(&claim_manifest)
+        .compaction
+        .retention_superseded;
+    // Our own fence has a *deadline*: the recovery path may take this claim over
+    // once it is older than `grace`, so a pass that has been running that long
+    // must stop deleting. This is the only check a *suspended* process can rely
+    // on — `lost` cannot be updated while it is stopped, and the object store
+    // (S3/R2) cannot always prove that a re-created object differs from the one
+    // we read. Stopping at `grace` is what keeps a stale pass from ever acting
+    // on a claim a taker could already own.
+    let fence_from = claim_manifest
+        .reclaiming
+        .iter()
+        .find(|r| r.owner == owner && r.token == token)
+        .and_then(|r| r.since.as_ref())
+        .map(walgit_proto::time::to_system);
+    let within_fence = || {
+        fence_from.is_some_and(|t| {
+            std::time::SystemTime::now()
+                .duration_since(t)
+                .unwrap_or_default()
+                < grace
+        })
+    };
+
+    let mut deleted = 0u64;
+    let mut freed = 0u64;
+    let mut all_complete = !truncated;
+    // (checksum, marker version) for packs whose objects are all gone.
+    let mut reclaimed: Vec<(String, walgit_store::Version)> = Vec::new();
+    // Claims we hold but must release without deleting (the marker was
+    // refreshed, or the pack turned out live).
+    let mut release: Vec<String> = Vec::new();
+    for (checksum, at) in candidates {
+        if !owned.contains(&checksum) || live.contains(&checksum) {
+            // A publisher re-adopted it before our claim, or another GC pass
+            // owns it. Leave the pack and its marker alone.
+            log(format!("gc: {checksum} is live again or owned elsewhere — skipped"));
+            continue;
+        }
+        // Fail closed on a lease we no longer hold, and re-verify the fence in
+        // the store before every destructive step: if a later pass recovered
+        // this claim (or the lease moved on), our authorization is gone.
+        if lost.load(Ordering::SeqCst) || !within_fence() {
+            log("gc: lease lost or claim past its deadline — stopping".to_string());
+            all_complete = false;
+            break;
+        }
+        if !claim_still_ours(handle, &checksum, owner, token).await? {
+            log(format!("gc: claim for {checksum} is no longer ours — skipped"));
+            all_complete = false;
+            continue;
+        }
+        // Re-read the marker now that we own the claim: the timestamp scanned
+        // above may predate a concurrent supersession that refreshed it after
+        // our read.
+        let marker_key = keys::superseded_key(&checksum);
+        let Some((meta, raw)) = handle
+            .store()
+            .get_bytes(&marker_key)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            // Marker gone: someone else retired it; drop the claim.
+            release.push(checksum.clone());
+            continue;
+        };
+        let marker = SupersededPack::decode(raw.as_ref()).map_err(|e| e.to_string())?;
+        let fresh_at = marker
+            .superseded_at
+            .as_ref()
+            .map_or(at, walgit_proto::time::to_system);
+        if now.duration_since(fresh_at).unwrap_or_default() <= retention {
+            log(format!(
+                "gc: {checksum} was superseded again inside the window — skipped"
+            ));
+            release.push(checksum.clone());
+            all_complete = false;
+            continue;
+        }
+        let side_files = [
+            keys::pack_key(&checksum),
+            keys::idx_key(&checksum),
+            keys::rev_key(&checksum),
+            keys::bitmap_key(&checksum),
+            keys::commit_graph_key(&checksum),
+        ];
+        let mut complete = true;
+        for key in &side_files {
+            if lost.load(Ordering::SeqCst) || !within_fence() {
+                log("gc: lease lost or claim past its deadline — stopping".to_string());
+                complete = false;
+                all_complete = false;
+                break;
+            }
+            match handle.store().head(key).await {
+                Ok(Some(meta)) => {
+                    // Re-verify the fence per object: a pass that was suspended
+                    // long enough for its lease to lapse cannot see `lost`
+                    // update while it is stopped, and by the time it resumes
+                    // another pass may have adopted the claim, finished the
+                    // reclamation and let a publisher re-adopt the checksum.
+                    // Re-checking here (plus the version taken above) closes
+                    // both orders: an earlier re-upload fails this check, a
+                    // later one fails the version-conditioned delete.
+                    if !within_fence() {
+                        log(format!(
+                            "gc: claim for {checksum} is past its deadline — leaving {key}"
+                        ));
+                        complete = false;
+                        all_complete = false;
+                        break;
+                    }
+                    if !claim_still_ours(handle, &checksum, owner, token).await? {
+                        log(format!(
+                            "gc: claim for {checksum} moved on — leaving {key}"
+                        ));
+                        complete = false;
+                        all_complete = false;
+                        break;
+                    }
+                    // …and once more *after* that round trip: the check above is
+                    // itself an await, and a pass suspended across it (or across
+                    // the deadline) must not go on to delete. What remains is the
+                    // store's own HEAD→DELETE, which is the accepted
+                    // lease-guarded check-then-act window on S3.
+                    if lost.load(Ordering::SeqCst) || !within_fence() {
+                        log(format!(
+                            "gc: claim for {checksum} passed its deadline — leaving {key}"
+                        ));
+                        complete = false;
+                        all_complete = false;
+                        break;
+                    }
+                    freed += meta.size;
+                    match handle.store().delete(key, Some(meta.version)).await {
+                        Ok(())
+                        | Err(walgit_store::StoreError::NotFound { .. }) => {}
+                        Err(walgit_store::StoreError::PreconditionFailed { .. }) => {
+                            log(format!("gc: {key} changed under us — leaving it"));
+                            complete = false;
+                        }
+                        Err(e) => return Err(format!("gc: delete {key}: {e}")),
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // A transient HEAD error must not silently strand the pack:
+                    // leave the marker so the next pass retries.
+                    log(format!("gc: head {key} failed ({e}) — leaving the marker"));
+                    complete = false;
+                }
+            }
+        }
+        if !complete {
+            // The marker is the only record that this pack is garbage: keep it
+            // until every object is gone. The claim stays too, so the pack is
+            // still listed against re-adoption.
+            all_complete = false;
+            continue;
+        }
+        log(format!(
+            "gc: reclaimed {checksum} (superseded {:.1}h ago)",
+            now.duration_since(fresh_at)
+                .unwrap_or_default()
+                .as_secs_f64()
+                / 3600.0
+        ));
+        reclaimed.push((checksum, meta.version));
+        deleted += 1;
+    }
+    if !reclaimed.is_empty() || !release.is_empty() {
+        // Retire the markers *while the claim is still held*. The claim stops
+        // the checksum re-entering `packs`, and `publish_compact_impl` skips
+        // marker writes for claimed checksums — so no fresh marker can appear
+        // under us. That is what makes the retire safe even on a backend whose
+        // conditional delete is HEAD+compare+DELETE (S3), where a release-then-
+        // delete order could drop a marker written in the gap.
+        for (checksum, version) in &reclaimed {
+            if lost.load(Ordering::SeqCst) || !within_fence() {
+                all_complete = false;
+                break;
+            }
+            // The retire is destructive too: re-verify the fence immediately
+            // before it, so a claim a newer pass took over cannot be retired by
+            // this stale one.
+            if !claim_still_ours(handle, checksum, owner, token).await? {
+                log(format!("gc: claim for {checksum} moved on — leaving its marker"));
+                all_complete = false;
+                continue;
+            }
+            // Re-check after that await, for the same reason as the object delete.
+            if lost.load(Ordering::SeqCst) || !within_fence() {
+                log(format!(
+                    "gc: claim for {checksum} passed its deadline — leaving its marker"
+                ));
+                all_complete = false;
+                break;
+            }
+            match handle
+                .store()
+                .delete(&keys::superseded_key(checksum), Some(version.clone()))
+                .await
+            {
+                Ok(()) | Err(walgit_store::StoreError::NotFound { .. }) => {}
+                Err(walgit_store::StoreError::PreconditionFailed { .. }) => {
+                    // A marker that outlived our claim generation (e.g. written
+                    // by an older pass): leave it for the next unit.
+                    log(format!(
+                        "gc: marker {checksum} changed — leaving it for the next pass"
+                    ));
+                    all_complete = false;
+                }
+                Err(e) => return Err(format!("gc: delete marker {checksum}: {e}")),
+            }
+        }
+        // Release last: a released claim with the marker gone would let a
+        // publisher re-adopt the checksum with no record of what happened.
+        if lost.load(Ordering::SeqCst) || !within_fence() {
+            // A pass that lost its lease (or ran past its own claim deadline)
+            // releases nothing: the claim is left for the age-fenced recovery.
+            all_complete = false;
+        } else {
+            let mut release_claims: Vec<String> = release.clone();
+            release_claims.extend(reclaimed.iter().map(|(c, _)| c.clone()));
+            handle
+                .update_reclaiming(&[], &release_claims, &[], token)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    if scanned > 0 {
+        log(format!(
+            "gc: scanned {scanned} marker(s), reclaimed {deleted}, freed {freed} bytes"
+        ));
+    }
+    Ok((deleted, freed, all_complete))
+}
+
+/// Is `checksum` still listed under *this* pass's fence in the store? A later
+/// pass that recovered the claim (age fence + dead holder) or a lost lease
+/// makes this false, and the caller must not delete under it anymore (#175).
+async fn claim_still_ours(
+    handle: &RepoHandle,
+    checksum: &str,
+    owner: &str,
+    token: &str,
+) -> Result<bool, String> {
+    use prost::Message;
+    let Some((_, raw)) = handle
+        .store()
+        .get_bytes(walgit_proto::keys::MANIFEST)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    let manifest =
+        walgit_proto::v1::Manifest::decode(raw.as_ref()).map_err(|e| e.to_string())?;
+    Ok(manifest
+        .reclaiming
+        .iter()
+        .any(|r| r.checksum == checksum && r.owner == owner && r.token == token))
+}
+
+/// Upper bound on packs reclaimed per GC unit: a unit must stay bounded so one
+/// pass cannot monopolise a maintainer (D22).
+const GC_MAX_PACKS_PER_UNIT: usize = 32;
+
+
+/// The last bucket-GC pass of `handle`'s repository, if any (#175).
+pub async fn read_gc(
+    handle: &RepoHandle,
+) -> Result<Option<walgit_proto::v1::GcReport>, String> {
+    use walgit_store::ObjectStoreExt;
+    match handle.store().get_bytes(walgit_proto::keys::GC).await {
+        Ok(Some((_, bytes))) => walgit_proto::v1::GcReport::decode(bytes.as_ref())
             .map(Some)
             .map_err(|e| e.to_string()),
         Ok(None) => Ok(None),
@@ -423,6 +949,109 @@ async fn run(
                 serde_json::json!({"pack": checksum, "bytes": bytes}),
             ))
         }
+        "gc" => {
+            // Fresh refs before anything: the lease TTL and the retention window
+            // are per-repo settings (D24), and a direct `POST /ops/gc` bypasses
+            // the maintainer's own sync — a cached handle must not hand out a
+            // lease (or a window) sized by a superseded settings revision.
+            {
+                let _g = handle.sync_refs().await.map_err(|e| e.to_string())?;
+            }
+            // Per-repo lease: two GC passes must not interleave. Claims carry
+            // an owner+token fence, so a later pass cannot touch ours while we
+            // still hold it — but the lease is still what keeps two passes from
+            // doing the same work, so it is *renewed* for the whole run.
+            let lease_ttl = handle.effective_config().compaction.lease_ttl;
+            // Guard against a mis-set (e.g. zero) TTL: a lease nobody can renew
+            // in time is worse than no GC at all.
+            let lease_ttl = lease_ttl.max(std::time::Duration::from_secs(30));
+            let lease_store: walgit_store::DynStore = Arc::new(handle.store().clone());
+            let lease = walgit_store::coord::try_acquire(
+                lease_store,
+                &walgit_proto::keys::lease_key("gc"),
+                walgit_store::coord::instance_id(),
+                "gc",
+                lease_ttl,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let Some(lease) = lease else {
+                return Ok((
+                    "gc: lease held by another instance".to_string(),
+                    serde_json::json!({"skipped": "lease-held"}),
+                ));
+            };
+            let lease = Arc::new(tokio::sync::Mutex::new(lease));
+            // A per-pass fence: every claim this pass lists carries `token` and
+            // is re-checked before each delete, so a later pass that recovers a
+            // claim (or takes the lease) cannot have its work conflated with
+            // ours. `lost` is set the moment a heartbeat finds the lease gone.
+            let token = uuid::Uuid::new_v4().to_string();
+            let owner = walgit_store::coord::instance_id().to_string();
+            let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let heartbeat = walgit_store::coord::LeaseGuard::spawn_heartbeat_watched(
+                lease.clone(),
+                lease_ttl / 3,
+                lease_ttl,
+                stop_rx,
+                lost.clone(),
+            );
+            // Clamped: the caller may not widen a unit past the bound the
+            // lease/reporting semantics were sized for.
+            let max = params
+                .get("max")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(GC_MAX_PACKS_PER_UNIT)
+                .min(GC_MAX_PACKS_PER_UNIT);
+            let outcome =
+                gc_superseded_packs(&handle, max, lease_ttl, &owner, &token, &lost, log).await;
+            // Stop renewing gracefully (never abort: a cancelled heartbeat whose
+            // remote CAS already landed leaves our version stale, and the
+            // release would then silently miss), then release through the guard.
+            let _ = stop_tx.send(true);
+            let _ = heartbeat.await;
+            if let Ok(mutex) = Arc::try_unwrap(lease)
+                && let Err(e) = mutex.into_inner().release().await
+            {
+                log(format!("gc: lease release failed: {e}"));
+            }
+            let (packs, bytes, complete) = outcome?;
+            if !complete {
+                // Something could not be deleted: the claims stay (correct — the
+                // pack is still there), so do NOT write gc.pb. The unit stays
+                // due and the next pass retries instead of leaving the checksum
+                // refused for a whole gc_interval.
+                return Ok((
+                    format!("gc: incomplete ({packs} reclaimed); retrying next pass"),
+                    serde_json::json!({"packs": packs, "bytes": bytes, "complete": false}),
+                ));
+            }
+            let report = walgit_proto::v1::GcReport {
+                at: Some(walgit_proto::time::now()),
+                packs,
+                bytes,
+                host: crate::maintain::host_name(state),
+            };
+            handle
+                .store()
+                .put_bytes(
+                    walgit_proto::keys::GC,
+                    report.encode_to_vec(),
+                    walgit_store::PutMode::Overwrite,
+                )
+                .await
+                .map_err(|e| format!("writing gc.pb: {e}"))?;
+            let summary = if packs == 0 {
+                "gc: nothing superseded past retention".to_string()
+            } else {
+                format!("gc: {packs} superseded pack(s), {bytes} bytes freed")
+            };
+            tracing::info!(repo = %id, packs, bytes, "bucket gc");
+            Ok((summary, serde_json::json!({"packs": packs, "bytes": bytes})))
+        }
+
         "compact" => {
             let force = flag(params, "force");
             let base = flag(params, "base");

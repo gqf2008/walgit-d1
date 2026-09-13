@@ -58,6 +58,11 @@ pub struct RepoHandle {
     // Current manifest (last known). Short critical sections, no await.
     pub(crate) manifest: PLRwLock<Arc<Manifest>>,
     pub(crate) manifest_version: PLMutex<Option<Version>>,
+    /// Guards the *pair* above. Writers install `(manifest, version)` under it
+    /// and readers snapshot under it, so the cache can never hold an old
+    /// manifest next to a newer version — which would let a CAS succeed on a
+    /// manifest body that predates the claim it is supposed to see (#175).
+    pub(crate) manifest_pair: PLMutex<()>,
 
     // Persistent local state.
     pub(crate) state: PLMutex<RepoState>,
@@ -211,6 +216,7 @@ impl RepoHandle {
             pack_mutex: TokioMutex::new(()),
             manifest: PLRwLock::new(Arc::new(manifest)),
             manifest_version: PLMutex::new(version),
+            manifest_pair: PLMutex::new(()),
             state: PLMutex::new(state),
             refs_verified: AtomicBool::new(false),
             packs_verified: AtomicBool::new(false),
@@ -431,6 +437,31 @@ impl RepoHandle {
 
     pub fn manifest_version(&self) -> Option<Version> {
         self.manifest_version.lock().clone()
+    }
+
+    /// The `(manifest, version)` pair a CAS must be based on, read in the only
+    /// order that cannot pair an old manifest with a new version.
+    ///
+    /// Writers publish a new manifest and then its version (separate locks), so
+    /// reading version-first makes `(old manifest, new version)` unobservable:
+    /// if we see the new version, the manifest write that preceded it is already
+    /// visible. The opposite pairing — new manifest, old version — is harmless:
+    /// the CAS simply loses and retries.
+    ///
+    /// Every `PutMode::Update(version)` decision must use this (#175).
+    pub fn manifest_snapshot(&self) -> (Arc<Manifest>, Option<Version>) {
+        let _pair = self.manifest_pair.lock();
+        let version = self.manifest_version.lock().clone();
+        let manifest = self.manifest.read().clone();
+        (manifest, version)
+    }
+
+    /// Install a new `(manifest, version)` pair atomically. Every writer must
+    /// use this instead of assigning the two fields separately.
+    pub(crate) fn install_manifest(&self, manifest: Arc<Manifest>, version: Option<Version>) {
+        let _pair = self.manifest_pair.lock();
+        *self.manifest.write() = manifest;
+        *self.manifest_version.lock() = version;
     }
 
     /// Last applied log entry sequence (local replay progress).
@@ -1083,8 +1114,7 @@ impl RepoHandle {
                     }
                     // Same content under a version we did not record (a publish that learned the version
                     // by HEAD): adopt the version so the next check is a 304.
-                    *self.manifest.write() = Arc::new(*manifest);
-                    *self.manifest_version.lock() = Some(meta_version);
+                    self.install_manifest(Arc::new(*manifest), Some(meta_version));
                     self.update_freshness();
                     return Ok(());
                 }
@@ -1098,8 +1128,7 @@ impl RepoHandle {
                 )
                 .await?;
                 span.record("entries_applied", manifest.head_seq.saturating_sub(before));
-                *self.manifest.write() = Arc::new(*manifest);
-                *self.manifest_version.lock() = Some(meta_version);
+                self.install_manifest(Arc::new(*manifest), Some(meta_version));
                 self.mark_refs_verified();
                 self.update_freshness();
             }
@@ -1208,8 +1237,7 @@ impl RepoHandle {
         self.mark_refs_unverified();
         crate::sync::materialize_from_scratch(self, &manifest, &meta.version).await?;
 
-        *self.manifest.write() = Arc::new(manifest);
-        *self.manifest_version.lock() = Some(meta.version);
+        self.install_manifest(Arc::new(manifest), Some(meta.version));
         self.last_freshness.lock().take();
 
         Ok(())
@@ -1365,6 +1393,25 @@ impl RepoHandle {
     /// settings, cached per settings revision. Settings that no longer parse
     /// against this build fall back to the host config with a warning
     /// (never a failure on a read path).
+    /// Effective config for a *specific* manifest generation (not "whatever is
+    /// current"): D24 settings are inline, so a caller that linearizes on a
+    /// manifest must derive its config from that same manifest (#175).
+    pub fn effective_config_for(&self, manifest: &Manifest) -> Arc<walgit_config::Config> {
+        let Some(settings) = manifest.settings.as_ref() else {
+            return self.cfg.clone();
+        };
+        if settings.revision == 0 {
+            return self.cfg.clone();
+        }
+        match self.cfg.with_settings(settings.toml.as_str()) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!(repo = %self.id, revision = settings.revision, error = %e, "repo settings do not apply to this build; using the host config");
+                self.cfg.clone()
+            }
+        }
+    }
+
     pub fn effective_config(&self) -> Arc<walgit_config::Config> {
         let settings = self.settings();
         let rev = settings.as_ref().map_or(0, |s| s.revision);
@@ -1419,6 +1466,22 @@ impl RepoHandle {
         commit_graph: Option<std::path::PathBuf>,
     ) -> Result<walgit_proto::v1::PackRef, WalError> {
         crate::publish::annotate_pack_impl(self, checksum, rev, bitmap, commit_graph).await
+    }
+
+    /// List/clear packs bucket GC is reclaiming (#175). GC lists a pack before
+    /// deleting any of its objects; a publisher must not re-adopt a listed
+    /// checksum. Both sides go through the manifest CAS.
+    /// Returns the manifest the claim set was read/committed against, so the
+    /// caller can derive per-repo config (D24 settings are inline) for exactly
+    /// that generation (#175).
+    pub async fn update_reclaiming(
+        &self,
+        add: &[String],
+        remove_own: &[String],
+        recover: &[(String, String, String)],
+        token: &str,
+    ) -> Result<Arc<Manifest>, WalError> {
+        crate::publish::update_reclaiming(self, add, remove_own, recover, token).await
     }
 
     /// Publish an already built pack (`pack-<checksum>.pack` + `.idx`) as a
@@ -1656,5 +1719,114 @@ impl RepoHandle {
         tokio::spawn(crate::publish::publisher_task(arc, rx));
         *guard = Some(tx.clone());
         tx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+    use walgit_proto::prost::Message;
+    use walgit_store::memory::MemoryStore;
+    use walgit_store::{PutBody, PutMode, PutOptions};
+
+    /// #175: the `(manifest, version)` pair a CAS is built on must be installed
+    /// and observed *atomically*. Two writers that install their two fields
+    /// separately can interleave so the cache ends up holding an older manifest
+    /// next to a newer version; a CAS then succeeds against a body that predates
+    /// the manifest it is updating and silently erases a `reclaiming` claim
+    /// bucket GC just listed — the manifest ends up pointing at deleted bytes.
+    ///
+    /// Here every writer installs a matched pair, so a concurrent snapshot must
+    /// never observe them mismatched. Reverting `install_manifest` to two
+    /// separate field writes (no `manifest_pair`) makes this fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn manifest_snapshot_never_pairs_a_stale_manifest_with_a_new_version() {
+        use std::sync::atomic::AtomicUsize;
+
+        let store = MemoryStore::shared();
+        let mut cfg = walgit_config::Config::default();
+        cfg.store.backend = walgit_config::StoreBackend::Memory;
+        cfg.store.memory_backend_intentional = true;
+        cfg.cache.dir = tempfile::tempdir().unwrap().keep();
+        let registry = crate::registry::Registry::new(store, Arc::new(cfg));
+
+        let id = RepoId::new("o", "pair").unwrap();
+        let seed = Manifest {
+            repo: id.to_string(),
+            revision: 0,
+            ..Default::default()
+        };
+        let prefixed = Prefixed::new(registry.store().clone(), id.store_prefix());
+        prefixed
+            .put(
+                keys::MANIFEST,
+                PutBody::Bytes(seed.encode_to_vec().into()),
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .unwrap();
+        let handle = registry.open(&id).await.unwrap();
+        // Normalise the opening pair (a store-generated version) to the same
+        // `v<revision>` scheme the writers use, so every snapshot can be checked
+        // without special-casing the seed.
+        handle.install_manifest(handle.manifest(), Some(Version::new("v0")));
+
+        let writers: u64 = 3;
+        let iters = 50_000u64;
+        let bad = Arc::new(AtomicBool::new(false));
+        let writers_done = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(usize::try_from(writers).unwrap() + 3));
+
+        std::thread::scope(|scope| {
+            for w in 0..writers {
+                let h = handle.clone();
+                let start = start.clone();
+                let writers_done = writers_done.clone();
+                scope.spawn(move || {
+                    start.wait();
+                    for i in 0..iters {
+                        let rev = (w + 1) * 1_000_000 + i;
+                        let mut m = (*h.manifest()).clone();
+                        m.revision = rev;
+                        h.install_manifest(Arc::new(m), Some(Version::new(format!("v{rev}"))));
+                    }
+                    writers_done.fetch_add(1, Ordering::Release);
+                });
+            }
+            for _ in 0..3 {
+                let h = handle.clone();
+                let bad = bad.clone();
+                let start = start.clone();
+                let writers_done = writers_done.clone();
+                scope.spawn(move || {
+                    start.wait();
+                    // Sample until every writer has stopped, then once more so a
+                    // tear written last is still caught.
+                    loop {
+                        let (m, v) = h.manifest_snapshot();
+                        if let Some(v) = v
+                            && v.as_str() != format!("v{}", m.revision)
+                        {
+                            bad.store(true, Ordering::Relaxed);
+                        }
+                        if writers_done.load(Ordering::Acquire) == usize::try_from(writers).unwrap() {
+                            let (m, v) = h.manifest_snapshot();
+                            if let Some(v) = v
+                                && v.as_str() != format!("v{}", m.revision)
+                            {
+                                bad.store(true, Ordering::Relaxed);
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        assert!(
+            !bad.load(Ordering::Relaxed),
+            "manifest_snapshot observed a torn (manifest, version) pair"
+        );
     }
 }

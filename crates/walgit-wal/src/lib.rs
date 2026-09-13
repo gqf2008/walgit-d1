@@ -22,7 +22,7 @@ pub use checkpoint::{CheckpointTrigger, checkpoint_due};
 pub use error::{CoordError, RefError, WalError};
 pub use handle::{ObjectAccess, RepoHandle};
 pub use progress::{Progress, Reporter};
-pub use publish::PublishResult;
+pub use publish::{PublishResult, write_superseded_markers};
 pub use registry::{EvictReport, Registry};
 pub use remote::{BlockCache, RemotePacks};
 pub use sync::{PackPlan, ReadGuard, SyncLevel};

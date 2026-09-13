@@ -13,6 +13,12 @@ pub enum WalError {
     NotFound,
     #[error("repository already exists")]
     AlreadyExists,
+    /// The pack is being reclaimed by bucket GC: the checksum is listed in
+    /// `Manifest.reclaiming`, so adopting the existing object could race the
+    /// deletion. Retryable — the retry uploads fresh bytes once GC has drained
+    /// the claim.
+    #[error("pack {0} is being reclaimed by bucket GC; retry")]
+    Reclaiming(String),
     #[error("ref conflict on {name}: expected {expected}, got {actual}")]
     RefConflict {
         name: String,

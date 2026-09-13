@@ -135,6 +135,9 @@ pub enum Unit {
     /// Connectivity audit due (`maintenance.fsck_interval`): none recorded, older than the
     /// interval, or a repair landed since the last audit (re-verify).
     Fsck(String),
+    /// Bucket GC due (`maintenance.gc_interval`): reclaim superseded packs older
+    /// than `compaction.retention_superseded` (#175).
+    Gc(String),
     /// Nothing to do.
     Idle,
     /// Not this host's repository (placement).
@@ -278,6 +281,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
         }
     // Integrity before everything else that builds on the object set.
     let fsck = crate::ops::read_fsck(&handle).await.ok().flatten();
+    let gc = crate::ops::read_gc(&handle).await.ok().flatten();
     if let Some(f) = &fsck {
         // f64 is the metrics-gauge contract; missing-object counts are ≪ 2^53.
         #[allow(clippy::cast_precision_loss, reason = "f64 is the metrics-gauge contract; missing-object counts ≪ 2^53")]
@@ -395,6 +399,25 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
             && handle.local().pack_path(&oid).exists()
         {
             return Ok(Unit::RevIndex(p.checksum.clone()));
+        }
+    }
+    // Bucket GC: refs-level (never reads pack data), so it runs anywhere the
+    // repo is assigned. Time-triggered so the planner stays LIST-free.
+    let gc_interval = cfg.maintenance.gc_interval;
+    if !gc_interval.is_zero() {
+        let due = match &gc {
+            None => Some("never collected".to_string()),
+            Some(g) => {
+                let at = g
+                    .at
+                    .as_ref()
+                    .map_or(SystemTime::UNIX_EPOCH, walgit_proto::time::to_system);
+                let age = SystemTime::now().duration_since(at).unwrap_or_default();
+                (age >= gc_interval).then(|| format!("last GC {}h ago", age.as_secs() / 3600))
+            }
+        };
+        if let Some(why) = due {
+            return Ok(Unit::Gc(why));
         }
     }
     // Lowest priority: the audit itself. Only where the whole pack set is local
@@ -604,6 +627,7 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
                 Unit::BaseRebuild(s, slot) => ("base-rebuild", Some(s.clone()), Some(*slot)),
                 Unit::RevIndex(_) => ("rev-index", None, None),
                 Unit::Fsck(_) => ("fsck", None, None),
+                Unit::Gc(_) => ("gc", None, None),
                 Unit::Idle | Unit::NotAssigned => unreachable!(),
             };
             let unit_span = tracing::info_span!("maintain.unit", repo = %id, kind, strategy = strategy.as_deref().unwrap_or(""), slot = slot.unwrap_or(0), outcome = tracing::field::Empty);
@@ -659,6 +683,7 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
                         params.insert("pack".to_string(), checksum.clone());
                         run_op(state, &id, "rev-index", params).await
                     }
+                    Unit::Gc(_) => run_op(state, &id, "gc", HashMap::new()).await,
                     Unit::Fsck(why) => {
                         let mut params = HashMap::new();
                         params.insert("connectivity".to_string(), "1".to_string());

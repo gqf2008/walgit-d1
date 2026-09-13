@@ -5,7 +5,7 @@
 ## 菜单
 
 - **状态行**:`walgit 服务:运行中/已停止`(5 秒轮询 `/healthz`)
-- **启动 / 停止服务**:macOS 走 `walgit-ensure`(screen 保活);Windows/Linux
+- **启动 / 停止服务**:调用 `walgit service …`（`walgit-ensure` 已是转发壳）;Windows/Linux
   以分离进程启动部署目录下的 `walgit(.exe) serve --config walgit.toml`,
   pid 写 `walgit.pid`,停止 = kill 该 pid
 - **⬆️ 发现新版本 — 点击升级** / **立即升级(拉 main 重建)**:升级**只由用户

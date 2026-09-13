@@ -245,6 +245,7 @@ impl Registry {
             writer: crate::handle::instance_id(),
             revision: 1,
             settings: None,
+            reclaiming: vec![],
         };
 
         let buf = manifest.encode_to_vec();

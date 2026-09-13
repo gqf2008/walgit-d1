@@ -15,7 +15,7 @@
    sweep_interval = "5m"             # 没有 bucket 通知时,这就是事件延迟上限
    ```
 
-2. 重启服务(`walgit-ensure stop && walgit-ensure`)。
+2. 重启服务(`walgit service restart --config ~/.walgit/walgit.toml`)。
 
 ## 运行接收器
 

@@ -49,6 +49,7 @@ pub async fn run_contract(store: DynStore, prefix: &str) {
     test_range_reads(&store, &p("range")).await;
     test_head_and_absent(&store, &p("head")).await;
     test_delete(&store, &p("del")).await;
+    test_conditional_delete_rejects_a_re_created_object(&store, &p("del-recreate")).await;
     test_list(&store, &p("list")).await;
     test_large_streamed_roundtrip(&store, &p("large")).await;
     test_multipart_path(&store, &p("multi")).await;
@@ -471,6 +472,42 @@ async fn test_delete(store: &DynStore, key: &str) {
         err.unwrap_err().is_not_found(),
         "conditional delete absent should be NotFound"
     );
+}
+
+/// delete: a conditional delete must fail when the object was **re-created**
+/// (deleted, then put again with identical bytes) after the version was read.
+///
+/// Pack GC reads an object's version, then deletes it conditionally. Between
+/// the two another pass may finish reclaiming that checksum and a publisher may
+/// re-adopt it — the same content-addressed bytes come back. On a backend whose
+/// version token is the content `ETag` (S3/R2) the two incarnations compare
+/// equal, so the stale delete would destroy a live object; this test is the
+/// guard for that (#175).
+async fn test_conditional_delete_rejects_a_re_created_object(store: &DynStore, key: &str) {
+    let _ = store.delete(key, None).await;
+
+    let v1 = put_bytes(store, key, b"gc-incarnation".as_slice(), PutMode::Create)
+        .await
+        .version;
+    store.delete(key, None).await.expect("delete v1");
+    let v2 = put_bytes(store, key, b"gc-incarnation".as_slice(), PutMode::Create)
+        .await
+        .version;
+
+    let err = store.delete(key, Some(v1)).await;
+    assert!(
+        err.is_err(),
+        "a conditional delete with the pre-re-creation version must fail: a version token must          identify an incarnation, not just the bytes (v2 = {v2:?})"
+    );
+    assert!(
+        err.unwrap_err().is_precondition_failed(),
+        "…and be PreconditionFailed"
+    );
+    assert!(
+        store.head(key).await.expect("head").is_some(),
+        "the re-created object must survive"
+    );
+    let _ = store.delete(key, None).await;
 }
 
 /// list: ordering, `start_after`, prefix isolation.

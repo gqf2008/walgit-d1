@@ -189,6 +189,10 @@ impl RepoHandle {
   pub fn store(&self) -> &Prefixed;                       // repo-scoped
   pub fn manifest(&self) -> Arc<walgit_proto::v1::Manifest>;   // last known
   pub fn manifest_version(&self) -> Option<Version>;
+  /// The `(manifest, version)` pair a manifest CAS must be built on, read atomically (one lock over both
+  /// fields). Every `PutMode::Update` decision uses this: a torn pair lets a writer CAS a body that predates
+  /// a `Manifest.reclaiming` claim just listed (#175).
+  pub fn manifest_snapshot(&self) -> (Arc<walgit_proto::v1::Manifest>, Option<Version>);
   /// Freshness check (conditional GET on manifest.pb; honors wal.freshness_ttl) + catch-up (download new
   /// packs, apply log entries after our seq, apply COMPACT: install new pack, remove superseded). Returns a
   /// read guard; while any guard is alive no pack is removed locally. Every request calls this first.
@@ -208,6 +212,20 @@ impl RepoHandle {
   /// COMPACT entry: new pack (already local, e.g. from LocalRepo::repack) superseding `supersedes`.
   pub async fn publish_compact(&self, new_pack: PackInfo, supersedes: Vec<gix_hash::ObjectId>, tier: u32)
       -> Result<u64, WalError>;
+  /// List/clear packs bucket GC is reclaiming (#175), under the manifest CAS. GC lists a checksum before
+  /// deleting any of its objects; a publisher must not re-adopt a listed checksum (→ `WalError::Reclaiming`).
+  /// `token` is this pass's fencing token: claims it lists carry `owner`+`token` and are re-checked before
+  /// every destructive step. `remove_own` releases only claims this pass still holds; `recover` is an exact
+  /// compare-and-remove of `(checksum, owner, token)` — used to take over a dead holder's stale claim (the
+  /// same CAS may also `add` it under this pass's fence). Returns the manifest the claim set was committed
+  /// against (per-repo config/live).
+  pub async fn update_reclaiming(
+      &self,
+      add: &[String],
+      remove_own: &[String],
+      recover: &[(String, String, String)],
+      token: &str,
+  ) -> Result<Arc<walgit_proto::v1::Manifest>, WalError>;
   /// Write checkpoint at current head (refs snapshot + pack set), then CAS manifest (checkpoint=, min_seq=,
   /// log_segments trimmed). Idempotent.
   pub async fn write_checkpoint(&self) -> Result<CheckpointRef, WalError>;
@@ -216,7 +234,8 @@ impl RepoHandle {
   pub fn last_access(&self) -> Instant;  pub fn touch(&self);
 }
 pub enum WalError { NotFound, AlreadyExists, RefConflict{name, expected, actual}, Store(StoreError),
-                    Coord(CoordError), Git(GitError), Corrupt(String), Retry{attempts}, Io(std::io::Error) }
+                    Coord(CoordError), Git(GitError), Corrupt(String), Retry{attempts}, Io(std::io::Error),
+                    Invalid(String), TooLarge{bytes, max}, Reclaiming(String) /* #175: retry after GC drains */ }
 pub enum RefError { NonFastForward, Conflict{expected,actual}, Rejected(String), Missing }
 ```
 

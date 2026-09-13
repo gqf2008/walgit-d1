@@ -25,6 +25,7 @@ mod mirror;
 mod principal_cmd;
 pub mod repo;
 mod serve;
+mod service_cmd;
 #[cfg(test)]
 mod testutil;
 mod wal_cmd;
@@ -49,7 +50,7 @@ struct Cli {
         long,
         global = true,
         env = "WALGIT_CONFIG",
-        default_value = "walgit.toml"
+        default_value = "~/.walgit/walgit.toml"
     )]
     config: PathBuf,
 
@@ -67,7 +68,7 @@ struct ServerCli {
         long,
         global = true,
         env = "WALGIT_CONFIG",
-        default_value = "walgit.toml"
+        default_value = "~/.walgit/walgit.toml"
     )]
     config: PathBuf,
 }
@@ -124,6 +125,13 @@ enum Command {
     Ci {
         #[command(subcommand)]
         action: ci_cmd::CiAction,
+    },
+    /// Manage the local server process: `start` / `stop` / `status` /
+    /// `restart`. The tray uses this too — there is no separate shell
+    /// supervisor.
+    Service {
+        #[command(subcommand)]
+        action: service_cmd::ServiceAction,
     },
     /// Generate a deterministic synthetic repository via `git fast-import`.
     Synth {
@@ -686,6 +694,10 @@ pub fn main_server() -> Result<()> {
 }
 
 fn run(config: &std::path::Path, command: Command) -> Result<()> {
+    // `--config` defaults to `~/.walgit/walgit.toml` (the deployment home); a
+    // user-supplied `~/…` expands the same way before the existence check below.
+    let config = walgit_config::expand_tilde(config);
+    let config = config.as_path();
     // Install the rustls crypto provider before any TLS code runs (GCS gRPC, reqwest).
     // `ring` is the workspace's one provider (server/tokio-rustls/rcgen all select it);
     // the explicit install makes the selection independent of how features resolve.
@@ -750,6 +762,7 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
             seed,
         } => synth::run(&out, size, commits, files, seed),
         Command::Serve => serve::run(&cfg, &config_path).await,
+        Command::Service { action } => service_cmd::run(&action, &config_path).await,
         Command::Compact {
             repo,
             all,

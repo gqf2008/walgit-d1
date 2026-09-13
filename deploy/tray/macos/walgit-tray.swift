@@ -1,22 +1,22 @@
 // walgit-tray — macOS 菜单栏托盘,管理本机 walgit 服务
-// 功能:启停(walgit-ensure)、新版本自动检测(每 30 分钟 fetch 比对,
+// 功能:启停(walgit service)、新版本自动检测(每 30 分钟 fetch 比对,
 //      打开 Web UI = 直接开页面,与其他平台一致;
 //      发现新版本仅在菜单/通知里提示,由用户点击后才升级:
 //      ff-merge main → cargo 构建 → 热换 → 健康验证,失败回滚)、
 //      退出(仅退出托盘,服务不受影响)。
-// 路径约定:部署目录 ~/walgit(二进制 walgit + run-walgit.sh + walgit-ensure),
+// 路径约定:部署目录 ~/.walgit(二进制 walgit + walgit.toml),
 //          源码仓库默认 /Volumes/Workspace/GitHub/walgit
 //          (可用 `defaults write com.walgit.tray repoPath <路径>` 覆盖)。
-// 日志:~/walgit/tray.log
+// 日志:~/.walgit/tray.log
 
 import AppKit
 
 let deployDir: String = {
-    // 测试/多部署覆盖:WALGIT_DEPLOY_DIR 环境变量优先,defaults 其次,默认 ~/walgit
+    // 测试/多部署覆盖:WALGIT_DEPLOY_DIR 环境变量优先,defaults 其次,默认 ~/.walgit
     // (NSString 的 tilde 展开走 passwd 主目录,不认 HOME 环境变量)。
     if let d = ProcessInfo.processInfo.environment["WALGIT_DEPLOY_DIR"], !d.isEmpty { return d }
     if let d = UserDefaults.standard.string(forKey: "deployDir"), !d.isEmpty { return d }
-    return NSString(string: "~/walgit").expandingTildeInPath
+    return NSString(string: "~/.walgit").expandingTildeInPath
 }()
 /// 部署目录 walgit.toml 行扫描 → (listen, backend, memoryIntentional);
 /// 注释行/行尾注释跳过,找不到回退 127.0.0.1:8081(#73:探活/开页与配置
@@ -56,13 +56,11 @@ var webURL: URL {
 }
 let logPath = "\(deployDir)/tray.log"
 
-func ensurePath() -> String {
-    let candidates = [
-        "\(deployDir)/walgit-ensure",
-        NSString(string: "~/.claude/skills/walgit/scripts/walgit-ensure").expandingTildeInPath,
-        NSString(string: "~/walgit/walgit-ensure").expandingTildeInPath,
-    ]
-    return candidates.first { FileManager.default.fileExists(atPath: $0) } ?? candidates[0]
+/// 服务存活是 **walgit 二进制**的职责(`walgit service …`),托盘只是调用方:
+/// 不再有 walgit-ensure 这种独立 shell 监督脚本。配置路径固定为部署目录下的
+/// walgit.toml,与探活/开页同源。
+func serviceCmd(_ verb: String) -> String {
+    "'\(deployDir)/walgit' service \(verb) --config '\(deployDir)/walgit.toml'"
 }
 
 func logLine(_ s: String) {
@@ -219,9 +217,8 @@ private func restartServiceAfterUpgrade(bundledVersion: String, done: @Sendable 
     let fm = FileManager.default
     let ok = sh("curl -sf --max-time 2 '\(healthURL)' 2>/dev/null").0 == 0
     guard ok else { done(); return }
-    let ensure = "\(deployDir)/walgit-ensure"
-    guard fm.isExecutableFile(atPath: ensure) else { done(); return }
-    _ = sh("WALGIT_DEPLOY_DIR='\(deployDir)' '\(ensure)' >/dev/null 2>&1 || true")
+    guard fm.isExecutableFile(atPath: "\(deployDir)/walgit") else { done(); return }
+    _ = sh("\(serviceCmd("restart")) >/dev/null 2>&1 || true")
     let want = "v\(bundledVersion)"
     for _ in 0..<20 {
         let (hc, hout) = sh("curl -sf --max-time 2 '\(healthURL)' 2>/dev/null || true")
@@ -237,7 +234,7 @@ private func restartServiceAfterUpgrade(bundledVersion: String, done: @Sendable 
 }
 
 /// 首次启动 bootstrap:从 app bundle Resources 落盘 ~/walgit 部署骨架。
-/// 托管文件(walgit 二进制、run-walgit.sh、walgit-ensure)按 bundle 内
+/// 托管文件(walgit 二进制)按 bundle 内
 /// skeleton.version 覆盖更新——DMG 覆盖安装即升级;用户文件(walgit.toml)
 /// 永不覆盖(配置与凭证安全)。开发构建(bundle 里没有 walgit 资源)跳过。
 func bootstrapDeploy(onServiceRestart: @Sendable @escaping () -> Void = {}) {
@@ -252,7 +249,7 @@ func bootstrapDeploy(onServiceRestart: @Sendable @escaping () -> Void = {}) {
     do {
         try fm.createDirectory(atPath: deployDir, withIntermediateDirectories: true)
     } catch {
-        logLine("bootstrap: 建 ~/walgit 失败: \(error)")
+        logLine("bootstrap: 建 ~/.walgit 失败: \(error)")
         onServiceRestart()
         return
     }
@@ -264,6 +261,8 @@ func bootstrapDeploy(onServiceRestart: @Sendable @escaping () -> Void = {}) {
     // 托管文件:版本不同则整体覆盖(覆盖安装 DMG = 升级路径)。先写
     // 临时名再原子替换,避免运行中的服务二进制被 remove+copy 的半状态
     // 捕获;只有三项全部成功且新二进制版本核验通过才写 marker。
+    // `walgit-ensure` 只是个转发壳(逻辑在 walgit 二进制),仍随部署一起装;
+    // run-walgit.sh 同理保留给 tray-rs/手工部署。
     let managed = ["walgit", "run-walgit.sh", "walgit-ensure"]
     // marker 不一致 → 整体换装;marker 一致但某个托管文件被删 → 只补缺失项。
     let versionChanged = !bundledVersion.isEmpty && bundledVersion != installedVersion
@@ -607,7 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func startService() {
         transitioning = true; refreshButton()
         DispatchQueue.global().async {
-            let (code, out) = sh("'\(ensurePath())' 2>&1")
+            let (code, out) = sh("\(serviceCmd("start")) 2>&1")
             logLine("start rc=\(code): \(out.suffix(200))")
             DispatchQueue.main.async {
                 self.transitioning = false
@@ -619,7 +618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func stopService() {
         transitioning = true; refreshButton()
         DispatchQueue.global().async {
-            let (code, out) = sh("'\(ensurePath())' stop 2>&1")
+            let (code, out) = sh("\(serviceCmd("stop")) 2>&1")
             logLine("stop rc=\(code): \(out.suffix(200))")
             DispatchQueue.main.async {
                 self.transitioning = false
@@ -837,10 +836,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         note("换装中…")
         _ = sh("cp '\(bin)' '\(bin).bak-tray'")
-        let (sc, sout) = sh("'\(ensurePath())' stop 2>&1")
+        let (sc, sout) = sh("\(serviceCmd("stop")) 2>&1")
         logLine("upgrade: stop rc=\(sc) \(sout.suffix(120))")
         _ = sh("cp '\(repo)/target/release/walgit' '\(bin)'")
-        let (rc, rout) = sh("'\(ensurePath())' 2>&1")
+        let (rc, rout) = sh("\(serviceCmd("start")) 2>&1")
         logLine("upgrade: start rc=\(rc) \(rout.suffix(120))")
 
         // 健康验证 ≤15s,失败回滚——与探活同源的地址(#115 审查修正:
@@ -862,7 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             logLine("upgrade: health FAIL — rollback")
             _ = sh("cp '\(bin).bak-tray' '\(bin)'")
-            _ = sh("'\(ensurePath())' stop 2>&1; '\(ensurePath())' 2>&1")
+            _ = sh("\(serviceCmd("restart")) 2>&1")
             DispatchQueue.main.async { self.updateState = .failed }
             notify("walgit 升级失败", "健康检查未过,已回滚旧版本")
         }

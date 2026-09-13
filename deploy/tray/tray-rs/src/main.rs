@@ -6,7 +6,7 @@
 //!      发现新版本只把菜单行变成「⬆️ 升级到新版本」,**由用户点击才升级**:
 //!      ff-merge main → cargo 构建 → 备份 → 停 → 热换 → 健康验证,失败回滚。
 //!
-//! 服务控制:macOS shell 到 walgit-ensure(screen 保活);Windows/Linux
+//! 服务控制:shell 到 `walgit-ensure`(转发壳)→ `walgit service`(存活/起停在二进制里);Windows/Linux
 //!          部署目录下的 walgit(.exe) 分离进程 + pidfile。
 //! 健康检查:内置裸 HTTP(loopback),零额外依赖。
 //! 打开 Web UI:直接开新页面(三平台一致)。

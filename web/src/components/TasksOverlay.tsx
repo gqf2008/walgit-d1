@@ -23,6 +23,7 @@ const KIND_KEYS: Record<string, I18nKey> = {
   "base-rebuild": "tasks.kind.base-rebuild",
   "rev-index": "tasks.kind.rev-index",
   fsck: "tasks.kind.fsck",
+  gc: "tasks.kind.gc",
   follow: "tasks.kind.follow",
 };
 

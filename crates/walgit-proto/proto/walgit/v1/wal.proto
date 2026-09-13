@@ -54,6 +54,27 @@ message Manifest {
   // refs-level sync must see the effective config without another GET; the
   // document is small (validated <= 16 KiB). History = SETTINGS log entries.
   RepoSettings settings = 12;
+  // Packs bucket GC is reclaiming (#175). Listed here under the manifest CAS so
+  // reclamation is ordered against adoption: GC CASes an entry in *before* it
+  // deletes any object, and a publisher that would put a checksum back into
+  // `packs` must refuse while that checksum is listed. Drained by GC as each
+  // pack is deleted (≤ GC_MAX_PACKS_PER_UNIT per pass, so this stays small).
+  repeated ReclaimingPack reclaiming = 13;
+}
+
+// One pack bucket GC is in the middle of deleting.
+message ReclaimingPack {
+  string checksum = 1;
+  // When GC listed it. Age fence for crash recovery (and diagnostics).
+  google.protobuf.Timestamp since = 2;
+  // Instance id of the GC pass that listed it. A second pass never deletes or
+  // retires a claim another live holder owns — it only recovers one whose
+  // holder is gone (see `token` + the age fence).
+  string owner = 3;
+  // Per-pass fencing token. A pass stamps every claim it lists with its own
+  // token and re-checks it before each destructive step, so a claim released
+  // or taken over by a later pass can no longer authorize deletions (#175).
+  string token = 4;
 }
 
 // D24: per-repository settings — a TOML document restricted to the sections a
@@ -175,6 +196,31 @@ message RefTransaction {
   repeated string push_options = 2;
   // Recorded client intent (git push --atomic). WAL application is always atomic.
   bool atomic = 3;
+}
+
+// Bucket-GC bookkeeping (`repos/<o>/<r>/gc.pb`, overwritten, not on the WAL):
+// when the last GC pass ran and how much it reclaimed. The maintainer's plan
+// reads it to decide whether a GC unit is due (#175).
+message GcReport {
+  google.protobuf.Timestamp at = 1;
+  uint64 packs = 2;
+  uint64 bytes = 3;
+  string host = 4;
+}
+
+// One superseded pack: written under `wal/_superseded/<checksum>` when a
+// COMPACT entry drops it from `Manifest.packs`. It records *when* the pack left
+// the live set, which the manifest alone cannot express (it keeps only the live
+// set, and the superseding log entry is eventually folded into a checkpoint).
+// Bucket-side GC deletes the pack + side-files + this marker once the marker is
+// older than `compaction.retention_superseded` and the pack is not live.
+message SupersededPack {
+  // Pack checksum (trailing SHA of the .pack), hex.
+  string checksum = 1;
+  // When the superseding COMPACT entry was committed.
+  google.protobuf.Timestamp superseded_at = 2;
+  // Sequence of that COMPACT entry (diagnostics / provenance).
+  uint64 seq = 3;
 }
 
 // checkpoints/<seq>/checkpoint.pb

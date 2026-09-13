@@ -106,10 +106,10 @@ bulk_clients = 4                  # separate data channels for pack/idx/side-fil
 bulk_concurrency = 32             # max concurrent bulk requests per process (control plane never queues behind them)
 
 [cache]
-dir = "/tmp/walgit"               # local materialized repos (+ tls/ for a self-signed certificate).
-                                  # DEFAULT (when this key is omitted): <temp-dir>/walgit (`/tmp` honoring TMPDIR,
-                                  # `%TEMP%` on Windows). This file pins an absolute path on purpose — a deployment
-                                  # cache must outlive the machine that created it.
+# dir = "~/.walgit/cache"         # local materialized repos (+ tls/ for a self-signed certificate).
+                                  # DEFAULT (when this key is omitted): `~/.walgit/cache` — the deployment home.
+                                  # Keep it on a local disk: a cache on a slow/busy volume (a workspace mount, an
+                                  # external drive someone else is thrashing) stalls the whole server. `~` expands.
 mode = "auto"                     # "budget" (max_bytes caps disk; too-large repos are served remotely) | "disk" (no budget,
                                   # full materialization, watermark eviction — a host with a real SSD) | "auto" = disk when
                                   # maintenance.disk = "ssd"
@@ -152,6 +152,7 @@ checkpoints = true                # unit 1: checkpoint repos whose wal.* trigger
 max_pack_bytes = "0B"             # declared capacity for units needing a local copy (0 = cache.max_bytes); above it: plan state "wrong-host"
 disk = "tmpfs"                    # "tmpfs" (memory-backed disk) | "ssd" (a real disk: may rebuild bases)
 # host = "maintainer-1"           # heartbeat object maintain/<host>.pb (default: instance id) — the plan shows who maintains a repo
+gc_interval = "24h"                # bucket GC: drop superseded packs older than compaction.retention_superseded → repos/<o>/<r>/gc.pb; 0 = off
 fsck_interval = "7d"              # lowest-priority unit: git fsck --connectivity-only over a complete local copy → repos/<o>/<r>/fsck.pb
                                   # (missing objects → walgit_repo_missing_objects{repo} + the `repair` unit from upstream.git); 0 = off
 follow_interval = "30s"           # upstream-follow loop (its own loop next to the priority loop): fetch each assigned repo's
@@ -173,7 +174,7 @@ factor = 2                        # geometric repack factor
 trigger_packs = 16                # compact when this many tier-0 packs exist
 trigger_bytes = "1GiB"            # or when tier-0 pack bytes exceed this (either way: at least 2 fresh packs; the base/history
                                   # pack are never folded; a base is rebuilt only by the weekly unit / `walgit compact --base`)
-lease_ttl = "10m"                 # compaction lease TTL
+lease_ttl = "10m"                 # compaction + bucket-GC lease TTL (floored at 30s; the GC pass renews it)
 retention_superseded = "7d"       # keep old packs for provenance / rewind
 engine = "git"                    # "git" (gix cannot delta-compress)
 

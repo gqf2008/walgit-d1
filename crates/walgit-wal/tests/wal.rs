@@ -3485,3 +3485,269 @@ async fn test_rebuilt_bucket_replaces_leftover_refs() {
         "leftover ref survived a bucket rebuild"
     );
 }
+
+/// #175: a superseding COMPACT must not commit without its
+/// `wal/_superseded/<checksum>` marker. The marker is what tells bucket GC when
+/// a pack left the live set, so a lost refresh would let GC use an old
+/// timestamp and delete the pack inside the retention window. The markers are
+/// therefore written *before* the manifest CAS, and a terminal write failure
+/// aborts the unit (nothing has committed yet).
+#[tokio::test]
+async fn a_supersession_without_its_marker_does_not_commit() {
+    use walgit_store::fault::{FaultPlan, FaultStore};
+
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let faulty = FaultStore::new(store.clone(), "faulty", 7);
+    let cfg = make_config(cache.path(), 0);
+    let registry = Registry::new(faulty.clone(), Arc::new(cfg));
+
+    let id = repo_id("test", "markerguard");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+
+    // Two pushed packs so a full repack really supersedes something.
+    let work = WorkRepo::new();
+    let mut prev = String::new();
+    for i in 0..2 {
+        let c = work.commit(&format!("c{i}"), &format!("d{i}"));
+        let pack = if prev.is_empty() {
+            work.create_pack()
+        } else {
+            work.create_incremental_pack(&c, &prev)
+        };
+        let ingested = ingest_pack_data(&handle, pack).await.unwrap();
+        let txn = make_txn(vec![("refs/heads/main", &prev, &c)]);
+        handle
+            .publish_push(Some(ingested), txn, HashMap::new())
+            .await
+            .unwrap();
+        prev = c;
+    }
+    let live = handle.manifest().packs[0].checksum.clone();
+
+    // Fresh refs view before repacking (doing this *after* the repack would
+    // prune the not-yet-published replacement pack).
+    {
+        let _g = handle.sync_full().await.unwrap();
+    }
+
+    // Repack into a single new pack that supersedes the live one.
+    let repack = handle
+        .local()
+        .repack(walgit_git::RepackOptions {
+            mode: walgit_git::RepackMode::Full,
+            write_bitmap: false,
+            write_midx: false,
+            keep: vec![],
+        })
+        .await
+        .unwrap();
+    assert!(
+        !repack.new_packs.is_empty() && !repack.removed.is_empty(),
+        "repack must produce a replacement and remove the live pack"
+    );
+
+    // Every write under the marker prefix now fails for good.
+    faulty.set(
+        FaultPlan {
+            p_err_before: 1.0,
+            ..Default::default()
+        }
+        .with_only(&["_superseded/"]),
+    );
+
+    let result = handle
+        .publish_compact(repack.new_packs[0].clone(), repack.removed.clone(), 2)
+        .await;
+    assert!(
+        result.is_err(),
+        "a supersession that cannot record its marker must not report success"
+    );
+
+    // Nothing committed: the pack the failed unit wanted to supersede is still
+    // live, and no manifest write happened.
+    let _g = handle.sync_full().await.unwrap();
+    let after = handle.manifest();
+    assert!(
+        after.packs.iter().any(|p| p.checksum == live),
+        "the live set must be untouched after the aborted supersession: {after:?}"
+    );
+}
+
+/// #175: a checksum bucket GC has *claimed* must not have its superseded marker
+/// (re)written by a compaction. GC retires that marker while it holds the
+/// claim; a refresh landing in that window would leave a dead pack with no
+/// record at all on a backend whose conditional delete is HEAD+compare+DELETE
+/// (S3), i.e. a permanent orphan. The live pack being folded still gets its
+/// marker — only the claimed checksum is skipped.
+#[tokio::test]
+async fn a_compaction_skips_the_marker_for_a_checksum_gc_has_claimed() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let cfg = make_config(cache.path(), 0);
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+    let id = repo_id("test", "claimed");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+
+    // Two live packs so a full repack really folds something.
+    let work = WorkRepo::new();
+    let mut prev = String::new();
+    for i in 0..2 {
+        let c = work.commit(&format!("c{i}"), &format!("d{i}"));
+        let pack = if prev.is_empty() {
+            work.create_pack()
+        } else {
+            work.create_incremental_pack(&c, &prev)
+        };
+        let ingested = ingest_pack_data(&handle, pack).await.unwrap();
+        let txn = make_txn(vec![("refs/heads/main", &prev, &c)]);
+        handle
+            .publish_push(Some(ingested), txn, HashMap::new())
+            .await
+            .unwrap();
+        prev = c;
+    }
+    let live = handle.manifest().packs[0].checksum.clone();
+
+    // A checksum GC has listed as reclaiming (not live, so the claim holds).
+    let claimed = "c".repeat(40);
+    handle
+        .update_reclaiming(std::slice::from_ref(&claimed), &[], &[], "t")
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .manifest()
+            .reclaiming
+            .iter()
+            .any(|r| r.checksum == claimed),
+        "the checksum must be claimed before the compaction"
+    );
+
+    // Repack, then supersede both the live pack and the claimed checksum.
+    let repack = handle
+        .local()
+        .repack(walgit_git::RepackOptions {
+            mode: walgit_git::RepackMode::Full,
+            write_bitmap: false,
+            write_midx: false,
+            keep: vec![],
+        })
+        .await
+        .unwrap();
+    assert!(!repack.removed.is_empty(), "repack removes the live pack");
+    let mut supersedes = repack.removed.clone();
+    supersedes.push(gix_hash::ObjectId::from_hex(claimed.as_bytes()).unwrap());
+    handle
+        .publish_compact(repack.new_packs[0].clone(), supersedes, 2)
+        .await
+        .unwrap();
+
+    assert!(
+        handle
+            .store()
+            .get_bytes(&walgit_proto::keys::superseded_key(&claimed))
+            .await
+            .unwrap()
+            .is_none(),
+        "a claimed checksum must not get a marker written under the claim"
+    );
+    let marker = handle
+        .store()
+        .get_bytes(&walgit_proto::keys::superseded_key(&live))
+        .await
+        .unwrap();
+    assert!(
+        marker.is_some(),
+        "the folded live pack still records its supersession"
+    );
+    // The claim is untouched by the compaction (GC still owns it).
+    assert!(
+        handle
+            .manifest()
+            .reclaiming
+            .iter()
+            .any(|r| r.checksum == claimed),
+        "the compaction must not clear GC's claim"
+    );
+}
+
+/// #175: releasing a claim is fenced by `owner`+`token`. A stale pass (an older
+/// token, or a different instance) must neither take over another holder's
+/// claim nor release it — otherwise a pass that already deleted a pack's bytes
+/// could unlock the checksum for re-adoption while a newer pass is deleting it.
+#[tokio::test]
+async fn a_claim_release_is_fenced_by_owner_and_token() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let cfg = make_config(cache.path(), 0);
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+    let id = repo_id("test", "fence");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let c = "c".repeat(40);
+
+    // Pass 1 claims C.
+    handle
+        .update_reclaiming(std::slice::from_ref(&c), &[], &[], "T1")
+        .await
+        .unwrap();
+    let owner = handle
+        .manifest()
+        .reclaiming
+        .iter()
+        .find(|r| r.checksum == c)
+        .expect("claimed")
+        .owner
+        .clone();
+
+    // A second pass of the same instance cannot take it over.
+    handle
+        .update_reclaiming(std::slice::from_ref(&c), &[], &[], "T2")
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .manifest()
+            .reclaiming
+            .iter()
+            .any(|r| r.checksum == c && r.token == "T1"),
+        "a different token must not take over the claim: {:?}",
+        handle.manifest().reclaiming
+    );
+
+    // …and its release with the wrong token is a no-op.
+    handle
+        .update_reclaiming(&[], std::slice::from_ref(&c), &[], "T2")
+        .await
+        .unwrap();
+    assert!(
+        handle.manifest().reclaiming.iter().any(|r| r.checksum == c),
+        "a stale release must not remove the current holder's claim: {:?}",
+        handle.manifest().reclaiming
+    );
+
+    // An exact compare-and-remove of a claim we observed does work (the
+    // recovery path), but not with a mismatched token.
+    handle
+        .update_reclaiming(
+            &[],
+            &[],
+            &[(c.clone(), owner.clone(), "not-the-token".into())],
+            "T9",
+        )
+        .await
+        .unwrap();
+    assert!(
+        handle.manifest().reclaiming.iter().any(|r| r.checksum == c),
+        "a compare-and-remove with the wrong token must not fire"
+    );
+    handle
+        .update_reclaiming(&[], &[], &[(c.clone(), owner, "T1".into())], "T9")
+        .await
+        .unwrap();
+    assert!(
+        handle.manifest().reclaiming.is_empty(),
+        "an exact compare-and-remove clears the claim: {:?}",
+        handle.manifest().reclaiming
+    );
+}

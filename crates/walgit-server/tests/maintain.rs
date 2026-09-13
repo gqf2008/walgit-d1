@@ -288,6 +288,7 @@ async fn fsck_unit_records_missing_objects_and_repair_unit_fetches_them_from_ups
             c.compaction.enabled = false;
             c.bundles.enabled = false;
             c.maintenance.fsck_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
         })
     )?;
     step!("put repo", server.put_repo("o", "r"))?;
@@ -1118,6 +1119,35 @@ async fn weekly_slot_rebuilds_the_base_then_composes_it_on_an_ssd_maintainer() -
             .collect::<Vec<_>>()
     );
 
+    // #175: every superseded pack gets a `wal/<checksum>.superseded` marker
+    // recording *when* it left the live set. The manifest keeps only the live
+    // set and this COMPACT entry is eventually folded into a checkpoint, so the
+    // marker is the only thing bucket GC can age a pack by.
+    {
+        use futures::StreamExt;
+        use walgit_store::ObjectStore;
+        let manifest = h.manifest();
+        let live: std::collections::HashSet<&str> =
+            manifest.packs.iter().map(|p| p.checksum.as_str()).collect();
+        let mut markers = 0usize;
+        let mut stream = h.store().list(walgit_proto::keys::SUPERSEDED_DIR, None);
+        while let Some(m) = stream.next().await {
+            let m = m?;
+            let Some(checksum) = m.key.strip_prefix(walgit_proto::keys::SUPERSEDED_DIR) else {
+                continue;
+            };
+            markers += 1;
+            assert!(
+                !live.contains(checksum),
+                "a live pack must not carry a superseded marker: {checksum}"
+            );
+        }
+        assert!(
+            markers > 0,
+            "the rebuild must have marked the packs it superseded"
+        );
+    }
+
     // A push lands between the rebuild and the compose (the rig's churn, 2026-08-22: the compose
     // refused for as long as refs kept moving — "no ref snapshot at the base's seq"). The header
     // must carry the refs AT THE BASE'S SEQ (replayed from the WAL), not the new tip.
@@ -1256,6 +1286,9 @@ async fn maintainer_builds_and_publishes_missing_rev_indexes() -> anyhow::Result
             c.compaction.enabled = false;
             c.bundles.enabled = false;
             c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            // The rev-index assertions below are about a specific unit: keep the
+            // (lower-priority) GC unit out of this rig's plan.
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
         })
     )?;
     step!("put repo", server.put_repo("o", "r"))?;
@@ -2041,5 +2074,964 @@ async fn maintainer_pass_brings_an_overgrown_bundle_list_to_retention() -> anyho
     let _ = step!("pass 2", walgit_server::maintain::run_pass(&server.state))?;
     let again = walgit_bundle::ops::read_list(&store).await?.unwrap();
     assert_eq!(again.bundles.len(), 5);
+    Ok(())
+}
+
+/// #175: GC runs under the per-repo `gc` lease. A pass that cannot take it must
+/// do nothing and leave the unit due (no `gc.pb`), or a claim it never
+/// established would be reported as a completed pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_skips_while_another_instance_holds_the_lease() -> anyhow::Result<()> {
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::ObjectStore;
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // Another instance holds the lease for ten minutes.
+    let lease_store: walgit_store::DynStore = std::sync::Arc::new(h.store().clone());
+    let lease = walgit_store::coord::try_acquire(
+        lease_store,
+        &walgit_proto::keys::lease_key("gc"),
+        "another-host",
+        "gc",
+        std::time::Duration::from_secs(600),
+    )
+    .await?
+    .expect("the test takes the lease");
+
+    step!("pass while held", run_pass(&server.state))?;
+    assert!(
+        h.store().head(walgit_proto::keys::GC).await?.is_none(),
+        "a pass that could not take the lease must not write gc.pb"
+    );
+    let unit = step!("plan still due", next_unit(&server.state, &id))?;
+    assert!(
+        matches!(unit, Unit::Gc(_)),
+        "the unit must stay due, got {unit:?}"
+    );
+
+    lease.release().await?;
+    step!("pass after release", run_pass(&server.state))?;
+    assert!(
+        h.store().head(walgit_proto::keys::GC).await?.is_some(),
+        "with the lease free the pass records gc.pb"
+    );
+    Ok(())
+}
+
+/// #175: a publisher must refuse a checksum bucket GC has listed as reclaiming.
+/// This is the other half of the ordering invariant — without it a publisher
+/// could put a checksum GC is deleting back into `packs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publishing_a_reclaiming_checksum_is_refused() -> anyhow::Result<()> {
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // A pack that is not live yet (so the claim CAS accepts it).
+    let dir = tempfile::tempdir()?;
+    let tree = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+        .trim()
+        .to_string();
+    let out = std::process::Command::new("git")
+        .current_dir(src.path())
+        .args(["pack-objects", &format!("{}/pack", dir.path().display())])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{tree}\n").as_bytes())?;
+            c.wait_with_output()
+        })?;
+    let checksum = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let pack = dir.path().join(format!("pack-{checksum}.pack"));
+    let idx = dir.path().join(format!("pack-{checksum}.idx"));
+
+    step!(
+        "list candidate",
+        h.update_reclaiming(std::slice::from_ref(&checksum), &[], &[], "t")
+    )?;
+    assert!(
+        h.manifest()
+            .reclaiming
+            .iter()
+            .any(|r| r.checksum == checksum),
+        "the checksum must be listed before the publish is attempted"
+    );
+
+    let err = step!("add pack", h.add_pack(&pack, &idx, 0, None))
+        .expect_err("a reclaiming checksum must not be publishable");
+    assert!(
+        matches!(err, walgit_wal::WalError::Reclaiming(ref c) if *c == checksum),
+        "expected Reclaiming, got {err:?}"
+    );
+    Ok(())
+}
+
+/// #175: the receive-pack path (`process_batch`) is the *other* CAS gate. A push
+/// that regenerates a byte-identical pack must be refused while bucket GC has
+/// the checksum listed — this is the path a client actually triggers, and
+/// disabling the check in `publish.rs` lets the push adopt bytes GC is deleting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pushing_a_reclaiming_checksum_is_refused() -> anyhow::Result<()> {
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // A checksum that is not live yet (so the claim CAS accepts it): the push
+    // below "regenerates" exactly these bytes, as git deterministically does.
+    let dead = "a".repeat(40);
+    step!(
+        "list candidate",
+        h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t")
+    )?;
+    assert!(
+        h.manifest()
+            .reclaiming
+            .iter()
+            .any(|r| r.checksum == dead),
+        "the checksum must be listed before the push is attempted"
+    );
+
+    let dir = tempfile::tempdir()?;
+    let ingested = walgit_git::IngestedPack {
+        checksum: gix_hash::ObjectId::from_hex(dead.as_bytes())?,
+        pack_path: dir.path().join(format!("pack-{dead}.pack")),
+        idx_path: dir.path().join(format!("pack-{dead}.idx")),
+        pack_size: 1,
+        idx_size: 1,
+        object_count: 1,
+    };
+    let txn = walgit_proto::v1::RefTransaction {
+        updates: vec![walgit_proto::v1::RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: String::new(),
+            new_oid: "0".repeat(40),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let Err(err) = step!(
+        "push",
+        h.publish_push(Some(ingested), txn, std::collections::HashMap::default())
+    ) else {
+        panic!("a reclaiming checksum must not be pushed");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&dead) && msg.contains("reclaim"),
+        "expected the push to be refused as reclaiming, got: {msg}"
+    );
+    Ok(())
+}
+
+/// #175: the manifest CAS is what orders reclamation against adoption. A pack
+/// that is live must never be listed as reclaiming (GC would then be free to
+/// delete a pack the manifest points at), and a non-live checksum lists and
+/// clears through the same CAS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reclaiming_list_never_contains_a_live_pack() -> anyhow::Result<()> {
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let live = h
+        .manifest()
+        .packs
+        .first()
+        .expect("push published a pack")
+        .checksum
+        .clone();
+
+    // A live pack must not become a GC candidate, even when asked directly.
+    step!(
+        "list live",
+        h.update_reclaiming(std::slice::from_ref(&live), &[], &[], "t")
+    )?;
+    assert!(
+        h.manifest().reclaiming.is_empty(),
+        "a live checksum was listed as reclaiming: {:?}",
+        h.manifest().reclaiming
+    );
+
+    // A non-live checksum lists, then clears, through the same CAS.
+    let dead = "f".repeat(40);
+    step!(
+        "list dead",
+        h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t")
+    )?;
+    assert!(
+        h.manifest()
+            .reclaiming
+            .iter()
+            .any(|r| r.checksum == dead),
+        "a non-live checksum must list"
+    );
+    step!(
+        "clear dead",
+        h.update_reclaiming(&[], std::slice::from_ref(&dead), &[], "t")
+    )?;
+    assert!(
+        h.manifest().reclaiming.is_empty(),
+        "clearing must empty the list: {:?}",
+        h.manifest().reclaiming
+    );
+    Ok(())
+}
+
+/// #175: bucket GC reclaims packs that a COMPACT entry superseded, but only
+/// once the `.superseded` marker has aged past
+/// `compaction.retention_superseded` — and never a pack that is still live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_reclaims_expired_superseded_packs_and_keeps_live_and_young_ones() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::SupersededPack;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            // Non-zero so the planner schedules the unit; the marker ages below
+            // decide what is actually reclaimed.
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.compaction.retention_superseded = std::time::Duration::from_hours(7 * 24);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let live = h
+        .manifest()
+        .packs
+        .first()
+        .expect("push published a pack")
+        .checksum
+        .clone();
+
+    // A pack that a COMPACT entry dropped eight days ago: past the 7d window.
+    let dead = "d".repeat(40);
+    let mut old_ts = walgit_proto::time::now();
+    old_ts.seconds -= 8 * 24 * 3600;
+    // …and one dropped an hour ago: inside the window, must be kept.
+    let young = "e".repeat(40);
+    let young_ts = walgit_proto::time::now();
+
+    // A marker on a *live* pack: "superseded then re-adopted" (or a marker
+    // written by a CAS that never landed). GC must leave the pack alone.
+    for (checksum, at, seq) in [
+        (&dead, old_ts, 7u64),
+        (&young, young_ts, 9u64),
+        (&live, old_ts, 11u64),
+    ] {
+        let marker = SupersededPack {
+            checksum: checksum.clone(),
+            superseded_at: Some(at),
+            seq,
+        };
+        step!(
+            "marker",
+            h.store().put_bytes(
+                &keys::superseded_key(checksum),
+                marker.encode_to_vec(),
+                PutMode::Create,
+            )
+        )?;
+    }
+    // The live pack already has its objects (the push published it); only the
+    // two synthetic ones need bodies.
+    for checksum in [&dead, &young] {
+        step!(
+            "pack body",
+            h.store()
+                .put_bytes(&keys::pack_key(checksum), vec![0u8; 32], PutMode::Create)
+        )?;
+        step!(
+            "idx",
+            h.store()
+                .put_bytes(&keys::idx_key(checksum), vec![0u8; 8], PutMode::Create)
+        )?;
+    }
+
+    assert!(
+        matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)),
+        "GC should be the due unit"
+    );
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("check dead pack", async {
+        assert!(
+            h.store().head(&keys::pack_key(&dead)).await?.is_none(),
+            "superseded pack past retention must be reclaimed"
+        );
+        assert!(
+            h.store().head(&keys::idx_key(&dead)).await?.is_none(),
+            "side files go with the pack"
+        );
+        assert!(
+            h.store()
+                .head(&keys::superseded_key(&dead))
+                .await?
+                .is_none(),
+            "the marker goes too"
+        );
+        assert!(
+            h.store().head(&keys::pack_key(&young)).await?.is_some(),
+            "a pack inside the retention window must survive"
+        );
+        assert!(
+            h.store().head(&keys::pack_key(&live)).await?.is_some(),
+            "a live pack must never be reclaimed, even with an old marker"
+        );
+        assert!(
+            h.store()
+                .head(&keys::superseded_key(&live))
+                .await?
+                .is_some(),
+            "the live pack's marker is kept (dropping it is irreversible)"
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    // The pass leaves the record the planner reads next time.
+    assert!(
+        step!("gc.pb", h.store().get_bytes(keys::GC))?
+            .is_some(),
+        "the GC pass records gc.pb"
+    );
+    Ok(())
+}
+
+/// #175: the unit's bound counts *reclaimable* work, and anything left behind
+/// keeps the unit due. Two ways the old shape was wrong, checked together:
+/// the bound was applied before the live filter, so (a) an older marker on a
+/// superseded-and-re-adopted (live) pack spent quota and starved a dead one, and
+/// (b) a pass that stopped at the bound still reported `complete`, writing
+/// `gc.pb` and sleeping a whole `gc_interval` with eligibility left on the floor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain() -> anyhow::Result<()>
+{
+    use futures::StreamExt;
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::SupersededPack;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.compaction.retention_superseded = std::time::Duration::from_hours(7 * 24);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let live = h
+        .manifest()
+        .packs
+        .first()
+        .expect("push published a pack")
+        .checksum
+        .clone();
+
+    let mut ts = walgit_proto::time::now();
+    // The live pack's marker is the *oldest*: with the bound applied first it
+    // would take the first slot every pass and never let the dead ones through.
+    ts.seconds -= 10 * 24 * 3600;
+    step!(
+        "live marker",
+        h.store().put_bytes(
+            &keys::superseded_key(&live),
+            SupersededPack {
+                checksum: live.clone(),
+                superseded_at: Some(ts),
+                seq: 1,
+            }
+            .encode_to_vec(),
+            PutMode::Create,
+        )
+    )?;
+    // 33 dead packs, all past the 7d window: one more than the 32/unit bound.
+    let mut deads = Vec::new();
+    for i in 0u32..33 {
+        let checksum = format!("{:040x}", 0xdead_0000u64 + u64::from(i));
+        let mut at = walgit_proto::time::now();
+        at.seconds -= 9 * 24 * 3600 + i64::from(i);
+        step!(
+            "dead marker",
+            h.store().put_bytes(
+                &keys::superseded_key(&checksum),
+                SupersededPack {
+                    checksum: checksum.clone(),
+                    superseded_at: Some(at),
+                    seq: 2 + u64::from(i),
+                }
+                .encode_to_vec(),
+                PutMode::Create,
+            )
+        )?;
+        step!(
+            "dead body",
+            h.store()
+                .put_bytes(&keys::pack_key(&checksum), vec![0u8; 32], PutMode::Create)
+        )?;
+        deads.push(checksum);
+    }
+
+    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    step!("gc pass", run_pass(&server.state))?;
+
+    // Exactly the 32/unit bound of *dead* packs went, not 31 (the live marker
+    // must not have spent a slot).
+    let mut remaining = 0usize;
+    for checksum in &deads {
+        if h.store().head(&keys::pack_key(checksum)).await?.is_some() {
+            remaining += 1;
+        }
+    }
+    assert_eq!(
+        remaining,
+        1,
+        "the live marker must not spend quota: expected 32 dead reclaimed, {remaining} left"
+    );
+    // Work remains, so the pass must NOT record gc.pb and the unit stays due.
+    assert!(
+        h.store().get_bytes(keys::GC).await?.is_none(),
+        "an incomplete pass must not write gc.pb"
+    );
+    assert!(
+        matches!(step!("plan again", next_unit(&server.state, &id))?, Unit::Gc(_)),
+        "the GC unit must stay due while eligible markers remain"
+    );
+
+    // A clean pass (nothing left but the live marker) drains the rest and records.
+    step!("second pass", run_pass(&server.state))?;
+    let mut left = 0usize;
+    let mut stream = h.store().list(keys::SUPERSEDED_DIR, None);
+    while let Some(m) = stream.next().await {
+        let m = m?;
+        if m.key.starts_with(keys::SUPERSEDED_DIR) {
+            left += 1;
+        }
+    }
+    assert_eq!(left, 1, "only the live pack's marker stays (dropping it is irreversible)");
+    assert!(
+        h.store().get_bytes(keys::GC).await?.is_some(),
+        "a drained pass records gc.pb"
+    );
+    Ok(())
+}
+
+/// #175 / D24: `[compaction]` is a per-repo settings section, so GC must honour
+/// the *effective* retention. A repo that asks for a longer provenance window
+/// must not have its packs deleted on the host's shorter one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_honours_the_repo_retention_override() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::SupersededPack;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            // Host keeps 7d; the repo below overrides it to 30d.
+            c.compaction.retention_superseded = std::time::Duration::from_hours(7 * 24);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    step!(
+        "repo settings",
+        h.publish_settings(
+            "[compaction]\nretention_superseded = \"30d\"\n",
+            "tester",
+            "longer provenance window",
+        )
+    )?;
+    assert_eq!(
+        h.effective_config().compaction.retention_superseded,
+        std::time::Duration::from_hours(30 * 24),
+        "the repo override must reach the effective config"
+    );
+
+    // A pack dropped 8 days ago: past the host's 7d, inside the repo's 30d.
+    let dead = "d".repeat(40);
+    let mut at = walgit_proto::time::now();
+    at.seconds -= 8 * 24 * 3600;
+    step!(
+        "marker",
+        h.store().put_bytes(
+            &keys::superseded_key(&dead),
+            SupersededPack {
+                checksum: dead.clone(),
+                superseded_at: Some(at),
+                seq: 5,
+            }
+            .encode_to_vec(),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "body",
+        h.store()
+            .put_bytes(&keys::pack_key(&dead), vec![0u8; 32], PutMode::Create)
+    )?;
+
+    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    step!("gc pass", run_pass(&server.state))?;
+    assert!(
+        h.store().head(&keys::pack_key(&dead)).await?.is_some(),
+        "the repo's 30d window must win over the host's 7d"
+    );
+    Ok(())
+}
+
+/// #175: a GC pass that retired a marker but died before releasing its claim
+/// leaves the checksum listed in `Manifest.reclaiming` forever — with no marker
+/// it can never become a candidate again, and a publisher regenerating those
+/// bytes is refused permanently. The next pass (it holds the lease) releases
+/// such claims: marker gone + pack not live = a completed reclaim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_releases_a_claim_whose_marker_was_already_retired() -> anyhow::Result<()> {
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // The crash left: claimed, marker already retired, objects already gone —
+    // and old enough (past the age fence) that no live holder can own it.
+    let orphan = "b".repeat(40);
+    {
+        use prost::Message;
+        use walgit_proto::keys;
+        use walgit_store::{ObjectStoreExt, PutMode};
+        let (meta, bytes) = step!("manifest", h.store().get_bytes(keys::MANIFEST))?
+            .expect("repo has a manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        let mut since = walgit_proto::time::now();
+        since.seconds -= 3600;
+        m.reclaiming.push(walgit_proto::v1::ReclaimingPack {
+            checksum: orphan.clone(),
+            since: Some(since),
+            owner: "someone-else".into(),
+            token: "their-token".into(),
+        });
+        m.revision += 1;
+        step!(
+            "claim",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+    step!("resync", h.sync())?;
+    assert!(
+        h.manifest().reclaiming.iter().any(|r| r.checksum == orphan),
+        "the checksum must be claimed before the pass"
+    );
+
+    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    step!("gc pass", run_pass(&server.state))?;
+    assert!(
+        !h.manifest().reclaiming.iter().any(|r| r.checksum == orphan),
+        "a claim whose marker is already gone must be released: {:?}",
+        h.manifest().reclaiming
+    );
+    Ok(())
+}
+
+/// #175: the crash-recovery release is fenced by claim *age* — a claim younger
+/// than a few lease TTLs may still belong to a live pass whose lease we cannot
+/// see, so the next pass must leave it alone rather than free the checksum for
+/// re-adoption while that pass is still deleting from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_leaves_a_fresh_claim_to_its_holder() -> anyhow::Result<()> {
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // A fresh claim with no marker: looks exactly like the crash-recovery
+    // candidate, but it is too young to be a crashed pass's leftover.
+    let fresh = "a".repeat(40);
+    step!(
+        "claim",
+        h.update_reclaiming(std::slice::from_ref(&fresh), &[], &[], "t")
+    )?;
+    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    step!("gc pass", run_pass(&server.state))?;
+    assert!(
+        h.manifest().reclaiming.iter().any(|r| r.checksum == fresh),
+        "a fresh claim must be left to its holder: {:?}",
+        h.manifest().reclaiming
+    );
+    Ok(())
+}
+
+/// #175: a claim whose holder died *while its marker was still present* must be
+/// adopted by the next pass — not left forever. Otherwise the pack is never
+/// reclaimed and every push/compact regenerating those bytes is refused
+/// permanently (`WalError::Reclaiming`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_takes_over_a_stale_claim_whose_marker_still_exists() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.compaction.retention_superseded = std::time::Duration::from_hours(7 * 24);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // A dead pack: aged marker + bodies, plus a stale claim from a holder that
+    // died before it could finish (its marker is *still there*).
+    let dead = "d".repeat(40);
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 9 * 24 * 3600;
+    step!(
+        "marker",
+        h.store().put_bytes(
+            &keys::superseded_key(&dead),
+            walgit_proto::v1::SupersededPack {
+                checksum: dead.clone(),
+                superseded_at: Some(old),
+                seq: 5,
+            }
+            .encode_to_vec(),
+            PutMode::Create,
+        )
+    )?;
+    for key in [keys::pack_key(&dead), keys::idx_key(&dead)] {
+        step!(
+            "body",
+            h.store().put_bytes(&key, vec![0u8; 32], PutMode::Create)
+        )?;
+    }
+    {
+        let (meta, bytes) = step!("manifest", h.store().get_bytes(keys::MANIFEST))?
+            .expect("repo has a manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        let mut since = walgit_proto::time::now();
+        since.seconds -= 3600;
+        m.reclaiming.push(walgit_proto::v1::ReclaimingPack {
+            checksum: dead.clone(),
+            since: Some(since),
+            owner: "dead-holder".into(),
+            token: "their-token".into(),
+        });
+        m.revision += 1;
+        step!(
+            "stale claim",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+    step!("resync", h.sync())?;
+
+    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("check", async {
+        assert!(
+            h.store().head(&keys::pack_key(&dead)).await?.is_none(),
+            "the adopter must finish the reclamation (pack reclaimed)"
+        );
+        assert!(
+            h.store().head(&keys::superseded_key(&dead)).await?.is_none(),
+            "the marker goes with the pack"
+        );
+        assert!(
+            !h.manifest().reclaiming.iter().any(|r| r.checksum == dead),
+            "the stale claim must not survive: {:?}",
+            h.manifest().reclaiming
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+/// #175: a claim left by a *previous pass of the same instance* (same owner,
+/// different token) with its marker already retired must be recovered too — the
+/// "not ours" test is `(owner, token)`, not `owner`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_releases_a_retired_claim_from_an_older_pass_of_the_same_instance() -> anyhow::Result<()>
+{
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // Same instance id as this pass (it is the same process), older token, no
+    // marker: an interrupted previous pass of ours.
+    let orphan = "e".repeat(40);
+    {
+        let (meta, bytes) = step!("manifest", h.store().get_bytes(keys::MANIFEST))?
+            .expect("repo has a manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        let mut since = walgit_proto::time::now();
+        since.seconds -= 3600;
+        m.reclaiming.push(walgit_proto::v1::ReclaimingPack {
+            checksum: orphan.clone(),
+            since: Some(since),
+            owner: walgit_store::coord::instance_id().to_string(),
+            token: "token-of-a-previous-pass".into(),
+        });
+        m.revision += 1;
+        step!(
+            "claim",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+    step!("resync", h.sync())?;
+
+    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    step!("gc pass", run_pass(&server.state))?;
+    assert!(
+        !h.manifest().reclaiming.iter().any(|r| r.checksum == orphan),
+        "an older token of this instance is a different holder and must be released: {:?}",
+        h.manifest().reclaiming
+    );
     Ok(())
 }

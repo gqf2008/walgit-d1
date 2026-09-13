@@ -148,13 +148,14 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 |---|---|
 | `manifest.pb` | Tiny, **CAS-rewritten**: `head_seq`, live pack set `PackRef[]` (checksum, sizes, tier, has_rev/bitmap), log segments, checkpoint pointer, settings inline, `revision`, `updated_at`. **The linearization point.** Nothing is visible before its CAS; everything after is idempotent and replayable. |
 | `log/<first_seq>.pb` | Immutable, uvarint-framed `LogEntry` frames: PUSH / REF_UPDATE (ref transaction + pack pointer), COMPACT (new pack, `supersedes[]`), CHECKPOINT, SETTINGS. Strictly increasing `seq`. One small object per publish batch. |
-| `wal/<checksum>.pack/.idx/.rev/.bitmap/.commit-graph` | Immutable packs, content-addressed by pack checksum: push packs (tier 0), compaction outputs (tier 1), the base (tier 2, bitmap'd), plus the side-files a reader needs. |
+| `wal/<checksum>.pack/.idx/.rev/.bitmap/.commit-graph` | Immutable packs, content-addressed by pack checksum: push packs (tier 0), compaction outputs (tier 1), the base (tier 2, bitmap'd), plus the side-files a reader needs. A pack a COMPACT entry dropped also carries a marker under `wal/_superseded/<checksum>` (when it left the live set; its own prefix so GC's listing never walks pack objects) — the manifest keeps only the live set, and the superseding entry is eventually folded into a checkpoint, so the marker is what lets bucket GC age a pack. |
 | `checkpoints/<seq>/checkpoint.pb`, `refs.pb` | Folded state at `seq`: live pack set + full `RefSnapshot`. Cold start = snapshot + tail, never full replay. |
 | `bundles/list.pb`, `bundles/<strategy>/…` | bundle-uri artefacts + CAS'd list. |
-| `leases/<name>.pb` | CAS lease with TTL heartbeat: `compact`, `bundle:<strategy>`. The only cross-instance mutex. |
+| `leases/<name>.pb` | CAS lease with TTL heartbeat: `compact`, `bundle:<strategy>`, `gc` (the GC pass renews it for its whole run; `ReclaimingPack` carries the listing pass's `owner`+`token` fence and `since`; every destructive step re-checks the fence, and a later pass only recovers *another* owner's claim once `since` is past `max(3×lease_ttl, 5min)`). The only cross-instance mutex. |
 | `cache/api/v1/<sha1>.json` | Shared render cache of immutable web API answers. |
 | `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all. |
 | `fsck.pb` | Last connectivity audit (`FsckReport`), written by the maintainer's `fsck` unit, consumed by `repair` (`docs/INTEGRITY.md`). |
+| `gc.pb` | Last bucket-GC pass (`GcReport`: when, how many packs, how many bytes) — the maintainer's plan reads it to decide whether the `gc` unit is due (`maintenance.gc_interval`). |
 | `events/cursor.json` | Durable acknowledged WAL sequence of the events bridge; advanced only after the webhook acknowledged (D32). |
 | `lfs/objects/<aa>/<bb>/<oid>` | LFS objects (sha256-addressed, immutable). Missing ones can be read through from `upstream.lfs` and persisted (`docs/LFS.md`). |
 Schema `crates/walgit-proto/proto/walgit/v1/wal.proto`; GCS (REST/JSON API data, gRPC metadata —
@@ -224,13 +225,13 @@ runtime** and never takes the refs phase's lock (D19). `check_fits` refuses to p
 - **A fold never touches the base or a history pack** (`--keep-pack`), **a base is rebuilt only by the weekly
   unit / `compact --base`**, and **a rebuild supersedes every other live pack** by the manifest, not by what git
   happened to delete.
-- Superseded packs are retained `compaction.retention_superseded` (provenance window) then GC'd.
+- Superseded packs are retained `compaction.retention_superseded` (provenance window) then GC'd by the maintainer's `gc` unit: it lists the markers and deletes a pack + its side-files + the marker once the marker is older than the window and the pack is not live (re-checked against a fresh manifest). Only marked packs are candidates, and a publisher refuses to adopt a checksum GC has listed in `Manifest.reclaiming` (`WalError::Reclaiming`) — the listing is CAS'd in *before* any object is deleted and cleared after, so it is the ordering record (the marker is the age record, not the lock). That closes the window where a publisher re-adopting a byte-identical pack could CAS it live between GC's live-check and GC's delete. Bounded per pass (`GC_MAX_PACKS_PER_UNIT`, default 32).
 
 ### 2.5b Self-healing by construction (D22)
 Everything the maintainer produces — checkpoints, bundles per slot, compactions, retention — is a **pure function
 of (config, WAL state)**. The maintainer does not run schedules; it computes the *desired state* every pass and
 performs **one bounded unit of the most important missing work** (checkpoint → repair → missing weekly → missing
-dailies oldest-first → missing hourlies → compaction → rev-index → fsck audit), as a task, under a lease. An outage
+dailies oldest-first → missing hourlies → compaction → rev-index → gc → fsck audit), as a task, under a lease. An outage
 of any length leaves no permanent hole; a deleted or corrupt artefact is "missing" and rebuilt identically; config
 changes take effect by re-planning; there are no one-off backfill scripts.
 
@@ -268,7 +269,7 @@ decision in §4 — or the PR is; never "fix later".
 | # | Principle | The tell in a PR | The question to answer |
 |---|---|---|---|
 | **I** | **No state outside the object store.** Disk and memory are caches. | A database, Redis, SQLite, a file that must survive a restart, an env var that encodes data. | "If every instance is wiped now, what is lost?" — must be "warmth". |
-| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
+| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, gc.pb, events/cursor, maintainer heartbeats, render cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
 | **III** | **Side effects are readers of the WAL, never steps of a write.** Events, mirrors, notifications tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
 | **IV** | **Every read revalidates; there is no eventually.** | A cache that outlives the manifest's generation, a TTL invented for a repo-scoped answer, a read that skips `sync_*`. | "After `push` returns `ok`, can any instance serve the old state?" (`cargo test -p walgit-server --test sim`). |
 | **V** | **Serve from the parts that fit; never a bigger box, never a hard-coded host.** | "Just download the pack", a path that assumes the full pack set is local, a hostname in `crates/` or `web/`. | "What happens to this code on a 20 GiB tmpfs with a 32 GB base pack? Which sync level does it need?" |

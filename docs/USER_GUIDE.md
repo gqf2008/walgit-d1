@@ -42,9 +42,10 @@
 ### 2.1 启动服务（本机开发形态）
 ```bash
 # 已有部署目录 ~/walgit
-walgit-ensure            # 幂等启动
-walgit-ensure status     # 状态 + /healthz
-walgit-ensure stop       # 停止
+walgit service start     # 幂等启动(存活判断在二进制里)
+walgit service status    # 状态 + /healthz
+walgit service stop      # 停止
+# `walgit-ensure` 仍可用,但它只是转发到 `walgit service`。
 ```
 服务默认监听 `http://127.0.0.1:8081`，Web UI 在 `http://127.0.0.1:8081/`。
 

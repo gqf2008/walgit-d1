@@ -855,6 +855,21 @@ pub async fn run_with_store(
         )
         .await?;
 
+    // Bucket GC (#175) lists a pack in `Manifest.reclaiming` before deleting any
+    // of its objects. Adopting a listed checksum would publish a manifest that
+    // points at bytes someone is removing, so refuse (the claim lives for the
+    // duration of one GC pass — seconds — not for the retention window).
+    if let Some(base) = &base_manifest {
+        for p in &pack_refs {
+            if base.reclaiming.iter().any(|r| r.checksum == p.checksum) {
+                return Err(anyhow::anyhow!(
+                    "pack {} is being reclaimed by bucket GC; retry the import",
+                    p.checksum
+                ));
+            }
+        }
+    }
+
     // ---- manifest CAS (the linearization point) --------------------------------------
     let manifest = Manifest {
         format_version: WAL_FORMAT_VERSION,
@@ -873,11 +888,45 @@ pub async fn run_with_store(
         }),
         log_segments: vec![],
         packs: pack_refs,
+        // Never drop a claim GC listed and does not own: this CAS would erase
+        // it while GC is still deleting from its own snapshot (#175).
+        reclaiming: base_manifest
+            .as_ref()
+            .map(|m| m.reclaiming.clone())
+            .unwrap_or_default(),
         updated_at: Some(time::now()),
         writer: format!("walgit-import@{}", hostname()),
         revision: base_manifest.as_ref().map_or(0, |m| m.revision) + 1,
         settings: None,
     };
+    // #175: packs this import drops from the live set still need a
+    // `wal/_superseded/<checksum>` marker, or bucket GC can never reclaim them —
+    // the marker is its only candidate source. Written *before* the CAS (with the
+    // same retrying helper the compaction path uses) so a lost refresh cannot
+    // let GC treat an old timestamp as the current one; a marker left on a pack
+    // that stays live is harmless because GC skips live packs.
+    let new_live: std::collections::HashSet<&str> =
+        manifest.packs.iter().map(|p| p.checksum.as_str()).collect();
+    // A checksum GC has claimed is skipped: GC retires that marker while it
+    // holds the claim, and a refresh landing in that window would leave the
+    // dead pack with no record at all where the backend's conditional delete is
+    // HEAD+compare+DELETE (S3). Claimed checksums are already dead with GC
+    // owning their objects, so there is nothing for the import to record.
+    let dropped: Vec<String> = base_manifest
+        .as_ref()
+        .map(|m| {
+            m.packs
+                .iter()
+                .filter(|p| !new_live.contains(p.checksum.as_str()))
+                .filter(|p| !m.reclaiming.iter().any(|r| r.checksum == p.checksum))
+                .map(|p| p.checksum.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    walgit_wal::write_superseded_markers(&repo_store, &dropped, seq, time::now())
+        .await
+        .context("writing superseded markers for replaced packs")?;
+
     let mode = match base_version {
         Some(v) => PutMode::Update(v),
         None => PutMode::Create,
@@ -1682,6 +1731,252 @@ mod resume_tests {
         assert!(
             !r.resumed && !r.noop && r.cas == 1 && r.skipped >= 1,
             "{r:?}"
+        );
+    }
+
+    /// A store whose manifest carries `reclaiming` but holds no packs yet — the
+    /// shape GC leaves right before it deletes, and the one an import must respect.
+    async fn seed_manifest_with_claim(
+        repo_store: &Prefixed,
+        object_format: &str,
+        reclaiming: Vec<walgit_proto::v1::ReclaimingPack>,
+    ) {
+        let m = Manifest {
+            format_version: WAL_FORMAT_VERSION,
+            repo: "t/seed".into(),
+            object_format: object_format.into(),
+            reclaiming,
+            ..Default::default()
+        };
+        repo_store
+            .put(
+                keys::MANIFEST,
+                PutBody::Bytes(m.encode_to_vec().into()),
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// #175: bucket GC lists a pack in `Manifest.reclaiming` before deleting any
+    /// of its objects. An import that would adopt a listed checksum must refuse
+    /// before its CAS — disabling the gate lets it publish a manifest pointing
+    /// at bytes GC is removing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_refuses_a_checksum_bucket_gc_is_reclaiming() {
+        let src = source();
+        let cfg = cfg();
+        let store = walgit_store::memory::MemoryStore::shared();
+        let repo = "t/gc-refuse";
+        let id = walgit_git::RepoId::new("t", "gc-refuse").unwrap();
+        let repo_store = Prefixed::new(store.clone(), id.store_prefix());
+        let pack_dir = crate::import::resolve_git_dir(src.path())
+            .unwrap()
+            .join("objects")
+            .join("pack");
+        let victim = scan_packs(&pack_dir)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.history_of.is_none())
+            .expect("source has an object pack")
+            .checksum;
+        // GC listed the source's own pack: re-importing it would re-adopt bytes
+        // GC is deleting, so the import must refuse.
+        seed_manifest_with_claim(
+            &repo_store,
+            "sha1",
+            vec![walgit_proto::v1::ReclaimingPack {
+                checksum: victim.clone(),
+                since: Some(time::now()),
+                owner: "someone-else".into(),
+                token: "their-token".into(),
+            }],
+        )
+        .await;
+        let err = run_with_store(opts(src.path(), repo), &cfg, store.clone(), false)
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("reclaim"), "refused: {err}");
+        // The claim survived: refusing did not erase it.
+        let m2 = Manifest::decode(
+            repo_store
+                .get_bytes(keys::MANIFEST)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .as_ref(),
+        )
+        .unwrap();
+        assert!(
+            m2.reclaiming.iter().any(|r| r.checksum == victim),
+            "the claim must survive the refused import: {m2:?}"
+        );
+    }
+
+    /// #175: an import rewrites the whole manifest, so it must carry forward any
+    /// `reclaiming` claim it did not touch — dropping the list would let a pack
+    /// GC is still deleting be adopted by the very next publisher.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_preserves_a_reclaiming_claim_it_does_not_touch() {
+        let src = source();
+        let cfg = cfg();
+        let store = walgit_store::memory::MemoryStore::shared();
+        let repo = "t/gc-keep";
+        let id = walgit_git::RepoId::new("t", "gc-keep").unwrap();
+        let repo_store = Prefixed::new(store.clone(), id.store_prefix());
+        // A checksum that is not part of the incoming pack set (a pack another
+        // writer superseded): the import does not touch it, so it must survive.
+        let ghost = "e".repeat(40);
+        seed_manifest_with_claim(
+            &repo_store,
+            "sha1",
+            vec![walgit_proto::v1::ReclaimingPack {
+                checksum: ghost.clone(),
+                since: Some(time::now()),
+                owner: "someone-else".into(),
+                token: "their-token".into(),
+            }],
+        )
+        .await;
+        run_with_store(opts(src.path(), repo), &cfg, store.clone(), false)
+            .await
+            .unwrap();
+        let m2 = Manifest::decode(
+            repo_store
+                .get_bytes(keys::MANIFEST)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .as_ref(),
+        )
+        .unwrap();
+        assert!(
+            m2.reclaiming.iter().any(|r| r.checksum == ghost),
+            "the import erased a claim it did not own: {m2:?}"
+        );
+    }
+
+    /// #175: `import --replace` drops the previous pack set from the live
+    /// manifest, so it must leave a `wal/_superseded/<checksum>` marker for every
+    /// pack it replaces — the marker is bucket GC's only candidate source, so a
+    /// replace without markers silently manufactures unreclaimable orphans.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replace_import_marks_the_packs_it_drops() {
+        let src = source();
+        let cfg = cfg();
+        let store = walgit_store::memory::MemoryStore::shared();
+        let repo = "t/replace";
+        let id = walgit_git::RepoId::new("t", "replace").unwrap();
+        let repo_store = Prefixed::new(store.clone(), id.store_prefix());
+        run_with_store(opts(src.path(), repo), &cfg, store.clone(), false)
+            .await
+            .unwrap();
+        let (_, bytes) = repo_store.get_bytes(keys::MANIFEST).await.unwrap().unwrap();
+        let old = Manifest::decode(bytes.as_ref()).unwrap();
+        let old_packs: Vec<String> = old.packs.iter().map(|p| p.checksum.clone()).collect();
+        assert!(!old_packs.is_empty(), "the first import published packs");
+
+        // A different source: its pack set differs, so the replace drops the old
+        // one (the object pack *and* its derived history pack).
+        let src2 = source();
+        std::fs::write(src2.path().join("extra"), "different bytes\n").unwrap();
+        sh(src2.path(), &["add", "."]);
+        sh(src2.path(), &["commit", "-q", "-m", "extra"]);
+        sh(src2.path(), &["repack", "-adb", "-q"]);
+        sh(src2.path(), &["prune-packed"]);
+        let mut o2 = opts(src2.path(), repo);
+        o2.replace = true;
+        run_with_store(o2, &cfg, store.clone(), false).await.unwrap();
+
+        let (_, bytes) = repo_store.get_bytes(keys::MANIFEST).await.unwrap().unwrap();
+        let new = Manifest::decode(bytes.as_ref()).unwrap();
+        let new_live: std::collections::HashSet<&str> =
+            new.packs.iter().map(|p| p.checksum.as_str()).collect();
+        let dropped: Vec<&String> = old_packs
+            .iter()
+            .filter(|c| !new_live.contains(c.as_str()))
+            .collect();
+        assert!(
+            !dropped.is_empty(),
+            "the replace must have dropped a pack: old={old_packs:?} new={new:?}"
+        );
+        for checksum in dropped {
+            assert!(
+                repo_store
+                    .get_bytes(&keys::superseded_key(checksum))
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "pack {checksum} was dropped without a superseded marker"
+            );
+        }
+    }
+
+    /// #175: a dropped checksum bucket GC has already claimed is skipped when
+    /// writing the replacement markers. GC retires that marker while it holds
+    /// the claim, so a refresh landing in that window would leave the dead pack
+    /// unrecorded where the backend's conditional delete is HEAD+compare+DELETE
+    /// (S3). The claim itself is GC's and must survive the import.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replace_import_skips_markers_for_checksums_gc_has_claimed() {
+        let src = source();
+        let cfg = cfg();
+        let store = walgit_store::memory::MemoryStore::shared();
+        let repo = "t/replace-claim";
+        let id = walgit_git::RepoId::new("t", "replace-claim").unwrap();
+        let repo_store = Prefixed::new(store.clone(), id.store_prefix());
+        run_with_store(opts(src.path(), repo), &cfg, store.clone(), false)
+            .await
+            .unwrap();
+
+        // Claim one of the packs the replace will drop.
+        let (meta, bytes) = repo_store.get_bytes(keys::MANIFEST).await.unwrap().unwrap();
+        let mut m = Manifest::decode(bytes.as_ref()).unwrap();
+        let claimed = m.packs[0].checksum.clone();
+        m.reclaiming.push(walgit_proto::v1::ReclaimingPack {
+            checksum: claimed.clone(),
+            since: Some(time::now()),
+            owner: "someone-else".into(),
+            token: "their-token".into(),
+        });
+        m.revision += 1;
+        repo_store
+            .put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+            .await
+            .unwrap();
+
+        // A different source replaces the pack set, dropping `claimed`.
+        let src2 = source();
+        std::fs::write(src2.path().join("extra"), "different bytes\n").unwrap();
+        sh(src2.path(), &["add", "."]);
+        sh(src2.path(), &["commit", "-q", "-m", "extra"]);
+        sh(src2.path(), &["repack", "-adb", "-q"]);
+        sh(src2.path(), &["prune-packed"]);
+        let mut o2 = opts(src2.path(), repo);
+        o2.replace = true;
+        run_with_store(o2, &cfg, store.clone(), false).await.unwrap();
+
+        assert!(
+            repo_store
+                .get_bytes(&keys::superseded_key(&claimed))
+                .await
+                .unwrap()
+                .is_none(),
+            "a claimed checksum must not get a replacement marker"
+        );
+        let (_, bytes) = repo_store.get_bytes(keys::MANIFEST).await.unwrap().unwrap();
+        let after = Manifest::decode(bytes.as_ref()).unwrap();
+        assert!(
+            after.reclaiming.iter().any(|r| r.checksum == claimed),
+            "the import must not clear GC's claim: {after:?}"
         );
     }
 }

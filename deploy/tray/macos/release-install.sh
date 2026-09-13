@@ -80,16 +80,16 @@ listen_addr() {
     printf '%s' "$l"
 }
 HEALTH_URL="http://$(listen_addr)/healthz"
-# walgit-ensure 的 stop/start 必须探测同一端口;函数不会随子进程继承,显式传值。
-WALGIT_LISTEN="$(listen_addr)"
-export WALGIT_LISTEN
+# 服务生命周期由 walgit 二进制负责(`walgit service …`):端口从部署的
+# walgit.toml 读,不再需要把解析结果经环境变量传给一个 shell 脚本。
+service() { "$DEPLOY/walgit" service "$1" --config "$DEPLOY/walgit.toml" 2>&1; }
 
 # 记录升级前服务是否在跑:只有它本来在跑,升级后才该把它带起来。
 # 用户主动停掉的服务不拉起(托盘里"停止服务"是明确意图)。
 SERVICE_WAS_RUNNING=0
 healthcheck "$HEALTH_URL" >/dev/null 2>&1 && SERVICE_WAS_RUNNING=1
-if [ -x "$DEPLOY/walgit-ensure" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
-    "$DEPLOY/walgit-ensure" stop >/dev/null 2>&1 || true
+if [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+    service stop >/dev/null 2>&1 || true
 fi
 
 OLD_VERSION="unknown"
@@ -104,7 +104,7 @@ fi
 # ~/walgit 托管文件(present 才备份)，与 app 一起回滚。
 DEPLOY_BACKUP=""
 DEPLOY_MANAGED=""
-for f in walgit walgit-ensure run-walgit.sh .skeleton-version; do
+for f in walgit run-walgit.sh .skeleton-version; do
     [ -e "$DEPLOY/$f" ] || continue
     [ -n "$DEPLOY_BACKUP" ] || DEPLOY_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/walgit-deploy-bak.XXXXXX")"
     cp -p "$DEPLOY/$f" "$DEPLOY_BACKUP/$f" 2>/dev/null || true
@@ -140,7 +140,7 @@ rollback() {
     local why="$1"
     log "rollback: $why"
     kill_new_tray
-    [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ] && "$DEPLOY/walgit-ensure" stop >/dev/null 2>&1 || true
+    [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ] && service stop >/dev/null 2>&1 || true
     if [ -e "$APP_DEST" ]; then
         mv "$APP_DEST" "$APP_DEST.failed-$VERSION-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
     fi
@@ -150,8 +150,8 @@ rollback() {
     restore_deploy_files
     [ "${WALGIT_UPDATE_SKIP_OPEN:-0}" != "1" ] && open --env "WALGIT_DEPLOY_DIR=$DEPLOY" "$APP_DEST" >/dev/null 2>&1 || true
     # 只恢复"升级前本来在跑"的服务;用户主动停掉的不要借回滚之名拉起。
-    if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit-ensure" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
-        "$DEPLOY/walgit-ensure" >/dev/null 2>&1 || true
+    if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+        service start >/dev/null 2>&1 || true
     fi
     notify "$(printf '%s，已恢复旧版本' "$why")"
     exit 1
@@ -184,8 +184,8 @@ done
 [ "$ok" = 1 ] || rollback "新版本启动或部署骨架更新时间超限"
 [ "$OPEN_FAILED" = 0 ] || rollback "无法启动新 app"
 
-if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit-ensure" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
-    "$DEPLOY/walgit-ensure" >/dev/null 2>&1 || rollback "服务启动失败"
+if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+    service start >/dev/null 2>&1 || rollback "服务启动失败"
     for _ in $(seq 1 "$HEALTH_WAIT"); do
         if [ "$(health_version)" = "v$VERSION" ]; then
             [ -n "$DEPLOY_BACKUP" ] && rm -rf "$DEPLOY_BACKUP"

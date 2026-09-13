@@ -44,7 +44,10 @@ use tracing::Instrument;
 use walgit_git::{IngestedPack, PackInfo};
 use walgit_proto::keys;
 use walgit_proto::v1::PackKind;
-use walgit_proto::v1::{EntryKind, LogEntry, LogSegmentRef, Manifest, PackRef, RefTransaction};
+use walgit_proto::v1::{
+    EntryKind, LogEntry, LogSegmentRef, Manifest, PackRef, ReclaimingPack, RefTransaction,
+    SupersededPack,
+};
 use walgit_proto::{frame, time};
 use walgit_store::{ObjectStore, Prefixed, PutBody, PutMode, PutOptions, StoreError};
 
@@ -102,6 +105,105 @@ pub(crate) fn pack_ref_from_info(p: &PackInfo, seq: u64, tier: u32) -> PackRef {
             PackKind::Objects as i32
         },
         derived_from: p.history_of.clone().unwrap_or_default(),
+    }
+}
+
+/// Add/remove `Manifest.reclaiming` entries under the manifest CAS (#175).
+///
+/// This is what orders bucket GC against adoption. GC lists a pack it is about
+/// to delete *before* touching any object; a publisher that would put that
+/// checksum back into `packs` refuses while it is listed. Both sides go through
+/// the manifest CAS, so exactly one of "GC reclaims it" and "a publisher
+/// re-adopts it" can win — the other re-reads and backs off. Without this, a
+/// publisher that regenerates a byte-identical pack can CAS it live in the
+/// window between GC's live-check and GC's delete.
+pub(crate) async fn update_reclaiming(
+    handle: &RepoHandle,
+    add: &[String],
+    remove_own: &[String],
+    recover: &[(String, String, String)],
+    token: &str,
+) -> Result<Arc<Manifest>, WalError> {
+    let writer = crate::handle::instance_id();
+    let max_retries = handle.cfg.wal.cas_max_retries;
+    let mut attempts = 0u32;
+    loop {
+        handle.sync_impl_level(crate::sync::SyncLevel::Refs).await?;
+        let (current, known_version) = handle.manifest_snapshot();
+        let mut updated: Manifest = (*current).clone();
+        // A release is fenced: a claim is removed only when the caller still
+        // holds it (`owner`+`token` match this pass), or when it is an exact
+        // compare-and-remove of a stale claim recovery already vetted. A stale
+        // pass can therefore never unlock a claim a newer pass has taken over.
+        updated.reclaiming.retain(|r| {
+            let own = r.owner == writer
+                && r.token == token
+                && remove_own.iter().any(|c| c == &r.checksum);
+            let recovered = recover
+                .iter()
+                .any(|(c, o, t)| c == &r.checksum && o == &r.owner && t == &r.token);
+            !(own || recovered)
+        });
+        for c in add {
+            // Only list packs that are not live *in this manifest*. The CAS
+            // below is what makes that check authoritative: if a publisher
+            // re-adopted the checksum first, we see it here and skip; if we win,
+            // the publisher's own CAS refuses while it is listed.
+            if updated.packs.iter().any(|p| &p.checksum == c) {
+                continue;
+            }
+            // An existing claim is never overwritten, even by another pass of
+            // *this* instance: a different `token` is a different holder, and
+            // only holding it (or an age-fenced recovery release) may change it.
+            if !updated.reclaiming.iter().any(|r| &r.checksum == c) {
+                updated.reclaiming.push(ReclaimingPack {
+                    checksum: c.clone(),
+                    since: Some(time::now()),
+                    owner: writer.clone(),
+                    token: token.to_string(),
+                });
+            }
+        }
+        if updated.reclaiming.len() == current.reclaiming.len()
+            && updated.reclaiming.iter().zip(current.reclaiming.iter()).all(
+                |(a, b)| a.checksum == b.checksum && a.owner == b.owner && a.token == b.token,
+            )
+        {
+            // Nothing to change: the caller still gets the manifest the claim
+            // set is defined against, so it can compute per-repo config for
+            // *that* generation (#175).
+            return Ok(current);
+        }
+        updated.revision += 1;
+        updated.updated_at = Some(time::now());
+        updated.writer = writer.clone();
+        let mode = match &known_version {
+            Some(v) => PutMode::Update(v.clone()),
+            None => PutMode::Create,
+        };
+        match handle
+            .store
+            .put(
+                keys::MANIFEST,
+                PutBody::Bytes(bytes::Bytes::from(updated.encode_to_vec())),
+                mode.into(),
+            )
+            .await
+        {
+            Ok(meta) => {
+                let committed = Arc::new(updated);
+                handle.install_manifest(committed.clone(), Some(meta.version.clone()));
+                handle.state.lock().manifest_version = Some(meta.version.as_str().to_string());
+                return Ok(committed);
+            }
+            Err(StoreError::PreconditionFailed { .. }) => {
+                attempts += 1;
+                if attempts >= max_retries {
+                    return Err(WalError::Retry { attempts });
+                }
+            }
+            Err(e) => return Err(WalError::Store(e)),
+        }
     }
 }
 
@@ -581,9 +683,22 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         {
             return finish_all_errors(batch, e);
         }
-        let manifest = handle.manifest.read().clone();
+        let (manifest, known_version) = handle.manifest_snapshot();
         let head_seq = manifest.head_seq;
-        let known_version = handle.manifest_version.lock().clone();
+
+        // A checksum bucket GC has listed as reclaiming must not be re-adopted
+        // (#175): the CAS that listed it and the CAS that would make it live are
+        // ordered, so refusing here is what keeps a re-adopted pack from
+        // pointing at bytes GC already deleted. The retry uploads fresh once GC
+        // has finished with it.
+        for req in &batch {
+            if let Some(pack) = &req.pack {
+                let checksum = pack.checksum.to_string();
+                if manifest.reclaiming.iter().any(|r| r.checksum == checksum) {
+                    return finish_all_errors(batch, WalError::Reclaiming(checksum));
+                }
+            }
+        }
 
         // O(log refs) lookups over the cached snapshot + an overlay of what this
         // batch applied; never an O(refs) map per push.
@@ -1057,8 +1172,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 }
                 if local_ok {
-                    *handle.manifest.write() = Arc::new(committed.clone());
-                    *handle.manifest_version.lock() = Some(version.clone());
+                    handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
                     {
                         let mut state = handle.state.lock();
                         state.manifest_version = Some(version.as_str().to_string());
@@ -1077,8 +1191,9 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                     }
                 } else {
                     // Forget the known version so the next sync performs an unconditional GET and
-                    // replays from the last applied seq.
-                    handle.manifest_version.lock().take();
+                    // replays from the last applied seq. Go through `install_manifest` so the
+                    // `(manifest, version)` pair stays atomic w.r.t. `manifest_snapshot` (#175).
+                    handle.install_manifest(handle.manifest(), None);
                 }
             }
             sweep_burned(&handle.store, &slot)
@@ -1240,6 +1355,73 @@ fn note_entry_time(handle: &RepoHandle, seq: u64, at: &prost_types::Timestamp) {
     }
 }
 
+/// Write the `wal/_superseded/<checksum>` markers for a superseding COMPACT
+/// entry, before its manifest CAS (#175).
+///
+/// The marker records the supersession time; GC deletes the pack + side-files
+/// once it ages past `compaction.retention_superseded`. Because a pack that was
+/// superseded, re-adopted and superseded again must get a *fresh* timestamp,
+/// the write is `Overwrite` (never `Create`, never `immutable`) and is retried:
+/// a lost refresh would let GC treat the old timestamp as the current one and
+/// delete early. A terminal failure aborts the supersession — nothing has
+/// committed yet, so the caller retries instead of publishing without a record.
+pub async fn write_superseded_markers(
+    store: &Prefixed,
+    supersedes_hex: &[String],
+    seq: u64,
+    at: prost_types::Timestamp,
+) -> Result<(), WalError> {
+    if supersedes_hex.is_empty() {
+        return Ok(());
+    }
+    let opts = PutOptions {
+        mode: PutMode::Overwrite,
+        ..Default::default()
+    };
+    // (key, body) per checksum; retries only re-send what failed.
+    let mut pending: Vec<(String, bytes::Bytes)> = supersedes_hex
+        .iter()
+        .map(|s| {
+            let marker = SupersededPack {
+                checksum: s.clone(),
+                superseded_at: Some(at),
+                seq,
+            };
+            (
+                keys::superseded_key(s),
+                bytes::Bytes::from(marker.encode_to_vec()),
+            )
+        })
+        .collect();
+    let mut last: Option<StoreError> = None;
+    for attempt in 0..3u32 {
+        // Concurrent: a 500-pack supersede must not add 500 serial PUTs to the
+        // compaction critical path.
+        let results = futures::future::join_all(pending.iter().map(|(key, body)| {
+            store.put(key, PutBody::Bytes(body.clone()), opts.clone())
+        }))
+        .await;
+        let mut failed: Vec<(String, bytes::Bytes)> = Vec::new();
+        for ((key, body), result) in pending.drain(..).zip(results) {
+            if let Err(e) = result {
+                last = Some(e);
+                failed.push((key, body));
+            }
+        }
+        if failed.is_empty() {
+            return Ok(());
+        }
+        pending = failed;
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(50 << attempt)).await;
+        }
+    }
+    match last {
+        Some(e) => Err(WalError::Store(e)),
+        None => Err(WalError::Retry { attempts: 3 }),
+    }
+}
+
 pub(crate) async fn publish_compact_impl(
     handle: &RepoHandle,
     new_pack: PackInfo,
@@ -1296,8 +1478,11 @@ pub(crate) async fn publish_compact_impl(
             handle.sync_impl().await?;
         }
 
-        let manifest = handle.manifest.read().clone();
-        let known_version = handle.manifest_version.lock().clone();
+        let (manifest, known_version) = handle.manifest_snapshot();
+
+        if manifest.reclaiming.iter().any(|r| r.checksum == checksum) {
+            return Err(WalError::Reclaiming(checksum.clone()));
+        }
 
         let entry_time = time::now();
         let make_entry = |seq: u64| LogEntry {
@@ -1367,6 +1552,25 @@ pub(crate) async fn publish_compact_impl(
             None => PutMode::Create,
         };
 
+        // Record *when* each pack leaves the live set (#175) *before* the CAS.
+        // The marker is what tells GC a pack's supersession time, so a marker
+        // that lagged its supersession (write lost, write swallowed) would let
+        // GC delete a freshly superseded pack inside the retention window. A
+        // failure here aborts the supersession (nothing has committed yet); a
+        // stray marker left on a still-live pack is filtered out by GC, which
+        // only ever dies a pack through a supersession that refreshes it.
+        //
+        // A checksum bucket GC has claimed is skipped: GC retires the marker
+        // while it holds the claim, and a writer refreshing it in that window
+        // would leave a dead pack with no marker at all (S3's conditional
+        // delete is HEAD+compare+DELETE, not atomic) (#175).
+        let marker_targets: Vec<String> = supersedes_hex
+            .iter()
+            .filter(|s| !manifest.reclaiming.iter().any(|r| &r.checksum == *s))
+            .cloned()
+            .collect();
+        write_superseded_markers(&handle.store, &marker_targets, seq, entry_time).await?;
+
         let cas = handle
             .store
             .put(
@@ -1395,8 +1599,7 @@ pub(crate) async fn publish_compact_impl(
             },
         };
         if let Some((committed, version)) = committed {
-            *handle.manifest.write() = Arc::new(committed.clone());
-            *handle.manifest_version.lock() = Some(version.clone());
+            handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
             note_entry_time(handle, seq, &entry_time);
             {
                 let mut state = handle.state.lock();
@@ -1480,8 +1683,7 @@ pub(crate) async fn annotate_pack_impl(
     }
     let mut attempts = 0u32;
     loop {
-        let current = handle.manifest.read().clone();
-        let known_version = handle.manifest_version.lock().clone();
+        let (current, known_version) = handle.manifest_snapshot();
         let mut updated: Manifest = (*current).clone();
         let Some(p) = updated.packs.iter_mut().find(|p| p.checksum == checksum) else {
             return Err(WalError::Corrupt(format!(
@@ -1515,8 +1717,7 @@ pub(crate) async fn annotate_pack_impl(
             .await
         {
             Ok(meta) => {
-                *handle.manifest.write() = Arc::new(updated.clone());
-                *handle.manifest_version.lock() = Some(meta.version.clone());
+                handle.install_manifest(Arc::new(updated.clone()), Some(meta.version.clone()));
                 {
                     let mut state = handle.state.lock();
                     state.manifest_version = Some(meta.version.as_str().to_string());
@@ -1607,8 +1808,7 @@ pub(crate) async fn publish_settings_impl(
     let mut attempts = 0u32;
     loop {
         handle.sync_impl_level(crate::sync::SyncLevel::Refs).await?;
-        let manifest = handle.manifest.read().clone();
-        let known_version = handle.manifest_version.lock().clone();
+        let (manifest, known_version) = handle.manifest_snapshot();
         let revision = manifest.settings.as_ref().map_or(0, |s| s.revision) + 1;
         let settings = walgit_proto::v1::RepoSettings {
             toml: toml_text.to_string(),
@@ -1680,8 +1880,7 @@ pub(crate) async fn publish_settings_impl(
             .await
         {
             Ok(meta) => {
-                *handle.manifest.write() = Arc::new(updated.clone());
-                *handle.manifest_version.lock() = Some(meta.version.clone());
+                handle.install_manifest(Arc::new(updated.clone()), Some(meta.version.clone()));
                 note_entry_time(handle, seq, &entry_time);
                 {
                     let mut state = handle.state.lock();
