@@ -372,13 +372,26 @@ async fn gc_superseded_packs(
             candidates.push((marker.checksum, at));
         }
     }
-    if candidates.is_empty() {
-        if !adopted.is_empty() {
+    // Adopted checksums that did not become candidates carry no work: their
+    // marker vanished between our GET and the take-over CAS, or it is not aged
+    // yet. Release them now rather than refusing publishers until the next
+    // `gc_interval`.
+    if !adopted.is_empty() {
+        let pending: std::collections::HashSet<&str> =
+            candidates.iter().map(|(c, _)| c.as_str()).collect();
+        let idle: Vec<String> = adopted
+            .iter()
+            .filter(|c| !pending.contains(c.as_str()))
+            .cloned()
+            .collect();
+        if !idle.is_empty() {
             handle
-                .update_reclaiming(&[], &adopted, &[], token)
+                .update_reclaiming(&[], &idle, &[], token)
                 .await
                 .map_err(|e| e.to_string())?;
         }
+    }
+    if candidates.is_empty() {
         return Ok((0, 0, true));
     }
     // Oldest first: a partial unit should reclaim the longest-dead packs.
