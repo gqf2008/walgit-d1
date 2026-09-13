@@ -480,7 +480,7 @@ async fn test_delete(store: &DynStore, key: &str) {
 /// Pack GC reads an object's version, then deletes it conditionally. Between
 /// the two another pass may finish reclaiming that checksum and a publisher may
 /// re-adopt it — the same content-addressed bytes come back. On a backend whose
-/// version token is the content ETag (S3/R2) the two incarnations compare
+/// version token is the content `ETag` (S3/R2) the two incarnations compare
 /// equal, so the stale delete would destroy a live object; this test is the
 /// guard for that (#175).
 async fn test_conditional_delete_rejects_a_re_created_object(store: &DynStore, key: &str) {
