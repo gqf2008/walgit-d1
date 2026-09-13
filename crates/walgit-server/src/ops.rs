@@ -564,6 +564,19 @@ async fn gc_superseded_packs(
                         all_complete = false;
                         break;
                     }
+                    // …and once more *after* that round trip: the check above is
+                    // itself an await, and a pass suspended across it (or across
+                    // the deadline) must not go on to delete. What remains is the
+                    // store's own HEAD→DELETE, which is the accepted
+                    // lease-guarded check-then-act window on S3.
+                    if lost.load(Ordering::SeqCst) || !within_fence() {
+                        log(format!(
+                            "gc: claim for {checksum} passed its deadline — leaving {key}"
+                        ));
+                        complete = false;
+                        all_complete = false;
+                        break;
+                    }
                     freed += meta.size;
                     match handle.store().delete(key, Some(meta.version)).await {
                         Ok(())
@@ -620,6 +633,14 @@ async fn gc_superseded_packs(
                 log(format!("gc: claim for {checksum} moved on — leaving its marker"));
                 all_complete = false;
                 continue;
+            }
+            // Re-check after that await, for the same reason as the object delete.
+            if lost.load(Ordering::SeqCst) || !within_fence() {
+                log(format!(
+                    "gc: claim for {checksum} passed its deadline — leaving its marker"
+                ));
+                all_complete = false;
+                break;
             }
             match handle
                 .store()
