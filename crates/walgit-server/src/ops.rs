@@ -446,6 +446,27 @@ async fn gc_superseded_packs(
         .effective_config_for(&claim_manifest)
         .compaction
         .retention_superseded;
+    // Our own fence has a *deadline*: the recovery path may take this claim over
+    // once it is older than `grace`, so a pass that has been running that long
+    // must stop deleting. This is the only check a *suspended* process can rely
+    // on — `lost` cannot be updated while it is stopped, and the object store
+    // (S3/R2) cannot always prove that a re-created object differs from the one
+    // we read. Stopping at `grace` is what keeps a stale pass from ever acting
+    // on a claim a taker could already own.
+    let fence_from = claim_manifest
+        .reclaiming
+        .iter()
+        .find(|r| r.owner == owner && r.token == token)
+        .and_then(|r| r.since.as_ref())
+        .map(walgit_proto::time::to_system);
+    let within_fence = || {
+        fence_from.is_some_and(|t| {
+            std::time::SystemTime::now()
+                .duration_since(t)
+                .unwrap_or_default()
+                < grace
+        })
+    };
 
     let mut deleted = 0u64;
     let mut freed = 0u64;
@@ -465,8 +486,8 @@ async fn gc_superseded_packs(
         // Fail closed on a lease we no longer hold, and re-verify the fence in
         // the store before every destructive step: if a later pass recovered
         // this claim (or the lease moved on), our authorization is gone.
-        if lost.load(Ordering::SeqCst) {
-            log("gc: lease lost during the pass — stopping".to_string());
+        if lost.load(Ordering::SeqCst) || !within_fence() {
+            log("gc: lease lost or claim past its deadline — stopping".to_string());
             all_complete = false;
             break;
         }
@@ -511,8 +532,8 @@ async fn gc_superseded_packs(
         ];
         let mut complete = true;
         for key in &side_files {
-            if lost.load(Ordering::SeqCst) {
-                log("gc: lease lost during the pass — stopping".to_string());
+            if lost.load(Ordering::SeqCst) || !within_fence() {
+                log("gc: lease lost or claim past its deadline — stopping".to_string());
                 complete = false;
                 all_complete = false;
                 break;
@@ -527,6 +548,14 @@ async fn gc_superseded_packs(
                     // Re-checking here (plus the version taken above) closes
                     // both orders: an earlier re-upload fails this check, a
                     // later one fails the version-conditioned delete.
+                    if !within_fence() {
+                        log(format!(
+                            "gc: claim for {checksum} is past its deadline — leaving {key}"
+                        ));
+                        complete = false;
+                        all_complete = false;
+                        break;
+                    }
                     if !claim_still_ours(handle, &checksum, owner, token).await? {
                         log(format!(
                             "gc: claim for {checksum} moved on — leaving {key}"
@@ -580,7 +609,8 @@ async fn gc_superseded_packs(
         // conditional delete is HEAD+compare+DELETE (S3), where a release-then-
         // delete order could drop a marker written in the gap.
         for (checksum, version) in &reclaimed {
-            if lost.load(Ordering::SeqCst) {
+            if lost.load(Ordering::SeqCst) || !within_fence() {
+                all_complete = false;
                 break;
             }
             // The retire is destructive too: re-verify the fence immediately
@@ -610,9 +640,9 @@ async fn gc_superseded_packs(
         }
         // Release last: a released claim with the marker gone would let a
         // publisher re-adopt the checksum with no record of what happened.
-        if lost.load(Ordering::SeqCst) {
-            // A pass that lost its lease releases nothing: the claim is left
-            // for the age-fenced recovery of whichever pass holds the lease next.
+        if lost.load(Ordering::SeqCst) || !within_fence() {
+            // A pass that lost its lease (or ran past its own claim deadline)
+            // releases nothing: the claim is left for the age-fenced recovery.
             all_complete = false;
         } else {
             let mut release_claims: Vec<String> = release.clone();
