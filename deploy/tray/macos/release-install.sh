@@ -2,14 +2,16 @@
 # release-install.sh — detached helper for macOS tray Release updates.
 # Invoked as: release-install.sh <dmg> <mount> <app-dest> <version> <tray-pid>
 #
-# 备份旧 app 与 ~/walgit 托管文件；替换失败或新版本健康检查失败时
-# 两者一起回滚，避免出现「旧 app + 新部署骨架」的半更新状态。
+# Program binaries live in the App Bundle; ~/.walgit is user state only.
+# Upgrade replaces the app bundle (with rollback), then restarts the service
+# from the restored/replaced bundle. Legacy managed copies under ~/.walgit are
+# removed after the old service stops; config, cache, keys and credentials stay.
 #
 # 测试用覆盖（生产不设）：
 #   WALGIT_DEPLOY_DIR / WALGIT_UPDATE_SKIP_SERVICE / WALGIT_UPDATE_SKIP_OPEN
 #   WALGIT_UPDATE_HEALTHCHECK  探活命令(默认 curl)
 #   WALGIT_UPDATE_TRAY_WAIT / WALGIT_UPDATE_BOOTSTRAP_WAIT / WALGIT_UPDATE_HEALTH_WAIT
-#    —— 三段轮询次数(每段 0.5s)，仅测试用；未设按生产值。
+#    —— 三段轮询次数(每段 0.1/0.5s)，仅测试用；未设按生产值。
 set -euo pipefail
 
 DMG="${1:?dmg}"
@@ -17,12 +19,12 @@ MOUNT="${2:?mount}"
 APP_DEST="${3:?app destination}"
 VERSION="${4#v}"
 TRAY_PID="${5:?tray pid}"
-DEPLOY="${WALGIT_DEPLOY_DIR:-$HOME/walgit}"
+DEPLOY="${WALGIT_DEPLOY_DIR:-$HOME/.walgit}"
 LOG="$DEPLOY/tray.log"
 
-TRAY_WAIT="${WALGIT_UPDATE_TRAY_WAIT:-300}"       # 0.1s/次 → 30s
+TRAY_WAIT="${WALGIT_UPDATE_TRAY_WAIT:-300}"            # 0.1s/次 → 30s
 BOOTSTRAP_WAIT="${WALGIT_UPDATE_BOOTSTRAP_WAIT:-120}"  # 0.5s/次 → 60s
-HEALTH_WAIT="${WALGIT_UPDATE_HEALTH_WAIT:-30}"    # 0.5s/次 → 15s
+HEALTH_WAIT="${WALGIT_UPDATE_HEALTH_WAIT:-30}"         # 0.5s/次 → 15s
 
 log() {
     mkdir -p "$DEPLOY"
@@ -61,16 +63,14 @@ healthcheck() { # healthcheck <url> [extra args...]
     fi
 }
 
-# 服务健康检查返回的是 {"status":"ok","version":"v0.5.1"} —— 取出版本号,
-# 用于判断升级后跑的是不是新二进制(#170:旧进程不会自己退出)。
 health_version() {
     local body
     body="$(healthcheck "$HEALTH_URL" --max-time 2 2>/dev/null || true)"
     printf '%s' "$body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
-# 与部署配置同源:自定义 [server].listen 时,预探活/重启后健康检查都要用
-# 实际端口,否则会把「运行中」误判成停止后跳过启动(服务静默停掉)。
+# 与状态配置同源:自定义 [server].listen 时,预探活/重启后健康检查都要用
+# 实际端口,否则会把「运行中」误判成停止后跳过启动。
 listen_addr() {
     local l=""
     if [ -f "$DEPLOY/walgit.toml" ]; then
@@ -80,17 +80,53 @@ listen_addr() {
     printf '%s' "$l"
 }
 HEALTH_URL="http://$(listen_addr)/healthz"
-# 服务生命周期由 walgit 二进制负责(`walgit service …`):端口从部署的
-# walgit.toml 读,不再需要把解析结果经环境变量传给一个 shell 脚本。
-service() { "$DEPLOY/walgit" service "$1" --config "$DEPLOY/walgit.toml" 2>&1; }
+
+# 服务生命周期由 App Bundle 里的 walgit 二进制负责。
+service() {
+    local bin="$APP_DEST/Contents/Resources/walgit"
+    [ -x "$bin" ] || return 1
+    "$bin" service "$1" --config "$DEPLOY/walgit.toml" 2>&1
+}
 
 # 记录升级前服务是否在跑:只有它本来在跑,升级后才该把它带起来。
-# 用户主动停掉的服务不拉起(托盘里"停止服务"是明确意图)。
 SERVICE_WAS_RUNNING=0
 healthcheck "$HEALTH_URL" >/dev/null 2>&1 && SERVICE_WAS_RUNNING=1
-if [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+
+# 0.5.x 的 launch 形态是 screen + run-walgit.sh，没有 pidfile；新
+# `walgit service stop` 看不到它。端口仍被 walgit 占用时只 kill 映像名
+# 匹配的监听进程，绝不按端口误杀别的服务。
+legacy_stop() {
+    local port pid comm
+    port="${HEALTH_URL##*:}"
+    port="${port%%/*}"
+    command -v screen >/dev/null 2>&1 && screen -S "${WALGIT_SCREEN_SESSION:-walgit-server}" -X quit >/dev/null 2>&1 || true
+    if command -v lsof >/dev/null 2>&1; then
+        pid="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+        if [ -n "$pid" ]; then
+            comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+            case "$comm" in
+                *walgit*) kill "$pid" 2>/dev/null || true ;;
+                *) log "legacy stop skipped: port $port held by $comm" ;;
+            esac
+        fi
+    fi
+}
+
+if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
     service stop >/dev/null 2>&1 || true
+    if healthcheck "$HEALTH_URL" >/dev/null 2>&1; then
+        legacy_stop
+    fi
 fi
+
+# v0.6.x 旧布局:这些曾是“部署骨架”托管文件,现已不属于状态目录。
+# 只删精确的文件名;配置、cache、keys、日志、pidfile 与凭证不动。
+for stale in walgit walgit-ensure run-walgit.sh .skeleton-version; do
+    if [ -e "$DEPLOY/$stale" ]; then
+        rm -f "$DEPLOY/$stale" || fail "清理旧布局失败: $DEPLOY/$stale"
+        log "removed legacy state-file: $stale"
+    fi
+done
 
 OLD_VERSION="unknown"
 if [ -f "$APP_DEST/Contents/Info.plist" ]; then
@@ -101,26 +137,8 @@ if [ -e "$APP_DEST" ]; then
     mv "$APP_DEST" "$BACKUP" || fail "备份旧 app 失败: $APP_DEST"
 fi
 
-# ~/walgit 托管文件(present 才备份)，与 app 一起回滚。
-DEPLOY_BACKUP=""
-DEPLOY_MANAGED=""
-for f in walgit run-walgit.sh .skeleton-version; do
-    [ -e "$DEPLOY/$f" ] || continue
-    [ -n "$DEPLOY_BACKUP" ] || DEPLOY_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/walgit-deploy-bak.XXXXXX")"
-    cp -p "$DEPLOY/$f" "$DEPLOY_BACKUP/$f" 2>/dev/null || true
-    DEPLOY_MANAGED="$DEPLOY_MANAGED $f"
-done
-
-restore_deploy_files() {
-    [ -n "$DEPLOY_BACKUP" ] || return 0
-    local f
-    for f in $DEPLOY_MANAGED; do
-        cp -p "$DEPLOY_BACKUP/$f" "$DEPLOY/$f" 2>/dev/null || true
-    done
-}
-
-# 新 app 由 `open` 启动后,其 bootstrap 可能已经跑起来;回滚前必须先终止
-# 它,否则会把正在运行的新 bundle 移走,留下「新进程 + 旧 bundle」。
+# 新 app 由 `open` 启动后,回滚前必须先终止它,否则会把正在运行的新 bundle
+# 移走,留下「新进程 + 旧 bundle」。
 new_tray_pid() {
     pgrep -f "$APP_DEST/Contents/MacOS/walgit-tray" 2>/dev/null | head -1 || true
 }
@@ -147,10 +165,8 @@ rollback() {
     if [ -e "$BACKUP" ]; then
         mv "$BACKUP" "$APP_DEST" 2>/dev/null || true
     fi
-    restore_deploy_files
     [ "${WALGIT_UPDATE_SKIP_OPEN:-0}" != "1" ] && open --env "WALGIT_DEPLOY_DIR=$DEPLOY" "$APP_DEST" >/dev/null 2>&1 || true
-    # 只恢复"升级前本来在跑"的服务;用户主动停掉的不要借回滚之名拉起。
-    if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+    if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
         service start >/dev/null 2>&1 || true
     fi
     notify "$(printf '%s，已恢复旧版本' "$why")"
@@ -167,28 +183,25 @@ if [ "${WALGIT_UPDATE_SKIP_OPEN:-0}" != "1" ]; then
     fi
 fi
 
-# The new app's bootstrap updates the managed ~/walgit files. Wait until the
-# marker and the deployment binary agree with the new bundle before restart.
+# App Bundle 是唯一程序来源:等新 bundle 内的 walgit 报出目标版本。
 ok=0
 for _ in $(seq 1 "$BOOTSTRAP_WAIT"); do
     app_v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DEST/Contents/Info.plist" 2>/dev/null || true)"
-    marker="$(cat "$DEPLOY/.skeleton-version" 2>/dev/null || true)"
-    bin_v="$("$DEPLOY/walgit" --version 2>/dev/null || true)"
+    bin_v="$("$APP_DEST/Contents/Resources/walgit" --version 2>/dev/null || true)"
     bin_token="${bin_v##* }"
-    if [ "$app_v" = "$VERSION" ] && [ "$marker" = "$VERSION" ] && [ "$bin_token" = "v$VERSION" ]; then
+    if [ "$app_v" = "$VERSION" ] && [ "$bin_token" = "v$VERSION" ]; then
         ok=1
         break
     fi
     sleep 0.5
 done
-[ "$ok" = 1 ] || rollback "新版本启动或部署骨架更新时间超限"
+[ "$ok" = 1 ] || rollback "新 App Bundle 版本核验超限"
 [ "$OPEN_FAILED" = 0 ] || rollback "无法启动新 app"
 
-if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
     service start >/dev/null 2>&1 || rollback "服务启动失败"
     for _ in $(seq 1 "$HEALTH_WAIT"); do
         if [ "$(health_version)" = "v$VERSION" ]; then
-            [ -n "$DEPLOY_BACKUP" ] && rm -rf "$DEPLOY_BACKUP"
             log "SUCCESS: v$VERSION"
             notify "已升级到 v$VERSION"
             exit 0
@@ -198,6 +211,5 @@ if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ -x "$DEPLOY/walgit" ] && [ "${WALGIT_UPDA
     rollback "新服务健康检查未到 v$VERSION(仍跑旧版本?)"
 fi
 
-[ -n "$DEPLOY_BACKUP" ] && rm -rf "$DEPLOY_BACKUP"
 log "SUCCESS: v$VERSION"
 notify "已升级到 v$VERSION"

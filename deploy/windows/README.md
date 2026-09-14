@@ -9,16 +9,16 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 
 | 项 | 位置 |
 |---|---|
-| `walgit.exe`(服务)/ `walgit-tray.exe`(托盘) | `%USERPROFILE%\walgit` —— 与托盘的部署目录约定一致 |
-| `walgit.toml` 初始配置(`walgit.toml.initial`) | 同上;**仅在不存在时生成,卸载不删除** |
+| `walgit.exe`(服务)/ `walgit-tray.exe`(托盘) | `%LOCALAPPDATA%\Programs\walgit` |
+| `walgit.toml` 初始配置(`walgit.toml.initial`) | `%USERPROFILE%\.walgit\walgit.toml`;**仅在不存在时生成,卸载不删除** |
 | 开始菜单 | 「walgit 托盘」「walgit 配置文件 walgit.toml」 |
 | 可选:桌面快捷方式、开机自启(HKCU `Run`,默认勾选自启) | |
 
 - 每用户安装(`PrivilegesRequired=lowest`),不需要管理员。
 - 升级 = 再跑一遍 setup:替换二进制前自动结束在跑的托盘与服务
   (配置保留)。
-- 卸载:删二进制与快捷方式、清自启键;`walgit.toml`、`tray.log`、
-  `walgit.pid` 留在原地(用户数据)。
+- 卸载:删程序与快捷方式、清自启键；`%USERPROFILE%\.walgit` 下的
+  `walgit.toml`、`cache`、`keys`、`tray.log`、`walgit.pid` 保留为用户数据。
 
 ## 初始配置与对象存储
 
@@ -42,5 +42,5 @@ ISCC -DMyAppVersion=0.1.0 deploy\windows\installer.iss
 版本号 CI 以 tag 覆盖(`-DMyAppVersion=<tag 去掉 v>`),本地缺省
 `0.0.0-dev`。构建产物目录 `deploy/windows/Output/` 已 gitignore。
 
-> 不要「以管理员身份运行」安装器:目录按安装进程的 `%USERPROFILE%` 解析,
-> 提权运行会装进管理员的 profile,当前用户的托盘将找不到部署目录。
+> 不要「以管理员身份运行」安装器：程序与状态目录按当前用户解析，提权
+> 运行会装进管理员的 profile，当前用户的托盘将找不到程序与配置。

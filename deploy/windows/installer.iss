@@ -14,8 +14,9 @@ AppId={{B4776A83-9C52-4A9E-8F1D-0A5F3E2D1C74}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=walgit
-; 部署目录与 tray-rs 的 deploy_dir() 约定一致:%USERPROFILE%\walgit
-DefaultDirName={%USERPROFILE}\walgit
+; 程序目录与状态目录分离：程序在 %LOCALAPPDATA%\Programs\walgit，
+; 状态/配置在 %USERPROFILE%\.walgit（与 tray-rs 的 state_dir() 一致）。
+DefaultDirName={%LOCALAPPDATA}\Programs\walgit
 AppendDefaultDirName=no
 DirExistsWarning=no
 PrivilegesRequired=lowest
@@ -50,12 +51,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
-; 已有配置绝不覆盖;卸载也不删(用户数据)
-Source: "walgit.toml.initial"; DestDir: "{app}"; DestName: "walgit.toml"; Flags: onlyifdoesntexist uninsneveruninstall
+; 已有配置绝不覆盖;卸载也不删(用户数据)。写到状态目录而非程序目录。
+Source: "walgit.toml.initial"; DestDir: "{%USERPROFILE}\.walgit"; DestName: "walgit.toml"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Icons]
 Name: "{group}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\walgit 配置文件 walgit.toml"; Filename: "notepad.exe"; Parameters: """{app}\walgit.toml"""
+Name: "{group}\walgit 配置文件 walgit.toml"; Filename: "notepad.exe"; Parameters: """{%USERPROFILE}\.walgit\walgit.toml"""
 Name: "{autodesktop}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
@@ -73,20 +74,20 @@ var
   pidbuf: AnsiString;
   pid: String;
 begin
-  // 换文件前结束部署目录自己的实例:
+  // 换文件前结束程序目录自己的实例:
   // 1) 服务优先按 pidfile + 映像名**双过滤**精确杀——裸 /PID 会撞上 pid
   //    复用误杀无关进程(taskkill /FI 要求 PID 与 IMAGENAME 同时匹配);
   // 2) 清扫只按可执行文件路径圈定 {app} 下的 walgit / walgit-tray,
   //    不碰机器上其他同名进程(dev 构建、另一份部署)。
   // 失败一律忽略——多半本就没在跑。
-  if LoadStringFromFile(ExpandConstant('{app}\walgit.pid'), pidbuf) then
+  if LoadStringFromFile(ExpandConstant('{%USERPROFILE}\.walgit\walgit.pid'), pidbuf) then
   begin
     pid := Trim(pidbuf);
     if pid <> '' then
       Exec(ExpandConstant('{cmd}'),
         '/C taskkill /F /T /FI "PID eq ' + pid + '" /FI "IMAGENAME eq walgit.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    DeleteFile(ExpandConstant('{app}\walgit.pid'));
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\walgit.pid'));
   end;
   // 托盘升级管线留的备份:安装器换装后它已无意义,留着会在托盘某次升级
   // 健康检查失败时被回滚逻辑盖回旧版本——删。
@@ -105,9 +106,9 @@ begin
     // 自启勾选承诺的是「部署开机可用」,不是只把托盘拉起来:写标记文件,
     // 托盘启动时发现它 + 服务未运行,就把服务一并拉起(tray-rs 读它)。
     if WizardIsTaskSelected('autostart') then
-      SaveStringToFile(ExpandConstant('{app}\service.autostart'), '', False)
+      SaveStringToFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'), '', False)
     else
-      DeleteFile(ExpandConstant('{app}\service.autostart'));
+      DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -115,6 +116,6 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     StopWalgit;
-    DeleteFile(ExpandConstant('{app}\service.autostart'));
+    DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
   end;
 end;

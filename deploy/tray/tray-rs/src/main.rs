@@ -6,8 +6,8 @@
 //!      发现新版本只把菜单行变成「⬆️ 升级到新版本」,**由用户点击才升级**:
 //!      ff-merge main → cargo 构建 → 备份 → 停 → 热换 → 健康验证,失败回滚。
 //!
-//! 服务控制:shell 到 `walgit-ensure`(转发壳)→ `walgit service`(存活/起停在二进制里);Windows/Linux
-//!          部署目录下的 walgit(.exe) 分离进程 + pidfile。
+//! 服务控制:直接调用安装目录/App Bundle 里的 `walgit service`；程序文件
+//!          不复制进 ~/.walgit，状态、配置和日志才属于那里。
 //! 健康检查:内置裸 HTTP(loopback),零额外依赖。
 //! 打开 Web UI:直接开新页面(三平台一致)。
 
@@ -47,8 +47,34 @@ fn home() -> PathBuf {
     }
 }
 
-fn deploy_dir() -> PathBuf {
-    home().join("walgit")
+fn state_dir() -> PathBuf {
+    home().join(".walgit")
+}
+
+/// Program location, never the state directory. In a macOS .app this is
+/// Contents/Resources/walgit; Windows/Linux installers put it next to the tray.
+fn walgit_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("WALGIT_BIN") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            #[cfg(target_os = "macos")]
+            if let Some(contents) = dir.parent() {
+                let bundled = contents.join("Resources").join(exe_name());
+                if bundled.is_file() {
+                    return bundled;
+                }
+            }
+            let flat = dir.join(exe_name());
+            if flat.is_file() {
+                return flat;
+            }
+        }
+    }
+    home().join(".local/bin").join(exe_name())
 }
 
 fn repo_dir() -> PathBuf {
@@ -66,11 +92,6 @@ fn repo_dir() -> PathBuf {
         })
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-fn pid_file() -> PathBuf {
-    deploy_dir().join("walgit.pid")
-}
-
 fn exe_name() -> &'static str {
     if cfg!(target_os = "windows") {
         "walgit.exe"
@@ -80,7 +101,7 @@ fn exe_name() -> &'static str {
 }
 
 fn log_line(s: &str) {
-    let dir = deploy_dir();
+    let dir = state_dir();
     // home 缺失时退化为相对路径——宁可丢日志也不在 CWD/System32 下建杂散目录
     if dir.as_os_str().is_empty() {
         return;
@@ -104,7 +125,7 @@ fn log_line(s: &str) {
 /// `backend` 只在 [store] 节出现(#73:托盘探活与配置同源,用户改 listen
 /// 不再使状态行恒「已停止」、升级健康验证恒失败)。
 fn deploy_config() -> (String, String, bool) {
-    let path = deploy_dir().join("walgit.toml");
+    let path = state_dir().join("walgit.toml");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return (DEFAULT_LISTEN.to_string(), String::new(), false);
     };
@@ -172,7 +193,7 @@ fn version_of(body: &str) -> String {
 
 // ---------- shell ----------
 
-// POSIX sh:macOS 的 walgit-ensure / open / xdg-open / kill 仍走字符串(真 sh
+// POSIX sh:open / xdg-open / kill 仍走字符串(真 sh
 // 认单引号);Windows 一律走 run() 的 argv 直传,不过 shell。
 #[cfg(not(target_os = "windows"))]
 fn sh(cmd: &str) -> (i32, String) {
@@ -226,47 +247,63 @@ fn run(
 
 // ---------- 服务控制 ----------
 
+/// macOS uses the in-binary service command. Windows/Linux keep the tray-side
+/// supervisor because `walgit serve` exits 75 after the setup wizard saves and
+/// needs an immediate respawn. Either way, no walgit-ensure shell and no binary
+/// copy under ~/.walgit.
 #[cfg(target_os = "macos")]
-fn ensure_path() -> PathBuf {
-    let candidates = [
-        home().join(".claude/skills/walgit/scripts/walgit-ensure"),
-        deploy_dir().join("walgit-ensure"),
-    ];
-    candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone())
-}
-
-fn service_start() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let (code, out) = sh(&format!("'{}' 2>&1", ensure_path().display()));
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(out)
-        }
+fn service_cmd(verb: &str) -> Result<(), String> {
+    let bin = walgit_binary();
+    if !bin.is_file() {
+        return Err(format!("missing walgit binary: {}", bin.display()));
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let child = spawn_service()?;
-        std::fs::write(pid_file(), child.id().to_string()).map_err(|e| format!("pidfile: {e}"))?;
-        // D43: the setup wizard's save exits 75 ("restart me"). Supervise the
-        // child so 保存并重启 is one click — respawn on 75, bounded (a real
-        // restart loop means the written config does not hold).
-        std::thread::spawn(move || supervise_service(child));
+    let cfg = state_dir().join("walgit.toml");
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["service", verb, "--config"]).arg(&cfg);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
         Ok(())
+    } else {
+        Err(text)
     }
 }
 
-/// Spawn `walgit serve --config walgit.toml` detached (windows: no console
-/// window, new group; unix: own session).
+#[cfg(target_os = "macos")]
+fn service_start() -> Result<(), String> {
+    service_cmd("start")
+}
+
+#[cfg(target_os = "macos")]
+fn service_stop() -> Result<(), String> {
+    service_cmd("stop")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pid_file() -> PathBuf {
+    state_dir().join("walgit.pid")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn service_start() -> Result<(), String> {
+    let child = spawn_service()?;
+    std::fs::write(pid_file(), child.id().to_string()).map_err(|e| format!("pidfile: {e}"))?;
+    // D43: the setup wizard's save exits 75 ("restart me"). Supervise the
+    // child so 保存并重启 is one click — respawn on 75, bounded (a real
+    // restart loop means the written config does not hold).
+    std::thread::spawn(move || supervise_service(child));
+    Ok(())
+}
+
+/// Spawn `walgit serve --config <state>/walgit.toml` detached (windows: no
+/// console window, new group; unix: own session).
 #[cfg(not(target_os = "macos"))]
 fn spawn_service() -> Result<std::process::Child, String> {
-    let exe = deploy_dir().join(exe_name());
-    let cfg = deploy_dir().join("walgit.toml");
+    let exe = walgit_binary();
+    let cfg = state_dir().join("walgit.toml");
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("serve").arg("--config").arg(&cfg);
     // D43: the setup save exits 75 only when the server knows a supervisor
@@ -334,42 +371,31 @@ fn supervise_service(mut child: std::process::Child) {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn service_stop() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let (code, out) = sh(&format!("'{}' stop 2>&1", ensure_path().display()));
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(out)
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let pid: u32 = std::fs::read_to_string(pid_file())
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .ok_or_else(|| "no pidfile".to_string())?;
-        // 双过滤:PID 与映像名同时匹配才杀——裸 /PID 会撞上 pid 复用误杀
-        // 无关进程树(pidfile 在服务崩溃后就是陈旧的)。
-        #[cfg(target_os = "windows")]
-        let (code, out) = {
-            let pid_filter = format!("PID eq {pid}");
-            let name_filter = format!("IMAGENAME eq {}", exe_name());
-            run(
-                None,
-                "taskkill",
-                &["/F", "/T", "/FI", &pid_filter, "/FI", &name_filter],
-                &[],
-            )
-        };
-        #[cfg(not(target_os = "windows"))]
-        let (code, out) = sh(&format!("kill {pid}"));
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(out)
-        }
+    let pid: u32 = std::fs::read_to_string(pid_file())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(|| "no pidfile".to_string())?;
+    // 双过滤:PID 与映像名同时匹配才杀——裸 /PID 会撞上 pid 复用误杀
+    // 无关进程树(pidfile 在服务崩溃后就是陈旧的)。
+    #[cfg(target_os = "windows")]
+    let (code, out) = {
+        let pid_filter = format!("PID eq {pid}");
+        let name_filter = format!("IMAGENAME eq {}", exe_name());
+        run(
+            None,
+            "taskkill",
+            &["/F", "/T", "/FI", &pid_filter, "/FI", &name_filter],
+            &[],
+        )
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (code, out) = sh(&format!("kill {pid}"));
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(out)
     }
 }
 
@@ -378,7 +404,7 @@ fn service_stop() -> Result<(), String> {
 /// 本身的结果如实写进错误串——不谎报「已回滚」。
 fn upgrade_pipeline(report: &dyn Fn(String)) -> Result<String, String> {
     let repo = repo_dir();
-    let bin = deploy_dir().join(exe_name());
+    let bin = walgit_binary();
 
     report("对齐 main…".into());
     let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
@@ -414,7 +440,7 @@ fn upgrade_pipeline(report: &dyn Fn(String)) -> Result<String, String> {
     let sha = sha_out.trim().to_string();
 
     report("换装中…".into());
-    let bak = deploy_dir().join("walgit.bak-tray");
+    let bak = bin.with_extension("bak-tray");
     let _ = std::fs::copy(&bin, &bak);
     let _ = service_stop();
     let swap = std::fs::copy(repo.join("target/release").join(exe_name()), &bin)
@@ -844,7 +870,7 @@ fn main() {
     // 安装器自启标记(Windows 安装器勾选「开机自动启动」时写):自启的托盘
     // 把服务一并拉起——勾选框承诺的是「部署开机可用」,不是只把托盘拉起来。
     // 仅在服务未运行时尝试一次;失败不重试,留给菜单「启动服务」。
-    if deploy_dir().join("service.autostart").exists() && healthz().is_none() {
+    if state_dir().join("service.autostart").exists() && healthz().is_none() {
         log_line("autostart marker: starting service");
         let _ = service_start();
     }

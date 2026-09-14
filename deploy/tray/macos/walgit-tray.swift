@@ -56,11 +56,23 @@ var webURL: URL {
 }
 let logPath = "\(deployDir)/tray.log"
 
-/// 服务存活是 **walgit 二进制**的职责(`walgit service …`),托盘只是调用方:
-/// 不再有 walgit-ensure 这种独立 shell 监督脚本。配置路径固定为部署目录下的
-/// walgit.toml,与探活/开页同源。
+/// 服务存活统一由 App Bundle 内的 walgit 二进制负责(`walgit service …`):
+/// 托盘只是调用方。配置路径固定为 ~/.walgit/walgit.toml,与探活/开页同源。
+func serviceBinaryPath() -> String {
+    if let override = ProcessInfo.processInfo.environment["WALGIT_BIN"], !override.isEmpty {
+        return override
+    }
+    if let res = Bundle.main.resourceURL?.path {
+        let bundled = "\(res)/walgit"
+        if FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
+        }
+    }
+    return "\(deployDir)/walgit"
+}
+
 func serviceCmd(_ verb: String) -> String {
-    "'\(deployDir)/walgit' service \(verb) --config '\(deployDir)/walgit.toml'"
+    "'\(serviceBinaryPath())' service \(verb) --config '\(deployDir)/walgit.toml'"
 }
 
 func logLine(_ s: String) {
@@ -94,10 +106,6 @@ func sh(_ command: String) -> (Int32, String) {
 
 func installedAppVersion() -> String {
     if let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-       !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return stripVersionPrefix(value)
-    }
-    if let value = try? String(contentsOfFile: "\(deployDir)/.skeleton-version", encoding: .utf8),
        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return stripVersionPrefix(value)
     }
@@ -210,141 +218,28 @@ func healthVersion(_ body: String) -> String {
     return v
 }
 
-/// 手动装 DMG 只换文件,不会重启已在跑的服务进程 —— 进程仍拿着旧二进制,
-/// /healthz 继续报旧版本,菜单看起来"升完级还是旧版"(#170)。只处理「本来
-/// 就在跑」的服务(用户主动停掉的不拉起)。放到后台队列执行,避免拖住主线程。
-private func restartServiceAfterUpgrade(bundledVersion: String, done: @Sendable @escaping () -> Void = {}) {
-    let fm = FileManager.default
-    let ok = sh("curl -sf --max-time 2 '\(healthURL)' 2>/dev/null").0 == 0
-    guard ok else { done(); return }
-    guard fm.isExecutableFile(atPath: "\(deployDir)/walgit") else { done(); return }
-    _ = sh("\(serviceCmd("restart")) >/dev/null 2>&1 || true")
-    let want = "v\(bundledVersion)"
-    for _ in 0..<20 {
-        let (hc, hout) = sh("curl -sf --max-time 2 '\(healthURL)' 2>/dev/null || true")
-        if hc == 0, healthVersion(hout) == want {
-            logLine("bootstrap: 服务已重启到 \(want)")
-            done()
-            return
-        }
-        Thread.sleep(forTimeInterval: 0.5)
-    }
-    logLine("bootstrap: 服务重启后未确认到 \(want),请在托盘里重启服务")
-    done()
-}
-
-/// 首次启动 bootstrap:从 app bundle Resources 落盘 ~/walgit 部署骨架。
-/// 托管文件(walgit 二进制)按 bundle 内
-/// skeleton.version 覆盖更新——DMG 覆盖安装即升级;用户文件(walgit.toml)
-/// 永不覆盖(配置与凭证安全)。开发构建(bundle 里没有 walgit 资源)跳过。
-func bootstrapDeploy(onServiceRestart: @Sendable @escaping () -> Void = {}) {
+/// 首次启动 bootstrap：只初始化 ~/.walgit 中的用户状态。程序二进制属于
+/// App Bundle，绝不复制到状态目录。旧版留下的 `walgit` / `walgit-ensure` /
+/// `run-walgit.sh` / `.skeleton-version` 在服务停止时清掉；配置、cache、keys、
+/// 日志、pidfile 和凭证永不触碰。
+func bootstrapDeploy() {
     let fm = FileManager.default
     guard let res = Bundle.main.resourceURL?.path,
-        fm.fileExists(atPath: "\(res)/walgit")
+        fm.isExecutableFile(atPath: "\(res)/walgit")
     else {
         logLine("bootstrap: bundle 无 walgit 资源(开发构建),跳过")
-        onServiceRestart()
         return
     }
     do {
         try fm.createDirectory(atPath: deployDir, withIntermediateDirectories: true)
     } catch {
         logLine("bootstrap: 建 ~/.walgit 失败: \(error)")
-        onServiceRestart()
         return
     }
-    let bundledVersion = (try? String(contentsOfFile: "\(res)/skeleton.version", encoding: .utf8))
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-    let marker = "\(deployDir)/.skeleton-version"
-    let installedVersion = (try? String(contentsOfFile: marker, encoding: .utf8))
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-    // 托管文件:版本不同则整体覆盖(覆盖安装 DMG = 升级路径)。先写
-    // 临时名再原子替换,避免运行中的服务二进制被 remove+copy 的半状态
-    // 捕获;只有三项全部成功且新二进制版本核验通过才写 marker。
-    // `walgit-ensure` 只是个转发壳(逻辑在 walgit 二进制),仍随部署一起装;
-    // run-walgit.sh 同理保留给 tray-rs/手工部署。
-    let managed = ["walgit", "run-walgit.sh", "walgit-ensure"]
-    // marker 不一致 → 整体换装;marker 一致但某个托管文件被删 → 只补缺失项。
-    let versionChanged = !bundledVersion.isEmpty && bundledVersion != installedVersion
-    let toWrite = managed.filter { f in
-        versionChanged || !fm.fileExists(atPath: "\(deployDir)/\(f)")
-    }
-    var managedOK = true
-    // 先把要写的全部落临时文件并核验版本;提升阶段逐项备份旧文件,任一失败
-    // 回滚已替换项。避免「walgit 新、ensure 旧、marker 未写」的混合骨架,
-    // 也避免 marker 一致但文件被删后不再自愈。
-    if !toWrite.isEmpty && !bundledVersion.isEmpty {
-        var staged: [String: String] = [:]
-        for f in toWrite {
-            let dst = "\(deployDir)/\(f)"
-            let tmp = "\(dst).new-\(ProcessInfo.processInfo.processIdentifier)"
-            do {
-                try? fm.removeItem(atPath: tmp)
-                try fm.copyItem(atPath: "\(res)/\(f)", toPath: tmp)
-                try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: tmp)
-                staged[f] = tmp
-            } catch {
-                managedOK = false
-                logLine("bootstrap: 预置 \(f) 失败: \(error)")
-            }
-        }
-        if managedOK, let stagedWalgit = staged["walgit"] {
-            let (vc, versionOut) = sh("'\(stagedWalgit)' --version 2>&1")
-            let token = versionOut.trimmingCharacters(in: .whitespacesAndNewlines)
-                .split(separator: " ").last.map(String.init) ?? ""
-            if vc != 0 || token != "v\(bundledVersion)" {
-                managedOK = false
-                logLine("bootstrap: walgit 版本核验失败: \(versionOut.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
-        }
-        var installed: [(dst: String, backup: String?)] = []
-        if managedOK {
-            for f in toWrite {
-                guard let tmp = staged[f] else { managedOK = false; break }
-                let dst = "\(deployDir)/\(f)"
-                let bak = "\(dst).old-\(ProcessInfo.processInfo.processIdentifier)"
-                do {
-                    var backup: String?
-                    if fm.fileExists(atPath: dst) {
-                        try? fm.removeItem(atPath: bak)
-                        try fm.moveItem(atPath: dst, toPath: bak)
-                        backup = bak
-                    }
-                    do {
-                        try fm.moveItem(atPath: tmp, toPath: dst)
-                    } catch {
-                        if let backup { try? fm.moveItem(atPath: backup, toPath: dst) }
-                        managedOK = false
-                        logLine("bootstrap: 写入 \(f) 失败: \(error)")
-                        break
-                    }
-                    installed.append((dst, backup))
-                    logLine("bootstrap: 写入 \(f)")
-                } catch {
-                    managedOK = false
-                    logLine("bootstrap: 备份 \(f) 失败: \(error)")
-                    break
-                }
-            }
-        }
-        if !managedOK {
-            for item in installed.reversed() {
-                try? fm.removeItem(atPath: item.dst)
-                if let backup = item.backup { try? fm.moveItem(atPath: backup, toPath: item.dst) }
-            }
-            for (_, tmp) in staged { try? fm.removeItem(atPath: tmp) }
-            logLine("bootstrap: 托管文件更新未完成,已回滚到旧骨架")
-        } else {
-            for item in installed { if let backup = item.backup { try? fm.removeItem(atPath: backup) } }
-        }
-    }
-    if versionChanged && !managedOK {
-        onServiceRestart()
-        return
-    }
-    // 用户文件:永不覆盖
+
+    // 用户配置：只在缺失时从 bundle 模板初始化，永不覆盖。
     let userFile = "\(deployDir)/walgit.toml"
-    if !fm.fileExists(atPath: userFile) {
+    if !fm.fileExists(atPath: userFile), fm.fileExists(atPath: "\(res)/walgit.toml") {
         do {
             try fm.copyItem(atPath: "\(res)/walgit.toml", toPath: userFile)
             logLine("bootstrap: 写入 walgit.toml")
@@ -352,36 +247,34 @@ func bootstrapDeploy(onServiceRestart: @Sendable @escaping () -> Void = {}) {
             logLine("bootstrap: walgit.toml 失败: \(error)")
         }
     }
-    if !bundledVersion.isEmpty && installedVersion != bundledVersion {
-        do {
-            try bundledVersion.write(toFile: marker, atomically: true, encoding: .utf8)
-            logLine("bootstrap: 骨架版本 \(installedVersion.isEmpty ? "新建" : "\(installedVersion) → \(bundledVersion)")")
-        } catch {
-            logLine("bootstrap: 写版本标记失败: \(error)")
+
+    // 旧布局迁移：只清三个受管文件；正在跑服务时跳过，避免把当前进程
+    // 的入口删在脚下。release-install 会先停服务再替换 App，因此正常升级
+    // 路径总能清掉。
+    let serviceStopped = sh("curl -sf --max-time 2 '\(healthURL)' >/dev/null 2>&1").0 != 0
+    if serviceStopped {
+        for stale in ["walgit", "walgit-ensure", "run-walgit.sh", ".skeleton-version"] {
+            let path = "\(deployDir)/\(stale)"
+            if fm.fileExists(atPath: path) {
+                try? fm.removeItem(atPath: path)
+                logLine("bootstrap: 已清理旧布局 \(stale)")
+            }
         }
     }
-    if versionChanged && managedOK {
-        DispatchQueue.global(qos: .utility).async {
-            restartServiceAfterUpgrade(bundledVersion: bundledVersion, done: onServiceRestart)
-        }
-    } else {
-        onServiceRestart()
-    }
-    // CLI 软链:让终端里的 `walgit` 直达部署二进制(/usr/local/bin 归用户所有,
-    // 无需管理员)。测试用 WALGIT_CLI_LINK 覆盖——必须与 WALGIT_DEPLOY_DIR
-    // 成对设置,且 deployDir 须为绝对路径(软链目标按字面解析,不做 tilde
-    // 展开;非绝对路径会改指真实 /usr/local/bin/walgit)。
+
+    // CLI 软链：终端入口指向 App Bundle 内的程序，不制造第二份副本。
     if !deployDir.hasPrefix("/") {
         logLine("bootstrap: deployDir 非绝对路径,跳过 CLI 软链")
     } else {
         let cliLink = ProcessInfo.processInfo.environment["WALGIT_CLI_LINK"].flatMap { $0.isEmpty ? nil : $0 }
             ?? "/usr/local/bin/walgit"
+        let target = "\(res)/walgit"
         do {
             if let attrs = try? fm.attributesOfItem(atPath: cliLink) {
                 if attrs[.type] as? FileAttributeType == .typeSymbolicLink {
-                    if (try? fm.destinationOfSymbolicLink(atPath: cliLink)) != "\(deployDir)/walgit" {
+                    if (try? fm.destinationOfSymbolicLink(atPath: cliLink)) != target {
                         try fm.removeItem(atPath: cliLink)
-                        try fm.createSymbolicLink(atPath: cliLink, withDestinationPath: "\(deployDir)/walgit")
+                        try fm.createSymbolicLink(atPath: cliLink, withDestinationPath: target)
                         logLine("bootstrap: 更新 CLI 软链 \(cliLink)")
                     }
                 } else {
@@ -392,14 +285,14 @@ func bootstrapDeploy(onServiceRestart: @Sendable @escaping () -> Void = {}) {
                 if !parent.isEmpty && parent != "." {
                     try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
                 }
-                try fm.createSymbolicLink(atPath: cliLink, withDestinationPath: "\(deployDir)/walgit")
+                try fm.createSymbolicLink(atPath: cliLink, withDestinationPath: target)
                 logLine("bootstrap: 建 CLI 软链 \(cliLink)")
             }
         } catch {
             logLine("bootstrap: CLI 软链失败: \(error)")
         }
     }
-    logLine("bootstrap: 部署骨架就绪(\(deployDir))")
+    logLine("bootstrap: 状态目录就绪(\(deployDir))")
 }
 
 enum UpdateState {
@@ -880,7 +773,8 @@ struct WalgitTrayMain {
         // 测试钩子:只跑部署骨架 bootstrap 后退出(不启动 NSApplication)。
         if ProcessInfo.processInfo.environment["WALGIT_BOOTSTRAP_ONLY"] == "1" {
             let done = DispatchSemaphore(value: 0)
-            bootstrapDeploy(onServiceRestart: { done.signal() })
+            bootstrapDeploy()
+            done.signal()
             _ = done.wait(timeout: .now() + 20)
             exit(0)
         }

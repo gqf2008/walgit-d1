@@ -1,4 +1,4 @@
-# %USERPROFILE%\walgit\walgit.toml — Windows 安装器生成的初始配置。
+# %USERPROFILE%\.walgit\walgit.toml — Windows 安装器生成的初始配置。
 #
 # 内存后端 = 未配置:首次启动进入 Web UI 首次运行向导(issue #70 / D43),
 # 在浏览器里配置 S3/R2 对象存储与首个管理员 token,保存后服务自动重启。
