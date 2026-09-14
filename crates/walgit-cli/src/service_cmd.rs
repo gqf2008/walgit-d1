@@ -139,6 +139,7 @@ async fn start(config: &Path, listen: &str, pidfile: &Path, log: &Path) -> Resul
     cmd.stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
+    detach_process(&mut cmd);
     let child = cmd.spawn().context("spawning walgit serve")?;
     std::fs::write(pidfile, format!("{}\n", child.id()))
         .with_context(|| format!("writing {}", pidfile.display()))?;
@@ -154,6 +155,34 @@ async fn start(config: &Path, listen: &str, pidfile: &Path, log: &Path) -> Resul
         "walgit: 启动失败，日志尾部：\n{}",
         tail(log, 5).unwrap_or_default()
     )
+}
+
+/// Put the server in its own session/process group so the short-lived
+/// `walgit service start` process and the shell/tray that invoked it can exit
+/// without reaping the server.
+fn detach_process(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec runs after fork and before exec in the child. The
+        // closure only calls the async-signal-safe libc::setsid and constructs
+        // an io::Error on failure; it does not touch Rust allocator/shared state.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
 }
 
 /// Append-only log that rotates rather than truncating: `>` used to zero a
@@ -291,3 +320,24 @@ fn credential_env(home: &Path) -> Vec<(String, String)> {
     out
 }
 
+#[cfg(all(test, unix))]
+mod tests {
+    use super::detach_process;
+
+    #[test]
+    fn detached_child_gets_its_own_session() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("5");
+        detach_process(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id().to_string();
+        let out = std::process::Command::new("ps")
+            .args(["-o", "sid=", "-p", &pid])
+            .output()
+            .unwrap();
+        let sid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(sid, pid, "child must lead its own session");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
