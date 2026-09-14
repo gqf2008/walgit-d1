@@ -17,13 +17,13 @@ on:
         default: 0.0.0-ci
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   # Tag pushes release normally; workflow_dispatch runs the same packaging path
   # as a signing dry run and skips the release job.
-  RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version }}
+  RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || inputs.version }}
 
 jobs:
   build:
@@ -111,7 +111,7 @@ jobs:
 
   macos:
     name: build (macos)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -142,6 +142,16 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
+
+      # Build before any Apple secret enters the environment: cargo build scripts
+      # and pnpm lifecycle hooks must never see the signing keychain or notary
+      # password. The signing step below consumes this binary as-is.
+      - name: Build the SPA and release binary (no signing secrets)
+        run: |
+          set -euo pipefail
+          just web-build
+          WALGIT_BUILD_SHA="v${RELEASE_VERSION#v}" \
+            cargo build --release --bin walgit
 
       - name: Import Developer ID certificate (temporary keychain)
         id: signing
@@ -180,6 +190,7 @@ jobs:
           CODESIGN_KEYCHAIN: ${{ runner.temp }}/walgit-signing.keychain-db
           CODESIGN_KEYCHAIN_PASSWORD: walgit-ci-signing
           WALGIT_IDENTITY: ${{ steps.signing.outputs.identity }}
+          WALGIT_SKIP_BUILD: '1'
           NOTARY_S3_ACCELERATION: '0'
         run: |
           set -euo pipefail
@@ -202,7 +213,9 @@ jobs:
   release:
     name: Publish release
     needs: [build, macos]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

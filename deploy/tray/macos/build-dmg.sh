@@ -10,6 +10,8 @@
 #   NOTARY_S3_ACCELERATION=0  关闭 S3 acceleration（代理环境下更稳）
 #   CODESIGN_KEYCHAIN     CI 临时钥匙串；同时提供 CODESIGN_KEYCHAIN_PASSWORD
 #   WALGIT_IDENTITY       可选：Developer ID 身份
+#   WALGIT_BIN            可选：预构建 walgit；默认 target/release/walgit
+#   WALGIT_SKIP_BUILD=1   CI：跳过 web/cargo 构建，使用预构建 WALGIT_BIN
 #
 # 产物：dist/walgit-<版本>-<架构>.dmg
 set -euo pipefail
@@ -147,32 +149,34 @@ done
 notary_mode >/dev/null
 IDENTITY="${WALGIT_IDENTITY:-}"
 if [ -z "$IDENTITY" ]; then
-    identity_keychains=()
     if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
-        identity_keychains=("$CODESIGN_KEYCHAIN")
+        IDENTITY="$(security find-identity -v -p codesigning "$CODESIGN_KEYCHAIN" 2>/dev/null \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+    else
+        IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
     fi
-    IDENTITY="$(security find-identity -v -p codesigning "${identity_keychains[@]}" 2>/dev/null \
-        | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
 fi
 [ -n "$IDENTITY" ] || { echo "❌ Keychain 里没有 Developer ID Application 身份" >&2; exit 1; }
-CODESIGN_KEYCHAIN_ARGS=()
-if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
-    CODESIGN_KEYCHAIN_ARGS=(--keychain "$CODESIGN_KEYCHAIN")
-fi
 unlock_codesign_keychain
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/walgit-dmg.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "== [1/8] build release binary =="
-( cd "$ROOT" && just web-build >/dev/null )
-WALGIT_BUILD_SHA="v$VERSION" cargo build --release --bin walgit --manifest-path "$ROOT/Cargo.toml"
-check_version "$ROOT/target/release/walgit" "$VERSION"
+WALGIT_BIN="${WALGIT_BIN:-$ROOT/target/release/walgit}"
+if [ "${WALGIT_SKIP_BUILD:-0}" = "1" ]; then
+    echo "== [1/8] build release binary (skipped; using prebuilt) =="
+else
+    echo "== [1/8] build release binary =="
+    ( cd "$ROOT" && just web-build >/dev/null )
+    WALGIT_BUILD_SHA="v$VERSION" cargo build --release --bin walgit --manifest-path "$ROOT/Cargo.toml"
+fi
+check_version "$WALGIT_BIN" "$VERSION"
 
 echo "== [2/8] assemble app =="
 APP_ROOT="$WORK/app"
 mkdir -p "$APP_ROOT"
-WALGIT_BIN="$ROOT/target/release/walgit" TRAY_APP_DIR="$APP_ROOT" "$SCRIPT_DIR/build.sh" "$VERSION"
+WALGIT_BIN="$WALGIT_BIN" TRAY_APP_DIR="$APP_ROOT" "$SCRIPT_DIR/build.sh" "$VERSION"
 APP="$APP_ROOT/walgit-tray.app"
 dot_clean -m "$APP" >/dev/null 2>&1 || true
 check_tree "$APP"
@@ -180,10 +184,15 @@ check_tree "$APP"
 check_version "$APP/Contents/Resources/walgit" "$VERSION"
 
 echo "== [3/8] sign app =="
-codesign --force --options runtime --timestamp --sign "$IDENTITY" \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" "$APP/Contents/Resources/walgit"
-codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" "$APP"
+if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+        --keychain "$CODESIGN_KEYCHAIN" "$APP/Contents/Resources/walgit"
+    codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" \
+        --keychain "$CODESIGN_KEYCHAIN" "$APP"
+else
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/Resources/walgit"
+    codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
+fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "== [4/8] notarize app =="
@@ -208,8 +217,11 @@ hdiutil create -volname walgit -srcfolder "$STAGE" -ov -format UDZO "$TMP_DMG" >
 
 echo "== [6/8] sign DMG =="
 unlock_codesign_keychain
-codesign --force --sign "$IDENTITY" --timestamp \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" "$TMP_DMG"
+if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
+    codesign --force --sign "$IDENTITY" --timestamp --keychain "$CODESIGN_KEYCHAIN" "$TMP_DMG"
+else
+    codesign --force --sign "$IDENTITY" --timestamp "$TMP_DMG"
+fi
 
 echo "== [7/8] notarize + staple DMG =="
 notary_submit "$TMP_DMG"
