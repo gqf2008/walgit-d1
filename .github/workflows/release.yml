@@ -191,6 +191,7 @@ jobs:
           CODESIGN_KEYCHAIN_PASSWORD: walgit-ci-signing
           WALGIT_IDENTITY: ${{ steps.signing.outputs.identity }}
           WALGIT_SKIP_BUILD: '1'
+          WALGIT_CLEAN_TARGET_AFTER_APP: '1'
           NOTARY_S3_ACCELERATION: '0'
         run: |
           set -euo pipefail
