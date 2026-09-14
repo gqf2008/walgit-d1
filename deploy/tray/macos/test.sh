@@ -70,6 +70,70 @@ if ./build-dmg.sh --check-zip "$TMP/corrupt.zip" >/dev/null 2>&1; then
     exit 1
 fi
 
+# 公证凭据分派：CI 三件套走 direct，缺少任一必须拒绝，否则回退 profile。
+notary_mode="$(APPLE_ID=id APPLE_TEAM_ID=team APPLE_APP_PASSWORD=pass ./build-dmg.sh --check-notary-mode)"
+[ "$notary_mode" = "direct" ] || { echo "FAIL: expected direct notary mode, got $notary_mode" >&2; exit 1; }
+notary_mode="$(env -u APPLE_ID -u APPLE_TEAM_ID -u APPLE_APP_PASSWORD ./build-dmg.sh --check-notary-mode)"
+[ "$notary_mode" = "profile" ] || { echo "FAIL: expected profile notary mode, got $notary_mode" >&2; exit 1; }
+if APPLE_ID=id APPLE_TEAM_ID=team env -u APPLE_APP_PASSWORD ./build-dmg.sh --check-notary-mode >/dev/null 2>&1; then
+    echo "FAIL: partial direct notary credentials were accepted" >&2
+    exit 1
+fi
+if grep -Eq 'identity_keychains|CODESIGN_KEYCHAIN_ARGS' build-dmg.sh; then
+    echo "FAIL: Bash 3.2 incompatible empty-array pattern reintroduced" >&2
+    exit 1
+fi
+
+# Full local-path smoke under macOS Bash 3.2: no CODESIGN_KEYCHAIN, fake
+# signing/notary tools, prebuilt binary. This is the path that used to abort
+# on an empty array before any signing happened.
+bash_compat_smoke() {
+    local base="$TMP/bash-compat"
+    local fake="$base/bin"
+    mkdir -p "$fake"
+    cat >"$base/walgit" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = "--version" ] && echo "walgit v0.0.0-ci"
+EOF
+    chmod +x "$base/walgit"
+    cat >"$fake/swiftc" <<'EOF'
+#!/bin/sh
+out=""; prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$arg"; break; fi
+  prev="$arg"
+done
+[ -n "$out" ] || exit 2
+printf '#!/bin/sh
+exit 0
+' >"$out"
+chmod +x "$out"
+EOF
+    printf '#!/bin/sh
+exit 0
+' >"$fake/codesign"
+    printf '#!/bin/sh
+exit 0
+' >"$fake/spctl"
+    printf '#!/bin/sh
+exit 0
+' >"$fake/xcrun"
+    cat >"$fake/hdiutil" <<'EOF'
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in *.dmg) : >"$arg"; break ;; esac
+done
+exit 0
+EOF
+    chmod +x "$fake"/*
+    PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_BIN="$base/walgit"         WALGIT_IDENTITY='Developer ID Application: Test' NOTARY_PROFILE=test         /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
+    local built
+    built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
+    [ -n "$built" ] || { echo "FAIL: bash-compat smoke produced no DMG" >&2; return 1; }
+    rm -f "$built"
+    return 0
+}
+
 # The real app bundle must contain exactly the new contract: program in
 # Resources, no managed copies under ~/.walgit.
 layout_fixture() {
@@ -441,6 +505,7 @@ menu_fixture() {
     esac
 }
 
+bash_compat_smoke
 layout_fixture
 bootstrap_fixture
 legacy_migration_fixture

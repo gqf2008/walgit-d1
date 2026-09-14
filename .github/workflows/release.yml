@@ -1,16 +1,29 @@
 name: Release
 
-# Tag v* to publish: builds native binaries on linux and windows, generates
-# a changelog from Conventional Commits since the previous tag, and attaches
-# everything to a GitHub Release. Versioning is semantic; the v0.1 milestone
-# is the first target (AGENTS.md §6.4).
+# Tag v* to publish: builds the linux, windows, and signed/notarized macOS
+# installers, generates a changelog from Conventional Commits since the previous
+# tag, and attaches everything to a GitHub Release. Versioning is semantic; the
+# v0.1 milestone is the first target (AGENTS.md §6.4). workflow_dispatch runs
+# the packaging/signing path without publishing a release.
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: DMG version for a signing dry run (release publish is skipped)
+        required: false
+        default: 0.0.0-ci
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tag pushes release normally; workflow_dispatch runs the same packaging path
+  # as a signing dry run and skips the release job.
+  RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || inputs.version }}
 
 jobs:
   build:
@@ -53,7 +66,7 @@ jobs:
         # Release binaries report the tag (v0.2.0), not the commit sha
         # (build.rs prefers WALGIT_BUILD_SHA; dev builds keep sha, issue #121).
         env:
-          WALGIT_BUILD_SHA: ${{ github.ref_name }}
+          WALGIT_BUILD_SHA: ${{ env.RELEASE_VERSION }}
         run: cargo build --release --bin walgit --bin walgit-server
       # --target-dir pins the tray exe into the root target/ regardless of how
       # cargo resolves the nested workspace's own [workspace]/.cargo config —
@@ -62,14 +75,11 @@ jobs:
         run: cargo build --release --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
       # One installer per platform (issue #108): the .deb is the only linux release
       # artefact, the Inno Setup exe the only windows one; raw binaries are not
-      # published. The macOS DMG is built outside CI (deploy/tray/macos/build-dmg.sh)
-      # and uploaded to the release.
+      # published. The macOS DMG is built by the dedicated `macos` job below.
       - name: Assemble the linux .deb
         if: runner.os == 'Linux'
         shell: bash
-        run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          deploy/linux/build-deb.sh target/release "$tag"
+        run: deploy/linux/build-deb.sh target/release "$RELEASE_VERSION"
       - name: Build the Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: bash
@@ -80,8 +90,7 @@ jobs:
             choco install innosetup -y --no-progress
           fi
           iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
-          tag="${GITHUB_REF#refs/tags/}"
-          "$iscc" "-DMyAppVersion=${tag#v}" deploy/windows/installer.iss
+          "$iscc" "-DMyAppVersion=${RELEASE_VERSION#v}" deploy/windows/installer.iss
       - name: Upload the .deb (linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
@@ -99,9 +108,114 @@ jobs:
           name: walgit-windows-installer
           path: deploy/windows/Output/walgit-setup-*.exe
 
+
+  macos:
+    name: build (macos)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup show
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            deploy/tray/tray-rs -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # Build before any Apple secret enters the environment: cargo build scripts
+      # and pnpm lifecycle hooks must never see the signing keychain or notary
+      # password. The signing step below consumes this binary as-is.
+      - name: Build the SPA and release binary (no signing secrets)
+        run: |
+          set -euo pipefail
+          just web-build
+          WALGIT_BUILD_SHA="v${RELEASE_VERSION#v}" \
+            cargo build --release --bin walgit
+
+      - name: Import Developer ID certificate (temporary keychain)
+        id: signing
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERT_P12:?missing APPLE_CERT_P12 secret}"
+          : "${APPLE_CERT_PASSWORD:?missing APPLE_CERT_PASSWORD secret}"
+          keychain="$RUNNER_TEMP/walgit-signing.keychain-db"
+          cert="$RUNNER_TEMP/walgit-signing.p12"
+          keychain_password="walgit-ci-signing"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security default-keychain -s "$keychain"
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$cert"
+          security import "$cert" -k "$keychain" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          [ -n "$identity" ] || {
+            echo "no Developer ID Application identity in temporary keychain" >&2
+            exit 1
+          }
+          rm -f "$cert"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, notarize, and staple the DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          CODESIGN_KEYCHAIN: ${{ runner.temp }}/walgit-signing.keychain-db
+          CODESIGN_KEYCHAIN_PASSWORD: walgit-ci-signing
+          WALGIT_IDENTITY: ${{ steps.signing.outputs.identity }}
+          WALGIT_SKIP_BUILD: '1'
+          NOTARY_S3_ACCELERATION: '0'
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          [ -n "$version" ] || { echo "missing release version" >&2; exit 1; }
+          ./deploy/tray/macos/build-dmg.sh "$version"
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: walgit-macos-dmg
+          path: deploy/tray/macos/dist/walgit-*.dmg
+          if-no-files-found: error
+
+      - name: Delete temporary signing keychain
+        if: always()
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/walgit-signing.keychain-db" 2>/dev/null || true
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, macos]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

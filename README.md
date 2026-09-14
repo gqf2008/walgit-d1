@@ -243,9 +243,9 @@ podman on POSIX; on Windows see `docs/WINDOWS.md` for the rustfs equivalent.
 
 macOS: this fork's local one-box shape runs the full server **on macOS** — the app bundle
 contains the Mach-O `walgit` and starts it through `walgit service`; user state stays under
-`~/.walgit`. The Swift tray plus the signed/notarized DMG are built here
-(`deploy/tray/macos/`, `build-dmg.sh`).
-The macOS CI leg runs the tray Release/package guards. What is Linux-targeted is **production /
+`~/.walgit`. The Swift tray plus the signed/notarized DMG are built from
+`deploy/tray/macos/build-dmg.sh`, both locally and by the macOS release job. The macOS CI leg
+runs the tray Release/package guards. What is Linux-targeted is **production /
 multi-instance deployment** (containers, the Nix OCI image, tmpfs hosts, object-store-backed
 fleets), not the binary's ability to run on a Mac.
 

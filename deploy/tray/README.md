@@ -71,7 +71,7 @@ Bundle 启动服务 → 健康验证；失败恢复旧 App Bundle。`~/.walgit` 
 ```bash
 ./build-dmg.sh 0.2.0                                # 自动构建/注入版本/签名/公证
 NOTARY_KEYCHAIN=/path/to/notary.keychain-db ./build-dmg.sh 0.2.0
-./test.sh                                           # Release 解析/版本/AppleDouble 守卫
+./test.sh                                           # Release 解析/版本/AppleDouble/公证凭据守卫
 ```
 
 `build-dmg.sh` 自己执行 `WALGIT_BUILD_SHA=v<version> cargo build` 并断言
@@ -79,6 +79,10 @@ NOTARY_KEYCHAIN=/path/to/notary.keychain-db ./build-dmg.sh 0.2.0
 用 `ditto --norsrc --noextattr` 提交公证，失败不会覆盖已有 DMG。默认
 notary profile 为 `voicecall-notary`；非交互环境可显式传
 `NOTARY_KEYCHAIN`。
+
+CI 使用 `APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD` 直传公证凭据，
+并设置 `CODESIGN_KEYCHAIN` + `CODESIGN_KEYCHAIN_PASSWORD` 让 `codesign`
+显式使用临时钥匙串；三件套缺一即失败，不会悄悄回退到本机 profile。
 
 需要 Xcode Command Line Tools(swiftc)。`build.sh` 把 walgit 二进制 +
 `release-install.sh` + `walgit.toml.template` 打进 app Resources；首次
