@@ -288,6 +288,7 @@ async fn fsck_unit_records_missing_objects_and_repair_unit_fetches_them_from_ups
             c.compaction.enabled = false;
             c.bundles.enabled = false;
             c.maintenance.fsck_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
         })
     )?;
     step!("put repo", server.put_repo("o", "r"))?;
