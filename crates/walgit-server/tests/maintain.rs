@@ -288,7 +288,6 @@ async fn fsck_unit_records_missing_objects_and_repair_unit_fetches_them_from_ups
             c.compaction.enabled = false;
             c.bundles.enabled = false;
             c.maintenance.fsck_interval = std::time::Duration::from_secs(3600);
-            c.maintenance.gc_interval = std::time::Duration::ZERO;
         })
     )?;
     step!("put repo", server.put_repo("o", "r"))?;
@@ -806,6 +805,7 @@ async fn one_pass_settles_all_closed_empty_slots() -> anyhow::Result<()> {
             c.compaction.enabled = false;
             c.maintenance.checkpoints = false;
             c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
             // weekly (full) + hourly on weekly: the closed hours since the weekly are empty.
             c.bundles.strategy.retain(|s| s.name != "daily");
             for s in &mut c.bundles.strategy {
@@ -1451,6 +1451,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
             c.compaction.enabled = false;
             c.maintenance.checkpoints = false;
             c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
             c.bundles.strategy.retain(|s| s.name != "daily");
             for s in &mut c.bundles.strategy {
                 if s.name == "hourly" {
@@ -1497,12 +1498,10 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
     let weekly_slot = walgit_bundle::slots::last_slot_at_or_before(&weekly, base)?
         .expect("weekly slot before fixed base");
     let weekly_at = walgit_bundle::slots::from_epoch(weekly_slot);
-    let now = weekly_at + 6 * hour;
+    let now = weekly_at + 6 * hour + walgit_bundle::slots::SLOT_CLOSE_GRACE;
     // History with explicit times: c1 before the weekly, c2 after it, nothing
     // since. Revs arrive as one shell-flavored string ("<tip> ^<base>"); the
     // pipe takes argv, so tokenize here like `sh` used to.
-    // Revs arrive as one shell-flavored string ("<tip> ^<base>"); the pipe
-    // takes argv, so tokenize here like `sh` used to.
     let pack_of = |revs: &str| -> anyhow::Result<Vec<u8>> {
         let mut first: Vec<&str> = vec!["rev-list", "--objects"];
         first.extend(revs.split_whitespace());
@@ -1649,8 +1648,12 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         walgit_bundle::slots::slot_closed(&hourly, s, now)
     });
     assert!(
-        !other_closed || !unchanged.is_empty(),
-        "the closed hour after it is skipped as unchanged: {:?}",
+        other_closed,
+        "the hour after the carrier must be closed at the synthetic now: {other_slot:?}"
+    );
+    assert!(
+        !unchanged.is_empty(),
+        "the closed hour after it must be skipped as unchanged: {:?}",
         list.skipped
             .iter()
             .map(|s| (s.slot, &s.reason))

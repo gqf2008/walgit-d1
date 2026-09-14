@@ -600,12 +600,19 @@ pub async fn upcoming(
 
 /// One pass: one unit per assigned repository.
 pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
-    run_pass_at(state, SystemTime::now()).await
+    run_pass_inner(state, None).await
 }
 
 /// `run_pass` with an injected scheduler clock. Tests use this to keep
 /// planner/settle decisions on the same instant as their assertions.
 pub async fn run_pass_at(state: &Arc<AppState>, now: SystemTime) -> anyhow::Result<PassReport> {
+    run_pass_inner(state, Some(now)).await
+}
+
+async fn run_pass_inner(
+    state: &Arc<AppState>,
+    fixed_now: Option<SystemTime>,
+) -> anyhow::Result<PassReport> {
     let mut report = PassReport::default();
     let repos = state.registry.list().await?;
     for id in repos {
@@ -624,7 +631,10 @@ pub async fn run_pass_at(state: &Arc<AppState>, now: SystemTime) -> anyhow::Resu
         let mut skipped_slots = 0u32;
         loop {
             let before_bundles = report.bundles;
-            let unit = match next_unit_at(state, &id, now).await {
+            // Production keeps the original per-planning-call clock; only the
+            // test entry point freezes it for a synthetic scenario.
+            let planner_now = fixed_now.unwrap_or_else(SystemTime::now);
+            let unit = match next_unit_at(state, &id, planner_now).await {
                 Ok(u) => u,
                 Err(e) => {
                     warn!(repo = %id, error = %e, "maintenance: planning failed");
