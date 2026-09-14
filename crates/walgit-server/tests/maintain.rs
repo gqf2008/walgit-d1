@@ -1554,14 +1554,48 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         .map_err(|_| anyhow::anyhow!("op start"))?;
     assert!(t.wait_done(std::time::Duration::from_secs(30)).await);
 
-    // Passes until idle: exactly ONE hourly (the slot that first sees c2); every
-    // later closed slot is recorded `unchanged since <that hourly>`.
-    for _ in 0..8 {
-        let report = step!("pass", walgit_server::maintain::run_pass(&server.state))?;
-        if report.units == 0 {
+    // Drive this scenario with the fixed `now` captured above, not
+    // `maintain::run_pass`: a pass also builds any newer weekly slot selected
+    // from the real wall clock, which can make the weekly already contain c2
+    // and make this timing-sensitive assertion depend on the CI hour.
+    let build_ctx = walgit_bundle::slots::PlanContext {
+        first_state: h.first_state_time(),
+        can_full: true,
+        can_incremental: true,
+        wrong_host_reason: None,
+    };
+    let mut built = None;
+    for _ in 0..12 {
+        let rows = server.state.bundles.plan(&id, now, build_ctx).await?;
+        let next = rows
+            .iter()
+            .filter(|r| {
+                r.strategy == "hourly"
+                    && r.status == walgit_bundle::slots::SlotStatus::Missing
+            })
+            .min_by_key(|r| r.slot)
+            .map(|r| r.slot);
+        let Some(slot) = next else { break };
+        if server
+            .state
+            .bundles
+            .build_slot_unit(&id, "hourly", slot)
+            .await?
+            .is_some()
+        {
+            built = Some(slot);
             break;
         }
     }
+    assert!(
+        built.is_some(),
+        "no hourly slot from {sunday} to {now:?} carried c2"
+    );
+    // Every later closed slot is recorded `unchanged since <that hourly>`.
+    step!(
+        "settle",
+        server.state.bundles.settle_closed_slots(&id, now)
+    )?;
     let list = walgit_bundle::ops::read_list(h.store())
         .await?
         .expect("list");
