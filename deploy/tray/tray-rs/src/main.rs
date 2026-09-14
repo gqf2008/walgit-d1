@@ -48,7 +48,11 @@ fn home() -> PathBuf {
 }
 
 fn state_dir() -> PathBuf {
-    home().join(".walgit")
+    let home = home();
+    if home.as_os_str().is_empty() {
+        return PathBuf::new();
+    }
+    home.join(".walgit")
 }
 
 /// Program location, never the state directory. In a macOS .app this is
