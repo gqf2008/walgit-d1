@@ -245,6 +245,16 @@ fn record_plan(
 /// The next unit for `id` on this host (pure w.r.t. side effects except a
 /// refs sync and a bundle-list read).
 pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Unit> {
+    next_unit_at(state, id, SystemTime::now()).await
+}
+
+/// `next_unit` with an injected planner clock. Production passes
+/// `SystemTime::now()`; tests use one fixed instant for plan + settle.
+async fn next_unit_at(
+    state: &Arc<AppState>,
+    id: &RepoId,
+    now: SystemTime,
+) -> anyhow::Result<Unit> {
     if !state.cfg.placement.maintains(id.owner(), id.name()) {
         return Ok(Unit::NotAssigned);
     }
@@ -312,7 +322,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
         }
         match state
             .bundles
-            .settle_closed_slots(id, SystemTime::now())
+            .settle_closed_slots(id, now)
             .await
         {
             Ok(n) if n > 0 => {
@@ -325,7 +335,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
         }
         let rows = state
             .bundles
-            .plan(id, SystemTime::now(), ctx)
+            .plan(id, now, ctx)
             .instrument(span.clone())
             .await?;
         record_plan(&span, id, &cfg.bundles, &rows);
@@ -590,6 +600,19 @@ pub async fn upcoming(
 
 /// One pass: one unit per assigned repository.
 pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
+    run_pass_inner(state, None).await
+}
+
+/// `run_pass` with an injected scheduler clock. Tests use this to keep
+/// planner/settle decisions on the same instant as their assertions.
+pub async fn run_pass_at(state: &Arc<AppState>, now: SystemTime) -> anyhow::Result<PassReport> {
+    run_pass_inner(state, Some(now)).await
+}
+
+async fn run_pass_inner(
+    state: &Arc<AppState>,
+    fixed_now: Option<SystemTime>,
+) -> anyhow::Result<PassReport> {
     let mut report = PassReport::default();
     let repos = state.registry.list().await?;
     for id in repos {
@@ -608,7 +631,10 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
         let mut skipped_slots = 0u32;
         loop {
             let before_bundles = report.bundles;
-            let unit = match next_unit(state, &id).await {
+            // Production keeps the original per-planning-call clock; only the
+            // test entry point freezes it for a synthetic scenario.
+            let planner_now = fixed_now.unwrap_or_else(SystemTime::now);
+            let unit = match next_unit_at(state, &id, planner_now).await {
                 Ok(u) => u,
                 Err(e) => {
                     warn!(repo = %id, error = %e, "maintenance: planning failed");
