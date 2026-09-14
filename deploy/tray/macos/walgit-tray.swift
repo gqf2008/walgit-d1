@@ -218,6 +218,67 @@ func healthVersion(_ body: String) -> String {
     return v
 }
 
+private func canonicalStateDir() -> String {
+    if let override = ProcessInfo.processInfo.environment["WALGIT_STATE_DIR"], !override.isEmpty {
+        return override
+    }
+    return NSString(string: "~/.walgit").expandingTildeInPath
+}
+
+private func legacyDefaultStateDir() -> String {
+    if let override = ProcessInfo.processInfo.environment["WALGIT_LEGACY_DIR"], !override.isEmpty {
+        return override
+    }
+    return NSString(string: "~/walgit").expandingTildeInPath
+}
+
+/// Remove only managed regular files/symlinks. A user-created directory at one
+/// of these names is preserved and reported.
+private func removeManagedFileIfSafe(_ path: String) {
+    let fm = FileManager.default
+    if (try? fm.destinationOfSymbolicLink(atPath: path)) != nil {
+        try? fm.removeItem(atPath: path)
+        logLine("bootstrap: 已移除旧托管 symlink \(path)")
+        return
+    }
+    guard let attrs = try? fm.attributesOfItem(atPath: path) else { return }
+    guard (attrs[.type] as? FileAttributeType) == .typeRegular else {
+        logLine("bootstrap: 保留非普通文件，不删除 \(path)")
+        return
+    }
+    try? fm.removeItem(atPath: path)
+    logLine("bootstrap: 已移除旧托管文件 \(path)")
+}
+
+/// Copy credentials/config (keep the legacy copy for the old helper's own
+/// health URL) and move the rest of user state. Nothing is overwritten.
+private func migrateLegacyState(from oldDir: String, to newDir: String) {
+    let fm = FileManager.default
+    try? fm.createDirectory(atPath: newDir, withIntermediateDirectories: true)
+    let managed: Set<String> = ["walgit", "walgit-ensure", "run-walgit.sh", ".skeleton-version"]
+    let copied: Set<String> = ["walgit.toml", ".r2-credentials", ".walgit_token"]
+    guard let entries = try? fm.contentsOfDirectory(atPath: oldDir) else { return }
+    for name in entries where !managed.contains(name) {
+        let src = "\(oldDir)/\(name)"
+        let dst = "\(newDir)/\(name)"
+        if fm.fileExists(atPath: dst) {
+            logLine("bootstrap: 迁移跳过已存在项 \(name)")
+            continue
+        }
+        do {
+            if copied.contains(name) {
+                try fm.copyItem(atPath: src, toPath: dst)
+                logLine("bootstrap: 已复制旧状态 \(name)")
+            } else {
+                try fm.moveItem(atPath: src, toPath: dst)
+                logLine("bootstrap: 已迁移旧状态 \(name)")
+            }
+        } catch {
+            logLine("bootstrap: 迁移旧状态 \(name) 失败: \(error)")
+        }
+    }
+}
+
 /// 首次启动 bootstrap：只初始化 ~/.walgit 中的用户状态。程序二进制属于
 /// App Bundle，绝不复制到状态目录。旧版留下的 `walgit` / `walgit-ensure` /
 /// `run-walgit.sh` / `.skeleton-version` 在服务停止时清掉；配置、cache、keys、
@@ -237,8 +298,30 @@ func bootstrapDeploy() {
         return
     }
 
+    let canonical = canonicalStateDir()
+    let legacyDefault = legacyDefaultStateDir()
+    let isLegacyDir = deployDir == legacyDefault
+    let stateDir = isLegacyDir ? canonical : deployDir
+    try? fm.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+
+    // 0.5.x helper 会把新 app 用 WALGIT_DEPLOY_DIR=~/walgit 拉起来。先把旧
+    // 服务停掉，再把用户状态迁到 ~/.walgit；配置/凭证保留旧副本，旧 helper
+    // 仍用旧的 health URL，而新服务读新状态。
+    if isLegacyDir {
+        if let attrs = try? fm.attributesOfItem(atPath: "\(deployDir)/walgit"),
+           (attrs[.type] as? FileAttributeType) == .typeRegular {
+            // Stop the old screen/serve process below; the file itself stays
+            // until the compatibility bridge replaces it with a symlink.
+        }
+        let (listen, _, _) = deployConfig()
+        let port = listen.split(separator: ":").last.map(String.init) ?? "8081"
+        _ = sh("screen -S \(ProcessInfo.processInfo.environment["WALGIT_SCREEN_SESSION"] ?? "walgit-server") -X quit >/dev/null 2>&1 || true")
+        _ = sh("pid=$(lsof -tiTCP:\(port) -sTCP:LISTEN 2>/dev/null | head -1 || true); if [ -n \"$pid\" ]; then comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); case \"$comm\" in *walgit*) kill \"$pid\" 2>/dev/null || true;; esac; fi")
+        migrateLegacyState(from: deployDir, to: canonical)
+    }
+
     // 用户配置：只在缺失时从 bundle 模板初始化，永不覆盖。
-    let userFile = "\(deployDir)/walgit.toml"
+    let userFile = "\(stateDir)/walgit.toml"
     if !fm.fileExists(atPath: userFile), fm.fileExists(atPath: "\(res)/walgit.toml") {
         do {
             try fm.copyItem(atPath: "\(res)/walgit.toml", toPath: userFile)
@@ -248,49 +331,62 @@ func bootstrapDeploy() {
         }
     }
 
-    // 0.5.x/0.6.0 的旧升级 helper 仍会检查 ~/.walgit/walgit 和
-    // .skeleton-version。这里建立一次性兼容桥：walgit 是指向 App Bundle
-    // 的 symlink，不是第二份程序；旧 helper 完成后 5 分钟自动清理。
-    for stale in ["walgit-ensure", "run-walgit.sh"] {
-        let path = "\(deployDir)/\(stale)"
-        if fm.fileExists(atPath: path) {
-            try? fm.removeItem(atPath: path)
-            logLine("bootstrap: 已移除旧托管脚本 \(stale)")
-        }
-    }
-    let legacyBin = "\(deployDir)/walgit"
-    let legacyMarker = "\(deployDir)/.skeleton-version"
+    // 该版本之前的升级 helper 只认它启动时看到的 bridge dir。bridge 里的
+    // walgit 指向 bundle，walgit-ensure 是临时转发壳；两者与 marker 一起在
+    // 5 分钟后清理。
+    let bridgeDir = deployDir
+    let legacyBin = "\(bridgeDir)/walgit"
+    let legacyEnsure = "\(bridgeDir)/walgit-ensure"
+    let legacyMarker = "\(bridgeDir)/.skeleton-version"
     let legacyLayout = fm.fileExists(atPath: legacyBin) || fm.fileExists(atPath: legacyMarker)
     let bundledVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
     if legacyLayout && !bundledVersion.isEmpty {
-        // 旧 0.5.x 服务可能由 screen/run-walgit 启动且没有 pidfile；释放端口
-        // 后旧 helper 才能用兼容 symlink 启动新 bundle 内的服务。
-        if sh("curl -sf --max-time 2 '\(healthURL)' >/dev/null 2>&1").0 == 0 {
-            let (listen, _, _) = deployConfig()
-            let port = listen.split(separator: ":").last.map(String.init) ?? "8081"
-            _ = sh("screen -S \(ProcessInfo.processInfo.environment["WALGIT_SCREEN_SESSION"] ?? "walgit-server") -X quit >/dev/null 2>&1 || true")
-            _ = sh("pid=$(lsof -tiTCP:\(port) -sTCP:LISTEN 2>/dev/null | head -1 || true); if [ -n \"$pid\" ]; then comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); case \"$comm\" in *walgit*) kill \"$pid\" 2>/dev/null || true;; esac; fi")
-        }
-        try? fm.removeItem(atPath: legacyBin)
+        removeManagedFileIfSafe(legacyBin)
         do {
             try fm.createSymbolicLink(atPath: legacyBin, withDestinationPath: "\(res)/walgit")
             try bundledVersion.write(toFile: legacyMarker, atomically: true, encoding: .utf8)
-            logLine("bootstrap: v\(bundledVersion) 旧升级兼容桥已建立")
-            DispatchQueue.global().asyncAfter(deadline: .now() + 300) {
-                if (try? fm.destinationOfSymbolicLink(atPath: legacyBin)) == "\(res)/walgit" {
-                    try? fm.removeItem(atPath: legacyBin)
-                }
-                let markerValue = (try? String(contentsOfFile: legacyMarker, encoding: .utf8))?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if markerValue == bundledVersion {
-                    try? fm.removeItem(atPath: legacyMarker)
-                }
-                logLine("bootstrap: 旧升级兼容桥已清理")
-            }
         } catch {
-            logLine("bootstrap: 旧升级兼容桥失败: \(error)")
+            logLine("bootstrap: 旧升级 walgit symlink/marker 失败: \(error)")
         }
+        removeManagedFileIfSafe(legacyEnsure)
+        let shim = """
+        #!/bin/sh
+        set -eu
+        BASE="$(cd "$(dirname "$0")" && pwd)"
+        STATE="${WALGIT_STATE_DIR:-$HOME/.walgit}"
+        case "${1:-start}" in
+          ensure|start|"") exec "$BASE/walgit" service start --config "$STATE/walgit.toml" ;;
+          stop|status|restart) exec "$BASE/walgit" service "$1" --config "$STATE/walgit.toml" ;;
+          *) exit 2 ;;
+        esac
+        """
+        let shimData = shim.data(using: .utf8) ?? Data()
+        if fm.createFile(
+            atPath: legacyEnsure,
+            contents: shimData,
+            attributes: [.posixPermissions: NSNumber(value: 0o755)]
+        ) {
+            logLine("bootstrap: v\(bundledVersion) 旧升级兼容桥已建立")
+        } else {
+            logLine("bootstrap: 旧升级 walgit-ensure 转发壳写入失败")
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 300) {
+            if (try? fm.destinationOfSymbolicLink(atPath: legacyBin)) == "\(res)/walgit" {
+                try? fm.removeItem(atPath: legacyBin)
+            }
+            let markerValue = (try? String(contentsOfFile: legacyMarker, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if markerValue == bundledVersion {
+                try? fm.removeItem(atPath: legacyMarker)
+            }
+            removeManagedFileIfSafe(legacyEnsure)
+            removeManagedFileIfSafe("\(bridgeDir)/run-walgit.sh")
+            logLine("bootstrap: 旧升级兼容桥已清理")
+        }
+    } else {
+        removeManagedFileIfSafe("\(bridgeDir)/walgit-ensure")
+        removeManagedFileIfSafe("\(bridgeDir)/run-walgit.sh")
     }
 
     // CLI 软链：终端入口指向 App Bundle 内的程序，不制造第二份副本。
@@ -739,6 +835,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Bundle.main.bundleURL.pathExtension == "app" {
             note("App Bundle 版本请使用 Release 升级")
             notify("walgit 升级中止", "源码升级只用于开发构建；请使用 Release 升级")
+            DispatchQueue.main.async {
+                self.updateState = .failed
+                self.refreshButton()
+            }
             return
         }
 

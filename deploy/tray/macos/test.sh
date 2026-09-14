@@ -115,7 +115,10 @@ bootstrap_fixture() {
         -o "$app/Contents/MacOS/walgit-tray"
     cat >"$res/walgit" <<'EOF'
 #!/bin/sh
-[ "${1:-}" = "--version" ] && echo "walgit v0.5.0"
+case "${1:-}" in
+  --version) echo "walgit v0.5.0" ;;
+  service) exit 0 ;;
+esac
 EOF
     chmod +x "$res/walgit"
     printf '[server]\nlisten = "127.0.0.1:%s"\n' "$port" >"$res/walgit.toml"
@@ -130,17 +133,65 @@ EOF
     [ -f "$state/walgit.toml" ] || { echo "FAIL(bootstrap): config not initialized" >&2; return 1; }
     grep -q "listen = \"127.0.0.1:$port\"" "$state/walgit.toml" \
         || { echo "FAIL(bootstrap): config template not copied" >&2; return 1; }
-    # Old 0.5.x helpers still check these two paths during an in-app upgrade.
+    # Old 0.5.x helpers still check these three paths during an in-app upgrade.
     [ "$(readlink "$state/walgit")" = "$res/walgit" ] \
         || { echo "FAIL(bootstrap): legacy upgrade symlink missing" >&2; return 1; }
     [ "$(cat "$state/.skeleton-version")" = "0.5.0" ] \
         || { echo "FAIL(bootstrap): legacy upgrade marker missing" >&2; return 1; }
-    for stale in walgit-ensure run-walgit.sh; do
-        [ ! -e "$state/$stale" ] || { echo "FAIL(bootstrap): obsolete $stale remains" >&2; return 1; }
-    done
+    [ -x "$state/walgit-ensure" ] \
+        || { echo "FAIL(bootstrap): legacy ensure shim missing" >&2; return 1; }
+    "$state/walgit-ensure" stop >/dev/null 2>&1 \
+        || { echo "FAIL(bootstrap): legacy ensure shim not executable" >&2; return 1; }
     [ -f "$state/cache/keep" ] || { echo "FAIL(bootstrap): cache touched" >&2; return 1; }
     [ "$(readlink "$base/bin/walgit")" = "$res/walgit" ] \
         || { echo "FAIL(bootstrap): CLI link does not target bundle binary" >&2; return 1; }
+    return 0
+}
+
+# Legacy installs used ~/walgit for both program and state. The bridge must
+# migrate user state to ~/.walgit while leaving the old helper's version/config
+# paths intact until it finishes.
+legacy_migration_fixture() {
+    local base="$TMP/legacy-migration"
+    local home="$base/home"
+    local old="$home/walgit"
+    local new="$home/.walgit"
+    local app="$base/walgit-tray.app"
+    local res="$app/Contents/Resources"
+    local port
+    port="$(free_port)"
+    mkdir -p "$app/Contents/MacOS" "$res" "$old/keys" "$old/cache"
+    pkginfo "$app" 0.5.0
+    swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
+        -o "$app/Contents/MacOS/walgit-tray"
+    cat >"$res/walgit" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = "--version" ] && echo "walgit v0.5.0"
+exit 0
+EOF
+    chmod +x "$res/walgit"
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$port" >"$res/walgit.toml"
+    printf 'listen = "127.0.0.1:%s"\n' "$port" >"$old/walgit.toml"
+    printf 'creds\n' >"$old/.r2-credentials"
+    printf 'key\n' >"$old/keys/k"
+    printf 'cache\n' >"$old/cache/c"
+    printf 'old\n' >"$old/walgit"
+    printf 'old\n' >"$old/walgit-ensure"
+    printf 'old\n' >"$old/run-walgit.sh"
+    printf '0.4.0\n' >"$old/.skeleton-version"
+
+    HOME="$home" WALGIT_STATE_DIR="$new" WALGIT_LEGACY_DIR="$old"     WALGIT_BOOTSTRAP_ONLY=1 WALGIT_DEPLOY_DIR="$old" \
+        WALGIT_CLI_LINK="$base/bin/walgit" \
+        "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1
+
+    [ -f "$new/walgit.toml" ] || { echo "FAIL(legacy-migration): config not copied" >&2; return 1; }
+    [ -f "$new/.r2-credentials" ] || { echo "FAIL(legacy-migration): credentials not copied" >&2; return 1; }
+    [ -f "$new/keys/k" ] || { echo "FAIL(legacy-migration): keys not moved" >&2; return 1; }
+    [ -f "$new/cache/c" ] || { echo "FAIL(legacy-migration): cache not moved" >&2; return 1; }
+    [ -f "$old/walgit.toml" ] || { echo "FAIL(legacy-migration): old config not retained" >&2; return 1; }
+    [ "$(readlink "$old/walgit")" = "$res/walgit" ] \
+        || { echo "FAIL(legacy-migration): bridge symlink missing" >&2; return 1; }
+    [ -x "$old/walgit-ensure" ] || { echo "FAIL(legacy-migration): bridge shim missing" >&2; return 1; }
     return 0
 }
 
@@ -328,6 +379,7 @@ menu_fixture() {
 
 layout_fixture
 bootstrap_fixture
+legacy_migration_fixture
 release_install_fixture success
 release_install_fixture rollback
 release_service_fixture
