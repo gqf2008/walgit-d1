@@ -110,6 +110,7 @@ bootstrap_fixture() {
     local port
     port="$(free_port)"
     mkdir -p "$app/Contents/MacOS" "$res" "$state/cache"
+    pkginfo "$app" 0.5.0
     swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
         -o "$app/Contents/MacOS/walgit-tray"
     cat >"$res/walgit" <<'EOF'
@@ -129,8 +130,13 @@ EOF
     [ -f "$state/walgit.toml" ] || { echo "FAIL(bootstrap): config not initialized" >&2; return 1; }
     grep -q "listen = \"127.0.0.1:$port\"" "$state/walgit.toml" \
         || { echo "FAIL(bootstrap): config template not copied" >&2; return 1; }
-    for stale in walgit walgit-ensure run-walgit.sh .skeleton-version; do
-        [ ! -e "$state/$stale" ] || { echo "FAIL(bootstrap): stale $stale remains" >&2; return 1; }
+    # Old 0.5.x helpers still check these two paths during an in-app upgrade.
+    [ "$(readlink "$state/walgit")" = "$res/walgit" ] \
+        || { echo "FAIL(bootstrap): legacy upgrade symlink missing" >&2; return 1; }
+    [ "$(cat "$state/.skeleton-version")" = "0.5.0" ] \
+        || { echo "FAIL(bootstrap): legacy upgrade marker missing" >&2; return 1; }
+    for stale in walgit-ensure run-walgit.sh; do
+        [ ! -e "$state/$stale" ] || { echo "FAIL(bootstrap): obsolete $stale remains" >&2; return 1; }
     done
     [ -f "$state/cache/keep" ] || { echo "FAIL(bootstrap): cache touched" >&2; return 1; }
     [ "$(readlink "$base/bin/walgit")" = "$res/walgit" ] \

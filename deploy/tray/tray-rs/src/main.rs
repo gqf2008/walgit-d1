@@ -409,6 +409,10 @@ fn service_stop() -> Result<(), String> {
 fn upgrade_pipeline(report: &dyn Fn(String)) -> Result<String, String> {
     let repo = repo_dir();
     let bin = walgit_binary();
+    let bin_text = bin.to_string_lossy();
+    if bin_text.contains(".app/Contents/") || bin_text.starts_with("/usr/") {
+        return Err("该安装由 App Bundle / 系统包管理，请使用 Release 或安装器升级".into());
+    }
 
     report("对齐 main…".into());
     let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);

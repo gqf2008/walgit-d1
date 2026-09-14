@@ -159,17 +159,28 @@ rollback() {
     log "rollback: $why"
     kill_new_tray
     [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ] && service stop >/dev/null 2>&1 || true
-    if [ -e "$APP_DEST" ]; then
-        mv "$APP_DEST" "$APP_DEST.failed-$VERSION-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+
+    local new_moved=0 restore_ok=0 open_ok=1 service_ok=1
+    if [ ! -e "$APP_DEST" ]; then
+        new_moved=1
+    elif mv "$APP_DEST" "$APP_DEST.failed-$VERSION-$(date +%Y%m%d-%H%M%S)" 2>/dev/null; then
+        new_moved=1
     fi
-    if [ -e "$BACKUP" ]; then
-        mv "$BACKUP" "$APP_DEST" 2>/dev/null || true
+    if [ "$new_moved" = 1 ] && [ -e "$BACKUP" ] && mv "$BACKUP" "$APP_DEST" 2>/dev/null; then
+        restore_ok=1
     fi
-    [ "${WALGIT_UPDATE_SKIP_OPEN:-0}" != "1" ] && open --env "WALGIT_DEPLOY_DIR=$DEPLOY" "$APP_DEST" >/dev/null 2>&1 || true
-    if [ "$SERVICE_WAS_RUNNING" = 1 ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
-        service start >/dev/null 2>&1 || true
+    if [ "$restore_ok" = 1 ] && [ "${WALGIT_UPDATE_SKIP_OPEN:-0}" != "1" ]; then
+        open --env "WALGIT_DEPLOY_DIR=$DEPLOY" "$APP_DEST" >/dev/null 2>&1 || open_ok=0
     fi
-    notify "$(printf '%s，已恢复旧版本' "$why")"
+    if [ "$restore_ok" = 1 ] && [ "$SERVICE_WAS_RUNNING" = 1 ] && [ "${WALGIT_UPDATE_SKIP_SERVICE:-0}" != "1" ]; then
+        service start >/dev/null 2>&1 || service_ok=0
+    fi
+    if [ "$restore_ok" = 1 ] && [ "$open_ok" = 1 ] && [ "$service_ok" = 1 ]; then
+        notify "$(printf '%s，已恢复旧版本' "$why")"
+    else
+        log "rollback incomplete: restore=$restore_ok open=$open_ok service=$service_ok"
+        notify "$(printf '%s；自动回滚未完成，请重装旧版或手动恢复 %s' "$why" "$BACKUP")"
+    fi
     exit 1
 }
 

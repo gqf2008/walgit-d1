@@ -68,7 +68,7 @@ func serviceBinaryPath() -> String {
             return bundled
         }
     }
-    return "\(deployDir)/walgit"
+    return "walgit"
 }
 
 func serviceCmd(_ verb: String) -> String {
@@ -248,17 +248,48 @@ func bootstrapDeploy() {
         }
     }
 
-    // 旧布局迁移：只清三个受管文件；正在跑服务时跳过，避免把当前进程
-    // 的入口删在脚下。release-install 会先停服务再替换 App，因此正常升级
-    // 路径总能清掉。
-    let serviceStopped = sh("curl -sf --max-time 2 '\(healthURL)' >/dev/null 2>&1").0 != 0
-    if serviceStopped {
-        for stale in ["walgit", "walgit-ensure", "run-walgit.sh", ".skeleton-version"] {
-            let path = "\(deployDir)/\(stale)"
-            if fm.fileExists(atPath: path) {
-                try? fm.removeItem(atPath: path)
-                logLine("bootstrap: 已清理旧布局 \(stale)")
+    // 0.5.x/0.6.0 的旧升级 helper 仍会检查 ~/.walgit/walgit 和
+    // .skeleton-version。这里建立一次性兼容桥：walgit 是指向 App Bundle
+    // 的 symlink，不是第二份程序；旧 helper 完成后 5 分钟自动清理。
+    for stale in ["walgit-ensure", "run-walgit.sh"] {
+        let path = "\(deployDir)/\(stale)"
+        if fm.fileExists(atPath: path) {
+            try? fm.removeItem(atPath: path)
+            logLine("bootstrap: 已移除旧托管脚本 \(stale)")
+        }
+    }
+    let legacyBin = "\(deployDir)/walgit"
+    let legacyMarker = "\(deployDir)/.skeleton-version"
+    let legacyLayout = fm.fileExists(atPath: legacyBin) || fm.fileExists(atPath: legacyMarker)
+    let bundledVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+    if legacyLayout && !bundledVersion.isEmpty {
+        // 旧 0.5.x 服务可能由 screen/run-walgit 启动且没有 pidfile；释放端口
+        // 后旧 helper 才能用兼容 symlink 启动新 bundle 内的服务。
+        if sh("curl -sf --max-time 2 '\(healthURL)' >/dev/null 2>&1").0 == 0 {
+            let (listen, _, _) = deployConfig()
+            let port = listen.split(separator: ":").last.map(String.init) ?? "8081"
+            _ = sh("screen -S \(ProcessInfo.processInfo.environment["WALGIT_SCREEN_SESSION"] ?? "walgit-server") -X quit >/dev/null 2>&1 || true")
+            _ = sh("pid=$(lsof -tiTCP:\(port) -sTCP:LISTEN 2>/dev/null | head -1 || true); if [ -n \"$pid\" ]; then comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); case \"$comm\" in *walgit*) kill \"$pid\" 2>/dev/null || true;; esac; fi")
+        }
+        try? fm.removeItem(atPath: legacyBin)
+        do {
+            try fm.createSymbolicLink(atPath: legacyBin, withDestinationPath: "\(res)/walgit")
+            try bundledVersion.write(toFile: legacyMarker, atomically: true, encoding: .utf8)
+            logLine("bootstrap: v\(bundledVersion) 旧升级兼容桥已建立")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 300) {
+                if (try? fm.destinationOfSymbolicLink(atPath: legacyBin)) == "\(res)/walgit" {
+                    try? fm.removeItem(atPath: legacyBin)
+                }
+                let markerValue = (try? String(contentsOfFile: legacyMarker, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if markerValue == bundledVersion {
+                    try? fm.removeItem(atPath: legacyMarker)
+                }
+                logLine("bootstrap: 旧升级兼容桥已清理")
             }
+        } catch {
+            logLine("bootstrap: 旧升级兼容桥失败: \(error)")
         }
     }
 
@@ -699,9 +730,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         let repo = repoPath()
-        let bin = "\(deployDir)/walgit"
+        let bin = serviceBinaryPath()
         let note: (String) -> Void = { m in
             DispatchQueue.main.async { self.busyNote = m; self.refreshButton() }
+        }
+        // App Bundle 是签名/公证产物，源码升级不能改写里面的 Mach-O（会破坏
+        // 签名的同时仍让 service 启动 bundle 内旧二进制）。正式形态用 Release。
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            note("App Bundle 版本请使用 Release 升级")
+            notify("walgit 升级中止", "源码升级只用于开发构建；请使用 Release 升级")
+            return
         }
 
         // 0. 对齐到 origin/main(不快进就不构建——否则会重建旧版本)。

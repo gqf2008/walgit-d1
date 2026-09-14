@@ -35,6 +35,9 @@ Release 升级管线:下载 DMG → 校验 GitHub `sha256`(精确等值)→ 校�
 签名/公证/版本(精确 token)→ 停服务 → 备份并替换 App Bundle → 从新
 Bundle 启动服务 → 健康验证；失败恢复旧 App Bundle。`~/.walgit` 里的
 配置、cache、keys、日志和凭证不参与换装或回滚。
+0.5.x/0.6.0 升级到新布局时，新 tray 会临时建立
+`~/.walgit/walgit -> App Bundle/walgit` 和 `.skeleton-version`，让旧 helper
+完成升级；5 分钟后自动清理，不保留程序副本。
 健康检查与 `[server].listen` 同源,自定义端口不会被误判成服务已停止。
 
 源码升级管线:ff-merge main → `cargo build --release -p walgit-cli` →
