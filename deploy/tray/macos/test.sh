@@ -64,6 +64,16 @@ if ./build-dmg.sh --check-zip "$TMP/corrupt.zip" >/dev/null 2>&1; then
     exit 1
 fi
 
+# 公证凭据分派：CI 三件套走 direct，缺少任一必须拒绝，否则回退 profile。
+notary_mode="$(APPLE_ID=id APPLE_TEAM_ID=team APPLE_APP_PASSWORD=pass ./build-dmg.sh --check-notary-mode)"
+[ "$notary_mode" = "direct" ] || { echo "FAIL: expected direct notary mode, got $notary_mode" >&2; exit 1; }
+notary_mode="$(env -u APPLE_ID -u APPLE_TEAM_ID -u APPLE_APP_PASSWORD ./build-dmg.sh --check-notary-mode)"
+[ "$notary_mode" = "profile" ] || { echo "FAIL: expected profile notary mode, got $notary_mode" >&2; exit 1; }
+if APPLE_ID=id APPLE_TEAM_ID=team env -u APPLE_APP_PASSWORD ./build-dmg.sh --check-notary-mode >/dev/null 2>&1; then
+    echo "FAIL: partial direct notary credentials were accepted" >&2
+    exit 1
+fi
+
 
 pkginfo() { # pkginfo <app> <version>
     mkdir -p "$1/Contents/Resources"

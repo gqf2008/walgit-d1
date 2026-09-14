@@ -45,7 +45,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `deploy/tray/` | The tray apps for a local deployment (macOS Swift + cross-platform Rust): start/stop, update detection, click-to-upgrade; see its README. |
 | `deploy/windows/` | The Windows installer (Inno Setup): per-user install to `%USERPROFILE%\walgit` (binary + tray + initial config), autostart; built into releases by `release.yml`. |
 | `deploy/linux/` | The linux `.deb` assembly (`build-deb.sh`, dpkg-deb): binaries + example config + tray desktop entry; built into releases by `release.yml`, validated on every PR by `ci.yml`. |
-| `deploy/tray/macos/build-dmg.sh` | The macOS release DMG pipeline (built outside CI): app + deployment skeleton → sign/notarize/staple → drag-install DMG, signed/notarized/stapled. |
+| `deploy/tray/macos/build-dmg.sh` | The macOS release DMG pipeline, run by release.yml on a macOS runner and reproducible locally: app + deployment skeleton → sign/notarize/staple → drag-install DMG. |
 | `Containerfile`, `flake.nix` | An OCI image; a Nix package, image and devshell. |
 
 ---
@@ -642,10 +642,11 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   Q&A/Show and tell); issues stay for work units, discussions for "why".
 - Vulnerabilities: private reporting (SECURITY.md) + Dependabot security updates +
   CodeQL scanning on PRs (results in the Security tab).
-- Releases: tag `v*` triggers `release.yml` (builds the linux `.deb` + the Windows
-  installer, changelog from Conventional Commits, attaches to `gh release`; the
-  macOS DMG is built locally with `deploy/tray/macos/build-dmg.sh` and uploaded;
-  re-pushing an existing tag re-attaches fresh artefacts). One installer per
-  platform, no raw binaries (issue #108). Versioning is
-  semantic; milestone `v0.1` is the first release target. A release is also a work
-  unit: create a `batch` issue with the release checklist.
+- Releases: tag `v*` triggers `release.yml` (builds the linux `.deb`, the Windows
+  installer, and the signed/notarized macOS DMG, changelog from Conventional
+  Commits, attaches to `gh release`; `workflow_dispatch` runs the same packaging
+  path as a signing dry run and skips publication; re-pushing an existing tag
+  re-attaches fresh artefacts). One installer per platform, no raw binaries
+  (issue #108). Versioning is semantic; milestone `v0.1` is the first release
+  target. A release is also a work unit: create a `batch` issue with the release
+  checklist.
