@@ -126,10 +126,29 @@ done
 exit 0
 EOF
     chmod +x "$fake"/*
-    PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_BIN="$base/walgit"         WALGIT_IDENTITY='Developer ID Application: Test' NOTARY_PROFILE=test         /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
+    mkdir -p "$base/root/target"
+    : >"$base/root/target/sentinel"
+
+    # Cleanup disabled: the sentinel must survive.
+    PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
+        WALGIT_BIN="$base/walgit" WALGIT_IDENTITY='Developer ID Application: Test' \
+        NOTARY_PROFILE=test /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
     local built
     built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
     [ -n "$built" ] || { echo "FAIL: bash-compat smoke produced no DMG" >&2; return 1; }
+    [ -e "$base/root/target/sentinel" ] \
+        || { echo "FAIL: target cleaned without the CI opt-in" >&2; return 1; }
+    rm -f "$built"
+
+    # CI cleanup: target goes away only after the app has been assembled.
+    PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
+        WALGIT_CLEAN_TARGET_AFTER_APP=1 WALGIT_BIN="$base/walgit" \
+        WALGIT_IDENTITY='Developer ID Application: Test' NOTARY_PROFILE=test \
+        /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
+    built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
+    [ -n "$built" ] || { echo "FAIL: cleanup smoke produced no DMG" >&2; return 1; }
+    [ ! -e "$base/root/target/sentinel" ] \
+        || { echo "FAIL: CI target cleanup did not run" >&2; return 1; }
     rm -f "$built"
     return 0
 }

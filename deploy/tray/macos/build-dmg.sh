@@ -14,12 +14,13 @@
 #   WALGIT_SKIP_BUILD=1   CI：跳过 web/cargo 构建，使用预构建 WALGIT_BIN
 #   WALGIT_CLEAN_TARGET_AFTER_APP=1
 #                         CI：app 组装后删除 $ROOT/target，给 DMG 腾空间
+#   WALGIT_TEST_ROOT      可选：测试时覆盖 ROOT（仅配合 WALGIT_SKIP_BUILD）
 #
 # 产物：dist/walgit-<版本>-<架构>.dmg
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+ROOT="${WALGIT_TEST_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 cd "$SCRIPT_DIR"
 
 usage() {
