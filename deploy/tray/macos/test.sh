@@ -197,6 +197,68 @@ EOF
     return 0
 }
 
+# Manual drag-to-Applications does not inject WALGIT_DEPLOY_DIR. The new app
+# must still discover ~/walgit, stop its service, copy state and restart from
+# the new bundle.
+manual_legacy_migration_fixture() {
+    local base="$TMP/manual-legacy"
+    local home="$base/home"
+    local old="$home/walgit"
+    local new="$home/.walgit"
+    local app="$base/walgit-tray.app"
+    local res="$app/Contents/Resources"
+    local version_file="$base/version"
+    local port
+    port="$(free_port)"
+    mkdir -p "$app/Contents/MacOS" "$res" "$old"
+    pkginfo "$app" 0.5.0
+    swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
+        -o "$app/Contents/MacOS/walgit-tray"
+    cat >"$res/walgit" <<STUB
+#!/bin/sh
+case "\${1:-}" in
+  --version) echo "walgit v0.5.0" ;;
+  service) [ "\${2:-}" = start ] && printf 'v0.5.0\n' >"$version_file"; exit 0 ;;
+esac
+STUB
+    chmod +x "$res/walgit"
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$port" >"$res/walgit.toml"
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$port" >"$old/walgit.toml"
+    printf 'v0.4.0\n' >"$version_file"
+
+    cat >"$base/health.py" <<'PYS'
+import os, socket, sys
+port = int(sys.argv[1]); vfile = sys.argv[2]
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port)); srv.listen(5)
+while True:
+    try: c, _ = srv.accept()
+    except OSError: break
+    try:
+        c.recv(4096)
+        v = open(vfile).read().strip() if os.path.exists(vfile) else "v0.0.0"
+        body = '{"status":"ok","version":"%s"}' % v
+        c.sendall(("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)).encode() + body.encode())
+    except OSError: pass
+    finally: c.close()
+PYS
+    python3 "$base/health.py" "$port" "$version_file" >/dev/null 2>&1 &
+    local srv_pid=$!
+    sleep 0.5
+
+    WALGIT_STATE_DIR="$new" WALGIT_LEGACY_DIR="$old" WALGIT_DEPLOY_DIR="$new" \
+    WALGIT_BOOTSTRAP_ONLY=1 WALGIT_CLI_LINK="$base/bin/walgit" \
+        "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1 || true
+    ( kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null ) || true
+
+    [ -f "$new/walgit.toml" ] || { echo "FAIL(manual-legacy): config not migrated" >&2; return 1; }
+    [ -f "$old/walgit.toml" ] || { echo "FAIL(manual-legacy): old config lost" >&2; return 1; }
+    [ "$(cat "$version_file")" = "v0.5.0" ] \
+        || { echo "FAIL(manual-legacy): service not restarted from new bundle" >&2; return 1; }
+    return 0
+}
+
 pkginfo() { # pkginfo <app> <version>
     mkdir -p "$1/Contents/Resources"
     cat >"$1/Contents/Info.plist" <<PLIST
@@ -382,6 +444,7 @@ menu_fixture() {
 layout_fixture
 bootstrap_fixture
 legacy_migration_fixture
+manual_legacy_migration_fixture
 release_install_fixture success
 release_install_fixture rollback
 release_service_fixture

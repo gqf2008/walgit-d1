@@ -4,7 +4,8 @@
 //      发现新版本仅在菜单/通知里提示,由用户点击后才升级:
 //      ff-merge main → cargo 构建 → 热换 → 健康验证,失败回滚)、
 //      退出(仅退出托盘,服务不受影响)。
-// 路径约定:部署目录 ~/.walgit(二进制 walgit + walgit.toml),
+// 路径约定:程序在 App Bundle(Contents/Resources/walgit),状态在 ~/.walgit
+//          (walgit.toml、cache、keys、日志、pidfile),
 //          源码仓库默认 /Volumes/Workspace/GitHub/walgit
 //          (可用 `defaults write com.walgit.tray repoPath <路径>` 覆盖)。
 // 日志:~/.walgit/tray.log
@@ -218,6 +219,20 @@ func healthVersion(_ body: String) -> String {
     return v
 }
 
+private func listenAddr(fromConfig path: String) -> String {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        return "127.0.0.1:8081"
+    }
+    for line in text.split(separator: "\n") {
+        let clean = line.split(separator: "#", maxSplits: 1).first.map(String.init) ?? ""
+        let t = clean.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("listen = \""), t.hasSuffix("\"") {
+            return String(t.dropFirst("listen = \"".count).dropLast())
+        }
+    }
+    return "127.0.0.1:8081"
+}
+
 private func canonicalStateDir() -> String {
     if let override = ProcessInfo.processInfo.environment["WALGIT_STATE_DIR"], !override.isEmpty {
         return override
@@ -302,28 +317,33 @@ func bootstrapDeploy() {
 
     let canonical = canonicalStateDir()
     let legacyDefault = legacyDefaultStateDir()
-    let isLegacyDir = deployDir == legacyDefault
     let stateDir = effectiveStateDir()
     try? fm.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
 
-    // 0.5.x helper 会把新 app 用 WALGIT_DEPLOY_DIR=~/walgit 拉起来。先把旧
-    // 服务停掉，再把用户状态迁到 ~/.walgit；配置/凭证保留旧副本，旧 helper
-    // 仍用旧的 health URL，而新服务读新状态。
-    if isLegacyDir {
-        if let attrs = try? fm.attributesOfItem(atPath: "\(deployDir)/walgit"),
-           (attrs[.type] as? FileAttributeType) == .typeRegular {
-            // Stop the old screen/serve process below; the file itself stays
-            // until the compatibility bridge replaces it with a symlink.
+    let legacyConfig = "\(legacyDefault)/walgit.toml"
+    let legacyBinPath = "\(legacyDefault)/walgit"
+    let hasLegacy = fm.fileExists(atPath: legacyConfig)
+        || fm.fileExists(atPath: legacyBinPath)
+        || fm.fileExists(atPath: "\(legacyDefault)/walgit-ensure")
+    var legacyWasRunning = false
+
+    // Whether the old helper injected WALGIT_DEPLOY_DIR=~/walgit or the user
+    // dragged the new DMG over the app manually, both must stop the old
+    // screen/no-pidfile service and migrate ~/walgit user state. The bridge
+    // below is still only needed for the old in-app helper.
+    if hasLegacy {
+        let legacyListen = listenAddr(fromConfig: legacyConfig)
+        let port = legacyListen.split(separator: ":").last.map(String.init) ?? "8081"
+        legacyWasRunning = sh("curl -sf --max-time 2 'http://\(legacyListen)/healthz' >/dev/null 2>&1").0 == 0
+        if legacyWasRunning {
+            _ = sh("screen -S \(ProcessInfo.processInfo.environment["WALGIT_SCREEN_SESSION"] ?? "walgit-server") -X quit >/dev/null 2>&1 || true")
+            _ = sh("pid=$(lsof -tiTCP:\(port) -sTCP:LISTEN 2>/dev/null | head -1 || true); if [ -n \"$pid\" ]; then comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); case \"$comm\" in *walgit*) kill \"$pid\" 2>/dev/null || true;; esac; fi")
+            for _ in 0..<20 {
+                if sh("lsof -tiTCP:\(port) -sTCP:LISTEN >/dev/null 2>&1").0 != 0 { break }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
         }
-        let (listen, _, _) = deployConfig()
-        let port = listen.split(separator: ":").last.map(String.init) ?? "8081"
-        _ = sh("screen -S \(ProcessInfo.processInfo.environment["WALGIT_SCREEN_SESSION"] ?? "walgit-server") -X quit >/dev/null 2>&1 || true")
-        _ = sh("pid=$(lsof -tiTCP:\(port) -sTCP:LISTEN 2>/dev/null | head -1 || true); if [ -n \"$pid\" ]; then comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); case \"$comm\" in *walgit*) kill \"$pid\" 2>/dev/null || true;; esac; fi")
-        for _ in 0..<20 {
-            if sh("lsof -tiTCP:\(port) -sTCP:LISTEN >/dev/null 2>&1").0 != 0 { break }
-            Thread.sleep(forTimeInterval: 0.25)
-        }
-        migrateLegacyState(from: deployDir, to: canonical)
+        migrateLegacyState(from: legacyDefault, to: canonical)
     }
 
     // 用户配置：只在缺失时从 bundle 模板初始化，永不覆盖。
@@ -340,11 +360,11 @@ func bootstrapDeploy() {
     // 该版本之前的升级 helper 只认它启动时看到的 bridge dir。bridge 里的
     // walgit 指向 bundle，walgit-ensure 是临时转发壳；两者与 marker 一起在
     // 5 分钟后清理。
-    let bridgeDir = deployDir
+    let bridgeDir = hasLegacy ? legacyDefault : deployDir
     let legacyBin = "\(bridgeDir)/walgit"
     let legacyEnsure = "\(bridgeDir)/walgit-ensure"
     let legacyMarker = "\(bridgeDir)/.skeleton-version"
-    let legacyLayout = fm.fileExists(atPath: legacyBin) || fm.fileExists(atPath: legacyMarker)
+    let legacyLayout = hasLegacy || fm.fileExists(atPath: legacyBin) || fm.fileExists(atPath: legacyMarker)
     let bundledVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
     if legacyLayout && !bundledVersion.isEmpty {
@@ -425,14 +445,17 @@ func bootstrapDeploy() {
             logLine("bootstrap: CLI 软链失败: \(error)")
         }
     }
-    // Manual drag-install replaces the app while an old service may still be
-    // running from the previous bundle. If it is healthy but reports another
-    // version, restart it through the new bundle.
-    if !bundledVersion.isEmpty {
+    // If the old service was running, bring it back through the new bundle.
+    // Otherwise a manual drag-install may have replaced the app while a
+    // same-layout service is still running; restart only when healthy.
+    if legacyWasRunning {
+        let (rc, out) = sh("\(serviceCmd("start")) 2>&1")
+        logLine("bootstrap: 旧服务迁移后启动 rc=\(rc) \(out.suffix(160))")
+    } else if !bundledVersion.isEmpty {
         let (hc, hout) = sh("curl -sf --max-time 2 '\(healthURL)' 2>/dev/null || true")
         if hc == 0, !hout.isEmpty, healthVersion(hout) != "v\(bundledVersion)" {
-            _ = sh("\(serviceCmd("restart")) >/dev/null 2>&1 || true")
-            logLine("bootstrap: 服务版本落后，已尝试通过新 bundle 重启")
+            let (rc, out) = sh("\(serviceCmd("restart")) 2>&1")
+            logLine("bootstrap: 服务版本落后 restart rc=\(rc) \(out.suffix(160))")
         }
     }
     logLine("bootstrap: 状态目录就绪(\(stateDir))")
