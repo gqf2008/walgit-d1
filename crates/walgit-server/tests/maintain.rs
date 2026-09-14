@@ -806,6 +806,7 @@ async fn one_pass_settles_all_closed_empty_slots() -> anyhow::Result<()> {
             c.compaction.enabled = false;
             c.maintenance.checkpoints = false;
             c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
             // weekly (full) + hourly on weekly: the closed hours since the weekly are empty.
             c.bundles.strategy.retain(|s| s.name != "daily");
             for s in &mut c.bundles.strategy {
@@ -1451,6 +1452,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
             c.compaction.enabled = false;
             c.maintenance.checkpoints = false;
             c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::ZERO;
             c.bundles.strategy.retain(|s| s.name != "daily");
             for s in &mut c.bundles.strategy {
                 if s.name == "hourly" {
@@ -1479,12 +1481,28 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         .to_string();
     let id = walgit_git::RepoId::new("o", "r")?;
     let h = step!("open", server.state.registry.open(&id))?;
-    let now = std::time::SystemTime::now();
     let hour = std::time::Duration::from_secs(3600);
-    // History with explicit times: c1 ten days ago (so a weekly slot with state
-    // exists — a full with no state is cut from now), c2 six hours ago, nothing since.
-    // Revs arrive as one shell-flavored string ("<tip> ^<base>"); the pipe
-    // takes argv, so tokenize here like `sh` used to.
+    // Fixed synthetic clock: choose a weekly slot, put c1 just before it and
+    // c2 one hour after it, then run the pass six hours later. The pass builds
+    // the weekly at that slot (already below) but no newer weekly can exist;
+    // the first hourly after it sees c2 and later identical slots must settle.
+    let weekly = server
+        .state
+        .cfg
+        .bundles
+        .strategy
+        .iter()
+        .find(|s| s.name == "weekly")
+        .unwrap()
+        .clone();
+    let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000);
+    let weekly_slot = walgit_bundle::slots::last_slot_at_or_before(&weekly, base)?
+        .expect("weekly slot before fixed base");
+    let weekly_at = walgit_bundle::slots::from_epoch(weekly_slot);
+    let now = weekly_at + 6 * hour + walgit_bundle::slots::SLOT_CLOSE_GRACE;
+    // History with explicit times: c1 before the weekly, c2 after it, nothing
+    // since. Revs arrive as one shell-flavored string ("<tip> ^<base>"); the
+    // pipe takes argv, so tokenize here like `sh` used to.
     let pack_of = |revs: &str| -> anyhow::Result<Vec<u8>> {
         let mut first: Vec<&str> = vec!["rev-list", "--objects"];
         first.extend(revs.split_whitespace());
@@ -1520,7 +1538,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
             Some(p1),
             txn("refs/heads/main", "", &c1),
             std::collections::HashMap::default(),
-            now - 240 * hour
+            weekly_at - hour
         )
     )?;
     let p2 = ingest(pack_of(&format!("{c2} ^{c1}"))?).await;
@@ -1530,22 +1548,14 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
             Some(p2),
             txn("refs/heads/main", &c1, &c2),
             std::collections::HashMap::default(),
-            now - 6 * hour
+            weekly_at + hour
         )
     )?;
     step!("sync", h.sync())?;
 
-    // Weekly at the last Sunday before c2 (state as of then: c1).
-    let weekly = server
-        .state
-        .cfg
-        .bundles
-        .strategy
-        .iter()
-        .find(|s| s.name == "weekly")
-        .unwrap()
-        .clone();
-    let sunday = walgit_bundle::slots::last_slot_at_or_before(&weekly, now - 48 * hour)?.unwrap();
+    // Build the fixed weekly (state as of then: c1). run_pass_at will not
+    // build any newer weekly because `now` is only six hours after it.
+    let sunday = weekly_slot;
     let mut params = std::collections::HashMap::new();
     params.insert("strategy".to_string(), "weekly".to_string());
     params.insert("slot".to_string(), sunday.to_string());
@@ -1555,9 +1565,14 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
     assert!(t.wait_done(std::time::Duration::from_secs(30)).await);
 
     // Passes until idle: exactly ONE hourly (the slot that first sees c2); every
-    // later closed slot is recorded `unchanged since <that hourly>`.
+    // later closed slot is recorded `unchanged since <that hourly>`. The
+    // injected `now` keeps the real maintain path from selecting a newer
+    // weekly slot based on the CI wall clock.
     for _ in 0..8 {
-        let report = step!("pass", walgit_server::maintain::run_pass(&server.state))?;
+        let report = step!(
+            "pass",
+            walgit_server::maintain::run_pass_at(&server.state, now)
+        )?;
         if report.units == 0 {
             break;
         }
@@ -1588,7 +1603,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
     let rows = server
         .state
         .bundles
-        .plan(&id, std::time::SystemTime::now(), ctx)
+        .plan(&id, now, ctx)
         .await?;
     let dbg: Vec<_> = rows
         .iter()
@@ -1631,11 +1646,15 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         .map(|r| r.slot)
         .max();
     let other_closed = other_slot.is_some_and(|s| {
-        walgit_bundle::slots::slot_closed(&hourly, s, std::time::SystemTime::now())
+        walgit_bundle::slots::slot_closed(&hourly, s, now)
     });
     assert!(
-        !other_closed || !unchanged.is_empty(),
-        "the closed hour after it is skipped as unchanged: {:?}",
+        other_closed,
+        "the hour after the carrier must be closed at the synthetic now: {other_slot:?}"
+    );
+    assert!(
+        !unchanged.is_empty(),
+        "the closed hour after it must be skipped as unchanged: {:?}",
         list.skipped
             .iter()
             .map(|s| (s.slot, &s.reason))
@@ -1654,7 +1673,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         .filter(|r| {
             r.strategy == "hourly"
                 && r.status == walgit_bundle::slots::SlotStatus::Missing
-                && walgit_bundle::slots::slot_closed(&hourly, r.slot, std::time::SystemTime::now())
+                && walgit_bundle::slots::slot_closed(&hourly, r.slot, now)
         })
         .count();
     assert_eq!(closed_missing, 0, "{rows:?}");

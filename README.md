@@ -117,8 +117,8 @@ git fetch origin '+refs/collab/*:refs/collab/*'
   经安装器部署、没有源码树的机器只能重跑安装器；Release 感知的自动下载升级目前仅 macOS。
 - **macOS Release 感知升级**：托盘同时比对 GitHub Release 与源码仓库，
   下载 → 严格校验（sha256 / 版本 / 签名 / 公证）→ 原子换装 → 健康检查，失败回滚。
-- **安装包**：Linux `.deb`、Windows Inno Setup 安装器和 macOS 签名+公证 DMG
-  均由 `release.yml` 在打 tag 时构建；`workflow_dispatch` 可跑同一条打包链做签名演练。
+- **安装包**：Linux `.deb` 与 Windows Inno Setup 安装器由 `release.yml` 在打 tag 时构建；
+  macOS 签名+公证 DMG 由 `deploy/tray/macos/build-dmg.sh` 在 CI 之外构建后上传 Release。
 
 **工程与治理** — 上游没有这些；本分叉按 agent 协作的方式补上：
 issue/PR 模板与批次化流程、`AGENTS.md` 协作协议、CI 分级（fast tier / e2e /
@@ -241,12 +241,13 @@ Developer Mode or run elevated — exFAT drives silently cannot host links). Pas
 `--config NUL` where docs say `/dev/null`. The developer `just dev-store` rig assumes
 podman on POSIX; on Windows see `docs/WINDOWS.md` for the rustfs equivalent.
 
-macOS: this fork's local one-box shape runs the full server **on macOS** — the tray bundles a
-Mach-O `walgit` and starts it with `walgit serve` (`deploy/tray/macos/run-walgit.sh`), and the
-Swift tray plus the signed/notarized DMG are built from `deploy/tray/macos/` (`build-dmg.sh`),
-both locally and by the macOS release job; the macOS CI leg runs the tray Release/package guards.
-What is Linux-targeted is **production / multi-instance deployment** (containers, the Nix OCI image,
-tmpfs hosts, object-store-backed fleets), not the binary's ability to run on a Mac.
+macOS: this fork's local one-box shape runs the full server **on macOS** — the app bundle
+contains the Mach-O `walgit` and starts it through `walgit service`; user state stays under
+`~/.walgit`. The Swift tray plus the signed/notarized DMG are built from
+`deploy/tray/macos/build-dmg.sh`, both locally and by the macOS release job. The macOS CI leg
+runs the tray Release/package guards. What is Linux-targeted is **production /
+multi-instance deployment** (containers, the Nix OCI image, tmpfs hosts, object-store-backed
+fleets), not the binary's ability to run on a Mac.
 
 Roles (`server.roles`): `serve` (git, API, UI, bundles, LFS), `maintain` (checkpoints, bundles, compaction,
 fsck/repair), `events` (the webhook bridge). Empty = all. Any number of `serve` hosts may point at one bucket; give

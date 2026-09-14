@@ -5,9 +5,9 @@
 ## 菜单
 
 - **状态行**:`walgit 服务:运行中/已停止`(5 秒轮询 `/healthz`)
-- **启动 / 停止服务**:调用 `walgit service …`（`walgit-ensure` 已是转发壳）;Windows/Linux
-  以分离进程启动部署目录下的 `walgit(.exe) serve --config walgit.toml`,
-  pid 写 `walgit.pid`,停止 = kill 该 pid
+- **启动 / 停止服务**:macOS 直接调用安装目录里的 `walgit service …`；
+  Windows/Linux 由托盘的 supervisor 启动 `walgit serve`（setup wizard 保存后
+  exit 75 需要立即重启），pidfile 写到 `~/.walgit`。程序文件不复制到状态目录。
 - **⬆️ 发现新版本 — 点击升级** / **立即升级(拉 main 重建)**:升级**只由用户
   点击触发**——ff-merge main → `cargo build --release -p walgit-cli` →
   备份(`walgit.bak-tray`)→ 停 → 热换 → 起服务 → 15s 健康验证,
@@ -26,11 +26,11 @@ cargo build --release        # 产物 target/release/walgit-tray(.exe)
 (`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev`)——tray-icon 在
 Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统依赖。
 
-- macOS:产物可直接运行;若要打包成 .app(LSUIElement,登录项可见),
-  参考 `~/walgit/tray`(Swift 版)的 bundle 结构
-- Windows:在 Windows 主机上 `cargo build --release`;部署目录
-  `%USERPROFILE%\walgit` 放 `walgit.exe` + `walgit.toml`
-- Linux:同 Windows 形态(`~/walgit/`),桌面环境需支持 appindicator
+- macOS:产物可直接运行；正式 DMG 打包仍由 `deploy/tray/macos/` 负责，
+  切到 `tray-rs` 见 #183
+- Windows:在 Windows 主机上 `cargo build --release`；安装目录放
+  `walgit.exe` + `walgit-tray.exe`，状态目录是 `%USERPROFILE%\.walgit`
+- Linux:同 Windows 形态，状态目录是 `~/.walgit`，桌面环境需支持 appindicator
 
 ### Windows 说明(issue #68 修复后的行为)
 
@@ -48,15 +48,15 @@ Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统
 
 ## 约定
 
-- 部署目录:`$HOME/walgit`(Windows:`%USERPROFILE%\walgit`;release 的
-  `walgit-setup-<version>-x64.exe` 安装器——`deploy/windows/`——会装好全套)
+- 程序目录：安装目录 / App Bundle；状态目录：`~/.walgit`
+  (Windows: `%USERPROFILE%\.walgit`)
 - 源码仓库:`$WALGIT_REPO`,默认 `/Volumes/Workspace/GitHub/walgit`
 - 服务地址:`http://127.0.0.1:8081`(healthz)
-- 日志:`~/walgit/tray.log`
+- 日志:`~/.walgit/tray.log`
 
 ## 已知边界
 
 - 升级构建需要本机有 rustup/cargo(1.98.0 toolchain)与 git
-- Windows/Linux 的启动/停止用 pidfile;服务若在托盘之外启动(无 pidfile),
-  「停止服务」会报 no pidfile——先在托盘里启动一次即可纳管
+- 服务若在托盘之外启动且没有 pidfile，「停止服务」可能无法纳管；
+  先在托盘里启动一次即可。
 - `block` crate(上游 objc 依赖)有 future-incompat 提示,不影响功能

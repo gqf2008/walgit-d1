@@ -1161,9 +1161,13 @@ pub fn deploy_home() -> std::path::PathBuf {
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
+    // Windows installers and the tray use %USERPROFILE%; prefer it over HOME
+    // so the CLI's config/cache/pid paths cannot diverge when both are set.
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
 }
 

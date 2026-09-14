@@ -144,6 +144,13 @@ jobs:
           dpkg-deb --info walgit_0.0.0-ci_amd64.deb
           dpkg-deb --contents walgit_0.0.0-ci_amd64.deb | grep -E 'usr/bin/|usr/share/walgit/walgit.example.toml|usr/share/walgit/walgit.toml.template|usr/share/applications/walgit-tray.desktop'
           dpkg-deb --ctrl-tarfile walgit_0.0.0-ci_amd64.deb | tar -t | grep postinst
+          postinst="$(mktemp)"
+          dpkg-deb --ctrl-tarfile walgit_0.0.0-ci_amd64.deb | tar -xO ./postinst >"$postinst"
+          grep -Fq "base=\"\$home/.walgit\"" "$postinst"
+          if grep -q 'cp /usr/bin/walgit' "$postinst"; then
+            echo "postinst still copies the program into the user home" >&2
+            exit 1
+          fi
 
   # Known-red until the debt lands (issue #1, ~1300 pre-existing pedantic
   # hits): the gate fails by design, so it is a separate job with
