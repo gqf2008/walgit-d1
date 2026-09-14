@@ -241,9 +241,10 @@ Developer Mode or run elevated — exFAT drives silently cannot host links). Pas
 `--config NUL` where docs say `/dev/null`. The developer `just dev-store` rig assumes
 podman on POSIX; on Windows see `docs/WINDOWS.md` for the rustfs equivalent.
 
-macOS: this fork's local one-box shape runs the full server **on macOS** — the tray bundles a
-Mach-O `walgit` and starts it with `walgit serve` (`deploy/tray/macos/run-walgit.sh`), and the
-Swift tray plus the signed/notarized DMG are built here (`deploy/tray/macos/`, `build-dmg.sh`).
+macOS: this fork's local one-box shape runs the full server **on macOS** — the app bundle
+contains the Mach-O `walgit` and starts it through `walgit service`; user state stays under
+`~/.walgit`. The Swift tray plus the signed/notarized DMG are built here
+(`deploy/tray/macos/`, `build-dmg.sh`).
 The macOS CI leg runs the tray Release/package guards. What is Linux-targeted is **production /
 multi-instance deployment** (containers, the Nix OCI image, tmpfs hosts, object-store-backed
 fleets), not the binary's ability to run on a Mac.

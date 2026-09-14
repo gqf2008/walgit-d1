@@ -1,8 +1,8 @@
-# walgit.toml — 部署配置模板(由托盘首次启动写入 ~/walgit/walgit.toml)。
+# walgit.toml — 状态配置模板(由托盘首次启动写入 ~/.walgit/walgit.toml)。
 # 未配置态(D43):memory 后端且无 memory_backend_intentional → 首次启动
 # 进入 /setup 向导配置 S3/R2/GCS 与首管理员;保存后服务重启即生效。
-# 凭证约定(run-walgit.sh 存在才读):~/walgit/.r2-credentials 导出
-# R2_ACCESS_KEY / R2_SECRET_KEY,~/walgit/.walgit_token 放访问令牌。
+# 凭证约定:~/.walgit/.r2-credentials 导出
+# R2_ACCESS_KEY / R2_SECRET_KEY；~/.walgit/.walgit_token 放访问令牌。
 # 详细键位见源码仓库 walgit.example.toml。
 
 [server]

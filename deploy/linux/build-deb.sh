@@ -28,25 +28,23 @@ mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/walgit" "$PKG/usr/share/ap
 
 cp "$BIN_DIR"/walgit "$BIN_DIR"/walgit-server "$BIN_DIR"/walgit-tray "$PKG/usr/bin/"
 cp "$REPO_ROOT/walgit.example.toml" "$PKG/usr/share/walgit/"
-# The D43 unconfigured template: postinst bootstraps ~/walgit for the installing
-# user (the tray spawns ~/walgit/walgit, exactly like the Windows installer and
-# the macOS DMG bootstrap).
+# The D43 unconfigured template: postinst initializes ~/.walgit state for the
+# installing user. Programs stay in /usr/bin; no binary is copied into $HOME.
 cp "$REPO_ROOT/deploy/tray/macos/walgit.toml.template" "$PKG/usr/share/walgit/walgit.toml.template"
 cat > "$PKG/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
-# Bootstrap the per-user deployment dir for the installing user (idempotent,
-# existing files never overwritten): walgit binary + D43 unconfigured config.
+# Initialize the per-user state dir for the installing user (idempotent,
+# existing files never overwritten). Programs stay in /usr/bin.
 # Runs under sudo dpkg -i; SUDO_USER names the human.
 set -eu
 user="${SUDO_USER:-}"
 if [ -z "$user" ] || ! id -u "$user" >/dev/null 2>&1; then
-    echo "walgit: no SUDO_USER — skipping ~/walgit bootstrap" >&2
+    echo "walgit: no SUDO_USER — skipping ~/.walgit bootstrap" >&2
     exit 0
 fi
 home="$(getent passwd "$user" | cut -d: -f6)"
-base="$home/walgit"
+base="$home/.walgit"
 mkdir -p "$base"
-[ -x "$base/walgit" ] || cp /usr/bin/walgit "$base/walgit"
 [ -f "$base/walgit.toml" ] || cp /usr/share/walgit/walgit.toml.template "$base/walgit.toml"
 chown -R "$user" "$base" 2>/dev/null || true
 exit 0

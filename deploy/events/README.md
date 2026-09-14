@@ -24,7 +24,7 @@ WALGIT_EVENTS_SECRET=<桥配置的 secret> \
 python3 deploy/events/agent-receiver.py --port 8099
 ```
 
-- 事件追加到 `~/walgit/events.jsonl`(每行一个 `ref` 事件,含 `_walgit.seq`)
+- 事件追加到 `~/.walgit/events.jsonl`(每行一个 `ref` 事件,含 `_walgit.seq`)
 - 批级去重:`X-Walgit-Delivery` 已见过的批次 ack 但不重复落盘
 - 验签:配置了 secret 时,`X-Walgit-Signature`(sha256 HMAC)常量时间比对
 
@@ -41,7 +41,7 @@ python3 deploy/events/agent-receiver.py --port 8099
 
 ```bash
 # 1) 推一个提交 → events.jsonl 立刻出现 ref 事件(create/update)
-git push origin main && tail -1 ~/walgit/events.jsonl
+git push origin main && tail -1 ~/.walgit/events.jsonl
 
 # 2) at-least-once:停接收器 → 再推一个 → 重启接收器
 #    (桥的 sweep 重投同一批,重启后的接收器应补收且不重复)

@@ -35,3 +35,7 @@ result-*
 # Locally reproducible.
 server-integration.log
 cli-integration.log
+
+# Python bytecode caches (agent scripts/tests)
+__pycache__/
+*.pyc

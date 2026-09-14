@@ -42,7 +42,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `walgit.example.toml` | Every config key with its default and a comment. Change it with the code. |
 | `walgit.standalone.toml` | The one-machine shape: `walgit-server --config walgit.standalone.toml` → `https://walgit.localhost:8080/`. |
 | `deploy/nginx.conf.example` | An optional nginx in front; documents the `X-Accel-Redirect` byte-offload contract. |
-| `deploy/tray/` | The tray apps for a local deployment (macOS Swift + cross-platform Rust): start/stop, update detection, click-to-upgrade; see its README. |
+| `deploy/tray/` | The tray apps for a local deployment (macOS Swift + cross-platform Rust): start/stop, update detection, click-to-upgrade. Program files stay in the app/install directory; `~/.walgit` is user state only. See its README. |
 | `deploy/windows/` | The Windows installer (Inno Setup): per-user install to `%USERPROFILE%\walgit` (binary + tray + initial config), autostart; built into releases by `release.yml`. |
 | `deploy/linux/` | The linux `.deb` assembly (`build-deb.sh`, dpkg-deb): binaries + example config + tray desktop entry; built into releases by `release.yml`, validated on every PR by `ci.yml`. |
 | `deploy/tray/macos/build-dmg.sh` | The macOS release DMG pipeline (built outside CI): app + deployment skeleton → sign/notarize/staple → drag-install DMG, signed/notarized/stapled. |

@@ -31,9 +31,14 @@ swiftc -O -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swif
 # 内嵌 Mach-O 先 ad-hoc 垫底;build-dmg.sh 会用 Developer ID 重签后公证。
 cp "$WALGIT_BIN" "$RES_DIR/walgit"
 codesign --force --sign - "$RES_DIR/walgit" 2>/dev/null || true
-cp run-walgit.sh release-install.sh "$RES_DIR/"
+cp release-install.sh "$RES_DIR/"
 cp walgit.toml.template "$RES_DIR/walgit.toml"
-printf '%s\n' "$VERSION" > "$RES_DIR/skeleton.version"
+for required in walgit release-install.sh walgit.toml; do
+    [ -e "$RES_DIR/$required" ] || {
+        echo "missing required app resource: $required" >&2
+        exit 1
+    }
+done
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
