@@ -25,7 +25,7 @@ func deployConfig() -> (listen: String, backend: String, memoryIntentional: Bool
     var listen = ""
     var backend = ""
     var intentional = false
-    let path = "\(deployDir)/walgit.toml"
+    let path = "\(effectiveStateDir())/walgit.toml"
     if let text = try? String(contentsOfFile: path, encoding: .utf8) {
         for raw in text.split(separator: "\n") {
             // TOML 行尾注释(#115 审查修正):仓库模板全是
@@ -54,7 +54,7 @@ var webURL: URL {
     let port = deployConfig().listen.split(separator: ":").last.map(String.init) ?? "8081"
     return URL(string: "http://walgit.localhost:\(port)/")!
 }
-let logPath = "\(deployDir)/tray.log"
+let logPath = "\(effectiveStateDir())/tray.log"
 
 /// 服务存活统一由 App Bundle 内的 walgit 二进制负责(`walgit service …`):
 /// 托盘只是调用方。配置路径固定为 ~/.walgit/walgit.toml,与探活/开页同源。
@@ -72,7 +72,7 @@ func serviceBinaryPath() -> String {
 }
 
 func serviceCmd(_ verb: String) -> String {
-    "'\(serviceBinaryPath())' service \(verb) --config '\(deployDir)/walgit.toml'"
+    "'\(serviceBinaryPath())' service \(verb) --config '\(effectiveStateDir())/walgit.toml'"
 }
 
 func logLine(_ s: String) {
@@ -225,6 +225,13 @@ private func canonicalStateDir() -> String {
     return NSString(string: "~/.walgit").expandingTildeInPath
 }
 
+/// All ongoing state/config/log/service paths resolve through here. The legacy
+/// helper may still pass WALGIT_DEPLOY_DIR=~/walgit; that is only the bridge
+/// directory, not the state directory.
+private func effectiveStateDir() -> String {
+    canonicalStateDir()
+}
+
 private func legacyDefaultStateDir() -> String {
     if let override = ProcessInfo.processInfo.environment["WALGIT_LEGACY_DIR"], !override.isEmpty {
         return override
@@ -250,29 +257,24 @@ private func removeManagedFileIfSafe(_ path: String) {
     logLine("bootstrap: 已移除旧托管文件 \(path)")
 }
 
-/// Copy credentials/config (keep the legacy copy for the old helper's own
-/// health URL) and move the rest of user state. Nothing is overwritten.
+/// Copy user state into the canonical directory without moving anything:
+/// rollback of the old app must still find the old installation complete.
+/// `cache` is disposable by design and is intentionally not duplicated.
 private func migrateLegacyState(from oldDir: String, to newDir: String) {
     let fm = FileManager.default
     try? fm.createDirectory(atPath: newDir, withIntermediateDirectories: true)
-    let managed: Set<String> = ["walgit", "walgit-ensure", "run-walgit.sh", ".skeleton-version"]
-    let copied: Set<String> = ["walgit.toml", ".r2-credentials", ".walgit_token"]
-    guard let entries = try? fm.contentsOfDirectory(atPath: oldDir) else { return }
-    for name in entries where !managed.contains(name) {
+    let items = ["walgit.toml", ".r2-credentials", ".walgit_token", "keys", ".events-seen"]
+    for name in items {
         let src = "\(oldDir)/\(name)"
         let dst = "\(newDir)/\(name)"
+        guard fm.fileExists(atPath: src) else { continue }
         if fm.fileExists(atPath: dst) {
             logLine("bootstrap: 迁移跳过已存在项 \(name)")
             continue
         }
         do {
-            if copied.contains(name) {
-                try fm.copyItem(atPath: src, toPath: dst)
-                logLine("bootstrap: 已复制旧状态 \(name)")
-            } else {
-                try fm.moveItem(atPath: src, toPath: dst)
-                logLine("bootstrap: 已迁移旧状态 \(name)")
-            }
+            try fm.copyItem(atPath: src, toPath: dst)
+            logLine("bootstrap: 已复制旧状态 \(name)")
         } catch {
             logLine("bootstrap: 迁移旧状态 \(name) 失败: \(error)")
         }
@@ -301,7 +303,7 @@ func bootstrapDeploy() {
     let canonical = canonicalStateDir()
     let legacyDefault = legacyDefaultStateDir()
     let isLegacyDir = deployDir == legacyDefault
-    let stateDir = isLegacyDir ? canonical : deployDir
+    let stateDir = effectiveStateDir()
     try? fm.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
 
     // 0.5.x helper 会把新 app 用 WALGIT_DEPLOY_DIR=~/walgit 拉起来。先把旧
@@ -317,6 +319,10 @@ func bootstrapDeploy() {
         let port = listen.split(separator: ":").last.map(String.init) ?? "8081"
         _ = sh("screen -S \(ProcessInfo.processInfo.environment["WALGIT_SCREEN_SESSION"] ?? "walgit-server") -X quit >/dev/null 2>&1 || true")
         _ = sh("pid=$(lsof -tiTCP:\(port) -sTCP:LISTEN 2>/dev/null | head -1 || true); if [ -n \"$pid\" ]; then comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); case \"$comm\" in *walgit*) kill \"$pid\" 2>/dev/null || true;; esac; fi")
+        for _ in 0..<20 {
+            if sh("lsof -tiTCP:\(port) -sTCP:LISTEN >/dev/null 2>&1").0 != 0 { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
         migrateLegacyState(from: deployDir, to: canonical)
     }
 
@@ -390,7 +396,7 @@ func bootstrapDeploy() {
     }
 
     // CLI 软链：终端入口指向 App Bundle 内的程序，不制造第二份副本。
-    if !deployDir.hasPrefix("/") {
+    if !stateDir.hasPrefix("/") {
         logLine("bootstrap: deployDir 非绝对路径,跳过 CLI 软链")
     } else {
         let cliLink = ProcessInfo.processInfo.environment["WALGIT_CLI_LINK"].flatMap { $0.isEmpty ? nil : $0 }
@@ -419,7 +425,17 @@ func bootstrapDeploy() {
             logLine("bootstrap: CLI 软链失败: \(error)")
         }
     }
-    logLine("bootstrap: 状态目录就绪(\(deployDir))")
+    // Manual drag-install replaces the app while an old service may still be
+    // running from the previous bundle. If it is healthy but reports another
+    // version, restart it through the new bundle.
+    if !bundledVersion.isEmpty {
+        let (hc, hout) = sh("curl -sf --max-time 2 '\(healthURL)' 2>/dev/null || true")
+        if hc == 0, !hout.isEmpty, healthVersion(hout) != "v\(bundledVersion)" {
+            _ = sh("\(serviceCmd("restart")) >/dev/null 2>&1 || true")
+            logLine("bootstrap: 服务版本落后，已尝试通过新 bundle 重启")
+        }
+    }
+    logLine("bootstrap: 状态目录就绪(\(stateDir))")
 }
 
 enum UpdateState {
@@ -769,7 +785,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             proc.executableURL = URL(fileURLWithPath: "/bin/bash")
             proc.arguments = [script, dmg, mount, Bundle.main.bundlePath, release.version, String(ProcessInfo.processInfo.processIdentifier)]
             var env = ProcessInfo.processInfo.environment
-            env["WALGIT_DEPLOY_DIR"] = deployDir
+            env["WALGIT_DEPLOY_DIR"] = effectiveStateDir()
             proc.environment = env
             proc.standardOutput = log
             proc.standardError = log

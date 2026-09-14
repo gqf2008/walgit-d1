@@ -109,6 +109,10 @@ legacy_stop() {
                 *) log "legacy stop skipped: port $port held by $comm" ;;
             esac
         fi
+        for _ in $(seq 1 20); do
+            lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 || break
+            sleep 0.25
+        done
     fi
 }
 

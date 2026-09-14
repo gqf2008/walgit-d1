@@ -128,7 +128,8 @@ EOF
         chmod +x "$state/$stale"
     done
 
-    WALGIT_BOOTSTRAP_ONLY=1 WALGIT_DEPLOY_DIR="$state" WALGIT_CLI_LINK="$base/bin/walgit" \
+    WALGIT_BOOTSTRAP_ONLY=1 WALGIT_STATE_DIR="$state" WALGIT_DEPLOY_DIR="$state" \
+        WALGIT_CLI_LINK="$base/bin/walgit" \
         "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1
     [ -f "$state/walgit.toml" ] || { echo "FAIL(bootstrap): config not initialized" >&2; return 1; }
     grep -q "listen = \"127.0.0.1:$port\"" "$state/walgit.toml" \
@@ -186,8 +187,9 @@ EOF
 
     [ -f "$new/walgit.toml" ] || { echo "FAIL(legacy-migration): config not copied" >&2; return 1; }
     [ -f "$new/.r2-credentials" ] || { echo "FAIL(legacy-migration): credentials not copied" >&2; return 1; }
-    [ -f "$new/keys/k" ] || { echo "FAIL(legacy-migration): keys not moved" >&2; return 1; }
-    [ -f "$new/cache/c" ] || { echo "FAIL(legacy-migration): cache not moved" >&2; return 1; }
+    [ -f "$new/keys/k" ] || { echo "FAIL(legacy-migration): keys not copied" >&2; return 1; }
+    [ -f "$old/keys/k" ] || { echo "FAIL(legacy-migration): old keys moved" >&2; return 1; }
+    [ -f "$old/cache/c" ] || { echo "FAIL(legacy-migration): old cache moved" >&2; return 1; }
     [ -f "$old/walgit.toml" ] || { echo "FAIL(legacy-migration): old config not retained" >&2; return 1; }
     [ "$(readlink "$old/walgit")" = "$res/walgit" ] \
         || { echo "FAIL(legacy-migration): bridge symlink missing" >&2; return 1; }
