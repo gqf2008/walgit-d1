@@ -3354,3 +3354,65 @@ async fn a_permanently_failing_unit_hands_the_pass_to_lower_priority_work() -> a
     );
     Ok(())
 }
+
+/// #194 复审：**多个** kind 同时处于退避时，兜底不能只做一次「无 backoff」规划 ——
+/// 那样永远选中优先级最高且仍在失败的那个，较低的 kind 依旧永远拿不到机会。
+/// 这里预置 `repair`（必然失败）与 `gc` 都在退避，断言 `gc` 仍能在同一个 pass 拿到
+/// 机会（`ran_kinds` 的轮转 + 单元预算是这条路径的唯一依赖）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backing_off_kinds_rotate_instead_of_starving_the_lower_one() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::FsckReport;
+    use walgit_server::maintain::{BACKOFF_AFTER_FAILURES, Backoff, run_pass_with_backoff};
+    use walgit_store::{ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.upstream.git = Some("https://127.0.0.1:9/nonexistent-gc-fairness.git".to_string());
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let fsck = FsckReport {
+        seq: h.manifest().head_seq,
+        at: Some(walgit_proto::time::now()),
+        host: "fairness-test".into(),
+        missing: vec!["0".repeat(40)],
+        missing_total: 1,
+        problems: 0,
+        elapsed_secs: 0.0,
+        repaired_seq: 0,
+    };
+    step!(
+        "fsck.pb",
+        h.store()
+            .put_bytes(keys::FSCK, fsck.encode_to_vec(), PutMode::Overwrite)
+    )?;
+
+    // Both kinds are already past the threshold: `repair` keeps failing, `gc`
+    // would succeed but sits below it in the priority order.
+    let mut backoff = Backoff::default();
+    for _ in 0..BACKOFF_AFTER_FAILURES {
+        backoff.record_failure(&id, "repair");
+        backoff.record_failure(&id, "gc");
+    }
+    let report = run_pass_with_backoff(&server.state, &mut backoff).await?;
+    assert!(
+        report.skipped >= 1,
+        "the failing kind still gets its turn (retrying is the loop's job)"
+    );
+    assert!(
+        h.store().get_bytes(keys::GC).await?.is_some(),
+        "the lower backed-off kind (gc) must get a turn instead of the higher one taking every fallback"
+    );
+    Ok(())
+}

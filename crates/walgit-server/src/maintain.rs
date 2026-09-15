@@ -152,6 +152,19 @@ pub enum Unit {
 /// when lower-priority work is also due (#194).
 pub const BACKOFF_AFTER_FAILURES: u32 = 3;
 
+/// Every kind the planner can return (the labels [`unit_kind`] produces), so
+/// backoff bookkeeping can enumerate "which kinds are being skipped".
+pub const UNIT_KINDS: [&str; 8] = [
+    "checkpoint",
+    "repair",
+    "base-rebuild",
+    "bundle",
+    "compact",
+    "rev-index",
+    "gc",
+    "fsck",
+];
+
 /// Units one repository may attempt in a single pass. The pass used to stop at
 /// the first unit; a repeatedly failing high-priority unit now hands the pass to
 /// the work below it, so the number of attempts has to stay bounded.
@@ -200,13 +213,13 @@ impl Backoff {
         self.strikes(repo, kind) >= BACKOFF_AFTER_FAILURES
     }
 
-    /// Any kind of this repo currently in backoff (drives the "only work left"
-    /// retry in the pass loop).
-    fn any_for(&self, repo: &RepoId) -> bool {
-        let prefix = repo.to_string();
-        self.failures
+    /// The kinds of this repo currently in backoff, in planner priority order.
+    pub fn skipped_kinds(&self, repo: &RepoId) -> Vec<&'static str> {
+        UNIT_KINDS
             .iter()
-            .any(|((r, _), n)| *r == prefix && *n >= BACKOFF_AFTER_FAILURES)
+            .copied()
+            .filter(|kind| self.should_skip(repo, kind))
+            .collect()
     }
 }
 
@@ -326,21 +339,24 @@ fn record_plan(
 /// The next unit for `id` on this host (pure w.r.t. side effects except a
 /// refs sync and a bundle-list read).
 pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Unit> {
-    next_unit_at(state, id, SystemTime::now(), None).await
+    next_unit_at(state, id, SystemTime::now(), &[]).await
 }
 
-/// `next_unit` with an injected planner clock and an optional backoff: kinds
-/// this repo has failed [`BACKOFF_AFTER_FAILURES`] times in a row are skipped,
-/// so the pass can reach the work below them (#194). Production passes
-/// `SystemTime::now()`; tests use one fixed instant for plan + settle.
+/// `next_unit` with an injected planner clock and an explicit skip list: kinds
+/// in `skip` are passed over, so the caller can reach the work below them
+/// (#194). The pass composes it from (a) the kinds this repo has failed
+/// [`BACKOFF_AFTER_FAILURES`] times in a row and (b) the kinds it already ran in
+/// this pass — which is what makes a multi-kind backoff rotate instead of
+/// letting the highest-priority failing kind take every fallback turn.
+/// Production passes `SystemTime::now()`; tests use one fixed instant for plan
+/// and settle.
 async fn next_unit_at(
     state: &Arc<AppState>,
     id: &RepoId,
     now: SystemTime,
-    backoff: Option<&Backoff>,
+    skip: &[&str],
 ) -> anyhow::Result<Unit> {
-    // Planner-local names match the labels `run_pass` records failures under.
-    let skip = |kind: &str| backoff.is_some_and(|b| b.should_skip(id, kind));
+    let skip = |kind: &str| skip.contains(&kind);
     if !state.cfg.placement.maintains(id.owner(), id.name()) {
         return Ok(Unit::NotAssigned);
     }
@@ -754,13 +770,10 @@ async fn run_pass_inner(
         //    priority work after a repeatedly failing kind (#194).
         let mut stale_slots = 0u32;
         let mut unit_attempts = 0u32;
-        // A kind in backoff that turns out to be the *only* due work still gets
-        // one attempt this pass (retrying is the loop's whole job); remembered
-        // so the retry cannot loop.
-        let mut retried_backoff = false;
-        // Kinds already attempted in this pass: a kind that ran (and failed)
-        // must not be re-entered through the "only work left" fallback, or one
-        // pass would burn the whole backoff budget on the same unit.
+        // Kinds already attempted in this pass. Two jobs: a kind that ran (and
+        // failed) is not re-entered through the "only work left" fallback, and
+        // when *several* kinds are in backoff the fallback rotates through them
+        // instead of letting the highest-priority failing kind take every turn.
         let mut ran_kinds: Vec<&'static str> = Vec::new();
         loop {
             // Per iteration: set only by the unit that just ran.
@@ -769,7 +782,11 @@ async fn run_pass_inner(
             // Production keeps the original per-planning-call clock; only the
             // test entry point freezes it for a synthetic scenario.
             let planner_now = fixed_now.unwrap_or_else(SystemTime::now);
-            let planned = match next_unit_at(state, &id, planner_now, Some(backoff)).await {
+            // Skip what is in backoff *and* what this pass already ran.
+            let backed_off = backoff.skipped_kinds(&id);
+            let mut skip: Vec<&str> = backed_off.clone();
+            skip.extend(ran_kinds.iter().copied());
+            let planned = match next_unit_at(state, &id, planner_now, &skip).await {
                 Ok(u) => u,
                 Err(e) => {
                     warn!(repo = %id, error = %e, "maintenance: planning failed");
@@ -777,16 +794,14 @@ async fn run_pass_inner(
                     break;
                 }
             };
-            // Nothing left once the backing-off kinds are skipped: if this repo
-            // has a kind in backoff, it is now the only due work — retry it.
-            let unit = if matches!(planned, Unit::Idle) && !retried_backoff && backoff.any_for(&id)
-            {
-                retried_backoff = true;
-                match next_unit_at(state, &id, planner_now, None).await {
-                    Ok(u) if ran_kinds.contains(&unit_kind(&u)) => {
-                        // Already attempted this pass: nothing left to do here.
-                        Unit::Idle
-                    }
+            // Nothing left once those are skipped: the backing-off kinds are the
+            // only due work, so give them a turn — `ran_kinds` keeps it rotating
+            // (each iteration the next backed-off kind gets its chance) and the
+            // unit budget keeps the pass bounded.
+            let unit = if matches!(planned, Unit::Idle) && !backed_off.is_empty() {
+                let retry_skip: Vec<&str> = ran_kinds.clone();
+                match next_unit_at(state, &id, planner_now, &retry_skip).await {
+                    Ok(u) if ran_kinds.contains(&unit_kind(&u)) => Unit::Idle,
                     Ok(u) => u,
                     Err(e) => {
                         warn!(repo = %id, error = %e, "maintenance: planning failed");
@@ -921,7 +936,6 @@ async fn run_pass_inner(
             // A unit that keeps failing hands the pass to the work below it —
             // bounded by the unit budget, so one repo cannot hold the loop.
             if handoff && unit_attempts < MAX_UNITS_PER_REPO_PER_PASS {
-                handoff = false;
                 continue;
             }
             break;
