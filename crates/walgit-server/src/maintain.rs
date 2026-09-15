@@ -1,8 +1,11 @@
 //! The `maintain` role: a **permanent, self-healing priority loop**. Every
 //! `maintenance.interval`, for each *assigned* repository (`[maintenance]
 //! repos` minus `exclude` — placement by rule), it picks the most important
-//! unit of work and does exactly ONE bounded unit as a task (discoverable at
-//! `…/tasks`, visible on the WAL page):
+//! unit of work and does a bounded amount of it as a task (discoverable at
+//! `…/tasks`, visible on the WAL page). Normally that is exactly one unit; a
+//! unit that keeps failing hands the rest of the pass to the work below it
+//! (`Backoff`, at most [`MAX_UNITS_PER_REPO_PER_PASS`] real units), so a
+//! permanently failing high-priority unit cannot starve the loop:
 //!
 //! 1. checkpoint-if-due (refs-level; works for any repo on any host),
 //! 2. the missing **weekly** slot (full bundle; compose for repos whose base is
@@ -183,6 +186,11 @@ const MAX_UNITS_PER_REPO_PER_PASS: u32 = 3;
 #[derive(Debug, Default)]
 pub struct Backoff {
     failures: std::collections::HashMap<(String, String), u32>,
+    /// Per-repo round-robin cursor over the backed-off kinds. Without it a pass
+    /// that can only fund [`MAX_UNITS_PER_REPO_PER_PASS`] attempts would retry
+    /// the same top-priority failing kinds every pass and never reach the ones
+    /// below them (#194 review).
+    rotation: std::collections::HashMap<String, usize>,
 }
 
 impl Backoff {
@@ -220,6 +228,22 @@ impl Backoff {
             .copied()
             .filter(|kind| self.should_skip(repo, kind))
             .collect()
+    }
+
+    /// Next backed-off kind to give a turn to, round-robin, advancing the cursor
+    /// so the *next* pass starts one further along. A pass can fund only a few
+    /// attempts, so this — not the per-pass `ran_kinds` — is what keeps more
+    /// than [`MAX_UNITS_PER_REPO_PER_PASS`] backing-off kinds from starving.
+    pub fn next_rotation(&mut self, repo: &RepoId) -> Option<&'static str> {
+        let kinds = self.skipped_kinds(repo);
+        if kinds.is_empty() {
+            return None;
+        }
+        let key = repo.to_string();
+        let cursor = self.rotation.entry(key).or_default();
+        let candidate = kinds[*cursor % kinds.len()];
+        *cursor = cursor.wrapping_add(1);
+        Some(candidate)
     }
 }
 
@@ -719,8 +743,9 @@ pub async fn upcoming(
     out
 }
 
-/// One pass: one unit per assigned repository (a repeatedly failing unit may
-/// hand the pass to the work below it — see [`Backoff`]). Callers that want the
+/// One pass per assigned repository: normally one unit, and at most
+/// [`MAX_UNITS_PER_REPO_PER_PASS`] real units when a repeatedly failing one
+/// hands the rest of the pass to the work below it ([`Backoff`]). Callers that want the
 /// backoff to persist across passes (the maintainer loop) use
 /// [`run_pass_with_backoff`]; this entry point starts from a fresh one.
 pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
@@ -756,7 +781,8 @@ async fn run_pass_inner(
             break;
         }
         report.repos += 1;
-        // One bounded unit of real work per repository per pass. A bundle slot
+        // A bounded amount of real work per repository per pass — one unit, or
+        // up to MAX_UNITS_PER_REPO_PER_PASS when a failing kind hands off. A bundle slot
         // that turns out to have nothing to cut (too small, no state as of the
         // slot) is not work: re-plan at once instead of spending a whole pass
         // per stale slot (a large repository after the 08-21 restart: ~30 such slots stood
@@ -782,11 +808,11 @@ async fn run_pass_inner(
             // Production keeps the original per-planning-call clock; only the
             // test entry point freezes it for a synthetic scenario.
             let planner_now = fixed_now.unwrap_or_else(SystemTime::now);
-            // Skip what is in backoff *and* what this pass already ran.
+            // Normal planning skips only the backing-off kinds: the stale
+            // bundle skip-through (`ran_kinds` covers `bundle`) must keep its own
+            // 48-slot budget, exactly as before this change.
             let backed_off = backoff.skipped_kinds(&id);
-            let mut skip: Vec<&str> = backed_off.clone();
-            skip.extend(ran_kinds.iter().copied());
-            let planned = match next_unit_at(state, &id, planner_now, &skip).await {
+            let planned = match next_unit_at(state, &id, planner_now, &backed_off).await {
                 Ok(u) => u,
                 Err(e) => {
                     warn!(repo = %id, error = %e, "maintenance: planning failed");
@@ -799,15 +825,27 @@ async fn run_pass_inner(
             // (each iteration the next backed-off kind gets its chance) and the
             // unit budget keeps the pass bounded.
             let unit = if matches!(planned, Unit::Idle) && !backed_off.is_empty() {
-                let retry_skip: Vec<&str> = ran_kinds.clone();
-                match next_unit_at(state, &id, planner_now, &retry_skip).await {
-                    Ok(u) if ran_kinds.contains(&unit_kind(&u)) => Unit::Idle,
-                    Ok(u) => u,
-                    Err(e) => {
-                        warn!(repo = %id, error = %e, "maintenance: planning failed");
-                        report.skipped += 1;
-                        break;
+                // The backing-off kinds are the only work left. Give the *next*
+                // one a turn (round-robin across passes), never one this pass
+                // already ran — a single kind cannot eat every pass.
+                match backoff.next_rotation(&id) {
+                    Some(candidate) if !ran_kinds.contains(&candidate) => {
+                        let only: Vec<&str> = UNIT_KINDS
+                            .iter()
+                            .copied()
+                            .filter(|k| *k != candidate)
+                            .collect();
+                        match next_unit_at(state, &id, planner_now, &only).await {
+                            Ok(u) if unit_kind(&u) == candidate => u,
+                            Ok(_) => Unit::Idle,
+                            Err(e) => {
+                                warn!(repo = %id, error = %e, "maintenance: planning failed");
+                                report.skipped += 1;
+                                break;
+                            }
+                        }
                     }
+                    _ => Unit::Idle,
                 }
             } else {
                 planned
@@ -1102,6 +1140,33 @@ mod backoff_tests {
     }
 
     #[test]
+    fn rotation_advances_across_passes_so_more_kinds_than_the_unit_budget_still_get_turns() {
+        // 4 backed-off kinds, but a pass can fund only MAX_UNITS_PER_REPO_PER_PASS
+        // attempts: the cursor (not the per-pass `ran_kinds`) must advance, or
+        // the 4th kind would never be reached.
+        let mut b = Backoff::default();
+        let id = repo();
+        for kind in ["repair", "base-rebuild", "bundle", "gc"] {
+            for _ in 0..BACKOFF_AFTER_FAILURES {
+                b.record_failure(&id, kind);
+            }
+        }
+        assert_eq!(
+            b.skipped_kinds(&id),
+            vec!["repair", "base-rebuild", "bundle", "gc"],
+            "all four are in backoff, in planner priority order"
+        );
+        let seen: Vec<&str> = (0..4).filter_map(|_| b.next_rotation(&id)).collect();
+        assert_eq!(
+            seen,
+            vec!["repair", "base-rebuild", "bundle", "gc"],
+            "each pass starts one further along, so every kind gets a turn"
+        );
+        // …and it wraps around rather than running off the end.
+        assert_eq!(b.next_rotation(&id), Some("repair"));
+    }
+
+    #[test]
     fn a_backed_off_kind_is_still_the_only_work_when_nothing_else_is_due() {
         let mut b = Backoff::default();
         let id = repo();
@@ -1109,11 +1174,16 @@ mod backoff_tests {
             b.record_failure(&id, "bundle");
         }
         assert!(b.should_skip(&id, "bundle"));
-        // `any_for` is what the pass loop uses to fall back to the backing-off
-        // kind when skipping it leaves nothing due.
-        assert!(b.any_for(&id), "the pass can tell there is work in backoff");
+        // `skipped_kinds` is what the pass loop composes its fallback from when
+        // skipping the backing-off kinds leaves nothing due.
+        assert_eq!(
+            b.skipped_kinds(&id),
+            vec!["bundle"],
+            "the pass can tell which kinds are being skipped"
+        );
         assert!(
-            !b.any_for(&RepoId::new("o", "other").expect("id")),
+            b.skipped_kinds(&RepoId::new("o", "other").expect("id"))
+                .is_empty(),
             "per repo, not global"
         );
     }
