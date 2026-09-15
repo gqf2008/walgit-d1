@@ -78,16 +78,44 @@ pub async fn refs_as_of(
     replay_refs(handle, Cut::Time(at)).await
 }
 
-/// Ref state **at** WAL `seq` exactly (the newest checkpoint at or before it + every ref
-/// transaction through `seq`, in memory). `Err(Corrupt)` when the log before the only checkpoint
-/// is folded away (`min_seq > seq`): that state is no longer replayable. Used by the weekly
-/// compose, whose header must carry the refs at the base pack's seq whatever moved since.
+/// Whether the manifest's log segments cover every seq in `(after_seq, through_seq]`.
+/// This is the guard that keeps a retained witness from silently answering for an older
+/// cut: a witness at `w < cut` is only usable when the tail `(w, cut]` is present.
+fn log_tail_is_contiguous(
+    manifest: &walgit_proto::v1::Manifest,
+    after_seq: u64,
+    through_seq: u64,
+) -> bool {
+    if after_seq >= through_seq {
+        return true;
+    }
 
-/// Newest **retained witness checkpoint** at or before `cut_seq` (#195): a
-/// `checkpoints/<seq>/` directory holding both objects the replay needs
-/// (`checkpoint.pb` + `refs.pb`), found by listing. Returns `None` when there is
-/// nothing usable, so the caller keeps its existing "not replayable" behaviour.
-async fn retained_witness_at_or_before(
+    let mut next = after_seq.saturating_add(1);
+    let mut segments: Vec<_> = manifest
+        .log_segments
+        .iter()
+        .filter(|s| s.last_seq >= next && s.first_seq <= through_seq)
+        .collect();
+    segments.sort_by_key(|s| s.first_seq);
+    for segment in segments {
+        if segment.first_seq > next {
+            return false;
+        }
+        next = next.max(segment.last_seq.saturating_add(1));
+        if next > through_seq {
+            return true;
+        }
+    }
+    false
+}
+
+/// Newest usable **retained witness checkpoint** at or before `cut_seq` (#195):
+/// a `checkpoints/<seq>/` directory holding both objects the replay needs
+/// (`checkpoint.pb` + `refs.pb`), found by listing. A witness older than the cut
+/// is accepted only when the manifest's log segments cover `(witness.seq, cut_seq]`
+/// contiguously. Returns `None` when there is nothing usable, so the caller keeps
+/// its existing "not replayable" behaviour.
+async fn retained_witness_for_cut(
     handle: &super::handle::RepoHandle,
     cut_seq: u64,
 ) -> Result<Option<walgit_proto::v1::CheckpointRef>, WalError> {
@@ -114,11 +142,15 @@ async fn retained_witness_at_or_before(
         }
         dirs.entry(seq).or_default().insert(m.key);
     }
+    let manifest = handle.manifest();
     for (seq, objects) in dirs.iter().rev() {
         let cp_key = keys::checkpoint_key(*seq);
         let refs_key = keys::checkpoint_refs_key(*seq);
         if !objects.contains(&cp_key) || !objects.contains(&refs_key) {
             continue; // half-written directory is not a witness
+        }
+        if *seq != cut_seq && !log_tail_is_contiguous(manifest.as_ref(), *seq, cut_seq) {
+            continue; // the tail needed to reach the cut was folded away
         }
         return Ok(Some(walgit_proto::v1::CheckpointRef {
             seq: *seq,
@@ -131,23 +163,14 @@ async fn retained_witness_at_or_before(
     Ok(None)
 }
 
+/// Ref state **at** WAL `seq` exactly (the newest checkpoint at or before it + every ref
+/// transaction through `seq`, in memory). `Err(Corrupt)` when the log before the only checkpoint
+/// is folded away (`min_seq > seq`): that state is no longer replayable. Used by the weekly
+/// compose, whose header must carry the refs at the base pack's seq whatever moved since.
 pub async fn refs_at_seq(
     handle: &super::handle::RepoHandle,
     seq: u64,
 ) -> Result<walgit_proto::v1::RefSnapshot, WalError> {
-    let manifest = handle.manifest();
-    let cp_ok = manifest.checkpoint.as_ref().is_some_and(|cp| cp.seq <= seq);
-    if !cp_ok && manifest.min_seq > 1 && manifest.min_seq > seq {
-        // The live checkpoint has folded past this cut. A **retained witness
-        // checkpoint** at or before the cut (#195, written by the base rebuild)
-        // still makes it replayable, so only fail when there is none.
-        if retained_witness_at_or_before(handle, seq).await?.is_none() {
-            return Err(WalError::Corrupt(format!(
-                "refs at seq {seq} are not replayable: log folded up to {} and no checkpoint at or before",
-                manifest.min_seq
-            )));
-        }
-    }
     Ok(replay_refs(handle, Cut::Seq(seq)).await?.0)
 }
 
@@ -194,25 +217,36 @@ async fn replay_refs(
         } else if manifest.min_seq > 1 {
             // The live checkpoint has moved past the cut. That is exactly the
             // shape a rebuilt base leaves behind: it was published at seq B and
-            // a later fold advanced the checkpoint beyond B. Look for a
-            // **retained witness checkpoint at or before the cut** (#195) — the
-            // base rebuild writes one at its own seq — and replay from there.
-            //
-            // This LIST runs only on this path (the live checkpoint cannot serve
-            // the cut) and compose/materialize are not hot paths; the exact case
-            // (`witness.seq == cut`) needs no tail at all, because the witness
-            // *is* the state at that seq.
-            if let Cut::Seq(cut_seq) = cut
-                && let Some(witness) = retained_witness_at_or_before(handle, cut_seq).await?
-                && let Some((_, bytes)) = handle.store().get_bytes(&witness.key).await?
-            {
+            // a later fold advanced the checkpoint beyond B. A retained witness
+            // at the cut (or one whose intervening tail is still contiguous)
+            // makes the replay possible; anything else fails closed instead of
+            // pretending the new checkpoint is the requested older state.
+            if let Cut::Seq(cut_seq) = cut {
+                let witness = retained_witness_for_cut(handle, cut_seq)
+                    .await?
+                    .ok_or_else(|| {
+                        WalError::Corrupt(format!(
+                            "refs at seq {cut_seq} are not replayable: log folded up to {} and no checkpoint at or before",
+                            manifest.min_seq
+                        ))
+                    })?;
+                let Some((_, bytes)) = handle.store().get_bytes(&witness.key).await? else {
+                    return Err(WalError::Corrupt(format!(
+                        "witness checkpoint listed at seq {} is missing",
+                        witness.seq
+                    )));
+                };
                 let cpo = walgit_proto::v1::Checkpoint::decode(bytes.as_ref())
                     .map_err(|e| WalError::Corrupt(format!("checkpoint decode: {e}")))?;
-                if let Some((_, rb)) = handle.store().get_bytes(&cpo.refs_key).await? {
-                    snap = walgit_proto::v1::RefSnapshot::decode(rb.as_ref())
-                        .map_err(|e| WalError::Corrupt(format!("refs decode: {e}")))?;
-                    from_seq = witness.seq;
-                }
+                let Some((_, rb)) = handle.store().get_bytes(&cpo.refs_key).await? else {
+                    return Err(WalError::Corrupt(format!(
+                        "witness checkpoint at seq {} points at missing refs {}",
+                        witness.seq, cpo.refs_key
+                    )));
+                };
+                snap = walgit_proto::v1::RefSnapshot::decode(rb.as_ref())
+                    .map_err(|e| WalError::Corrupt(format!("refs decode: {e}")))?;
+                from_seq = witness.seq;
             }
         }
     }
@@ -263,6 +297,13 @@ async fn replay_refs(
             }
         }
         last_seq = e.seq;
+    }
+    if let Cut::Seq(seq) = cut
+        && last_seq != seq
+    {
+        return Err(WalError::Corrupt(format!(
+            "refs at seq {seq} are not replayable: replay stopped at seq {last_seq} (missing log tail)"
+        )));
     }
     Ok((
         walgit_proto::v1::RefSnapshot {

@@ -225,14 +225,17 @@ runtime** and never takes the refs phase's lock (D19). `check_fits` refuses to p
 - **A fold never touches the base or a history pack** (`--keep-pack`), **a base is rebuilt only by the weekly
   unit / `compact --base`**, and **a rebuild supersedes every other live pack** by the manifest, not by what git
   happened to delete.
-- **A base pack carries its own witness checkpoint (#195).** Bundle compose replays the base's refs with
+- **A tier-2 pack carries its own witness checkpoint (#195).** Bundle compose replays the base's refs with
   `refs_at_seq(base_seq)`, and the reader used to consult *only* the live checkpoint — so the first fold after a
   rebuild made the base unreplayable (`refs at seq X are not replayable: log folded up to Y and no checkpoint at or
-  before`). A base rebuild now writes an **exact checkpoint at the base's own seq** (`write_witness_checkpoint`:
-  the `checkpoints/<seq>/{checkpoint.pb,refs.pb}` pair, immutable, **no manifest CAS** — it does not move the live
-  fold), and the reader, when the live checkpoint has moved past the cut, lists `checkpoints/` for the newest
-  **complete** witness at or before it. That invariant — *base ⇒ exact witness at its seq* — is also what makes
-  folded WAL objects reclaimable at all (see the GC bullet below).
+  before`). The tier-2 publish choke point (`publish_compact_impl`, shared by base rebuild, `walgit import` and
+  `wal add-pack --tier 2`) writes an **exact checkpoint at the pack's own seq** (`write_witness_checkpoint`:
+  the `checkpoints/<seq>/{checkpoint.pb,refs.pb}` pair, create-if-absent, **no manifest CAS** — it does not move
+  the live fold; a failed pair write fails the publish unit so it retries). When the live checkpoint has moved past
+  the cut, the reader lists `checkpoints/` and accepts an exact witness, or an older complete witness only when the
+  manifest proves every log segment in `(witness.seq, cut]` is present; a folded gap returns the original
+  not-replayable error instead of silently serving older refs. That invariant — *tier-2 publish ⇒ exact witness at
+  its seq* — is also what makes folded WAL objects reclaimable at all (see the GC bullet below).
 - Superseded packs are retained `compaction.retention_superseded` (provenance window) then GC'd by the maintainer's `gc` unit: it lists the markers and deletes a pack + its side-files + the marker once the marker is older than the window and the pack is not live (re-checked against a fresh manifest). Before that scan the same unit **reconciles marker-less orphans** — packs superseded before markers existed, uploads abandoned before the manifest CAS, a crash between the object PUT and the log entry — by listing `wal/` and stamping what the fresh manifest does not reference (`superseded_at = now`, so an orphan's reclamation only ever starts later; ≤ `GC_MAX_MARKERS_PER_UNIT` per pass, and the unit stays due until the reconcile is complete). The marker set is therefore self-healing, not a one-off backfill. Only marked packs are candidates, and a publisher refuses to adopt a checksum GC has listed in `Manifest.reclaiming` (`WalError::Reclaiming`) — the listing is CAS'd in *before* any object is deleted and cleared after, so it is the ordering record (the marker is the age record, not the lock). That closes the window where a publisher re-adopting a byte-identical pack could CAS it live between GC's live-check and GC's delete. Bounded per pass (`GC_MAX_PACKS_PER_UNIT`, default 32).
 
 ### 2.5b Self-healing by construction (D22)

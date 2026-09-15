@@ -18,7 +18,7 @@ mod store_proto;
 mod sync;
 pub mod tasks;
 
-pub use checkpoint::{CheckpointTrigger, checkpoint_due};
+pub use checkpoint::{CheckpointTrigger, checkpoint_due, write_witness_checkpoint};
 pub use error::{CoordError, RefError, WalError};
 pub use handle::{ObjectAccess, RepoHandle};
 pub use progress::{Progress, Reporter};

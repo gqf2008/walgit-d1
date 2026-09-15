@@ -121,7 +121,8 @@ pub(crate) async fn write_checkpoint_impl(handle: &RepoHandle) -> Result<Checkpo
 /// that replay a one-hop load (`Cut::Seq(B)` with `cp.seq == B`).
 ///
 /// `packs` is the pack set to record (the publisher passes the manifest's packs
-/// at that moment). Idempotent: the objects are immutable and keyed by `seq`.
+/// at that moment). The objects are create-if-absent: concurrent writers of the
+/// same `seq` converge, and a retry after a half-written pair completes it.
 pub async fn write_witness_checkpoint(
     handle: &RepoHandle,
     seq: u64,
@@ -150,29 +151,34 @@ pub async fn write_witness_checkpoint(
         ref_count: snap.refs.len() as u64,
         bundle_key: String::new(),
         created_at: Some(created_at),
-        writer: crate::handle::instance_id().to_string(),
+        writer: crate::handle::instance_id(),
     };
     let immutable = walgit_store::PutOptions {
+        mode: PutMode::Create,
         immutable: true,
         ..Default::default()
     };
-    handle
-        .store()
-        .put(
-            &refs_key,
-            walgit_store::PutBody::Bytes(bytes::Bytes::from(snap.encode_to_vec())),
-            immutable.clone(),
-        )
-        .await?;
-    handle
-        .store()
-        .put(
-            &cp_key,
-            walgit_store::PutBody::Bytes(bytes::Bytes::from(checkpoint.encode_to_vec())),
-            immutable,
-        )
-        .await?;
-    let _ = PutMode::Create; // (documented above: immutability is the store's)
+    for (key, body) in [
+        (refs_key.clone(), snap.encode_to_vec()),
+        (cp_key.clone(), checkpoint.encode_to_vec()),
+    ] {
+        match handle
+            .store()
+            .put(
+                &key,
+                walgit_store::PutBody::Bytes(bytes::Bytes::from(body)),
+                immutable.clone(),
+            )
+            .await
+        {
+            // A precondition failure means another writer created the same key
+            // first. The refs bytes are deterministic for `seq`; the checkpoint
+            // may differ only in `created_at`/`writer` and points at those same
+            // refs, so it is semantically the same witness.
+            Ok(_) | Err(walgit_store::StoreError::PreconditionFailed { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok(CheckpointRef {
         seq,
         key: cp_key,

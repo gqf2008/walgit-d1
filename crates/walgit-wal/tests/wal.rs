@@ -3820,3 +3820,152 @@ async fn refs_at_seq_finds_a_retained_witness_after_later_folds() {
         "the retained witness must carry the refs as of the base's seq"
     );
 }
+
+/// #195 B1：见证只能在它**精确等于** cut 时直接使用；若见证更旧，则 cut 与它之间的
+/// log 段必须连续存在。否则旧的见证绝不能冒充 cut 的状态（回归：曾静默返回旧 refs）。
+#[tokio::test]
+async fn refs_at_seq_rejects_a_witness_older_than_a_folded_cut() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let mut cfg = make_config(cache.path(), 0);
+    cfg.wal.snapshot_every_entries = 0; // manual checkpoint
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+
+    let id = repo_id("test", "witness-gap");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let work = WorkRepo::new();
+
+    let c1 = work.commit("one", "d1");
+    let ingested1 = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
+    let mut txn1 = make_txn(vec![("refs/heads/main", "", &c1)]);
+    txn1.updates.push(RefUpdate {
+        name: "HEAD".to_string(),
+        old_oid: String::new(),
+        new_oid: String::new(),
+        new_symbolic_target: "refs/heads/main".to_string(),
+        new_peeled: String::new(),
+    });
+    handle
+        .publish_push(Some(ingested1), txn1, HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(handle.manifest().head_seq, 1);
+    let witness = walgit_wal::write_witness_checkpoint(
+        &handle,
+        1,
+        handle.manifest().packs.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(witness.seq, 1);
+
+    // seq 2 and seq 3, then fold the live checkpoint to 3. The tail (1, 2]
+    // is now gone, so refs_at_seq(2) must not return the seq-1 witness.
+    let c2 = work.commit("two", "d2");
+    let ingested2 = ingest_pack_data(&handle, work.create_incremental_pack(&c2, &c1))
+        .await
+        .unwrap();
+    handle
+        .publish_push(
+            Some(ingested2),
+            make_txn(vec![("refs/heads/main", &c1, &c2)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let c3 = work.commit("three", "d3");
+    let ingested3 = ingest_pack_data(&handle, work.create_incremental_pack(&c3, &c2))
+        .await
+        .unwrap();
+    handle
+        .publish_push(
+            Some(ingested3),
+            make_txn(vec![("refs/heads/main", &c2, &c3)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let cp = handle.write_checkpoint().await.unwrap();
+    assert_eq!(cp.seq, 3);
+    assert!(
+        handle.manifest().min_seq > 2,
+        "the fold must remove the log tail needed to replay cut 2"
+    );
+
+    let err = handle.refs_at_seq(2).await.unwrap_err();
+    assert!(
+        err.to_string().contains("not replayable"),
+        "a witness older than the cut must fail closed, got: {err}"
+    );
+
+    // The exact witness is still valid.
+    let exact = handle.refs_at_seq(1).await.unwrap();
+    let main = exact
+        .refs
+        .iter()
+        .find(|r| r.name == "refs/heads/main")
+        .expect("main ref");
+    assert_eq!(main.oid, c1);
+}
+
+/// #195 B2：tier-2 publish 的通用 choke point 写 exact witness；import /
+/// `wal add-pack --tier 2` 不再依赖调用方（base rebuild）自己补写。
+#[tokio::test]
+async fn publish_compact_tier2_writes_an_exact_witness() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let cfg = make_config(cache.path(), 0);
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+
+    let id = repo_id("test", "witness-choke");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let work = WorkRepo::new();
+    let c1 = work.commit("base", "d1");
+    let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
+    handle
+        .publish_push(
+            Some(ingested),
+            make_txn(vec![("refs/heads/main", "", &c1)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    // Promote the already-installed pack through the same public tier-2
+    // publish path that import / `wal add-pack` use; no repack required to
+    // exercise the witness choke point.
+    let info = handle
+        .local()
+        .packs()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.checksum.to_string() == handle.manifest().packs[0].checksum)
+        .expect("the ingested pack is installed locally");
+    let seq = handle.publish_compact(info, Vec::new(), 2).await.unwrap();
+
+    assert!(
+        handle
+            .store()
+            .head(&walgit_proto::keys::checkpoint_key(seq))
+            .await
+            .unwrap()
+            .is_some(),
+        "publish_compact(tier=2) must write checkpoint.pb"
+    );
+    assert!(
+        handle
+            .store()
+            .head(&walgit_proto::keys::checkpoint_refs_key(seq))
+            .await
+            .unwrap()
+            .is_some(),
+        "publish_compact(tier=2) must write refs.pb"
+    );
+    let snap = handle.refs_at_seq(seq).await.unwrap();
+    let main = snap
+        .refs
+        .iter()
+        .find(|r| r.name == "refs/heads/main")
+        .expect("main ref");
+    assert_eq!(main.oid, c1);
+}

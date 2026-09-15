@@ -475,29 +475,18 @@ pub async fn rebuild_base(
             && (p.has_bitmap || info.history_of.is_some())
             && supersedes_left.as_ref().is_none_or(std::vec::Vec::is_empty)
         {
+            // A retry after the publish CAS but before the witness write sees
+            // this branch. Re-ensure the exact witness instead of skipping the
+            // publish without healing the missing invariant (#195).
+            walgit_wal::write_witness_checkpoint(handle, p.seq, manifest.packs.clone()).await?;
             log(format!(
-                "pack {hex} is already live as tier 2: not re-published"
+                "pack {hex} is already live as tier 2; witness checkpoint ensured"
             ));
             published.push(hex);
             continue;
         }
         let sup = supersedes_left.take().unwrap_or_default();
         let seq = handle.publish_compact(info, sup, 2).await?;
-        // #195: this base's refs must stay replayable *after* later folds push the
-        // live checkpoint past `seq`. Write the exact witness checkpoint here —
-        // `refs_at_seq(seq)` then finds it (the reader lists retained witnesses
-        // when the live checkpoint is newer than the cut) and bundle compose works
-        // however far the WAL folds afterwards.
-        let packs = handle.manifest().packs.clone();
-        match walgit_wal::write_witness_checkpoint(&handle, seq, packs).await {
-            Ok(cp) => log(format!(
-                "witness checkpoint written at seq {} for base {hex}",
-                cp.seq
-            )),
-            Err(e) => log(format!(
-                "witness checkpoint at seq {seq} failed ({e}); compose may need a rebuild after the next fold"
-            )),
-        }
         log(format!(
             "published pack {hex} as seq {seq}{}",
             if already.is_some() {

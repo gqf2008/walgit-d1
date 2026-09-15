@@ -3451,6 +3451,9 @@ async fn bundle_compose_works_after_a_fold_moved_past_the_base() -> anyhow::Resu
     std::fs::write(src.path().join("a.txt"), "one\n")?;
     git_in(src.path(), &["add", "."])?;
     git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    let c1 = git_in(src.path(), &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
     git(
         &["push", "-q", &server.repo_url("o", "r"), "main"],
         src.path(),
@@ -3485,10 +3488,44 @@ async fn bundle_compose_works_after_a_fold_moved_past_the_base() -> anyhow::Resu
         "the rebuild must leave an exact witness checkpoint at the base's seq"
     );
 
+    // Retry path: if the publish committed but the witness write failed, the
+    // next rebuild sees the base already live and must still re-ensure the
+    // witness rather than skipping the publish path (#195 B2).
+    h.store()
+        .delete(&walgit_proto::keys::checkpoint_key(base_seq), None)
+        .await?;
+    h.store()
+        .delete(&walgit_proto::keys::checkpoint_refs_key(base_seq), None)
+        .await?;
+    let mut retry_params = HashMap::new();
+    retry_params.insert("base".to_string(), "1".to_string());
+    retry_params.insert("force".to_string(), "1".to_string());
+    assert!(
+        step!(
+            "base rebuild witness retry",
+            walgit_server::maintain::run_op(&server.state, &id, "compact", retry_params)
+        ),
+        "a retry over an already-live base must re-ensure its witness"
+    );
+    assert!(
+        h.store()
+            .head(&walgit_proto::keys::checkpoint_key(base_seq))
+            .await?
+            .is_some()
+            && h.store()
+                .head(&walgit_proto::keys::checkpoint_refs_key(base_seq))
+                .await?
+                .is_some(),
+        "the retry must rewrite both witness objects"
+    );
+
     // 2. Advance past the base and fold: the live checkpoint now sits above base_seq.
     std::fs::write(src.path().join("b.txt"), "two\n")?;
     git_in(src.path(), &["add", "."])?;
     git_in(src.path(), &["commit", "-q", "-m", "two"])?;
+    let c2 = git_in(src.path(), &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
     git(
         &["push", "-q", &server.repo_url("o", "r"), "main"],
         src.path(),
@@ -3525,6 +3562,33 @@ async fn bundle_compose_works_after_a_fold_moved_past_the_base() -> anyhow::Resu
             walgit_server::maintain::run_op(&server.state, &id, "bundle", b_params)
         ),
         "compose must succeed even though the WAL folded past the base (was: refs not replayable)"
+    );
+
+    // The header must carry the base's tip, not the live tip. A compose that
+    // silently falls back to the newer checkpoint would finish "successfully"
+    // but produce an unclonable/mislabeled bundle; assert the actual bytes.
+    let list = walgit_bundle::ops::read_list(h.store())
+        .await?
+        .expect("bundle list");
+    let entry = list
+        .bundles
+        .iter()
+        .find(|b| b.strategy == weekly.name)
+        .expect("weekly bundle entry");
+    let header = server
+        .get_text(
+            &format!("/o/r.git/{}", entry.key),
+            &[("Range", "bytes=0-511")],
+        )
+        .await?;
+    assert!(
+        header.starts_with("# v2 git bundle\n")
+            && header.contains(&format!("{c1} refs/heads/main")),
+        "weekly header must carry the base seq's tip {c1}: {header:?}"
+    );
+    assert!(
+        !header.contains(&c2),
+        "weekly header must not carry the later tip {c2}: {header:?}"
     );
     Ok(())
 }
