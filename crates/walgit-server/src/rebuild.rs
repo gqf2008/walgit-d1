@@ -475,8 +475,12 @@ pub async fn rebuild_base(
             && (p.has_bitmap || info.history_of.is_some())
             && supersedes_left.as_ref().is_none_or(std::vec::Vec::is_empty)
         {
+            // A retry after the publish CAS but before the witness write sees
+            // this branch. Re-ensure the exact witness instead of skipping the
+            // publish without healing the missing invariant (#195).
+            walgit_wal::write_witness_checkpoint(handle, p.seq, manifest.packs.clone()).await?;
             log(format!(
-                "pack {hex} is already live as tier 2: not re-published"
+                "pack {hex} is already live as tier 2; witness checkpoint ensured"
             ));
             published.push(hex);
             continue;

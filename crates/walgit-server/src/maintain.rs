@@ -241,7 +241,7 @@ impl Backoff {
         }
         let key = repo.to_string();
         let cursor = self.rotation.entry(key).or_default();
-        let candidate = kinds[*cursor % kinds.len()];
+        let candidate = *kinds.get(*cursor % kinds.len())?;
         *cursor = cursor.wrapping_add(1);
         Some(candidate)
     }
@@ -1061,7 +1061,12 @@ async fn heartbeat(
 }
 
 /// Start `op` as a task and wait for it. Returns true when it finished ok.
-async fn run_op(
+/// The unit dispatcher (also used by tests that drive one unit directly).
+#[allow(
+    clippy::implicit_hasher,
+    reason = "test-facing dispatcher; production callers all pass the default HashMap"
+)]
+pub async fn run_op(
     state: &Arc<AppState>,
     id: &RepoId,
     op: &str,

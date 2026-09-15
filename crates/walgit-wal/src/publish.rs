@@ -1620,6 +1620,15 @@ pub(crate) async fn publish_compact_impl(
                 }
             }
             crate::state::save_state(handle.local.path(), &handle.state.lock().clone())?;
+            if tier == 2 {
+                // #195: every tier-2 publish path (base rebuild, `wal add-pack`,
+                // import) goes through this choke point. The exact witness keeps
+                // the base's refs replayable after later folds move the live
+                // checkpoint past `seq`. A failure is surfaced so the unit retries
+                // instead of silently leaving a base without its witness.
+                crate::checkpoint::write_witness_checkpoint(handle, seq, committed.packs.clone())
+                    .await?;
+            }
             sweep_burned(&handle.store, &slot).await;
             return Ok(seq);
         }
