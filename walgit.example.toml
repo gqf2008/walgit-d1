@@ -153,6 +153,12 @@ max_pack_bytes = "0B"             # declared capacity for units needing a local 
 disk = "tmpfs"                    # "tmpfs" (memory-backed disk) | "ssd" (a real disk: may rebuild bases)
 # host = "maintainer-1"           # heartbeat object maintain/<host>.pb (default: instance id) — the plan shows who maintains a repo
 gc_interval = "24h"                # bucket GC: drop superseded packs older than compaction.retention_superseded → repos/<o>/<r>/gc.pb; 0 = off
+retention_wal = "7d"               # bucket GC: folded log segments (below manifest.min_seq) and non-live checkpoints are
+                                   # dropped past this window; never touched: the live checkpoint, live log segments, the
+                                   # newest checkpoint at or before a live base's seq, any checkpoint directory newer than
+                                   # the live one (in-flight CAS), and — unless every live base has an exact, complete
+                                   # checkpoint at its seq — all folded segments and older checkpoints (fail closed, #195).
+                                   # 0 = keep forever (applies to the next GC pass; an in-flight bounded pass is not cancelled)
 fsck_interval = "7d"              # lowest-priority unit: git fsck --connectivity-only over a complete local copy → repos/<o>/<r>/fsck.pb
                                   # (missing objects → walgit_repo_missing_objects{repo} + the `repair` unit from upstream.git); 0 = off
 follow_interval = "30s"           # upstream-follow loop (its own loop next to the priority loop): fetch each assigned repo's

@@ -422,6 +422,13 @@ pub struct WalConfig {
     pub remote_objects: bool,
 }
 
+/// A week, mirroring `compaction.retention_superseded`: `wal materialize
+/// --at-seq` can still rewind inside this window; beyond it the checkpoint/log
+/// objects are dead weight (the folded state is in the live checkpoint).
+fn default_retention_wal() -> Duration {
+    Duration::from_hours(7 * 24)
+}
+
 /// The `maintain` role's loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -449,6 +456,16 @@ pub struct MaintenanceConfig {
     /// 0 = off.
     #[serde(with = "humantime_serde")]
     pub gc_interval: Duration,
+    /// Provenance window for **folded WAL objects** (#175): log segments below
+    /// `manifest.min_seq` and checkpoints other than the live one are deleted
+    /// once they are older than this. The live checkpoint, the live log
+    /// segments, and the newest checkpoint at or before a live base pack's seq
+    /// (bundle compose replays refs from it) are never touched, whatever their
+    /// age. 0 = keep them forever. The window is read from the manifest
+    /// snapshot at the start of a GC pass; a settings change applies to later
+    /// passes, not to an already-running bounded pass.
+    #[serde(with = "humantime_serde", default = "default_retention_wal")]
+    pub retention_wal: Duration,
     /// Connectivity audit cadence: `git fsck --connectivity-only` over a complete
     /// local copy, result at `repos/<o>/<r>/fsck.pb` (missing objects →
     /// `walgit_repo_missing_objects{repo}` and the `repair` unit). Lowest
@@ -497,6 +514,7 @@ impl Default for MaintenanceConfig {
             host: None,
             fsck_interval: Duration::from_hours(168),
             gc_interval: Duration::from_hours(24),
+            retention_wal: default_retention_wal(),
             follow_interval: Duration::from_secs(30),
         }
     }

@@ -4,6 +4,7 @@
 //! which streams the op's log as SSE and records the outcome per instance.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
@@ -208,6 +209,223 @@ pub async fn read_fsck(
         Ok(None) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Folded WAL objects one GC pass may delete: log segments the live checkpoint
+/// already folded, and checkpoints no longer referenced (#175). They are tiny
+/// (a few KB each); the bound exists to keep one unit bounded, not for bytes.
+const GC_MAX_WAL_OBJECTS_PER_UNIT: usize = 512;
+
+/// Reclaim folded WAL objects (#175): log segments below `manifest.min_seq`,
+/// and checkpoint directories that are neither the live checkpoint nor the one
+/// a live base pack's refs are replayed from.
+///
+/// Age anchor: the **live checkpoint's `created_at`**. Everything this pass is
+/// allowed to delete was folded at or before that instant, so
+/// `now - created_at > retention_wal` is a conservative (late) bound for all of
+/// them — and it needs no per-object timestamp, which the store contract does
+/// not expose.
+///
+/// Returns `(objects deleted, bytes freed, complete)`.
+async fn gc_wal_objects(
+    handle: &RepoHandle,
+    manifest: Arc<walgit_proto::v1::Manifest>,
+    max: usize,
+    retention: std::time::Duration,
+    lost: &std::sync::atomic::AtomicBool,
+    log: Log<'_>,
+) -> Result<(u64, u64, bool), String> {
+    use futures::StreamExt;
+    use walgit_proto::keys;
+    use walgit_store::ObjectStore;
+
+    if retention.is_zero() {
+        return Ok((0, 0, true));
+    }
+    let Some(checkpoint) = manifest.checkpoint.as_ref() else {
+        // Nothing is folded yet: every log segment is live.
+        return Ok((0, 0, true));
+    };
+    let Some(created_at) = checkpoint
+        .created_at
+        .as_ref()
+        .map(walgit_proto::time::to_system)
+    else {
+        // No anchor ⇒ no proof of age ⇒ keep everything this pass.
+        return Ok((0, 0, true));
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(created_at)
+        .unwrap_or_default();
+    if age <= retention {
+        log(format!(
+            "gc: folded WAL objects are younger than the {}h window — nothing to do",
+            retention.as_secs() / 3600
+        ));
+        return Ok((0, 0, true));
+    }
+
+    // List both prefixes once: the deletion set is derived from what exists.
+    let mut log_segments: Vec<(String, u64)> = Vec::new(); // (key, first_seq)
+    let checkpoint_dirs: Vec<(u64, Vec<(String, u64)>)>; // (seq, objects)
+    {
+        let mut stream = handle.store().list(keys::LOG_DIR, None);
+        while let Some(m) = stream.next().await {
+            let m = m.map_err(|e| e.to_string())?;
+            let Some(name) = m.key.strip_prefix(keys::LOG_DIR) else {
+                continue;
+            };
+            let Some(seq_hex) = name.strip_suffix(".pb") else {
+                continue;
+            };
+            let Ok(first_seq) = u64::from_str_radix(seq_hex, 16) else {
+                continue;
+            };
+            log_segments.push((m.key, first_seq));
+        }
+        let mut dirs: std::collections::BTreeMap<u64, Vec<(String, u64)>> =
+            std::collections::BTreeMap::new();
+        let mut stream = handle.store().list(keys::CHECKPOINTS_DIR, None);
+        while let Some(m) = stream.next().await {
+            let m = m.map_err(|e| e.to_string())?;
+            let Some(rest) = m.key.strip_prefix(keys::CHECKPOINTS_DIR) else {
+                continue;
+            };
+            let Some((seq_hex, _)) = rest.split_once('/') else {
+                continue;
+            };
+            let Ok(seq) = u64::from_str_radix(seq_hex, 16) else {
+                continue;
+            };
+            dirs.entry(seq).or_default().push((m.key, m.size));
+        }
+        checkpoint_dirs = dirs.into_iter().collect();
+    }
+
+    // What a live base pack's refs are replayed from: either an exact checkpoint
+    // at its seq, or the newest checkpoint at or before it **plus the log
+    // segments covering (that checkpoint, base_seq]** (#195). Keep the whole
+    // witness — the checkpoint alone cannot reconstruct the refs.
+    let mut keep: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    keep.insert(checkpoint.seq);
+    let mut keep_logs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // Fail closed until every live base has an *exact, complete* checkpoint at
+    // its seq: a base without one has no witness we can prove — the segments its
+    // refs would be replayed from sit below `min_seq` and are invisible in
+    // `manifest.log_segments`, and a partial directory (one PUT of the writer's
+    // pair landed) is not a witness either. In that case this whole pass deletes
+    // nothing for the repo: neither the folded segments nor any older checkpoint
+    // (that directory is the only remaining fallback candidate).
+    let mut keep_all_folded_logs = false;
+    for base in walgit_wal::base_packs(&manifest) {
+        // A witness is a directory that actually holds both objects the replay
+        // needs — not merely a seq that appears in the listing.
+        let exact = checkpoint_dirs
+            .iter()
+            .filter(|(seq, _)| *seq == base.seq)
+            .any(|(_, objects)| {
+                let has = |want: &str| objects.iter().any(|(key, _)| key == want);
+                has(&keys::checkpoint_key(base.seq)) && has(&keys::checkpoint_refs_key(base.seq))
+            });
+        if !exact {
+            keep_all_folded_logs = true;
+        }
+        let witness_seq = checkpoint_dirs
+            .iter()
+            .rev()
+            .find(|(seq, _)| *seq <= base.seq)
+            .map_or(0, |(seq, _)| *seq);
+        if witness_seq > 0 {
+            keep.insert(witness_seq);
+        }
+        // The tail the replay reads: segments that start at or before the base
+        // and reach past the checkpoint it replays from.
+        for segment in &manifest.log_segments {
+            if segment.first_seq <= base.seq && segment.last_seq > witness_seq {
+                keep_logs.insert(segment.first_seq);
+            }
+        }
+    }
+
+    let live_logs: std::collections::HashSet<u64> =
+        manifest.log_segments.iter().map(|s| s.first_seq).collect();
+    let mut deleted = 0u64;
+    let mut deletion_count = 0usize;
+    let mut freed = 0u64;
+    let mut complete = true;
+    let mut pending: Vec<Vec<(String, u64)>> = Vec::new();
+
+    for (key, first_seq) in log_segments {
+        if live_logs.contains(&first_seq) || first_seq >= manifest.min_seq {
+            continue; // still needed for replay
+        }
+        if keep_all_folded_logs || keep_logs.contains(&first_seq) {
+            continue; // a live base's replay witness (or nothing provable)
+        }
+        pending.push(vec![(key, 0)]);
+    }
+    for (seq, objects) in checkpoint_dirs {
+        if keep.contains(&seq) {
+            continue;
+        }
+        if keep_all_folded_logs {
+            // No provable witness for some live base: leave every older
+            // checkpoint directory as a fallback candidate.
+            continue;
+        }
+        // Only directories strictly *older* than the live checkpoint are
+        // candidates: a checkpoint directory is PUT before its manifest CAS
+        // (checkpoint.rs: two immutable PUTs, then the CAS), so a concurrent
+        // writer's directory can exist while the snapshot still points at the
+        // previous seq — deleting it would leave that CAS pointing at nothing.
+        // A genuinely abandoned newer directory is reclaimed by a later pass,
+        // once a still-newer checkpoint has become live.
+        if seq >= checkpoint.seq {
+            continue;
+        }
+        pending.push(objects);
+    }
+
+    for objects in pending {
+        if deletion_count >= max {
+            complete = false;
+            break;
+        }
+        if lost.load(std::sync::atomic::Ordering::SeqCst) {
+            // The lease is gone: another pass may own this work now.
+            complete = false;
+            break;
+        }
+        for (key, size) in objects {
+            if deletion_count >= max {
+                complete = false;
+                break;
+            }
+            if lost.load(std::sync::atomic::Ordering::SeqCst) {
+                complete = false;
+                break;
+            }
+            match handle.store().delete(&key, None).await {
+                Ok(()) | Err(walgit_store::StoreError::NotFound { .. }) => {
+                    deleted += 1;
+                    deletion_count += 1;
+                    freed += size;
+                }
+                Err(e) => return Err(format!("gc: delete {key}: {e}")),
+            }
+            if lost.load(std::sync::atomic::Ordering::SeqCst) {
+                complete = false;
+                break;
+            }
+        }
+    }
+    if deleted > 0 || !complete {
+        log(format!(
+            "gc: reclaimed {deleted} folded WAL object(s), {freed} bytes{}",
+            if complete { "" } else { " (more next pass)" }
+        ));
+    }
+    Ok((deleted, freed, complete))
 }
 
 /// One bounded bucket-GC unit: delete superseded packs that have aged past
@@ -1080,14 +1298,16 @@ async fn run(
             // are per-repo settings (D24), and a direct `POST /ops/gc` bypasses
             // the maintainer's own sync — a cached handle must not hand out a
             // lease (or a window) sized by a superseded settings revision.
-            {
-                let _g = handle.sync_refs().await.map_err(|e| e.to_string())?;
-            }
+            let manifest = handle
+                .sync_refs_fresh()
+                .await
+                .map_err(|e| e.to_string())?;
+            let effective = handle.effective_config_for(manifest.as_ref());
             // Per-repo lease: two GC passes must not interleave. Claims carry
             // an owner+token fence, so a later pass cannot touch ours while we
             // still hold it — but the lease is still what keeps two passes from
             // doing the same work, so it is *renewed* for the whole run.
-            let lease_ttl = handle.effective_config().compaction.lease_ttl;
+            let lease_ttl = effective.compaction.lease_ttl;
             // Guard against a mis-set (e.g. zero) TTL: a lease nobody can renew
             // in time is worse than no GC at all.
             let lease_ttl = lease_ttl.max(std::time::Duration::from_secs(30));
@@ -1131,6 +1351,19 @@ async fn run(
                 .filter(|n| *n > 0)
                 .unwrap_or(GC_MAX_PACKS_PER_UNIT)
                 .min(GC_MAX_PACKS_PER_UNIT);
+            // Folded WAL objects first: their pass is independent of the pack
+            // claims, and running it before the pack phase keeps it from being
+            // starved whenever the pack side reports "incomplete".
+            let retention_wal = effective.maintenance.retention_wal;
+            let wal_outcome = gc_wal_objects(
+                &handle,
+                manifest,
+                GC_MAX_WAL_OBJECTS_PER_UNIT,
+                retention_wal,
+                &lost,
+                log,
+            )
+            .await;
             let outcome =
                 gc_superseded_packs(&handle, max, lease_ttl, &owner, &token, &lost, log).await;
             // Stop renewing gracefully (never abort: a cancelled heartbeat whose
@@ -1143,7 +1376,9 @@ async fn run(
             {
                 log(format!("gc: lease release failed: {e}"));
             }
+            let (wal_objects, wal_bytes, wal_complete) = wal_outcome?;
             let (packs, bytes, marked, complete) = outcome?;
+            let complete = complete && wal_complete;
             if !complete {
                 // Something could not be deleted: the claims stay (correct — the
                 // pack is still there), so do NOT write gc.pb. The unit stays
@@ -1151,10 +1386,11 @@ async fn run(
                 // refused for a whole gc_interval.
                 return Ok((
                     format!(
-                        "gc: incomplete ({packs} reclaimed, {marked} marked); retrying next pass"
+                        "gc: incomplete ({packs} packs reclaimed, {marked} marked, {wal_objects} folded WAL objects); retrying next pass"
                     ),
                     serde_json::json!({
-                        "packs": packs, "bytes": bytes, "marked": marked, "complete": false
+                        "packs": packs, "bytes": bytes, "marked": marked,
+                        "wal_objects": wal_objects, "wal_bytes": wal_bytes, "complete": false
                     }),
                 ));
             }
@@ -1173,7 +1409,7 @@ async fn run(
                 )
                 .await
                 .map_err(|e| format!("writing gc.pb: {e}"))?;
-            let summary = match (packs, marked) {
+            let mut summary = match (packs, marked) {
                 (0, 0) => "gc: nothing superseded past retention".to_string(),
                 (0, m) => format!("gc: marked {m} orphan object(s); none past retention yet"),
                 (p, 0) => format!("gc: {p} superseded pack(s), {bytes} bytes freed"),
@@ -1181,10 +1417,19 @@ async fn run(
                     format!("gc: {p} superseded pack(s), {bytes} bytes freed; marked {m} orphan(s)")
                 }
             };
-            tracing::info!(repo = %id, packs, bytes, marked, "bucket gc");
+            if wal_objects > 0 {
+                let _ = write!(
+                    summary,
+                    "; {wal_objects} folded WAL object(s), {wal_bytes} bytes freed"
+                );
+            }
+            tracing::info!(repo = %id, packs, bytes, marked, wal_objects, wal_bytes, "bucket gc");
             Ok((
                 summary,
-                serde_json::json!({"packs": packs, "bytes": bytes, "marked": marked}),
+                serde_json::json!({
+                    "packs": packs, "bytes": bytes, "marked": marked,
+                    "wal_objects": wal_objects, "wal_bytes": wal_bytes
+                }),
             ))
         }
 

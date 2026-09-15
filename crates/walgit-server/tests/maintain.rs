@@ -3592,3 +3592,768 @@ async fn bundle_compose_works_after_a_fold_moved_past_the_base() -> anyhow::Resu
     );
     Ok(())
 }
+
+/// #175 剩余：folded WAL 对象回收 —— `manifest.min_seq` 以下的 log 段与不再
+/// 被引用的 checkpoint 目录，在超过 `maintenance.retention_wal` 之后应被删除；
+/// live checkpoint、live log 段必须留下。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_reclaims_folded_wal_objects_past_the_window() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::{CheckpointRef, LogSegmentRef};
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // The live checkpoint is old (8 days) — that is the age anchor for every
+    // folded WAL object.
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 8 * 24 * 3600;
+    let live_seq = 20u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(old),
+            first_state_at: Some(old),
+            as_of: Some(old),
+        });
+        m.min_seq = 6; // everything below 6 is folded into that checkpoint
+        m.log_segments = vec![LogSegmentRef {
+            key: keys::log_segment_key(15),
+            first_seq: 15,
+            last_seq: 19,
+            size: 0,
+            sealed: true,
+        }];
+        m.packs.clear(); // no base pack: no checkpoint is needed for compose
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version)
+            )
+        )?;
+    }
+
+    // Folded log segment (below min_seq) and the live one.
+    for (seq, live) in [(5u64, false), (15u64, true)] {
+        step!(
+            "log segment",
+            h.store()
+                .put_bytes(&keys::log_segment_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+        let _ = live;
+    }
+    // An unreferenced old checkpoint dir, and the live one.
+    for (seq, live) in [(5u64, false), (live_seq, true)] {
+        step!(
+            "checkpoint object",
+            h.store()
+                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+        step!(
+            "checkpoint refs",
+            h.store().put_bytes(
+                &keys::checkpoint_refs_key(seq),
+                vec![0u8; 16],
+                PutMode::Create
+            )
+        )?;
+        let _ = live;
+    }
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("assertions", async {
+        assert!(
+            h.store().head(&keys::log_segment_key(5)).await?.is_none(),
+            "a folded log segment past the window must be reclaimed"
+        );
+        assert!(
+            h.store().head(&keys::log_segment_key(15)).await?.is_some(),
+            "a live log segment must stay"
+        );
+        assert!(
+            h.store().head(&keys::checkpoint_key(5)).await?.is_none(),
+            "an unreferenced checkpoint past the window must be reclaimed"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_refs_key(5))
+                .await?
+                .is_none(),
+            "the checkpoint's refs snapshot goes with it"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_key(live_seq))
+                .await?
+                .is_some(),
+            "the live checkpoint must stay"
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+/// `walgit compact --base` 可能把 base 建在一个*更老*的 checkpoint 上：compose 要靠
+/// 它重放 refs。回收必须保住「每个 live base 的 seq 处、最新的那个 checkpoint」——
+/// 删了它就是 #195 那种 `refs not replayable`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_keeps_the_checkpoint_a_live_base_needs() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::{CheckpointRef, LogSegmentRef, PackKind, PackRef};
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 8 * 24 * 3600;
+    let live_seq = 30u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(old),
+            first_state_at: Some(old),
+            as_of: Some(old),
+        });
+        // Legal invariant: the live checkpoint folded everything up to its seq.
+        m.min_seq = live_seq + 1;
+        m.log_segments = vec![
+            LogSegmentRef {
+                key: keys::log_segment_key(2),
+                first_seq: 2,
+                last_seq: 8,
+                size: 0,
+                sealed: true,
+            },
+            LogSegmentRef {
+                key: keys::log_segment_key(11),
+                first_seq: 11,
+                last_seq: 12,
+                size: 0,
+                sealed: true,
+            },
+        ];
+        // A live base at seq 12: the newest checkpoint at or before it is 10.
+        m.packs = vec![PackRef {
+            checksum: "a".repeat(40),
+            seq: 12,
+            tier: 2,
+            kind: PackKind::Objects as i32,
+            ..Default::default()
+        }];
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version)
+            )
+        )?;
+    }
+    let refs = walgit_proto::v1::RefSnapshot::default().encode_to_vec();
+    for seq in [5u64, 10, live_seq] {
+        step!(
+            "checkpoint object",
+            h.store()
+                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+        step!(
+            "checkpoint refs",
+            h.store().put_bytes(
+                &keys::checkpoint_refs_key(seq),
+                refs.clone(),
+                PutMode::Create
+            )
+        )?;
+    }
+    // 2 ends before the witness checkpoint (10) → dead weight; 11 covers
+    // (10, 12] → the base's replay tail; 20 is past the base → dead weight.
+    for seq in [2u64, 11, 20] {
+        step!(
+            "log segment",
+            h.store()
+                .put_bytes(&keys::log_segment_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+    }
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("assertions", async {
+        assert!(
+            h.store().head(&keys::checkpoint_key(10)).await?.is_some(),
+            "the newest checkpoint at or before the live base (seq 12) must be kept"
+        );
+        assert!(
+            h.store().head(&keys::checkpoint_key(5)).await?.is_some(),
+            "with an unprovable witness even older checkpoints stay (fail closed)"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_key(live_seq))
+                .await?
+                .is_some(),
+            "the live checkpoint must stay"
+        );
+        // Fail closed (#195): this base has **no exact checkpoint at its seq**,
+        // so which folded segments a rebuild needs cannot be proven — keep them
+        // all rather than deleting evidence.
+        for seq in [2u64, 11, 20] {
+            assert!(
+                h.store().head(&keys::log_segment_key(seq)).await?.is_some(),
+                "folded segment {seq} must be kept while the base's witness is unprovable"
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+/// 并发保护的守门测试：checkpoint 目录是**先 PUT 不可变对象、再 CAS manifest** 的，
+/// 所以快照里可能还没有一个正在写入的、seq 更大的目录。GC 只允许删**严格小于** live
+/// seq 的目录；更大的一律留给后续 pass（否则那个 CAS 落地后会指向被删对象）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_keeps_checkpoint_dirs_newer_than_the_live_one() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::CheckpointRef;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 8 * 24 * 3600;
+    let live_seq = 30u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = live_seq + 1;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(old),
+            first_state_at: Some(old),
+            as_of: Some(old),
+        });
+        m.log_segments.clear();
+        m.packs.clear();
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version)
+            )
+        )?;
+    }
+    let refs = walgit_proto::v1::RefSnapshot::default().encode_to_vec();
+    for seq in [20u64, live_seq, 31, 40] {
+        step!(
+            "checkpoint object",
+            h.store()
+                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+        step!(
+            "checkpoint refs",
+            h.store().put_bytes(
+                &keys::checkpoint_refs_key(seq),
+                refs.clone(),
+                PutMode::Create
+            )
+        )?;
+    }
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("assertions", async {
+        assert!(
+            h.store().head(&keys::checkpoint_key(20)).await?.is_none(),
+            "an older, unreferenced checkpoint is reclaimed"
+        );
+        assert!(
+            h.store().head(&keys::checkpoint_key(31)).await?.is_some(),
+            "a directory newer than the live checkpoint may belong to an in-flight CAS — keep it"
+        );
+        assert!(
+            h.store().head(&keys::checkpoint_key(40)).await?.is_some(),
+            "same for any newer directory"
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+/// 反面：当 live base 在它自己的 seq 处**有完整、可验证的 exact witness**
+/// （`checkpoint.pb` + `refs.pb` 都在），fail-closed 就该解除，回收恢复：更老的
+/// checkpoint 与 folded log 段都可以删，只有 live 对象与 exact witness 留下。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_reclaims_folded_wal_objects_when_the_base_witness_is_complete() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::{CheckpointRef, PackKind, PackRef};
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 8 * 24 * 3600;
+    let live_seq = 30u64;
+    let base_seq = 12u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = live_seq + 1;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(old),
+            first_state_at: Some(old),
+            as_of: Some(old),
+        });
+        m.log_segments.clear();
+        m.packs = vec![PackRef {
+            checksum: "a".repeat(40),
+            seq: base_seq,
+            tier: 2,
+            kind: PackKind::Objects as i32,
+            ..Default::default()
+        }];
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version)
+            )
+        )?;
+    }
+    let refs = walgit_proto::v1::RefSnapshot::default().encode_to_vec();
+    // 5 and 30: checkpoint objects. 12: the base's exact, *complete* witness.
+    for (seq, complete) in [(5u64, false), (base_seq, true), (live_seq, true)] {
+        step!(
+            "checkpoint object",
+            h.store()
+                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+        if complete {
+            step!(
+                "checkpoint refs",
+                h.store().put_bytes(
+                    &keys::checkpoint_refs_key(seq),
+                    refs.clone(),
+                    PutMode::Create
+                )
+            )?;
+        }
+    }
+    step!(
+        "folded log",
+        h.store()
+            .put_bytes(&keys::log_segment_key(20), vec![0u8; 16], PutMode::Create)
+    )?;
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("assertions", async {
+        assert!(
+            h.store().head(&keys::checkpoint_key(5)).await?.is_none(),
+            "with a complete witness the older checkpoint is reclaimable again"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_key(base_seq))
+                .await?
+                .is_some(),
+            "the exact witness must stay"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_key(live_seq))
+                .await?
+                .is_some(),
+            "the live checkpoint must stay"
+        );
+        assert!(
+            h.store().head(&keys::log_segment_key(20)).await?.is_none(),
+            "folded logs are reclaimable again once the witness is provable"
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_fails_closed_when_the_base_witness_is_partial() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::{CheckpointRef, PackKind, PackRef};
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 8 * 24 * 3600;
+    let live_seq = 30u64;
+    let base_seq = 12u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = live_seq + 1;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(old),
+            first_state_at: Some(old),
+            as_of: Some(old),
+        });
+        m.log_segments.clear();
+        m.packs = vec![PackRef {
+            checksum: "a".repeat(40),
+            seq: base_seq,
+            tier: 2,
+            kind: PackKind::Objects as i32,
+            ..Default::default()
+        }];
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version)
+            )
+        )?;
+    }
+    let refs = walgit_proto::v1::RefSnapshot::default().encode_to_vec();
+    // 5 and 30: checkpoint objects. 12: a *partial* directory — the writer's
+    // paired PUTs are not atomic, so `checkpoint.pb` can exist without
+    // `refs.pb`. That is not a witness, and it must not switch fail-closed off.
+    for (seq, complete) in [(5u64, false), (base_seq, false), (live_seq, true)] {
+        step!(
+            "checkpoint object",
+            h.store()
+                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
+        )?;
+        if complete {
+            step!(
+                "checkpoint refs",
+                h.store().put_bytes(
+                    &keys::checkpoint_refs_key(seq),
+                    refs.clone(),
+                    PutMode::Create
+                )
+            )?;
+        }
+    }
+    step!(
+        "folded log",
+        h.store()
+            .put_bytes(&keys::log_segment_key(20), vec![0u8; 16], PutMode::Create)
+    )?;
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("assertions", async {
+        assert!(
+            h.store().head(&keys::checkpoint_key(5)).await?.is_some(),
+            "a half-written witness directory must not unlock reclamation"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_key(base_seq))
+                .await?
+                .is_some(),
+            "the exact witness must stay"
+        );
+        assert!(
+            h.store()
+                .head(&keys::checkpoint_key(live_seq))
+                .await?
+                .is_some(),
+            "the live checkpoint must stay"
+        );
+        assert!(
+            h.store().head(&keys::log_segment_key(20)).await?.is_some(),
+            "folded logs stay while the witness is unprovable"
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+/// #175 / D24: a GC pass must not act on a per-repo retention setting that was
+/// published after this instance's last refs sync. `sync_refs` can legally skip
+/// the conditional GET under `wal.freshness_ttl`; the destructive GC path must
+/// bypass that shortcut and use the manifest it fetched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_reads_retention_settings_past_the_freshness_ttl() -> anyhow::Result<()> {
+    use prost::Message;
+    use std::sync::Arc;
+    use walgit_proto::keys;
+    use walgit_proto::v1::{Checkpoint, CheckpointRef, LogSegmentRef, RefSnapshot};
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+            c.wal.freshness_ttl = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+
+    let live_seq = 20u64;
+    let mut old = walgit_proto::time::now();
+    old.seconds -= 8 * 24 * 3600;
+    let object_format = h.manifest().object_format.clone();
+    let refs = RefSnapshot {
+        seq: live_seq,
+        object_format: object_format.clone(),
+        created_at: Some(old),
+        ..Default::default()
+    };
+    step!(
+        "live refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(live_seq),
+            refs.encode_to_vec(),
+            PutMode::Create,
+        )
+    )?;
+    let checkpoint = Checkpoint {
+        seq: live_seq,
+        object_format: object_format.clone(),
+        refs_key: keys::checkpoint_refs_key(live_seq),
+        created_at: Some(old),
+        ..Default::default()
+    };
+    step!(
+        "live checkpoint",
+        h.store().put_bytes(
+            &keys::checkpoint_key(live_seq),
+            checkpoint.encode_to_vec(),
+            PutMode::Create,
+        )
+    )?;
+
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = 6;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(old),
+            first_state_at: Some(old),
+            as_of: Some(old),
+        });
+        m.log_segments = vec![LogSegmentRef {
+            key: keys::log_segment_key(15),
+            first_seq: 15,
+            last_seq: 19,
+            size: 0,
+            sealed: true,
+        }];
+        m.packs.clear();
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+
+    // A folded log/checkpoint pair that the host's 1h window would reclaim.
+    step!(
+        "old log",
+        h.store()
+            .put_bytes(&keys::log_segment_key(5), vec![0u8; 16], PutMode::Create)
+    )?;
+    step!(
+        "live log",
+        h.store()
+            .put_bytes(&keys::log_segment_key(15), vec![0u8; 16], PutMode::Create)
+    )?;
+    for key in [
+        keys::checkpoint_key(5),
+        keys::checkpoint_refs_key(5),
+    ] {
+        step!(
+            "old checkpoint",
+            h.store().put_bytes(&key, vec![0u8; 16], PutMode::Create)
+        )?;
+    }
+
+    // Load the rewritten manifest and record this instance's freshness TTL.
+    step!("sync", h.sync())?;
+    assert_eq!(
+        h.manifest().checkpoint.as_ref().map(|c| c.seq),
+        Some(live_seq)
+    );
+
+    // Another instance changes the repo to "keep forever" after the sync above.
+    let mut cfg2 = (*server.state.cfg).clone();
+    let cache2 = tempfile::tempdir()?;
+    cfg2.cache.dir = cache2.path().to_path_buf();
+    let registry2 =
+        walgit_wal::Registry::new(server.state.store.clone(), Arc::new(cfg2));
+    let h2 = step!("open second instance", registry2.open(&id))?;
+    step!(
+        "retention settings",
+        h2.publish_settings(
+            "[maintenance]\nretention_wal = \"0s\"\n",
+            "tester",
+            "keep WAL provenance forever",
+        )
+    )?;
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    assert!(
+        h.store().head(&keys::log_segment_key(5)).await?.is_some(),
+        "the fresh settings revision must be observed before deleting WAL objects"
+    );
+    assert!(
+        h.store().head(&keys::checkpoint_key(5)).await?.is_some(),
+        "retention_wal=0 must keep the old checkpoint"
+    );
+    assert!(
+        h.store().head(&keys::log_segment_key(15)).await?.is_some(),
+        "live log remains untouched"
+    );
+    Ok(())
+}
