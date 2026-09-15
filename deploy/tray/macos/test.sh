@@ -512,6 +512,45 @@ release_detect_fixture() {
         *) echo "FAIL(release-detect): same version not up-to-date: $out" >&2; return 1 ;;
     esac
 
+    # 缺 digest / assets 为空：没有源码仓库可回退时，不能当成「已是最新」。
+    mkdir -p "$base/no-repo"
+    printf '{"tag_name":"v0.9.9","assets":[{"name":"walgit-0.9.9-%s.dmg","browser_download_url":"https://example.invalid/w.dmg","digest":null}]}\n' \
+        "$arch" >"$base/no-digest.json"
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
+        WALGIT_RELEASE_FIXTURE="$base/no-digest.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"更新检查失败"* ) ;;
+        *) echo "FAIL(release-detect): missing digest was treated as latest: $out" >&2; return 1 ;;
+    esac
+    case "$out" in
+        *"已是最新"* ) echo "FAIL(release-detect): missing digest said latest: $out" >&2; return 1 ;;
+    esac
+    grep -q "no sha256 digest" "$state/tray.log" \
+        || { echo "FAIL(release-detect): missing digest reason not logged" >&2; return 1; }
+
+    # assets 为空：同样是检查失败，不是已是最新。
+    printf '{"tag_name":"v0.9.9","assets":[]}\n' >"$base/no-assets.json"
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
+        WALGIT_RELEASE_FIXTURE="$base/no-assets.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"更新检查失败"* ) ;;
+        *) echo "FAIL(release-detect): empty assets was treated as latest: $out" >&2; return 1 ;;
+    esac
+
+    # 无源码仓库 + lookup 失败：两条通道都不可用，必须报检查失败。
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
+        WALGIT_RELEASE_API="http://127.0.0.1:1/latest" WALGIT_DETECT_ONCE=1 \
+        "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"更新检查失败"* ) ;;
+        *) echo "FAIL(release-detect): unavailable channels said latest: $out" >&2; return 1 ;;
+    esac
+    grep -q "latest lookup failed" "$state/tray.log" \
+        || { echo "FAIL(release-detect): lookup failure reason not logged" >&2; return 1; }
+
+    # 旧版本 → 已是最新(降级提示是 bug)。
     # 旧版本 → 已是最新(降级提示是 bug)。
     write_release_fixture "$base/older.json" 0.4.0
     out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/older.json" \

@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use release::{
-    upgrade_line, ReleaseInfo, ST_AVAILABLE, ST_CHECKING, ST_FAILED, ST_IDLE, ST_INSTALLING,
-    ST_LATEST,
+    upgrade_line, ReleaseInfo, ST_AVAILABLE, ST_CHECKING, ST_CHECK_FAILED, ST_FAILED, ST_IDLE,
+    ST_INSTALLING, ST_LATEST,
 };
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
@@ -154,13 +154,14 @@ fn app_version() -> String {
 /// 只信 API 里的 sha256 digest:拿不到就当作「没有可用更新」而不是安装
 /// 一个未校验的包。只有 macOS 的 Release 通道会用它。
 #[cfg(target_os = "macos")]
-fn latest_release() -> Option<ReleaseInfo> {
+fn latest_release() -> Result<ReleaseInfo, String> {
     use release::{arch_slug, parse_latest_release};
 
     if let Ok(fixture) = std::env::var("WALGIT_RELEASE_FIXTURE") {
         if !fixture.is_empty() {
-            let body = std::fs::read_to_string(&fixture).ok()?;
-            return parse_latest_release(&body, arch_slug()).ok();
+            let body = std::fs::read_to_string(&fixture)
+                .map_err(|e| format!("cannot read fixture {fixture}: {e}"))?;
+            return parse_latest_release(&body, arch_slug());
         }
     }
     let endpoint =
@@ -185,25 +186,19 @@ fn latest_release() -> Option<ReleaseInfo> {
         &[],
     );
     if code != 0 {
-        log_line(&format!(
-            "release: latest lookup failed {}",
+        return Err(format!(
+            "latest lookup failed {}",
             body.trim().chars().take(160).collect::<String>()
         ));
-        return None;
     }
-    match parse_latest_release(&body, arch_slug()) {
-        Ok(info) => Some(info),
-        Err(e) => {
-            log_line(&format!("release: {e}"));
-            None
-        }
-    }
+    parse_latest_release(&body, arch_slug())
 }
 
 /// 检测结果:菜单状态机据此选「下载并升级(Release)」还是「从源码升级」。
 enum Detected {
     Nothing,
     Source(String),
+    Failed,
     #[cfg(target_os = "macos")]
     Release(ReleaseInfo),
 }
@@ -237,7 +232,7 @@ fn detected_update() -> Detected {
         if app_bundle().is_some() {
             let current = app_version();
             match latest_release() {
-                Some(info) => {
+                Ok(info) => {
                     let newer = is_version_newer(&info.version, &current);
                     log_line(&format!(
                         "detect: app={current} release=v{} → {}",
@@ -250,9 +245,14 @@ fn detected_update() -> Detected {
                         Detected::Nothing
                     };
                 }
-                None => log_line(&format!(
-                    "detect: app={current} release=none(lookup 失败)→ 退回源码检测"
-                )),
+                Err(reason) => {
+                    log_line(&format!(
+                        "detect: app={current} release unavailable ({reason})"
+                    ));
+                    if !has_source_repo() {
+                        return Detected::Failed;
+                    }
+                }
             }
         }
     }
@@ -261,7 +261,7 @@ fn detected_update() -> Detected {
             "detect: source=none(无仓库 {})",
             repo_dir().display()
         ));
-        return Detected::Nothing;
+        return Detected::Failed;
     }
     let repo = repo_dir();
     let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
@@ -271,7 +271,7 @@ fn detected_update() -> Detected {
     let remote = rout.trim().to_string();
     if c1 != 0 || c2 != 0 || local.is_empty() || remote.is_empty() {
         log_line("detect: source skip(git failed)");
-        return Detected::Nothing;
+        return Detected::Failed;
     }
     let short = |sha: &str| sha[..7.min(sha.len())].to_string();
     log_line(&format!(
@@ -301,6 +301,11 @@ fn publish_detected(proxy: &EventLoopProxy<Msg>, detected: Detected) {
             let _ = proxy.send_event(Msg::Release(None));
             let _ = proxy.send_event(Msg::Available(sha));
             let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
+        }
+        Detected::Failed => {
+            let _ = proxy.send_event(Msg::Release(None));
+            let _ = proxy.send_event(Msg::Available(String::new()));
+            let _ = proxy.send_event(Msg::UpdateState(ST_CHECK_FAILED));
         }
         #[cfg(target_os = "macos")]
         Detected::Release(info) => {
@@ -1326,7 +1331,7 @@ impl ApplicationHandler<Msg> for App {
                     }
                 }
                 "upgrade" => match self.state {
-                    ST_IDLE | ST_LATEST | ST_FAILED => {
+                    ST_IDLE | ST_LATEST | ST_FAILED | ST_CHECK_FAILED => {
                         self.state = ST_CHECKING;
                         self.rebuild_menu();
                         std::thread::spawn(move || {
@@ -1433,6 +1438,7 @@ fn main() {
         let (state, release, sha) = match detected {
             Detected::Nothing => (ST_LATEST, None, String::new()),
             Detected::Source(sha) => (ST_AVAILABLE, None, sha),
+            Detected::Failed => (ST_CHECK_FAILED, None, String::new()),
             #[cfg(target_os = "macos")]
             Detected::Release(info) => (ST_AVAILABLE, Some(info), String::new()),
         };
