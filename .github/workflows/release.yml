@@ -196,6 +196,9 @@ jobs:
           WALGIT_IDENTITY: ${{ steps.signing.outputs.identity }}
           WALGIT_SKIP_BUILD: '1'
           WALGIT_CLEAN_TARGET_AFTER_APP: '1'
+          # CI-only: reclaim cargo/rustup/package-manager caches before the
+          # DMG stage (#204). Never inferred from HOME; opt-in explicitly.
+          WALGIT_CLEAN_HOME_CACHES: '1'
           NOTARY_S3_ACCELERATION: '0'
         run: |
           set -euo pipefail

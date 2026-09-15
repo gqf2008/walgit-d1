@@ -109,9 +109,45 @@ fi
 # Full local-path smoke under macOS Bash 3.2: no CODESIGN_KEYCHAIN, fake
 # signing/notary tools, prebuilt binary. This is the path that used to abort
 # on an empty array before any signing happened.
+# Seed the two cleanup opt-ins: repository target and HOME caches.
+cleanup_seed() {
+    local root="$1"
+    local home="$2"
+    rm -rf "$root/target"
+    mkdir -p "$root/target" \
+        "$home/.cargo/registry" "$home/.cargo/git" \
+        "$home/.rustup/toolchains" \
+        "$home/Library/Caches/pnpm" "$home/Library/pnpm/store" \
+        "$home/Library/Caches/Homebrew"
+    : >"$root/target/sentinel"
+}
+
+cleanup_check_home() {
+    local home="$1"
+    local want="$2"
+    local path
+    for path in \
+        "$home/.cargo/registry" \
+        "$home/.cargo/git" \
+        "$home/.rustup/toolchains" \
+        "$home/Library/Caches/pnpm" \
+        "$home/Library/pnpm/store" \
+        "$home/Library/Caches/Homebrew"; do
+        if [ "$want" = present ] && [ ! -e "$path" ]; then
+            echo "FAIL: local HOME cache was cleaned without the CI opt-in: $path" >&2
+            return 1
+        fi
+        if [ "$want" = absent ] && [ -e "$path" ]; then
+            echo "FAIL: CI HOME cache cleanup did not run: $path" >&2
+            return 1
+        fi
+    done
+}
+
 bash_compat_smoke() {
     local base="$TMP/bash-compat"
     local fake="$base/bin"
+    local home built
     mkdir -p "$fake"
     cat >"$base/walgit" <<'EOF'
 #!/bin/sh
@@ -140,23 +176,26 @@ done
 exit 0
 EOF
     chmod +x "$fake"/*
-    mkdir -p "$base/root/target"
-    : >"$base/root/target/sentinel"
 
-    # Cleanup disabled: the sentinel must survive.
-    PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
+    # Cleanup disabled: both the target and the HOME caches must survive.
+    home="$base/home-disabled"
+    cleanup_seed "$base/root" "$home"
+    PATH="$fake:$PATH" HOME="$home" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
         WALGIT_BIN="$base/walgit" WALGIT_TRAY_BIN="$base/tray" \
         WALGIT_IDENTITY='Developer ID Application: Test' \
         NOTARY_PROFILE=test /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
-    local built
     built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
     [ -n "$built" ] || { echo "FAIL: bash-compat smoke produced no DMG" >&2; return 1; }
     [ -e "$base/root/target/sentinel" ] \
         || { echo "FAIL: target cleaned without the CI opt-in" >&2; return 1; }
+    cleanup_check_home "$home" present
     rm -f "$built"
 
-    # CI cleanup: target goes away only after the app has been assembled.
-    PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
+    # CI target cleanup enabled, but HOME cache cleanup deliberately not set:
+    # the target goes away, the developer's global cache does not.
+    home="$base/home-local-cleanup"
+    cleanup_seed "$base/root" "$home"
+    PATH="$fake:$PATH" HOME="$home" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
         WALGIT_CLEAN_TARGET_AFTER_APP=1 WALGIT_BIN="$base/walgit" \
         WALGIT_TRAY_BIN="$base/tray" \
         WALGIT_IDENTITY='Developer ID Application: Test' NOTARY_PROFILE=test \
@@ -165,10 +204,26 @@ EOF
     [ -n "$built" ] || { echo "FAIL: cleanup smoke produced no DMG" >&2; return 1; }
     [ ! -e "$base/root/target/sentinel" ] \
         || { echo "FAIL: CI target cleanup did not run" >&2; return 1; }
+    cleanup_check_home "$home" present
+    rm -f "$built"
+
+    # Full CI cleanup: the dedicated HOME-cache switch removes the fixture
+    # caches. This is the only path that may touch $HOME caches.
+    home="$base/home-ci-cleanup"
+    cleanup_seed "$base/root" "$home"
+    PATH="$fake:$PATH" HOME="$home" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
+        WALGIT_CLEAN_TARGET_AFTER_APP=1 WALGIT_CLEAN_HOME_CACHES=1 \
+        WALGIT_BIN="$base/walgit" WALGIT_TRAY_BIN="$base/tray" \
+        WALGIT_IDENTITY='Developer ID Application: Test' NOTARY_PROFILE=test \
+        /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
+    built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
+    [ -n "$built" ] || { echo "FAIL: full cleanup smoke produced no DMG" >&2; return 1; }
+    [ ! -e "$base/root/target/sentinel" ] \
+        || { echo "FAIL: full CI target cleanup did not run" >&2; return 1; }
+    cleanup_check_home "$home" absent
     rm -f "$built"
     return 0
 }
-
 # The real app bundle must contain exactly the new contract: program in
 # Resources, no managed copies under ~/.walgit.
 layout_fixture() {
