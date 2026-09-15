@@ -2,14 +2,10 @@
 //! catch-up/materialize of local repos, ref snapshots. See AGENTS.md §2 and AGENTS.md §2.
 
 mod checkpoint;
-
-/// Retained witness checkpoints (#195): written by a base rebuild so the base's
-/// own seq stays replayable after later folds move the live checkpoint past it.
-pub use checkpoint::write_witness_checkpoint;
-pub mod ci;
-pub mod collab;
 mod error;
 mod handle;
+pub mod ci;
+pub mod collab;
 pub mod lockwait;
 mod log_reader;
 pub mod platform;

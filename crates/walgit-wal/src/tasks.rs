@@ -159,8 +159,8 @@ impl TaskState {
                 Progress::Progress { .. } => rec.progress = Some(p.clone()),
                 Progress::Task { .. } => {}
             }
-            rec.elapsed_ms =
-                u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            rec.elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis())
+                .unwrap_or(u64::MAX);
         }
         {
             let mut replay = self.replay.lock();
@@ -392,8 +392,8 @@ impl Tasks {
         let record = {
             let mut rec = state.record.lock();
             rec.finished = Some(now_rfc3339());
-            rec.elapsed_ms =
-                u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            rec.elapsed_ms = u64::try_from(state.started_at.elapsed().as_millis())
+                .unwrap_or(u64::MAX);
             match &outcome {
                 Ok((summary, _)) => {
                     rec.ok = Some(true);

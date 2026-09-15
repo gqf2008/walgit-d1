@@ -1810,8 +1810,7 @@ mod tests {
                         {
                             bad.store(true, Ordering::Relaxed);
                         }
-                        if writers_done.load(Ordering::Acquire) == usize::try_from(writers).unwrap()
-                        {
+                        if writers_done.load(Ordering::Acquire) == usize::try_from(writers).unwrap() {
                             let (m, v) = h.manifest_snapshot();
                             if let Some(v) = v
                                 && v.as_str() != format!("v{}", m.revision)
