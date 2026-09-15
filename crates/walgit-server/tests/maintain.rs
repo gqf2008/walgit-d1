@@ -3262,3 +3262,157 @@ async fn gc_reconcile_is_bounded_and_stays_due_while_orphans_remain() -> anyhow:
     );
     Ok(())
 }
+
+/// #194：一个**永久失败**的高优先级单元不得饿死它下面的工作。实测生产里 9 个仓库
+/// 有 6 个每 pass 选中 `bundle` 且全部失败（base seq 处缺 checkpoint），而 `gc`
+/// 排在后面 → 全桶 `gc.pb` 恒为 0、孤儿永远不被回收。
+///
+/// 这里用最省事的确定性失败源：`fsck.pb` 列出缺失对象 + `upstream.git` 指向不存在
+/// 的路径 → `repair`（优先级高于 `gc`）每 pass 必失败。断言：达到退避阈值后，
+/// **同一个 pass** 就能把机会交给 `gc`；而当 `gc` 不再 due、`repair` 成为唯一工作
+/// 时，它仍然会被重试（自愈循环的意义就在于此）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_permanently_failing_unit_hands_the_pass_to_lower_priority_work() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::FsckReport;
+    use walgit_server::maintain::{
+        BACKOFF_AFTER_FAILURES, Backoff, Unit, next_unit, run_pass_with_backoff,
+    };
+    use walgit_store::{ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            // Deterministic repair failure: the only source it may fetch from
+            // does not exist.
+            c.upstream.git = Some("https://127.0.0.1:9/nonexistent-gc-fairness.git".to_string());
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let fsck = FsckReport {
+        seq: h.manifest().head_seq,
+        at: Some(walgit_proto::time::now()),
+        host: "fairness-test".into(),
+        missing: vec!["0".repeat(40)],
+        missing_total: 1,
+        problems: 0,
+        elapsed_secs: 0.0,
+        repaired_seq: 0,
+    };
+    step!(
+        "fsck.pb",
+        h.store()
+            .put_bytes(keys::FSCK, fsck.encode_to_vec(), PutMode::Overwrite)
+    )?;
+    assert!(
+        matches!(
+            step!("plan", next_unit(&server.state, &id))?,
+            Unit::Repair(_)
+        ),
+        "a repair with missing objects outranks gc"
+    );
+
+    let mut backoff = Backoff::default();
+    for strike in 1..=BACKOFF_AFTER_FAILURES {
+        step!(
+            "failing pass",
+            run_pass_with_backoff(&server.state, &mut backoff)
+        )?;
+        assert_eq!(
+            backoff.strikes(&id, "repair"),
+            strike,
+            "the failing repair keeps its strike count"
+        );
+        if strike < BACKOFF_AFTER_FAILURES {
+            assert!(
+                h.store().get_bytes(keys::GC).await?.is_none(),
+                "below the threshold the pass still ends at the failing unit"
+            );
+        }
+    }
+    assert!(
+        h.store().get_bytes(keys::GC).await?.is_some(),
+        "once the repair reaches the backoff threshold, gc must run in that same pass"
+    );
+
+    // gc is not due again for an hour: the backing-off repair is now the only
+    // work, and the loop must still retry it rather than idle forever.
+    let report = run_pass_with_backoff(&server.state, &mut backoff).await?;
+    assert_eq!(report.units, 0, "nothing else is due");
+    assert_eq!(
+        report.skipped, 1,
+        "the only due unit is the backing-off repair — it still runs (and fails)"
+    );
+    Ok(())
+}
+
+/// #194 复审：**多个** kind 同时处于退避时，兜底不能只做一次「无 backoff」规划 ——
+/// 那样永远选中优先级最高且仍在失败的那个，较低的 kind 依旧永远拿不到机会。
+/// 这里预置 `repair`（必然失败）与 `gc` 都在退避，断言 `gc` 仍能在同一个 pass 拿到
+/// 机会（`ran_kinds` 的轮转 + 单元预算是这条路径的唯一依赖）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backing_off_kinds_rotate_instead_of_starving_the_lower_one() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::FsckReport;
+    use walgit_server::maintain::{BACKOFF_AFTER_FAILURES, Backoff, run_pass_with_backoff};
+    use walgit_store::{ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.upstream.git = Some("https://127.0.0.1:9/nonexistent-gc-fairness.git".to_string());
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let fsck = FsckReport {
+        seq: h.manifest().head_seq,
+        at: Some(walgit_proto::time::now()),
+        host: "fairness-test".into(),
+        missing: vec!["0".repeat(40)],
+        missing_total: 1,
+        problems: 0,
+        elapsed_secs: 0.0,
+        repaired_seq: 0,
+    };
+    step!(
+        "fsck.pb",
+        h.store()
+            .put_bytes(keys::FSCK, fsck.encode_to_vec(), PutMode::Overwrite)
+    )?;
+
+    // Both kinds are already past the threshold: `repair` keeps failing, `gc`
+    // would succeed but sits below it in the priority order.
+    let mut backoff = Backoff::default();
+    for _ in 0..BACKOFF_AFTER_FAILURES {
+        backoff.record_failure(&id, "repair");
+        backoff.record_failure(&id, "gc");
+    }
+    let report = run_pass_with_backoff(&server.state, &mut backoff).await?;
+    assert!(
+        report.skipped >= 1,
+        "the failing kind still gets its turn (retrying is the loop's job)"
+    );
+    assert!(
+        h.store().get_bytes(keys::GC).await?.is_some(),
+        "the lower backed-off kind (gc) must get a turn instead of the higher one taking every fallback"
+    );
+    Ok(())
+}
