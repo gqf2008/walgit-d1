@@ -158,6 +158,8 @@ retention_wal = "7d"               # bucket GC: folded log segments (below manif
                                    # newest checkpoint at or before a live base's seq, any checkpoint directory newer than
                                    # the live one (in-flight CAS), and — unless every live base has an exact, complete
                                    # checkpoint at its seq — all folded segments and older checkpoints (fail closed, #195).
+                                   # Age comes from each candidate's own immutable content (log entry / checkpoint time);
+                                   # missing or unreadable timestamps fail safe by keeping the object.
                                    # 0 = keep forever (applies to the next GC pass; an in-flight bounded pass is not cancelled)
 fsck_interval = "7d"              # lowest-priority unit: git fsck --connectivity-only over a complete local copy → repos/<o>/<r>/fsck.pb
                                   # (missing objects → walgit_repo_missing_objects{repo} + the `repair` unit from upstream.git); 0 = off

@@ -216,15 +216,33 @@ pub async fn read_fsck(
 /// (a few KB each); the bound exists to keep one unit bounded, not for bytes.
 const GC_MAX_WAL_OBJECTS_PER_UNIT: usize = 512;
 
+/// Delete a checkpoint directory in a crash-safe order: optional side files
+/// first, then `refs.pb`, and `checkpoint.pb` last. A normal writer's
+/// `RefSnapshot.created_at` is `None`, so a refs-only remnant would have no
+/// durable age; the checkpoint object retains its own timestamp until the
+/// directory is fully gone.
+fn order_checkpoint_deletes(seq: u64, objects: &mut [(String, u64)]) {
+    let cp_key = walgit_proto::keys::checkpoint_key(seq);
+    let refs_key = walgit_proto::keys::checkpoint_refs_key(seq);
+    objects.sort_by_key(|(key, _)| match key.as_str() {
+        _ if *key == cp_key => 2,
+        _ if *key == refs_key => 1,
+        _ => 0,
+    });
+}
+
 /// Reclaim folded WAL objects (#175): log segments below `manifest.min_seq`,
 /// and checkpoint directories that are neither the live checkpoint nor the one
 /// a live base pack's refs are replayed from.
 ///
-/// Age anchor: the **live checkpoint's `created_at`**. Everything this pass is
-/// allowed to delete was folded at or before that instant, so
-/// `now - created_at > retention_wal` is a conservative (late) bound for all of
-/// them — and it needs no per-object timestamp, which the store contract does
-/// not expose.
+/// Age anchor: each candidate's own content. A log segment's newest
+/// `LogEntry.created_at`, and a checkpoint's `created_at` (falling back to
+/// the refs snapshot's `created_at` when the checkpoint object is gone) are
+/// the only durable time proof the store contract exposes. Missing/invalid
+/// timestamps fail safe by
+/// keeping the object. Using the live checkpoint's time here would never drain
+/// an actively maintained repository: every new checkpoint would keep every
+/// older folded object "inside" the window (#206).
 ///
 /// Returns `(objects deleted, bytes freed, complete)`.
 async fn gc_wal_objects(
@@ -246,27 +264,17 @@ async fn gc_wal_objects(
         // Nothing is folded yet: every log segment is live.
         return Ok((0, 0, true));
     };
-    let Some(created_at) = checkpoint
-        .created_at
-        .as_ref()
-        .map(walgit_proto::time::to_system)
-    else {
-        // No anchor ⇒ no proof of age ⇒ keep everything this pass.
-        return Ok((0, 0, true));
+    let now = std::time::SystemTime::now();
+    let valid_time = |ts: &prost_types::Timestamp| {
+        (ts.seconds >= 0 && (0..1_000_000_000).contains(&ts.nanos))
+            .then(|| walgit_proto::time::to_system(ts))
     };
-    let age = std::time::SystemTime::now()
-        .duration_since(created_at)
-        .unwrap_or_default();
-    if age <= retention {
-        log(format!(
-            "gc: folded WAL objects are younger than the {}h window — nothing to do",
-            retention.as_secs() / 3600
-        ));
-        return Ok((0, 0, true));
-    }
+    let older_than = |ts: Option<std::time::SystemTime>| {
+        ts.is_some_and(|t| now.duration_since(t).unwrap_or_default() > retention)
+    };
 
     // List both prefixes once: the deletion set is derived from what exists.
-    let mut log_segments: Vec<(String, u64)> = Vec::new(); // (key, first_seq)
+    let mut log_segments: Vec<(String, u64, u64)> = Vec::new(); // (key, first_seq, size)
     let checkpoint_dirs: Vec<(u64, Vec<(String, u64)>)>; // (seq, objects)
     {
         let mut stream = handle.store().list(keys::LOG_DIR, None);
@@ -281,7 +289,7 @@ async fn gc_wal_objects(
             let Ok(first_seq) = u64::from_str_radix(seq_hex, 16) else {
                 continue;
             };
-            log_segments.push((m.key, first_seq));
+            log_segments.push((m.key, first_seq, m.size));
         }
         let mut dirs: std::collections::BTreeMap<u64, Vec<(String, u64)>> =
             std::collections::BTreeMap::new();
@@ -354,15 +362,33 @@ async fn gc_wal_objects(
     let mut freed = 0u64;
     let mut complete = true;
     let mut pending: Vec<Vec<(String, u64)>> = Vec::new();
+    let mut pending_objects = 0usize;
 
-    for (key, first_seq) in log_segments {
+    for (key, first_seq, size) in log_segments {
         if live_logs.contains(&first_seq) || first_seq >= manifest.min_seq {
             continue; // still needed for replay
         }
         if keep_all_folded_logs || keep_logs.contains(&first_seq) {
             continue; // a live base's replay witness (or nothing provable)
         }
-        pending.push(vec![(key, 0)]);
+        let Some((_, bytes)) = handle.store().get_bytes(&key).await.map_err(|e| e.to_string())? else {
+            continue; // a vanished object has nothing left to reclaim
+        };
+        let (entries, _) = walgit_proto::frame::decode_entries(&bytes)
+            .map_err(|e| format!("gc: decode log segment {key}: {e}"))?;
+        let Some(newest_entry) = entries.iter().max_by_key(|e| e.seq) else {
+            continue; // an empty/corrupt segment has no age proof
+        };
+        let newest = newest_entry.created_at.as_ref().and_then(&valid_time);
+        if !older_than(newest) {
+            continue;
+        }
+        if pending_objects >= max {
+            complete = false;
+            break;
+        }
+        pending_objects += 1;
+        pending.push(vec![(key, size)]);
     }
     for (seq, objects) in checkpoint_dirs {
         if keep.contains(&seq) {
@@ -383,6 +409,46 @@ async fn gc_wal_objects(
         if seq >= checkpoint.seq {
             continue;
         }
+        let cp_key = keys::checkpoint_key(seq);
+        let refs_key = keys::checkpoint_refs_key(seq);
+        let timestamp = if let Some((_, bytes)) = handle.store().get_bytes(&cp_key).await.map_err(|e| e.to_string())? {
+            match walgit_proto::v1::Checkpoint::decode(bytes.as_ref()) {
+                Ok(cp) => cp.created_at.as_ref().and_then(&valid_time),
+                Err(e) => {
+                    tracing::warn!(key = %cp_key, error = %e, "gc: unreadable checkpoint; keeping it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // A crash mid-delete can leave refs.pb without checkpoint.pb. Its
+        // snapshot carries a timestamp too; use it so the remnant can drain.
+        let timestamp = if timestamp.is_some() {
+            timestamp
+        } else if let Some((_, bytes)) = handle.store().get_bytes(&refs_key).await.map_err(|e| e.to_string())? {
+            match walgit_proto::v1::RefSnapshot::decode(bytes.as_ref()) {
+                Ok(rs) => rs.created_at.as_ref().and_then(&valid_time),
+                Err(e) => {
+                    tracing::warn!(key = %refs_key, error = %e, "gc: unreadable refs snapshot; keeping it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if !older_than(timestamp) {
+            continue;
+        }
+        // Keep a checkpoint directory atomic: never queue one whose objects
+        // would straddle the deletion bound. The next pass can delete it whole.
+        if pending_objects.saturating_add(objects.len()) > max {
+            complete = false;
+            break;
+        }
+        let mut objects = objects;
+        order_checkpoint_deletes(seq, &mut objects);
+        pending_objects += objects.len();
         pending.push(objects);
     }
 
@@ -1870,6 +1936,29 @@ pub async fn compact_repo(
         packs,
         superseded,
     })
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::order_checkpoint_deletes;
+
+    #[test]
+    fn checkpoint_directory_deletes_checkpoint_last() {
+        let seq = 7;
+        let cp = walgit_proto::keys::checkpoint_key(seq);
+        let refs = walgit_proto::keys::checkpoint_refs_key(seq);
+        let side = format!("{}{}.bundle", walgit_proto::keys::CHECKPOINTS_DIR, "0000000000000007/");
+        let mut objects = vec![
+            (cp.clone(), 1),
+            (refs.clone(), 2),
+            (side.clone(), 3),
+        ];
+        order_checkpoint_deletes(seq, &mut objects);
+        let names: Vec<&str> = objects.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(names[0], side, "optional side files delete first");
+        assert_eq!(names[1], refs, "refs delete before the checkpoint");
+        assert_eq!(names[2], cp, "checkpoint.pb must be the last delete");
+    }
 }
 
 #[cfg(test)]
