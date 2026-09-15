@@ -2087,6 +2087,9 @@ name = "walgit-tray"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "serde_json",
  "tray-icon",
  "windows-sys 0.52.0",

@@ -20,6 +20,14 @@ strip = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# 点 Dock 图标 → 打开 Web UI(#200)。winit 持有 NSApplication delegate 且不转发
+# `applicationShouldHandleReopen:hasVisibleWindows:`，所以这里往**它的 delegate 类**
+# 上注入这一个方法(它没实现,故不覆盖其行为)。crate 均已在依赖树里(tray-icon/muda)。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication"] }
+objc2-foundation = { version = "0.2", features = ["NSObject"] }
+
 
 # 单实例命名互斥(仅 Windows 用;版本对齐 tray-icon 传递依赖,不引入新树)。
 # Win32_Security 是 CreateMutexW 声明的 cfg 要求——没有它,今天能编译全靠

@@ -647,6 +647,115 @@ fn run(
     }
 }
 
+// ---------- macOS Dock reopen 钩子(#200) ----------
+
+/// 点 Dock 图标（或 `open -a`）→ 打开 Web UI。
+///
+/// macOS 把这件事投递给**应用 delegate** 的
+/// `applicationShouldHandleReopen:hasVisibleWindows:`；winit 持有 delegate 且不实现也不
+/// 转发它，而替换 winit 的 delegate 会破坏事件循环。所以启动时（主线程、事件循环开始
+/// 前）往 **winit 的 delegate 类**上注入这一个方法：
+///
+/// * 注入前先 `class_getInstanceMethod` 检查：已存在（例如未来的 winit 实现了它）就跳过，
+///   **绝不覆盖**别人的实现；
+/// * 注入的选择子 winit 未实现，因此不改变 winit 的任何行为；
+/// * 类型编码按当前目标的 `BOOL` 生成（arm64 是 `B`、x86_64 是 `c` —— 硬编码任何一个都会
+///   在另一个架构上伪造方法元数据）；
+/// * 任何一步失败只记日志，不 panic：托盘主体功能不依赖它。
+#[cfg(target_os = "macos")]
+fn install_dock_reopen_hook() {
+    use objc2::encode::Encode;
+    use objc2::runtime::{AnyObject, Bool, Sel};
+    use objc2::sel;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    /// The delegate callback: open the Web UI when the Dock icon (or `open -a`)
+    /// asks the app to come back. `false` = "I handled it, there is no window to
+    /// show" (this app has no windows of its own).
+    unsafe extern "C" fn should_handle_reopen(
+        _this: &AnyObject,
+        _cmd: Sel,
+        _sender: *mut AnyObject,
+        _has_visible_windows: Bool,
+    ) -> Bool {
+        log_line("dock: reopen — opening the Web UI");
+        open_web();
+        Bool::NO
+    }
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        log_line("dock: reopen hook skipped (not on the main thread)");
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: main thread (MainThreadMarker above) and the app exists.
+    let Some(delegate) = (unsafe { app.delegate() }) else {
+        log_line("dock: reopen hook skipped (no NSApplication delegate)");
+        return;
+    };
+    let delegate_ptr: *const AnyObject = std::ptr::from_ref(&*delegate).cast();
+    let class_ptr = unsafe { objc2::ffi::object_getClass(delegate_ptr.cast()) };
+    if class_ptr.is_null() {
+        log_line("dock: reopen hook skipped (delegate has no class)");
+        return;
+    }
+    let selector = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
+    if !unsafe { objc2::ffi::class_getInstanceMethod(class_ptr, selector.as_ptr()) }.is_null() {
+        log_line("dock: reopen hook skipped (the delegate already implements it)");
+        return;
+    }
+    // `BOOL` is `B` on aarch64 and `c` on x86_64: take it from the type itself
+    // instead of hardcoding either.
+    let bool_encoding = Bool::ENCODING.to_string();
+    let Ok(types) = std::ffi::CString::new(format!("{bool_encoding}@:@{bool_encoding}")) else {
+        log_line("dock: reopen hook skipped (bad type encoding)");
+        return;
+    };
+    // SAFETY: the selector is absent (checked above), so this cannot shadow an
+    // existing implementation; the signature matches the documented AppKit
+    // method for this target's BOOL; and this runs on the main thread before the
+    // event loop starts dispatching.
+    let added = unsafe {
+        let imp: objc2::ffi::IMP = Some(std::mem::transmute::<
+            unsafe extern "C" fn(&AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
+            unsafe extern "C" fn(),
+        >(should_handle_reopen));
+        objc2::ffi::class_addMethod(class_ptr.cast_mut(), selector.as_ptr(), imp, types.as_ptr())
+    };
+    log_line(&format!(
+        "dock: reopen hook installed={added} on the winit delegate class"
+    ));
+
+    // `WALGIT_REOPEN_SELFTEST=1`: prove the injected method is callable without a
+    // window server (CI has no Dock to click). This invokes exactly the IMP
+    // AppKit calls on a Dock click, then leaves before the event loop.
+    if std::env::var("WALGIT_REOPEN_SELFTEST").as_deref() != Ok("1") {
+        return;
+    }
+    // `ffi::BOOL` is `bool` on arm64 but `i8` on x86_64: go through `Bool`
+    // instead of a bare `!` (which does not compile on the latter).
+    if Bool::from_raw(added).is_false() {
+        log_line("dock: selftest skipped (the method was not added)");
+        return;
+    }
+    // SAFETY: the selector exists with this exact signature (we just added it,
+    // verified above); no other thread is messaging the delegate yet.
+    let raw: unsafe extern "C" fn() = objc2::ffi::objc_msgSend;
+    let send: unsafe extern "C" fn(*const AnyObject, Sel, *const AnyObject, Bool) -> Bool =
+        unsafe { std::mem::transmute(raw) };
+    let handled = unsafe {
+        send(
+            delegate_ptr,
+            selector,
+            std::ptr::from_ref(&*app).cast(),
+            Bool::NO,
+        )
+    };
+    println!("reopen-selftest handled={}", handled.as_bool());
+    std::process::exit(0);
+}
+
 // ---------- 服务控制 ----------
 
 /// macOS uses the in-binary service command. Windows/Linux keep the tray-side
@@ -926,6 +1035,16 @@ fn open_web() {
     } else {
         format!("http://{hostname}:{port}/")
     };
+    // Test seam (#200): with `WALGIT_OPEN_URL_FILE` set, record the URL instead
+    // of launching a browser. The reopen regression asserts *this* — a log line
+    // alone would stay green if the action were dropped — and CI never pops a
+    // browser window.
+    if let Ok(path) = std::env::var("WALGIT_OPEN_URL_FILE") {
+        if !path.is_empty() {
+            let _ = std::fs::write(path, format!("{url}\n"));
+            return;
+        }
+    }
     #[cfg(target_os = "macos")]
     sh(&format!("open '{url}'"));
     #[cfg(target_os = "windows")]
@@ -1427,6 +1546,9 @@ fn main() {
             }
         });
     }
+
+    #[cfg(target_os = "macos")]
+    install_dock_reopen_hook();
 
     event_loop.run_app(&mut app).unwrap();
 }
