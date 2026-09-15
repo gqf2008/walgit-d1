@@ -1790,6 +1790,7 @@ mod resume_tests {
                 since: Some(time::now()),
                 owner: "someone-else".into(),
                 token: "their-token".into(),
+                fence_until: None,
             }],
         )
         .await;
@@ -1838,6 +1839,7 @@ mod resume_tests {
                 since: Some(time::now()),
                 owner: "someone-else".into(),
                 token: "their-token".into(),
+                fence_until: None,
             }],
         )
         .await;
@@ -1942,6 +1944,7 @@ mod resume_tests {
             since: Some(time::now()),
             owner: "someone-else".into(),
             token: "their-token".into(),
+            fence_until: None,
         });
         m.revision += 1;
         repo_store

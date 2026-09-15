@@ -509,10 +509,44 @@ async fn gc_wal_objects(
 /// (D22: one unit of the most important missing work).
 ///
 /// Returns `(reclaimed packs, freed bytes, markers written, complete)`.
+fn reclaim_deadline(
+    claim: &walgit_proto::v1::ReclaimingPack,
+    grace: std::time::Duration,
+) -> Option<std::time::SystemTime> {
+    let valid_time = |ts: &prost_types::Timestamp| {
+        (ts.seconds >= 0 && (0..1_000_000_000).contains(&ts.nanos))
+            .then(|| walgit_proto::time::to_system(ts))
+    };
+    claim
+        .fence_until
+        .as_ref()
+        .and_then(&valid_time)
+        .or_else(|| {
+            claim
+                .since
+                .as_ref()
+                .and_then(&valid_time)
+                .and_then(|t| t.checked_add(grace))
+        })
+}
+
 async fn gc_superseded_packs(
     handle: &RepoHandle,
     max: usize,
     lease_ttl: std::time::Duration,
+    owner: &str,
+    token: &str,
+    lost: &std::sync::atomic::AtomicBool,
+    log: Log<'_>,
+) -> Result<(u64, u64, u64, bool), String> {
+    let grace = (lease_ttl.saturating_mul(3)).max(std::time::Duration::from_secs(300));
+    gc_superseded_packs_with_grace(handle, max, grace, owner, token, lost, log).await
+}
+
+async fn gc_superseded_packs_with_grace(
+    handle: &RepoHandle,
+    max: usize,
+    grace: std::time::Duration,
     owner: &str,
     token: &str,
     lost: &std::sync::atomic::AtomicBool,
@@ -551,7 +585,9 @@ async fn gc_superseded_packs(
     // a live pass whose lease we simply cannot see. "Not ours" is judged on
     // `(owner, token)`: a different token of the *same* instance is a different
     // holder.
-    let grace = (lease_ttl.saturating_mul(3)).max(std::time::Duration::from_secs(300));
+    let fence_until = Some(walgit_proto::time::from_system(
+        now.checked_add(grace).unwrap_or(now),
+    ));
     // Marker gone ⇒ nothing left to reclaim: release the stale claim by an
     // exact compare-and-remove.
     let mut orphan_claims: Vec<(String, String, String)> = Vec::new();
@@ -568,12 +604,11 @@ async fn gc_superseded_packs(
         if ours || live.contains(&claim.checksum) {
             continue;
         }
-        // A missing `since` is not evidence of age: keep the claim.
-        let old_enough = claim
-            .since
-            .as_ref()
-            .map(walgit_proto::time::to_system)
-            .is_some_and(|t| now.duration_since(t).unwrap_or_default() >= grace);
+        // A missing deadline/since is not evidence of age: keep the claim.
+        // New claims carry an absolute `fence_until`; legacy claims fall back
+        // to `since + grace` so a settings change cannot move the deadline.
+        let old_enough = reclaim_deadline(&claim, grace)
+            .is_some_and(|deadline| now.duration_since(deadline).is_ok());
         if !old_enough {
             continue;
         }
@@ -599,7 +634,7 @@ async fn gc_superseded_packs(
         let mut recover: Vec<(String, String, String)> = orphan_claims.clone();
         recover.extend(takeovers.iter().cloned());
         handle
-            .update_reclaiming(&adopt, &[], &recover, token)
+            .update_reclaiming(&adopt, &[], &recover, token, fence_until)
             .await
             .map_err(|e| e.to_string())?;
         adopted.extend(adopt);
@@ -778,7 +813,7 @@ async fn gc_superseded_packs(
             .collect();
         if !idle.is_empty() {
             handle
-                .update_reclaiming(&[], &idle, &[], token)
+                .update_reclaiming(&[], &idle, &[], token, fence_until)
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -820,7 +855,7 @@ async fn gc_superseded_packs(
         .collect();
     drop(before_claim);
     let claim_manifest = handle
-        .update_reclaiming(&claimable, &[], &[], token)
+        .update_reclaiming(&claimable, &[], &[], token, fence_until)
         .await
         .map_err(|e| e.to_string())?;
     // Only claims carrying *this* pass's fence are ours to delete; the helper
@@ -850,19 +885,13 @@ async fn gc_superseded_packs(
     // (S3/R2) cannot always prove that a re-created object differs from the one
     // we read. Stopping at `grace` is what keeps a stale pass from ever acting
     // on a claim a taker could already own.
-    let fence_from = claim_manifest
+    let fence_deadline = claim_manifest
         .reclaiming
         .iter()
         .find(|r| r.owner == owner && r.token == token)
-        .and_then(|r| r.since.as_ref())
-        .map(walgit_proto::time::to_system);
+        .and_then(|r| reclaim_deadline(r, grace));
     let within_fence = || {
-        fence_from.is_some_and(|t| {
-            std::time::SystemTime::now()
-                .duration_since(t)
-                .unwrap_or_default()
-                < grace
-        })
+        fence_deadline.is_some_and(|deadline| std::time::SystemTime::now() < deadline)
     };
 
     let mut deleted = 0u64;
@@ -1070,7 +1099,7 @@ async fn gc_superseded_packs(
             let mut release_claims: Vec<String> = release.clone();
             release_claims.extend(reclaimed.iter().map(|(c, _)| c.clone()));
             handle
-                .update_reclaiming(&[], &release_claims, &[], token)
+                .update_reclaiming(&[], &release_claims, &[], token, fence_until)
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -1958,6 +1987,327 @@ mod gc_tests {
         assert_eq!(names[0], side, "optional side files delete first");
         assert_eq!(names[1], refs, "refs delete before the checkpoint");
         assert_eq!(names[2], cp, "checkpoint.pb must be the last delete");
+    }
+}
+
+#[cfg(test)]
+mod gc_fence_tests {
+    use super::{gc_superseded_packs_with_grace, reclaim_deadline};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use prost::Message;
+    use walgit_config::{Config, StoreBackend};
+    use walgit_git::ObjectFormat;
+    use walgit_store::fault::{FaultPlan, FaultStore};
+    use walgit_store::memory::MemoryStore;
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    #[test]
+    fn absolute_fence_until_wins_over_since_plus_grace() {
+        let now = std::time::SystemTime::now();
+        let since = now - Duration::from_secs(3600);
+        let fence = now + Duration::from_secs(300);
+        let claim = walgit_proto::v1::ReclaimingPack {
+            checksum: "a".repeat(40),
+            since: Some(walgit_proto::time::from_system(since)),
+            owner: "owner".into(),
+            token: "token".into(),
+            fence_until: Some(walgit_proto::time::from_system(fence)),
+        };
+        let deadline = reclaim_deadline(&claim, Duration::from_secs(1)).expect("deadline");
+        assert!(
+            deadline > now + Duration::from_secs(240),
+            "absolute fence_until must not be replaced by since + grace"
+        );
+    }
+
+    #[test]
+    fn malformed_fence_until_falls_back_to_valid_since() {
+        let now = std::time::SystemTime::now();
+        let since = now - Duration::from_secs(10);
+        let claim = walgit_proto::v1::ReclaimingPack {
+            checksum: "a".repeat(40),
+            since: Some(walgit_proto::time::from_system(since)),
+            owner: "owner".into(),
+            token: "token".into(),
+            fence_until: Some(prost_types::Timestamp {
+                seconds: 1,
+                nanos: 1_000_000_000,
+            }),
+        };
+        assert_eq!(
+            reclaim_deadline(&claim, Duration::from_secs(1)),
+            since.checked_add(Duration::from_secs(1)),
+            "an invalid fence_until must fall back to since + grace"
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_times_do_not_invent_a_deadline() {
+        let claim = walgit_proto::v1::ReclaimingPack {
+            checksum: "a".repeat(40),
+            since: None,
+            owner: "owner".into(),
+            token: "token".into(),
+            fence_until: None,
+        };
+        assert_eq!(reclaim_deadline(&claim, Duration::from_secs(1)), None);
+    }
+
+    async fn fixture() -> anyhow::Result<(
+        Arc<FaultStore>,
+        Arc<walgit_wal::RepoHandle>,
+        String,
+        tempfile::TempDir,
+    )> {
+        let truth = MemoryStore::shared();
+        let fault = FaultStore::new(truth, "gc-fence", 1);
+        let cache = tempfile::tempdir()?;
+        let mut cfg = Config::default();
+        cfg.store.backend = StoreBackend::Memory;
+        cfg.store.memory_backend_intentional = true;
+        cfg.cache.dir = cache.path().to_path_buf();
+        cfg.compaction.retention_superseded = Duration::from_secs(60);
+        cfg.wal.freshness_ttl = Duration::from_secs(3600);
+        let registry = walgit_wal::Registry::new(fault.clone(), Arc::new(cfg));
+        let id = walgit_git::RepoId::new("o", "r")?;
+        let handle = registry.create(&id, ObjectFormat::Sha1).await?;
+        handle.sync_refs().await?;
+
+        let checksum = "a".repeat(40);
+        let mut old = walgit_proto::time::now();
+        old.seconds -= 2 * 3600;
+        handle
+            .store()
+            .put_bytes(
+                &walgit_proto::keys::superseded_key(&checksum),
+                walgit_proto::v1::SupersededPack {
+                    checksum: checksum.clone(),
+                    superseded_at: Some(old),
+                    seq: 1,
+                }
+                .encode_to_vec(),
+                PutMode::Create,
+            )
+            .await?;
+        handle
+            .store()
+            .put_bytes(
+                &walgit_proto::keys::pack_key(&checksum),
+                vec![0u8; 16],
+                PutMode::Create,
+            )
+            .await?;
+        Ok((fault, handle, checksum, cache))
+    }
+
+    async fn fixture_for_reconcile() -> anyhow::Result<(
+        Arc<FaultStore>,
+        Arc<MemoryStore>,
+        Arc<walgit_wal::RepoHandle>,
+        String,
+        String,
+        tempfile::TempDir,
+    )> {
+        let truth = MemoryStore::shared();
+        let fault = FaultStore::new(truth.clone(), "gc-reconcile", 2);
+        let cache = tempfile::tempdir()?;
+        let mut cfg = Config::default();
+        cfg.store.backend = StoreBackend::Memory;
+        cfg.store.memory_backend_intentional = true;
+        cfg.cache.dir = cache.path().to_path_buf();
+        cfg.compaction.retention_superseded = Duration::from_secs(7 * 24 * 3600);
+        cfg.wal.freshness_ttl = Duration::from_secs(3600);
+        let registry = walgit_wal::Registry::new(fault.clone(), Arc::new(cfg));
+        let id = walgit_git::RepoId::new("o", "r")?;
+        let prefix = id.store_prefix();
+        let handle = registry.create(&id, ObjectFormat::Sha1).await?;
+        handle.sync_refs().await?;
+
+        let checksum = "b".repeat(40);
+        handle
+            .store()
+            .put_bytes(
+                &walgit_proto::keys::pack_key(&checksum),
+                vec![0u8; 16],
+                PutMode::Create,
+            )
+            .await?;
+        let full_marker_key = format!(
+            "{prefix}{}",
+            walgit_proto::keys::superseded_key(&checksum)
+        );
+        Ok((fault, truth, handle, checksum, full_marker_key, cache))
+    }
+
+    fn delay_manifest_get(fault: &FaultStore, delay: Duration) {
+        fault.set(FaultPlan {
+            delay_after: Some(delay),
+            only_keys: Some(vec!["manifest.pb".to_string()]),
+            ..Default::default()
+        });
+    }
+
+    #[tokio::test]
+    async fn suspended_before_side_file_delete_leaves_the_pack() -> anyhow::Result<()> {
+        let (fault, handle, checksum, _cache) = fixture().await?;
+        delay_manifest_get(&fault, Duration::from_secs(2));
+        let lost = AtomicBool::new(false);
+        let log = |_: String| {};
+        let owner = walgit_store::coord::instance_id().to_string();
+        let (deleted, _freed, _marked, complete) = gc_superseded_packs_with_grace(
+            &handle,
+            1,
+            Duration::from_secs(1),
+            &owner,
+            "token",
+            &lost,
+            &log,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(deleted, 0, "a pass past its fence must not delete");
+        assert!(!complete);
+        assert!(
+            handle
+                .store()
+                .head(&walgit_proto::keys::pack_key(&checksum))
+                .await?
+                .is_some(),
+            "the pack must remain"
+        );
+        assert!(
+            handle
+                .store()
+                .head(&walgit_proto::keys::superseded_key(&checksum))
+                .await?
+                .is_some(),
+            "the marker must remain"
+        );
+        assert!(
+            handle
+                .manifest()
+                .reclaiming
+                .iter()
+                .any(|r| r.checksum == checksum && r.fence_until.is_some()),
+            "the claim must carry an absolute fence_until"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn suspended_before_marker_delete_leaves_the_marker() -> anyhow::Result<()> {
+        let (fault, handle, checksum, _cache) = fixture().await?;
+        // Two delayed manifest GETs: the first (pack check) completes inside
+        // the fence, so the pack is deleted; the second (marker-retire check)
+        // returns past it, so the marker must stay. Use a wide margin so a
+        // loaded CI runner cannot make the first check expire too.
+        delay_manifest_get(&fault, Duration::from_secs(3));
+        let lost = AtomicBool::new(false);
+        let log = |_: String| {};
+
+        let owner = walgit_store::coord::instance_id().to_string();
+        let (deleted, _freed, _marked, complete) = gc_superseded_packs_with_grace(
+            &handle,
+            1,
+            Duration::from_secs(8),
+            &owner,
+            "token",
+            &lost,
+            &log,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(deleted, 1, "the pack delete is inside the fence");
+        assert!(!complete);
+        assert!(
+            handle
+                .store()
+                .head(&walgit_proto::keys::pack_key(&checksum))
+                .await?
+                .is_none(),
+            "the pack must be gone"
+        );
+        assert!(
+            handle
+                .store()
+                .head(&walgit_proto::keys::superseded_key(&checksum))
+                .await?
+                .is_some(),
+            "the marker must survive the suspended retire"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_create_race_preserves_the_concurrent_marker() -> anyhow::Result<()> {
+        let (fault, truth, handle, checksum, full_marker_key, _cache) =
+            fixture_for_reconcile().await?;
+        let mut old = walgit_proto::time::now();
+        old.seconds -= 2 * 3600;
+        let old_marker = walgit_proto::v1::SupersededPack {
+            checksum: checksum.clone(),
+            superseded_at: Some(old.clone()),
+            seq: 7,
+        }
+        .encode_to_vec();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_hook = fired.clone();
+        let hook_key = full_marker_key.clone();
+        let hook_bytes = old_marker.clone();
+        let hook_truth = truth;
+        fault.set_before_put(Some(Arc::new(move |key: &str| {
+            if key == hook_key && !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let _ = futures::executor::block_on(hook_truth.put_bytes(
+                    &hook_key,
+                    hook_bytes.clone(),
+                    PutMode::Create,
+                ));
+            }
+        })));
+
+        let owner = walgit_store::coord::instance_id().to_string();
+        let lost = AtomicBool::new(false);
+        let log = |_: String| {};
+        let (_deleted, _freed, marked, complete) = gc_superseded_packs_with_grace(
+            &handle,
+            1,
+            Duration::from_secs(60),
+            &owner,
+            "token",
+            &lost,
+            &log,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        fault.set_before_put(None);
+        assert_eq!(marked, 0, "losing Create must not count as a marker write");
+        assert!(complete);
+
+        let (_, raw) = handle
+            .store()
+            .get_bytes(&walgit_proto::keys::superseded_key(&checksum))
+            .await?
+            .expect("the concurrent marker must remain");
+        let kept = walgit_proto::v1::SupersededPack::decode(raw.as_ref())?;
+        assert_eq!(kept.seq, 7, "Create loss must preserve the earlier marker");
+        assert_eq!(
+            kept.superseded_at,
+            Some(old),
+            "Create loss must preserve the earlier age record"
+        );
+        assert!(
+            handle
+                .store()
+                .head(&walgit_proto::keys::pack_key(&checksum))
+                .await?
+                .is_some(),
+            "a marker inside retention must leave the pack alone"
+        );
+        Ok(())
     }
 }
 

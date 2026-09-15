@@ -3612,7 +3612,7 @@ async fn a_compaction_skips_the_marker_for_a_checksum_gc_has_claimed() {
     // A checksum GC has listed as reclaiming (not live, so the claim holds).
     let claimed = "c".repeat(40);
     handle
-        .update_reclaiming(std::slice::from_ref(&claimed), &[], &[], "t")
+        .update_reclaiming(std::slice::from_ref(&claimed), &[], &[], "t", None)
         .await
         .unwrap();
     assert!(
@@ -3688,7 +3688,7 @@ async fn a_claim_release_is_fenced_by_owner_and_token() {
 
     // Pass 1 claims C.
     handle
-        .update_reclaiming(std::slice::from_ref(&c), &[], &[], "T1")
+        .update_reclaiming(std::slice::from_ref(&c), &[], &[], "T1", None)
         .await
         .unwrap();
     let owner = handle
@@ -3702,7 +3702,7 @@ async fn a_claim_release_is_fenced_by_owner_and_token() {
 
     // A second pass of the same instance cannot take it over.
     handle
-        .update_reclaiming(std::slice::from_ref(&c), &[], &[], "T2")
+        .update_reclaiming(std::slice::from_ref(&c), &[], &[], "T2", None)
         .await
         .unwrap();
     assert!(
@@ -3717,7 +3717,7 @@ async fn a_claim_release_is_fenced_by_owner_and_token() {
 
     // …and its release with the wrong token is a no-op.
     handle
-        .update_reclaiming(&[], std::slice::from_ref(&c), &[], "T2")
+        .update_reclaiming(&[], std::slice::from_ref(&c), &[], "T2", None)
         .await
         .unwrap();
     assert!(
@@ -3734,6 +3734,7 @@ async fn a_claim_release_is_fenced_by_owner_and_token() {
             &[],
             &[(c.clone(), owner.clone(), "not-the-token".into())],
             "T9",
+            None,
         )
         .await
         .unwrap();
@@ -3742,7 +3743,7 @@ async fn a_claim_release_is_fenced_by_owner_and_token() {
         "a compare-and-remove with the wrong token must not fire"
     );
     handle
-        .update_reclaiming(&[], &[], &[(c.clone(), owner, "T1".into())], "T9")
+        .update_reclaiming(&[], &[], &[(c.clone(), owner, "T1".into())], "T9", None)
         .await
         .unwrap();
     assert!(

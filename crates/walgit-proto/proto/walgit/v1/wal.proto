@@ -75,6 +75,12 @@ message ReclaimingPack {
   // token and re-checks it before each destructive step, so a claim released
   // or taken over by a later pass can no longer authorize deletions (#175).
   string token = 4;
+  // Absolute deadline for this holder's destructive work. A later pass may
+  // recover the claim once this instant has passed; the holder must stop at or
+  // before it. Storing the absolute instant keeps old/new passes from deriving
+  // different deadlines after a lease-TTL settings change (#179). Legacy claims
+  // without it fall back to `since + grace`.
+  google.protobuf.Timestamp fence_until = 5;
 }
 
 // D24: per-repository settings — a TOML document restricted to the sections a
