@@ -3279,7 +3279,7 @@ async fn a_permanently_failing_unit_hands_the_pass_to_lower_priority_work() -> a
     use walgit_server::maintain::{
         BACKOFF_AFTER_FAILURES, Backoff, Unit, next_unit, run_pass_with_backoff,
     };
-    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+    use walgit_store::{ObjectStoreExt, PutMode};
 
     let server = step!(
         "start",

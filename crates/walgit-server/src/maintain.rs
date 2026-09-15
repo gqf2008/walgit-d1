@@ -210,6 +210,21 @@ impl Backoff {
     }
 }
 
+/// The label a unit is recorded under (backoff key, metrics, logs).
+pub fn unit_kind(unit: &Unit) -> &'static str {
+    match unit {
+        Unit::Checkpoint(_) => "checkpoint",
+        Unit::BundleSlot(..) => "bundle",
+        Unit::Compact => "compact",
+        Unit::Repair(_) => "repair",
+        Unit::BaseRebuild(..) => "base-rebuild",
+        Unit::RevIndex(_) => "rev-index",
+        Unit::Fsck(_) => "fsck",
+        Unit::Gc(_) => "gc",
+        Unit::Idle | Unit::NotAssigned => "",
+    }
+}
+
 /// Packs with at least this many objects get a `.rev` side-file (≈ 50 ns per
 /// object per `pack-objects` without one: 60 M → 2.85 s, 250 k → 12 ms).
 pub const REV_INDEX_MIN_OBJECTS: u64 = 250_000;
@@ -730,17 +745,26 @@ async fn run_pass_inner(
         // slot) is not work: re-plan at once instead of spending a whole pass
         // per stale slot (a large repository after the 08-21 restart: ~30 such slots stood
         // between the loop and the 05:00 hourly).
-        let mut skipped_slots = 0u32;
-        let mut attempts = 0u32;
+        // Two separate budgets, because they bound two different things:
+        //  * `stale_slots` — bundle slots that turn out to have nothing to cut
+        //    (`NoNewObjects`/`NoRefs`): not work, so they must not eat the
+        //    handoff budget below (a large repository after a restart had ~30 of
+        //    them queued in front of the 05:00 hourly);
+        //  * `unit_attempts` — real units, including the handoff to lower
+        //    priority work after a repeatedly failing kind (#194).
+        let mut stale_slots = 0u32;
+        let mut unit_attempts = 0u32;
         // A kind in backoff that turns out to be the *only* due work still gets
         // one attempt this pass (retrying is the loop's whole job); remembered
         // so the retry cannot loop.
         let mut retried_backoff = false;
+        // Kinds already attempted in this pass: a kind that ran (and failed)
+        // must not be re-entered through the "only work left" fallback, or one
+        // pass would burn the whole backoff budget on the same unit.
+        let mut ran_kinds: Vec<&'static str> = Vec::new();
         loop {
-            attempts += 1;
-            if attempts > MAX_UNITS_PER_REPO_PER_PASS {
-                break;
-            }
+            // Per iteration: set only by the unit that just ran.
+            let mut handoff = false;
             let before_bundles = report.bundles;
             // Production keeps the original per-planning-call clock; only the
             // test entry point freezes it for a synthetic scenario.
@@ -759,6 +783,10 @@ async fn run_pass_inner(
             {
                 retried_backoff = true;
                 match next_unit_at(state, &id, planner_now, None).await {
+                    Ok(u) if ran_kinds.contains(&unit_kind(&u)) => {
+                        // Already attempted this pass: nothing left to do here.
+                        Unit::Idle
+                    }
                     Ok(u) => u,
                     Err(e) => {
                         warn!(repo = %id, error = %e, "maintenance: planning failed");
@@ -783,6 +811,7 @@ async fn run_pass_inner(
                 Unit::Gc(_) => ("gc", None, None),
                 Unit::Idle | Unit::NotAssigned => unreachable!(),
             };
+            ran_kinds.push(kind);
             let unit_span = tracing::info_span!("maintain.unit", repo = %id, kind, strategy = strategy.as_deref().unwrap_or(""), slot = slot.unwrap_or(0), outcome = tracing::field::Empty);
             let t_unit = Instant::now();
             let done = async {
@@ -860,7 +889,8 @@ async fn run_pass_inner(
             } else {
                 report.skipped += 1;
                 let strikes = backoff.record_failure(&id, kind);
-                if strikes >= BACKOFF_AFTER_FAILURES {
+                handoff = strikes >= BACKOFF_AFTER_FAILURES;
+                if handoff {
                     // Stop paying the whole pass for a unit that keeps failing:
                     // the next planning call skips this kind, so the work below
                     // it runs (this pass, not in a week when the slot closes).
@@ -876,16 +906,22 @@ async fn run_pass_inner(
                         strikes,
                         "maintenance: unit keeps failing — handing the pass to lower-priority work"
                     );
-                    continue;
                 }
             }
             let was_bundle = matches!(unit, Unit::BundleSlot(..));
-            if done
-                && was_bundle
-                && report.bundles == before_bundles
-                && skipped_slots < SKIP_THROUGH_MAX
-            {
-                skipped_slots += 1;
+            let stale_bundle = done && was_bundle && report.bundles == before_bundles;
+            if stale_bundle {
+                stale_slots += 1;
+                if stale_slots < SKIP_THROUGH_MAX {
+                    continue;
+                }
+                break;
+            }
+            unit_attempts += 1;
+            // A unit that keeps failing hands the pass to the work below it —
+            // bounded by the unit budget, so one repo cannot hold the loop.
+            if handoff && unit_attempts < MAX_UNITS_PER_REPO_PER_PASS {
+                handoff = false;
                 continue;
             }
             break;
