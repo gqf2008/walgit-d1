@@ -24,6 +24,48 @@ macro_rules! step {
     };
 }
 
+/// A timestamp clearly outside the test retention windows.
+fn old_timestamp() -> prost_types::Timestamp {
+    let mut ts = walgit_proto::time::now();
+    ts.seconds -= 8 * 24 * 3600;
+    ts
+}
+
+/// A valid one-entry log segment whose newest entry is `at`. GC now ages log
+/// segments by their own content, so zero-filled fixtures would (correctly)
+/// fail safe and never be reclaimed.
+fn log_segment_bytes(seq: u64, at: &prost_types::Timestamp) -> bytes::Bytes {
+    let entry = walgit_proto::v1::LogEntry {
+        seq,
+        created_at: Some(at.clone()),
+        ..Default::default()
+    };
+    walgit_proto::frame::encode_entries(std::iter::once(&entry))
+}
+
+/// A valid checkpoint object carrying the age GC reads.
+fn checkpoint_bytes(seq: u64, at: &prost_types::Timestamp) -> Vec<u8> {
+    use prost::Message;
+    walgit_proto::v1::Checkpoint {
+        seq,
+        refs_key: walgit_proto::keys::checkpoint_refs_key(seq),
+        created_at: Some(at.clone()),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// A valid refs snapshot carrying the same age (used for crash remnants and
+/// half-written directories).
+fn refs_snapshot_bytes(at: &prost_types::Timestamp) -> Vec<u8> {
+    use prost::Message;
+    walgit_proto::v1::RefSnapshot {
+        created_at: Some(at.clone()),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pass_checkpoints_due_repos_refs_level_and_reports_tasks() -> anyhow::Result<()> {
     use walgit_server::maintain::{Unit, next_unit, run_pass};
@@ -3620,10 +3662,10 @@ async fn gc_reclaims_folded_wal_objects_past_the_window() -> anyhow::Result<()> 
     let h = step!("open", server.state.registry.open(&id))?;
     step!("sync", h.sync())?;
 
-    // The live checkpoint is old (8 days) — that is the age anchor for every
-    // folded WAL object.
-    let mut old = walgit_proto::time::now();
-    old.seconds -= 8 * 24 * 3600;
+    // Candidates are 8 days old; the live checkpoint is *fresh* on purpose.
+    // The old global anchor would keep everything forever in an active repo.
+    let old = old_timestamp();
+    let fresh = walgit_proto::time::now();
     let live_seq = 20u64;
     {
         let (meta, bytes) =
@@ -3632,9 +3674,9 @@ async fn gc_reclaims_folded_wal_objects_past_the_window() -> anyhow::Result<()> 
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(old),
-            first_state_at: Some(old),
-            as_of: Some(old),
+            created_at: Some(fresh.clone()),
+            first_state_at: Some(fresh.clone()),
+            as_of: Some(fresh.clone()),
         });
         m.min_seq = 6; // everything below 6 is folded into that checkpoint
         m.log_segments = vec![LogSegmentRef {
@@ -3657,31 +3699,55 @@ async fn gc_reclaims_folded_wal_objects_past_the_window() -> anyhow::Result<()> 
     }
 
     // Folded log segment (below min_seq) and the live one.
-    for (seq, live) in [(5u64, false), (15u64, true)] {
-        step!(
-            "log segment",
-            h.store()
-                .put_bytes(&keys::log_segment_key(seq), vec![0u8; 16], PutMode::Create)
-        )?;
-        let _ = live;
-    }
+    step!(
+        "old log segment",
+        h.store().put_bytes(
+            &keys::log_segment_key(5),
+            log_segment_bytes(5, &old),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live log segment",
+        h.store().put_bytes(
+            &keys::log_segment_key(15),
+            log_segment_bytes(15, &fresh),
+            PutMode::Create,
+        )
+    )?;
     // An unreferenced old checkpoint dir, and the live one.
-    for (seq, live) in [(5u64, false), (live_seq, true)] {
-        step!(
-            "checkpoint object",
-            h.store()
-                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
-        )?;
-        step!(
-            "checkpoint refs",
-            h.store().put_bytes(
-                &keys::checkpoint_refs_key(seq),
-                vec![0u8; 16],
-                PutMode::Create
-            )
-        )?;
-        let _ = live;
-    }
+    step!(
+        "old checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(5),
+            checkpoint_bytes(5, &old),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "old checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(5),
+            refs_snapshot_bytes(&old),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(live_seq),
+            checkpoint_bytes(live_seq, &fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(live_seq),
+            refs_snapshot_bytes(&fresh),
+            PutMode::Create,
+        )
+    )?;
 
     assert!(matches!(
         step!("plan", next_unit(&server.state, &id))?,
@@ -3861,6 +3927,375 @@ async fn gc_keeps_the_checkpoint_a_live_base_needs() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #206 fail-safe: a candidate with a missing/invalid timestamp is kept.
+/// `prost` clamps malformed Timestamp values into the epoch, so GC must reject
+/// them before calling `time::to_system`; the newest log entry missing its time
+/// must not fall back to an older entry's age.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_keeps_objects_with_missing_or_invalid_timestamps() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::{CheckpointRef, LogEntry, LogSegmentRef};
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let old = old_timestamp();
+    let fresh = walgit_proto::time::now();
+    let live_seq = 20u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = 10;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(fresh.clone()),
+            first_state_at: Some(fresh.clone()),
+            as_of: Some(fresh.clone()),
+        });
+        m.log_segments = vec![LogSegmentRef {
+            key: keys::log_segment_key(15),
+            first_seq: 15,
+            last_seq: 19,
+            size: 0,
+            sealed: true,
+        }];
+        m.packs.clear();
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+
+    step!(
+        "live checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(live_seq),
+            checkpoint_bytes(live_seq, &fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(live_seq),
+            refs_snapshot_bytes(&fresh),
+            PutMode::Create,
+        )
+    )?;
+
+    // Newest entry has no timestamp; only the older entry is old. Do not use
+    // the older entry's timestamp as a fallback.
+    let entries = [
+        LogEntry {
+            seq: 4,
+            created_at: Some(old.clone()),
+            ..Default::default()
+        },
+        LogEntry {
+            seq: 5,
+            created_at: None,
+            ..Default::default()
+        },
+    ];
+    step!(
+        "timestampless log",
+        h.store().put_bytes(
+            &keys::log_segment_key(5),
+            walgit_proto::frame::encode_entries(entries.iter()),
+            PutMode::Create,
+        )
+    )?;
+    let mut invalid = walgit_proto::time::now();
+    invalid.nanos = -1;
+    step!(
+        "invalid checkpoint",
+        h.store().put_bytes(
+            &keys::checkpoint_key(6),
+            checkpoint_bytes(6, &invalid),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "invalid refs snapshot",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(6),
+            refs_snapshot_bytes(&invalid),
+            PutMode::Create,
+        )
+    )?;
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    assert!(
+        h.store().head(&keys::log_segment_key(5)).await?.is_some(),
+        "a log whose newest entry has no timestamp must be kept"
+    );
+    assert!(
+        h.store().head(&keys::checkpoint_key(6)).await?.is_some(),
+        "a checkpoint with an invalid timestamp must be kept"
+    );
+    assert!(
+        h.store()
+            .head(&keys::checkpoint_refs_key(6))
+            .await?
+            .is_some(),
+        "the checkpoint refs remnant must stay with it"
+    );
+    Ok(())
+}
+
+/// A checkpoint delete can be interrupted after refs.pb was removed but before
+/// checkpoint.pb was removed (the deliberate delete order). The remaining
+/// checkpoint object must still carry enough age for the next pass to drain it;
+/// this test starts from exactly that remnant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_drains_a_checkpoint_remnant_after_an_interrupted_delete() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::CheckpointRef;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let old = old_timestamp();
+    let fresh = walgit_proto::time::now();
+    let live_seq = 20u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = 10;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(fresh.clone()),
+            first_state_at: Some(fresh.clone()),
+            as_of: Some(fresh.clone()),
+        });
+        m.log_segments.clear();
+        m.packs.clear();
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+    step!(
+        "live checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(live_seq),
+            checkpoint_bytes(live_seq, &fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(live_seq),
+            refs_snapshot_bytes(&fresh),
+            PutMode::Create,
+        )
+    )?;
+    // Simulate the interrupted directory: refs.pb is already gone.
+    step!(
+        "checkpoint remnant",
+        h.store().put_bytes(
+            &keys::checkpoint_key(5),
+            checkpoint_bytes(5, &old),
+            PutMode::Create,
+        )
+    )?;
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+    assert!(
+        h.store().head(&keys::checkpoint_key(5)).await?.is_none(),
+        "a checkpoint.pb remnant must be drained by its own timestamp"
+    );
+    Ok(())
+}
+
+/// The deletion bound must never split a checkpoint directory. Fill the pass
+/// with 511 old log objects; the next candidate is a two-object checkpoint.
+/// It must be left whole for the next pass, then deleted whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_keeps_a_checkpoint_directory_whole_at_the_delete_bound() -> anyhow::Result<()> {
+    use prost::Message;
+    use walgit_proto::keys;
+    use walgit_proto::v1::CheckpointRef;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.maintenance.retention_wal = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let old = old_timestamp();
+    let fresh = walgit_proto::time::now();
+    let live_seq = 1_000u64;
+    {
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("manifest");
+        let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
+        m.head_seq = live_seq;
+        m.min_seq = live_seq + 1;
+        m.checkpoint = Some(CheckpointRef {
+            seq: live_seq,
+            key: keys::checkpoint_key(live_seq),
+            created_at: Some(fresh.clone()),
+            first_state_at: Some(fresh.clone()),
+            as_of: Some(fresh.clone()),
+        });
+        m.log_segments.clear();
+        m.packs.clear();
+        m.revision += 1;
+        step!(
+            "rewrite manifest",
+            h.store().put_bytes(
+                keys::MANIFEST,
+                m.encode_to_vec(),
+                PutMode::Update(meta.version),
+            )
+        )?;
+    }
+    step!(
+        "live checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(live_seq),
+            checkpoint_bytes(live_seq, &fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(live_seq),
+            refs_snapshot_bytes(&fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!("old logs", async {
+        for seq in 1..=511u64 {
+            h.store()
+                .put_bytes(
+                    &keys::log_segment_key(seq),
+                    log_segment_bytes(seq, &old),
+                    PutMode::Create,
+                )
+                .await?;
+        }
+        Ok::<(), walgit_store::StoreError>(())
+    })?;
+    step!(
+        "boundary checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(600),
+            checkpoint_bytes(600, &old),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "boundary checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(600),
+            refs_snapshot_bytes(&old),
+            PutMode::Create,
+        )
+    )?;
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("first gc pass", run_pass(&server.state))?;
+    assert!(
+        h.store().head(&keys::checkpoint_key(600)).await?.is_some()
+            && h.store()
+                .head(&keys::checkpoint_refs_key(600))
+                .await?
+                .is_some(),
+        "the checkpoint directory must not be split at the bound"
+    );
+
+    assert!(matches!(
+        step!("plan again", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("second gc pass", run_pass(&server.state))?;
+    assert!(
+        h.store().head(&keys::checkpoint_key(600)).await?.is_none()
+            && h.store()
+                .head(&keys::checkpoint_refs_key(600))
+                .await?
+                .is_none(),
+        "the next pass must delete the directory whole"
+    );
+    Ok(())
+}
+
 /// 并发保护的守门测试：checkpoint 目录是**先 PUT 不可变对象、再 CAS manifest** 的，
 /// 所以快照里可能还没有一个正在写入的、seq 更大的目录。GC 只允许删**严格小于** live
 /// seq 的目录；更大的一律留给后续 pass（否则那个 CAS 落地后会指向被删对象）。
@@ -3888,8 +4323,8 @@ async fn gc_keeps_checkpoint_dirs_newer_than_the_live_one() -> anyhow::Result<()
     let h = step!("open", server.state.registry.open(&id))?;
     step!("sync", h.sync())?;
 
-    let mut old = walgit_proto::time::now();
-    old.seconds -= 8 * 24 * 3600;
+    let old = old_timestamp();
+    let fresh = walgit_proto::time::now();
     let live_seq = 30u64;
     {
         let (meta, bytes) =
@@ -3916,18 +4351,25 @@ async fn gc_keeps_checkpoint_dirs_newer_than_the_live_one() -> anyhow::Result<()
             )
         )?;
     }
-    let refs = walgit_proto::v1::RefSnapshot::default().encode_to_vec();
-    for seq in [20u64, live_seq, 31, 40] {
+    for (seq, at) in [
+        (20u64, &old),
+        (live_seq, &fresh),
+        (31u64, &fresh),
+        (40u64, &fresh),
+    ] {
         step!(
             "checkpoint object",
-            h.store()
-                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
+            h.store().put_bytes(
+                &keys::checkpoint_key(seq),
+                checkpoint_bytes(seq, at),
+                PutMode::Create
+            )
         )?;
         step!(
             "checkpoint refs",
             h.store().put_bytes(
                 &keys::checkpoint_refs_key(seq),
-                refs.clone(),
+                refs_snapshot_bytes(at),
                 PutMode::Create
             )
         )?;
@@ -3984,8 +4426,8 @@ async fn gc_reclaims_folded_wal_objects_when_the_base_witness_is_complete() -> a
     let h = step!("open", server.state.registry.open(&id))?;
     step!("sync", h.sync())?;
 
-    let mut old = walgit_proto::time::now();
-    old.seconds -= 8 * 24 * 3600;
+    let old = old_timestamp();
+    let fresh = walgit_proto::time::now();
     let live_seq = 30u64;
     let base_seq = 12u64;
     {
@@ -3997,9 +4439,9 @@ async fn gc_reclaims_folded_wal_objects_when_the_base_witness_is_complete() -> a
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(old),
-            first_state_at: Some(old),
-            as_of: Some(old),
+            created_at: Some(fresh.clone()),
+            first_state_at: Some(fresh.clone()),
+            as_of: Some(fresh.clone()),
         });
         m.log_segments.clear();
         m.packs = vec![PackRef {
@@ -4019,29 +4461,62 @@ async fn gc_reclaims_folded_wal_objects_when_the_base_witness_is_complete() -> a
             )
         )?;
     }
-    let refs = walgit_proto::v1::RefSnapshot::default().encode_to_vec();
-    // 5 and 30: checkpoint objects. 12: the base's exact, *complete* witness.
-    for (seq, complete) in [(5u64, false), (base_seq, true), (live_seq, true)] {
-        step!(
-            "checkpoint object",
-            h.store()
-                .put_bytes(&keys::checkpoint_key(seq), vec![0u8; 16], PutMode::Create)
-        )?;
-        if complete {
-            step!(
-                "checkpoint refs",
-                h.store().put_bytes(
-                    &keys::checkpoint_refs_key(seq),
-                    refs.clone(),
-                    PutMode::Create
-                )
-            )?;
-        }
-    }
+    // 5: old dead weight. 12: the base's exact, complete witness. 30: live.
+    step!(
+        "old checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(5),
+            checkpoint_bytes(5, &old),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "old checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(5),
+            refs_snapshot_bytes(&old),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "base witness object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(base_seq),
+            checkpoint_bytes(base_seq, &fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "base witness refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(base_seq),
+            refs_snapshot_bytes(&fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint object",
+        h.store().put_bytes(
+            &keys::checkpoint_key(live_seq),
+            checkpoint_bytes(live_seq, &fresh),
+            PutMode::Create,
+        )
+    )?;
+    step!(
+        "live checkpoint refs",
+        h.store().put_bytes(
+            &keys::checkpoint_refs_key(live_seq),
+            refs_snapshot_bytes(&fresh),
+            PutMode::Create,
+        )
+    )?;
     step!(
         "folded log",
-        h.store()
-            .put_bytes(&keys::log_segment_key(20), vec![0u8; 16], PutMode::Create)
+        h.store().put_bytes(
+            &keys::log_segment_key(20),
+            log_segment_bytes(20, &old),
+            PutMode::Create,
+        )
     )?;
 
     assert!(matches!(

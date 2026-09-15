@@ -458,7 +458,8 @@ pub struct MaintenanceConfig {
     pub gc_interval: Duration,
     /// Provenance window for **folded WAL objects** (#175): log segments below
     /// `manifest.min_seq` and checkpoints other than the live one are deleted
-    /// once they are older than this. The live checkpoint, the live log
+    /// once their own immutable content proves them older than this. The live
+    /// checkpoint, the live log
     /// segments, and the newest checkpoint at or before a live base pack's seq
     /// (bundle compose replays refs from it) are never touched, whatever their
     /// age. 0 = keep them forever. The window is read from the manifest
