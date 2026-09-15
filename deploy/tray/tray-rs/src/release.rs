@@ -5,8 +5,8 @@
 //! 看到错误的升级提示(或把别的 tag 的 asset 当成新版本),所以全部做成
 //! 无 IO 的纯函数,由 `cargo test` 覆盖。
 //!
-//! 来源:macOS Swift 托盘(`ReleaseLogic.swift` + `walgit-tray.swift` 的
-//! `menuVersionLine`/`upgradeLine`);issue #183 把它迁到跨平台 tray-rs。
+//! 来源:macOS Swift 托盘的 release 解析/版本比较与菜单文本
+//! (`menuVersionLine`/`upgradeLine`);issue #183 把它迁到跨平台 tray-rs。
 //!
 //! 生产调用点只有 macOS 的 Release 通道;三平台都跑 `cargo test`,所以非
 //! macOS 的 release 构建里"没人用"是预期,不是死代码。

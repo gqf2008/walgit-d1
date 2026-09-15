@@ -5,7 +5,7 @@
 //! 启动要把用户状态**复制**(不移动,旧 app 回滚后仍完整)到新目录,并在旧
 //! 目录留一个只活 5 分钟的升级兼容桥(walgit symlink + walgit-ensure 转发壳)。
 //!
-//! 来源:macOS Swift 托盘 `bootstrapDeploy()`;issue #183 随托盘一起迁到
+//! 来源:macOS Swift 托盘的 `bootstrapDeploy()`;issue #183 随托盘一起迁到
 //! 跨平台 tray-rs。Windows/Linux 保持空实现(那边是安装器托管布局)。
 
 #[cfg(target_os = "macos")]
