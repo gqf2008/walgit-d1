@@ -7,10 +7,12 @@
 //!
 //! ## Version tokens
 //!
-//! S3 `ETags` are used as opaque `Version` strings. Quotes are stripped
-//! consistently on read and never stored. For non-multipart uploads the
-//! `ETag` is the MD5 of the content; for multipart uploads it is a compound
-//! hash. Callers never parse the token — equality comparison suffices.
+//! Every PUT stores a fresh `walgit-incarnation` user-metadata token and
+//! returns `<etag>@<incarnation>`. `Version::http_etag()` exposes the bare
+//! `ETag` for HTTP and S3 conditional headers; full equality includes the
+//! incarnation, so identical bytes re-created under the same key compare
+//! unequal. Objects written before this metadata existed fall back to
+//! `<etag>@lm:<Last-Modified>`. Quotes are stripped consistently on read.
 //!
 //! ## Conditional PUT
 //!
@@ -21,10 +23,11 @@
 //!
 //! ## Conditional DELETE
 //!
-//! S3 has no native conditional delete. We emulate via HEAD (read `ETag`) +
-//! compare + DELETE, documenting the inherent check-then-act race: a
-//! concurrent writer could replace the object between HEAD and DELETE.
-//! Acceptable for walgit's lease-guarded semantics.
+//! We HEAD (read the full incarnation), compare, then DELETE with
+//! `If-Match: <etag>`. The HEAD comparison rejects a stale version even when a
+//! re-created object has identical bytes; the DELETE guard rejects a different
+//! `ETag` racing in after that HEAD. What remains is the narrow
+//! same-ETag-after-HEAD window, bounded by walgit's lease/claim fences.
 //!
 //! ## Multipart upload
 //!
@@ -41,6 +44,7 @@
 //!
 //! See the compatibility notes at the bottom of this file.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -48,8 +52,50 @@ use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream as S3ByteStream;
+use aws_smithy_types::DateTime;
 use bytes::Bytes;
 use futures::StreamExt;
+
+/// S3 user metadata carrying a fresh incarnation token on every PUT. The
+/// token is not derivable from the content: identical bytes re-created under
+/// the same key must compare unequal for conditional delete.
+const INCARNATION_META: &str = "walgit-incarnation";
+
+fn new_incarnation() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn metadata_incarnation(metadata: Option<&HashMap<String, String>>) -> Option<&str> {
+    metadata
+        .and_then(|m| m.get(INCARNATION_META))
+        .map(String::as_str)
+        .filter(|v| !v.is_empty())
+}
+
+fn version_from_parts(
+    etag: Option<&str>,
+    incarnation: Option<&str>,
+    last_modified: Option<&DateTime>,
+) -> Version {
+    let etag = etag.unwrap_or("").trim_matches('"');
+    if let Some(incarnation) = incarnation.filter(|v| !v.is_empty()) {
+        return Version::new(format!("{etag}@{incarnation}"));
+    }
+    // Objects written before incarnation metadata existed still need a stable
+    // version. Last-Modified is only a fallback; new writes always carry the
+    // unforgeable metadata token.
+    let last_modified = last_modified
+        .map(|dt| {
+            dt.fmt(aws_smithy_types::date_time::Format::HttpDate)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    if last_modified.is_empty() {
+        Version::new(etag)
+    } else {
+        Version::new(format!("{etag}@lm:{last_modified}"))
+    }
+}
 
 use crate::{
     BoxStream, GetOptions, GetResult, ObjectMeta, ObjectStore, PutBody, PutMode, PutOptions,
@@ -57,6 +103,7 @@ use crate::{
 };
 
 /// S3-compatible object store.
+#[derive(Clone)]
 pub struct S3Store {
     client: S3Client,
     bucket: String,
@@ -159,10 +206,10 @@ impl S3Store {
         let mut builder = self.client.get_object().bucket(&self.bucket).key(key);
 
         if let Some(v) = &opts.if_none_match {
-            builder = builder.if_none_match(v.as_str());
+            builder = builder.if_none_match(v.http_etag());
         }
         if let Some(v) = &opts.if_match {
-            builder = builder.if_match(v.as_str());
+            builder = builder.if_match(v.http_etag());
         }
         if let Some(r) = &opts.range {
             builder = builder.range(Self::range_header(r));
@@ -203,6 +250,18 @@ impl S3Store {
             .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
+        let incarnation = resp
+            .headers()
+            .get("x-amz-meta-walgit-incarnation")
+            .and_then(|v| v.to_str().ok());
+        let last_modified = resp
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                DateTime::from_str(v, aws_smithy_types::date_time::Format::HttpDate).ok()
+            });
+        let version = version_from_parts(etag.as_deref(), incarnation, last_modified.as_ref());
 
         // `ObjectMeta::size` is the size of the whole object (as on GCS/memory),
         // also for range reads: `Content-Range: bytes a-b/total` carries it.
@@ -215,7 +274,6 @@ impl S3Store {
 
         match status.as_u16() {
             200 | 206 => {
-                let version = Version::new(etag.as_deref().unwrap_or(""));
                 let meta = ObjectMeta {
                     key: key.into(),
                     size: total.or(content_length).unwrap_or(0),
@@ -240,13 +298,11 @@ impl S3Store {
                     .boxed();
                 Ok(GetResult::Object { meta, body })
             }
-            304 => Ok(GetResult::NotModified {
-                version: Version::new(etag.as_deref().unwrap_or("")),
-            }),
+            304 => Ok(GetResult::NotModified { version }),
             404 => Err(StoreError::NotFound { key: key.into() }),
             412 => Err(StoreError::PreconditionFailed {
                 key: key.into(),
-                current: etag.map(Version::new),
+                current: Some(version),
             }),
             s if s >= 500 || s == 429 => {
                 Err(StoreError::Retryable(anyhow::anyhow!("s3 get status {s}")))
@@ -376,10 +432,15 @@ impl ObjectStore for S3Store {
                 let size = u64::try_from(out.content_length().unwrap_or(0)).map_err(|_| {
                     StoreError::InvalidArgument(format!("negative content-length on {key}"))
                 })?;
+                let version = version_from_parts(
+                    etag.as_deref(),
+                    metadata_incarnation(out.metadata()),
+                    out.last_modified(),
+                );
                 Ok(Some(ObjectMeta {
                     key: key.into(),
                     size,
-                    version: Version::new(etag.as_deref().unwrap_or("")),
+                    version,
                 }))
             }
             Err(err) => {
@@ -408,12 +469,14 @@ impl ObjectStore for S3Store {
             return self.multipart_put(key, s3_body, len, &opts).await;
         }
 
+        let incarnation = new_incarnation();
         let mut builder = self
             .client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
             .body(s3_body)
+            .metadata(INCARNATION_META, incarnation.clone())
             .content_length(len.try_into().map_err(|_| {
                 StoreError::InvalidArgument(format!(
                     "object {key} is larger than i64::MAX (S3's own cap is 5 TiB)"
@@ -426,7 +489,7 @@ impl ObjectStore for S3Store {
                 builder = builder.if_none_match("*");
             }
             PutMode::Update(v) => {
-                builder = builder.if_match(v.as_str());
+                builder = builder.if_match(v.http_etag());
             }
         }
 
@@ -441,7 +504,7 @@ impl ObjectStore for S3Store {
                 Ok(ObjectMeta {
                     key: key.into(),
                     size: len,
-                    version: Version::new(etag.as_deref().unwrap_or("")),
+                    version: version_from_parts(etag.as_deref(), Some(&incarnation), None),
                 })
             }
             Err(e) => {
@@ -474,13 +537,15 @@ impl ObjectStore for S3Store {
             }
         }
 
-        let resp = self
-            .client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
+        let mut delete = self.client.delete_object().bucket(&self.bucket).key(key);
+        if let Some(want) = &if_version {
+            // The HEAD above compares the full incarnation. Rustfs/R2 support
+            // `If-Match` on DELETE, so this second guard still prevents a
+            // different ETag from being deleted if the object changes between
+            // the HEAD and this request.
+            delete = delete.if_match(want.http_etag());
+        }
+        let resp = delete.send().await;
 
         match resp {
             Ok(_) => Ok(()),
@@ -509,6 +574,33 @@ impl ObjectStore for S3Store {
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ObjectMeta>> {
+        // LIST does not expose S3 user metadata, so a full incarnation needs
+        // one HEAD per object. Callers that only need keys must use
+        // `list_keys` to keep bulk walks one LIST per page.
+        let store = self.clone();
+        let stream = self.list_keys(prefix, start_after).then(move |r| {
+            let store = store.clone();
+            async move {
+                match r {
+                    Ok(key) => store.head(&key).await,
+                    Err(e) => Err(e),
+                }
+            }
+        });
+        Box::pin(stream.filter_map(|r| async move {
+            match r {
+                Ok(Some(meta)) => Some(Ok(meta)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        }))
+    }
+
+    fn list_keys(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let prefix = prefix.to_owned();
@@ -551,23 +643,10 @@ impl ObjectStore for S3Store {
 
                 match builder.send().await {
                     Ok(resp) => {
-                        let items: Vec<Result<ObjectMeta>> = resp
+                        let items: Vec<Result<String>> = resp
                             .contents()
                             .iter()
-                            .map(|obj| {
-                                let etag = obj.e_tag().map(|s| s.trim_matches('"').to_owned());
-                                let size =
-                                    u64::try_from(obj.size().unwrap_or(0)).map_err(|_| {
-                                        StoreError::InvalidArgument(
-                                            "negative object size in list response".into(),
-                                        )
-                                    })?;
-                                Ok(ObjectMeta {
-                                    key: obj.key().unwrap_or("").to_owned(),
-                                    size,
-                                    version: Version::new(etag.as_deref().unwrap_or("")),
-                                })
-                            })
+                            .map(|obj| Ok(obj.key().unwrap_or("").to_owned()))
                             .collect();
 
                         state.continuation_token = resp
@@ -680,11 +759,13 @@ impl ObjectStore for S3Store {
         // The virtual concatenation, cut into parts: a part is [start, end) of the whole.
         // Runs that lie inside one source and are >= MIN_PART become copies; everything else
         // (a small source, the tail that pads it to MIN_PART) is read and uploaded.
+        let incarnation = new_incarnation();
         let mut create = self
             .client
             .create_multipart_upload()
             .bucket(&self.bucket)
-            .key(dest);
+            .key(dest)
+            .metadata(INCARNATION_META, incarnation.clone());
         if let Some(ct) = opts.content_type {
             create = create.content_type(ct);
         }
@@ -862,7 +943,7 @@ impl ObjectStore for S3Store {
         Ok(ObjectMeta {
             key: dest.into(),
             size: total,
-            version: Version::new(etag.as_deref().unwrap_or("")),
+            version: version_from_parts(etag.as_deref(), Some(&incarnation), None),
         })
     }
 
@@ -889,7 +970,7 @@ struct ListState {
     start_after: Option<String>,
     continuation_token: Option<String>,
     started: bool,
-    buffer: std::vec::IntoIter<Result<ObjectMeta>>,
+    buffer: std::vec::IntoIter<Result<String>>,
 }
 
 // ---- multipart upload (Overwrite only) ---------------------------------
@@ -904,11 +985,13 @@ impl S3Store {
     ) -> Result<ObjectMeta> {
         use tokio::io::AsyncReadExt;
 
+        let incarnation = new_incarnation();
         let mut create = self
             .client
             .create_multipart_upload()
             .bucket(&self.bucket)
-            .key(key);
+            .key(key)
+            .metadata(INCARNATION_META, incarnation.clone());
 
         if let Some(ct) = opts.content_type {
             create = create.content_type(ct);
@@ -1035,7 +1118,7 @@ impl S3Store {
         Ok(ObjectMeta {
             key: key.into(),
             size: len,
-            version: Version::new(etag.as_deref().unwrap_or("")),
+            version: version_from_parts(etag.as_deref(), Some(&incarnation), None),
         })
     }
 
@@ -1074,6 +1157,11 @@ fn static_credentials(
 // 8. ETags: quoted, MD5 for single-PUT, compound for multipart. Quotes
 //    stripped consistently in our Version.
 // 9. force_path_style: required for rustfs local dev.
+// 10. If-Match on DeleteObject: honored (wrong ETag -> 412); we use it as a
+//     second guard after the full-incarnation HEAD comparison.
+// 11. User metadata survives PutObject/CreateMultipartUpload and is returned
+//     by HeadObject/GetObject; ListObjectsV2 does not expose it, hence the
+//     separate full `list` vs cheap `list_keys` contract.
 
 #[cfg(test)]
 mod tests {

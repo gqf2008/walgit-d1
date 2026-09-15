@@ -165,12 +165,12 @@ impl Registry {
         prefixed.delete(keys::MANIFEST, None).await?;
         let mut after: Option<String> = None;
         loop {
-            let mut stream = prefixed.list("", after.as_deref());
+            let mut stream = prefixed.list_keys("", after.as_deref());
             let mut last = None;
             while let Some(res) = stream.next().await {
-                let m = res?;
-                prefixed.delete(&m.key, None).await?;
-                last = Some(m.key);
+                let key = res?;
+                prefixed.delete(&key, None).await?;
+                last = Some(key);
             }
             match last {
                 Some(k) => after = Some(k),

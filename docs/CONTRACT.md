@@ -19,9 +19,11 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
 - `walgit-proto`: prost types from `proto/walgit/v1/wal.proto` (Manifest, LogSegmentRef, LogEntry, PackRef,
   RefTransaction/RefUpdate, Checkpoint(+Ref), RefSnapshot/Ref, Lease, BundleList/BundleEntry); `keys::*`;
   `frame::{encode_entries,decode_entries}` (uvarint-framed log encoding); `time::*`; `keys::POLICY` / `policy_key` (`policy.json` rule language, `docs/POLICY.md`).
-- `walgit-store`: `ObjectStore` trait (`Version` opaque CAS token, `GetOptions{if_none_match,if_match,range}`,
-  `GetResult::{NotModified,Object}`, `PutMode::{Overwrite,Create,Update(Version)}`, `PutBody::{Bytes,Stream,File}`,
-  `PutOptions`, `StoreError::{NotFound,PreconditionFailed{current},Retryable,InvalidArgument,Other}`,
+- `walgit-store`: `ObjectStore` trait (`Version` opaque CAS token with `http_etag()` for the bare
+  HTTP/S3 entity tag; `list` returns full metadata, `list_keys` is the cheap key-only walk;
+  `GetOptions{if_none_match,if_match,range}`, `GetResult::{NotModified,Object}`,
+  `PutMode::{Overwrite,Create,Update(Version)}`, `PutBody::{Bytes,Stream,File}`, `PutOptions`,
+  `StoreError::{NotFound,PreconditionFailed{current},Retryable,InvalidArgument,Other}`,
   `ObjectStoreExt`, `Prefixed`, `memory::MemoryStore`, `util::{collect,once,file_stream,backoff,retry}`),
   placeholder modules `coord.rs`, `gcs.rs`, `s3.rs`.
 - `walgit-config`: `Config` for walgit.toml (+ `WALGIT__` env overrides, `PORT`); `Config::with_settings` accepts

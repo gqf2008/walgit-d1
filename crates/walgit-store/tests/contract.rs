@@ -50,6 +50,7 @@ pub async fn run_contract(store: DynStore, prefix: &str) {
     test_head_and_absent(&store, &p("head")).await;
     test_delete(&store, &p("del")).await;
     test_conditional_delete_rejects_a_re_created_object(&store, &p("del-recreate")).await;
+    test_version_tracks_incarnation_and_listing(&store, &p("version")).await;
     test_list(&store, &p("list")).await;
     test_large_streamed_roundtrip(&store, &p("large")).await;
     test_multipart_path(&store, &p("multi")).await;
@@ -101,6 +102,11 @@ async fn test_compose(store: &DynStore, key: &str) {
         .await
         .expect("compose");
     assert_eq!(meta.size, (header.len() + body.len()) as u64);
+    let head = store.head(key).await.expect("head").expect("object");
+    assert_eq!(
+        head.version, meta.version,
+        "compose PUT/HEAD version mismatch"
+    );
     let r = store
         .get(key, GetOptions::default())
         .await
@@ -510,6 +516,59 @@ async fn test_conditional_delete_rejects_a_re_created_object(store: &DynStore, k
     let _ = store.delete(key, None).await;
 }
 
+/// A version must identify one object incarnation, not just its bytes.
+/// `list` must expose that same full version; `list_keys` remains the cheap
+/// key-only walk for callers that do not need it.
+async fn test_version_tracks_incarnation_and_listing(store: &DynStore, key: &str) {
+    let _ = store.delete(key, None).await;
+
+    let first = put_bytes(store, key, b"same-bytes".as_slice(), PutMode::Create).await;
+    let head = store.head(key).await.expect("head").expect("object");
+    assert_eq!(
+        head.version, first.version,
+        "HEAD must return the PUT incarnation"
+    );
+
+    let second = put_bytes(
+        store,
+        key,
+        b"same-bytes".as_slice(),
+        PutMode::Update(first.version.clone()),
+    )
+    .await;
+    assert_ne!(
+        second.version, first.version,
+        "an overwrite is a new incarnation even when the bytes are identical"
+    );
+
+    let listed = store
+        .list(key, None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .next()
+        .expect("listed object")
+        .expect("listing ok");
+    assert_eq!(
+        listed.version, second.version,
+        "list must return the full incarnation"
+    );
+
+    let keys: Vec<String> = store
+        .list_keys(key, None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|r| r.expect("list key"))
+        .collect();
+    assert_eq!(keys, vec![key.to_owned()]);
+
+    store
+        .delete(key, Some(second.version))
+        .await
+        .expect("delete current incarnation");
+}
+
 /// list: ordering, `start_after`, prefix isolation.
 async fn test_list(store: &DynStore, base: &str) {
     // Clean up any previous data under base.
@@ -682,7 +741,7 @@ async fn test_multipart_path(store: &DynStore, key: &str) {
 
     let len = data.len() as u64;
     let stream = walgit_store::util::once(data.clone());
-    store
+    let put_meta = store
         .put(
             key,
             PutBody::Stream { len, stream },
@@ -693,6 +752,11 @@ async fn test_multipart_path(store: &DynStore, key: &str) {
         )
         .await
         .expect("multipart put");
+    let head = store.head(key).await.expect("head").expect("object");
+    assert_eq!(
+        head.version, put_meta.version,
+        "multipart PUT/HEAD version mismatch"
+    );
 
     let r = store
         .get(key, GetOptions::default())
