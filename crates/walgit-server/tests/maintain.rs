@@ -743,11 +743,7 @@ async fn bundle_list_shows_a_bundle_right_after_this_host_builds_it() -> anyhow:
         .await
         .map_err(|_| anyhow::anyhow!("op start failed"))?;
     assert!(t.wait_done(std::time::Duration::from_secs(30)).await);
-    assert!(
-        t.outcome().is_some_and(|o| o.is_ok()),
-        "{:?}",
-        t.outcome()
-    );
+    assert!(t.outcome().is_some_and(|o| o.is_ok()), "{:?}", t.outcome());
     let list2 = step!("list 2", server.get_text("/o/r.git/bundles/list", &[]))?;
     assert!(
         list2.contains("[bundle \"daily-"),
@@ -1600,11 +1596,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         can_incremental: true,
         wrong_host_reason: None,
     };
-    let rows = server
-        .state
-        .bundles
-        .plan(&id, now, ctx)
-        .await?;
+    let rows = server.state.bundles.plan(&id, now, ctx).await?;
     let dbg: Vec<_> = rows
         .iter()
         .filter(|r| r.strategy == "hourly")
@@ -1645,9 +1637,8 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         .filter(|r| r.strategy == "hourly" && r.slot != hourlies[0].slot)
         .map(|r| r.slot)
         .max();
-    let other_closed = other_slot.is_some_and(|s| {
-        walgit_bundle::slots::slot_closed(&hourly, s, now)
-    });
+    let other_closed =
+        other_slot.is_some_and(|s| walgit_bundle::slots::slot_closed(&hourly, s, now));
     assert!(
         other_closed,
         "the hour after the carrier must be closed at the synthetic now: {other_slot:?}"
@@ -2266,10 +2257,7 @@ async fn pushing_a_reclaiming_checksum_is_refused() -> anyhow::Result<()> {
         h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t")
     )?;
     assert!(
-        h.manifest()
-            .reclaiming
-            .iter()
-            .any(|r| r.checksum == dead),
+        h.manifest().reclaiming.iter().any(|r| r.checksum == dead),
         "the checksum must be listed before the push is attempted"
     );
 
@@ -2362,10 +2350,7 @@ async fn reclaiming_list_never_contains_a_live_pack() -> anyhow::Result<()> {
         h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t")
     )?;
     assert!(
-        h.manifest()
-            .reclaiming
-            .iter()
-            .any(|r| r.checksum == dead),
+        h.manifest().reclaiming.iter().any(|r| r.checksum == dead),
         "a non-live checksum must list"
     );
     step!(
@@ -2384,7 +2369,8 @@ async fn reclaiming_list_never_contains_a_live_pack() -> anyhow::Result<()> {
 /// once the `.superseded` marker has aged past
 /// `compaction.retention_superseded` — and never a pack that is still live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn gc_reclaims_expired_superseded_packs_and_keeps_live_and_young_ones() -> anyhow::Result<()> {
+async fn gc_reclaims_expired_superseded_packs_and_keeps_live_and_young_ones() -> anyhow::Result<()>
+{
     use prost::Message;
     use walgit_proto::keys;
     use walgit_proto::v1::SupersededPack;
@@ -2514,8 +2500,7 @@ async fn gc_reclaims_expired_superseded_packs_and_keeps_live_and_young_ones() ->
 
     // The pass leaves the record the planner reads next time.
     assert!(
-        step!("gc.pb", h.store().get_bytes(keys::GC))?
-            .is_some(),
+        step!("gc.pb", h.store().get_bytes(keys::GC))?.is_some(),
         "the GC pass records gc.pb"
     );
     Ok(())
@@ -2528,8 +2513,8 @@ async fn gc_reclaims_expired_superseded_packs_and_keeps_live_and_young_ones() ->
 /// (b) a pass that stopped at the bound still reported `complete`, writing
 /// `gc.pb` and sleeping a whole `gc_interval` with eligibility left on the floor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain() -> anyhow::Result<()>
-{
+async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain()
+-> anyhow::Result<()> {
     use futures::StreamExt;
     use prost::Message;
     use walgit_proto::keys;
@@ -2615,7 +2600,10 @@ async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain(
         deads.push(checksum);
     }
 
-    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
     step!("gc pass", run_pass(&server.state))?;
 
     // Exactly the 32/unit bound of *dead* packs went, not 31 (the live marker
@@ -2627,8 +2615,7 @@ async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain(
         }
     }
     assert_eq!(
-        remaining,
-        1,
+        remaining, 1,
         "the live marker must not spend quota: expected 32 dead reclaimed, {remaining} left"
     );
     // Work remains, so the pass must NOT record gc.pb and the unit stays due.
@@ -2637,7 +2624,10 @@ async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain(
         "an incomplete pass must not write gc.pb"
     );
     assert!(
-        matches!(step!("plan again", next_unit(&server.state, &id))?, Unit::Gc(_)),
+        matches!(
+            step!("plan again", next_unit(&server.state, &id))?,
+            Unit::Gc(_)
+        ),
         "the GC unit must stay due while eligible markers remain"
     );
 
@@ -2651,7 +2641,10 @@ async fn gc_bounds_reclaimable_work_and_stays_due_while_eligible_markers_remain(
             left += 1;
         }
     }
-    assert_eq!(left, 1, "only the live pack's marker stays (dropping it is irreversible)");
+    assert_eq!(
+        left, 1,
+        "only the live pack's marker stays (dropping it is irreversible)"
+    );
     assert!(
         h.store().get_bytes(keys::GC).await?.is_some(),
         "a drained pass records gc.pb"
@@ -2734,7 +2727,10 @@ async fn gc_honours_the_repo_retention_override() -> anyhow::Result<()> {
             .put_bytes(&keys::pack_key(&dead), vec![0u8; 32], PutMode::Create)
     )?;
 
-    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
     step!("gc pass", run_pass(&server.state))?;
     assert!(
         h.store().head(&keys::pack_key(&dead)).await?.is_some(),
@@ -2785,8 +2781,8 @@ async fn gc_releases_a_claim_whose_marker_was_already_retired() -> anyhow::Resul
         use prost::Message;
         use walgit_proto::keys;
         use walgit_store::{ObjectStoreExt, PutMode};
-        let (meta, bytes) = step!("manifest", h.store().get_bytes(keys::MANIFEST))?
-            .expect("repo has a manifest");
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("repo has a manifest");
         let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
         let mut since = walgit_proto::time::now();
         since.seconds -= 3600;
@@ -2812,7 +2808,10 @@ async fn gc_releases_a_claim_whose_marker_was_already_retired() -> anyhow::Resul
         "the checksum must be claimed before the pass"
     );
 
-    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
     step!("gc pass", run_pass(&server.state))?;
     assert!(
         !h.manifest().reclaiming.iter().any(|r| r.checksum == orphan),
@@ -2863,7 +2862,10 @@ async fn gc_leaves_a_fresh_claim_to_its_holder() -> anyhow::Result<()> {
         "claim",
         h.update_reclaiming(std::slice::from_ref(&fresh), &[], &[], "t")
     )?;
-    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
     step!("gc pass", run_pass(&server.state))?;
     assert!(
         h.manifest().reclaiming.iter().any(|r| r.checksum == fresh),
@@ -2936,8 +2938,8 @@ async fn gc_takes_over_a_stale_claim_whose_marker_still_exists() -> anyhow::Resu
         )?;
     }
     {
-        let (meta, bytes) = step!("manifest", h.store().get_bytes(keys::MANIFEST))?
-            .expect("repo has a manifest");
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("repo has a manifest");
         let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
         let mut since = walgit_proto::time::now();
         since.seconds -= 3600;
@@ -2959,7 +2961,10 @@ async fn gc_takes_over_a_stale_claim_whose_marker_still_exists() -> anyhow::Resu
     }
     step!("resync", h.sync())?;
 
-    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
     step!("gc pass", run_pass(&server.state))?;
 
     step!("check", async {
@@ -2968,7 +2973,10 @@ async fn gc_takes_over_a_stale_claim_whose_marker_still_exists() -> anyhow::Resu
             "the adopter must finish the reclamation (pack reclaimed)"
         );
         assert!(
-            h.store().head(&keys::superseded_key(&dead)).await?.is_none(),
+            h.store()
+                .head(&keys::superseded_key(&dead))
+                .await?
+                .is_none(),
             "the marker goes with the pack"
         );
         assert!(
@@ -3022,8 +3030,8 @@ async fn gc_releases_a_retired_claim_from_an_older_pass_of_the_same_instance() -
     // marker: an interrupted previous pass of ours.
     let orphan = "e".repeat(40);
     {
-        let (meta, bytes) = step!("manifest", h.store().get_bytes(keys::MANIFEST))?
-            .expect("repo has a manifest");
+        let (meta, bytes) =
+            step!("manifest", h.store().get_bytes(keys::MANIFEST))?.expect("repo has a manifest");
         let mut m = walgit_proto::v1::Manifest::decode(bytes.as_ref())?;
         let mut since = walgit_proto::time::now();
         since.seconds -= 3600;
@@ -3045,12 +3053,212 @@ async fn gc_releases_a_retired_claim_from_an_older_pass_of_the_same_instance() -
     }
     step!("resync", h.sync())?;
 
-    assert!(matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)));
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
     step!("gc pass", run_pass(&server.state))?;
     assert!(
         !h.manifest().reclaiming.iter().any(|r| r.checksum == orphan),
         "an older token of this instance is a different holder and must be released: {:?}",
         h.manifest().reclaiming
+    );
+    Ok(())
+}
+
+/// #177: 存量孤儿没有任何 marker —— 在 marker 机制（#176）出现之前被 supersede
+/// 的 pack、上传被放弃的 pack、以及 `.pack` 已被删但 side-file 还在的残骸，都
+/// 不在 `wal/_superseded/` 里，GC 的候选扫描永远看不到它们（本机全桶实测：
+/// 0 个 marker vs 2,200+ 孤儿 pack）。reconcile 必须给「新鲜 manifest 不再引用
+/// 且没有 marker」的对象补上标记，同时绝不碰 live 的 pack。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_marks_orphans_without_markers_and_never_touches_live_packs() -> anyhow::Result<()> {
+    use walgit_proto::keys;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+            c.compaction.retention_superseded = std::time::Duration::from_hours(7 * 24);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+    let live = h
+        .manifest()
+        .packs
+        .first()
+        .expect("push published a pack")
+        .checksum
+        .clone();
+
+    // ① 孤儿 pack（有 pack + idx，没有任何 marker）——存量数据的形态。
+    let orphan = "a".repeat(40);
+    // ② 只有 side-file 的残骸（pack 已不在）——同样没有 marker。
+    let side_only = "b".repeat(40);
+    // ③ 删除侧不认识的扩展名（将来新增 side-file 的形态）：**不得标记**，否则
+    // 会「标记 → 删不掉 → 下一轮再标记」地空转。
+    let unknown_ext = "c".repeat(40);
+    for (key, body) in [
+        (keys::pack_key(&orphan), vec![0u8; 32]),
+        (keys::idx_key(&orphan), vec![0u8; 8]),
+        (keys::idx_key(&side_only), vec![0u8; 8]),
+        (format!("wal/{unknown_ext}.mtimes"), vec![0u8; 8]),
+    ] {
+        step!(
+            "orphan object",
+            h.store().put_bytes(&key, body, PutMode::Create)
+        )?;
+    }
+
+    assert!(
+        matches!(step!("plan", next_unit(&server.state, &id))?, Unit::Gc(_)),
+        "GC should be the due unit"
+    );
+    step!("gc pass", run_pass(&server.state))?;
+
+    step!("check markers", async {
+        for (what, checksum) in [("orphan pack", &orphan), ("side-file remnant", &side_only)] {
+            let marker = h.store().get_bytes(&keys::superseded_key(checksum)).await?;
+            assert!(
+                marker.is_some(),
+                "{what} must be marked so a later pass can reclaim it"
+            );
+        }
+        assert!(
+            h.store()
+                .head(&keys::superseded_key(&live))
+                .await?
+                .is_none(),
+            "a live pack must never be marked as superseded"
+        );
+        assert!(
+            h.store()
+                .head(&keys::superseded_key(&unknown_ext))
+                .await?
+                .is_none(),
+            "an extension the reclamation loop cannot delete must not be marked"
+        );
+        // Stamped `now`: inside the retention window, so nothing is deleted yet.
+        assert!(
+            h.store().head(&keys::pack_key(&orphan)).await?.is_some(),
+            "the orphan is marked, not reclaimed: retention still applies"
+        );
+        assert!(
+            h.store().head(&keys::pack_key(&live)).await?.is_some(),
+            "the live pack is untouched"
+        );
+        Ok::<(), anyhow::Error>(())
+    })?;
+    assert!(
+        step!("gc.pb", h.store().get_bytes(keys::GC))?.is_some(),
+        "a completed reconcile records gc.pb"
+    );
+
+    // 第二次 pass：标记已存在就不再重复写（老时间戳不会被刷新成新时间）。
+    let before = step!(
+        "marker body",
+        h.store().get_bytes(&keys::superseded_key(&orphan))
+    )?
+    .expect("marker")
+    .1;
+    step!("second gc pass", run_pass(&server.state))?;
+    let after = step!(
+        "marker body again",
+        h.store().get_bytes(&keys::superseded_key(&orphan))
+    )?
+    .expect("marker")
+    .1;
+    assert_eq!(
+        before, after,
+        "an existing marker must not be rewritten (its stamp is the conservative one)"
+    );
+    Ok(())
+}
+
+/// reconcile 也必须是有界单元：一轮最多写 `GC_MAX_MARKERS_PER_UNIT` 个标记，剩下
+/// 的孤儿保持单元 due（不写 gc.pb），下一轮继续 —— 否则一个几万个对象的仓库会把
+/// 单个单元拖出 lease 预算。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_reconcile_is_bounded_and_stays_due_while_orphans_remain() -> anyhow::Result<()> {
+    use futures::StreamExt;
+    use walgit_proto::keys;
+    use walgit_server::maintain::{Unit, next_unit, run_pass};
+    use walgit_server::ops::GC_MAX_MARKERS_PER_UNIT;
+    use walgit_store::{ObjectStore, ObjectStoreExt, PutMode};
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.maintenance.checkpoints = false;
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+            c.maintenance.gc_interval = std::time::Duration::from_secs(3600);
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // 比一轮上限多 3 个孤儿。
+    let total = GC_MAX_MARKERS_PER_UNIT + 3;
+    for i in 0u64..total as u64 {
+        let checksum = format!("{:040x}", 0x0bad_0000u64 + i);
+        step!(
+            "orphan pack",
+            h.store()
+                .put_bytes(&keys::pack_key(&checksum), vec![0u8; 32], PutMode::Create)
+        )?;
+    }
+
+    assert!(matches!(
+        step!("plan", next_unit(&server.state, &id))?,
+        Unit::Gc(_)
+    ));
+    step!("gc pass", run_pass(&server.state))?;
+
+    // 只有一轮上限的标记被写出。
+    let mut markers = 0usize;
+    let mut stream = h.store().list(keys::SUPERSEDED_DIR, None);
+    while let Some(m) = stream.next().await {
+        m?;
+        markers += 1;
+    }
+    assert_eq!(
+        markers, GC_MAX_MARKERS_PER_UNIT,
+        "one pass must write at most the per-unit marker bound"
+    );
+    assert!(
+        h.store().get_bytes(keys::GC).await?.is_none(),
+        "an incomplete reconcile must not record gc.pb"
+    );
+    assert!(
+        matches!(
+            step!("plan again", next_unit(&server.state, &id))?,
+            Unit::Gc(_)
+        ),
+        "the unit stays due while orphans remain unmarked"
     );
     Ok(())
 }
