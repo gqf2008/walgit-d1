@@ -210,7 +210,6 @@ pub async fn read_fsck(
     }
 }
 
-
 /// One bounded bucket-GC unit: delete superseded packs that have aged past
 /// `compaction.retention_superseded` (#175).
 ///
@@ -222,7 +221,10 @@ pub async fn read_fsck(
 /// pack a concurrent publisher uploaded but has not CAS'd yet: no marker, no
 /// candidate.
 ///
-/// Bounded by `max` (D22: one unit of the most important missing work).
+/// Bounded by `max` packs and [`GC_MAX_MARKERS_PER_UNIT`] newly written markers
+/// (D22: one unit of the most important missing work).
+///
+/// Returns `(reclaimed packs, freed bytes, markers written, complete)`.
 async fn gc_superseded_packs(
     handle: &RepoHandle,
     max: usize,
@@ -231,7 +233,7 @@ async fn gc_superseded_packs(
     token: &str,
     lost: &std::sync::atomic::AtomicBool,
     log: Log<'_>,
-) -> Result<(u64, u64, bool), String> {
+) -> Result<(u64, u64, u64, bool), String> {
     use futures::StreamExt;
     use prost::Message;
     use std::sync::atomic::Ordering;
@@ -331,6 +333,108 @@ async fn gc_superseded_packs(
         }
     }
 
+    // ---- Reconcile: stamp orphans the live set no longer references --------
+    //
+    // A pack normally leaves the live set through a COMPACT entry, which writes
+    // its marker. Some never get one: packs superseded before markers existed
+    // (#175/#177), a pack whose upload was abandoned before the manifest CAS,
+    // and a pack orphaned by a crash between the object PUT and the log entry.
+    // The marker scan below cannot see any of them, so LIST the pack directory
+    // and stamp what the *fresh* manifest does not reference.
+    //
+    // `superseded_at = now` is the conservative stamp: an orphan's real
+    // supersession time is unknowable, and stamping "now" only ever delays
+    // reclamation. Deletion still requires the full retention window, the claim
+    // CAS and a liveness re-check against a fresh manifest, so an in-flight pack
+    // that gets adopted meanwhile becomes live and is skipped.
+    let marker_prefix = keys::superseded_key("");
+    let mut markers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stream = handle.store().list(keys::SUPERSEDED_DIR, None);
+        while let Some(m) = stream.next().await {
+            let m = m.map_err(|e| e.to_string())?;
+            if let Some(checksum) = m.key.strip_prefix(&marker_prefix) {
+                markers.insert(checksum.to_string());
+            }
+        }
+    }
+    let mut marked = 0u64;
+    let mut reconcile_truncated = false;
+    {
+        let mut stream = handle.store().list(keys::WAL_DIR, None);
+        while let Some(m) = stream.next().await {
+            let m = m.map_err(|e| e.to_string())?;
+            let Some(rest) = m.key.strip_prefix(keys::WAL_DIR) else {
+                continue;
+            };
+            // Markers live one segment down (`wal/_superseded/<checksum>`) and
+            // are not pack objects.
+            if rest.contains('/') {
+                continue;
+            }
+            // Any side-file spelling counts: a checksum whose `.pack` is
+            // already gone but whose `.idx`/`.rev`/`.bitmap`/`.commit-graph`
+            // survived is exactly the garbage this reconcile is for (the
+            // reclamation loop deletes whatever exists and tolerates the rest).
+            let Some((checksum, ext)) = rest.split_once('.') else {
+                continue;
+            };
+            if !WAL_OBJECT_EXTS.contains(&ext) {
+                continue;
+            }
+            if live.contains(checksum) || markers.contains(checksum) {
+                continue;
+            }
+            // Bound counts *successful* writes: a lost `Create` race (above)
+            // costs a round trip but no marker, and the concurrent writers are
+            // the publish path's COMPACT (bounded by packs it supersedes), not
+            // an unbounded stream.
+            if marked >= GC_MAX_MARKERS_PER_UNIT as u64 {
+                reconcile_truncated = true;
+                break;
+            }
+            let marker = SupersededPack {
+                checksum: checksum.to_string(),
+                superseded_at: Some(walgit_proto::time::now()),
+                // No superseding COMPACT entry: 0 marks a reconciled orphan
+                // (`seq` is provenance only — nothing reads it for decisions).
+                seq: 0,
+            };
+            match handle
+                .store()
+                .put_bytes(
+                    &keys::superseded_key(checksum),
+                    marker.encode_to_vec(),
+                    walgit_store::PutMode::Create,
+                )
+                .await
+            {
+                Ok(_) => {
+                    markers.insert(checksum.to_string());
+                    marked += 1;
+                }
+                // Marked concurrently — the publish path (COMPACT) or another
+                // pass — after our LIST: `Create` is what keeps *its* stamp, and
+                // a stamp is the age record, so overwriting would restart the
+                // retention window. (The fault-injected test for this race is
+                // tracked with the other suspended/taken-over-pass cases in #179;
+                // no in-process test can produce it without a store hook.)
+                Err(walgit_store::StoreError::PreconditionFailed { .. }) => {}
+                Err(e) => return Err(format!("gc: marking orphan {checksum}: {e}")),
+            }
+        }
+    }
+    if marked > 0 || reconcile_truncated {
+        log(format!(
+            "gc: marked {marked} orphan object(s) for reclamation{}",
+            if reconcile_truncated {
+                " (more next pass)"
+            } else {
+                ""
+            }
+        ));
+    }
+
     // Collect markers that have aged past the retention window *and* whose pack
     // is not live in that same generation. Reading each marker is one GET; the
     // listing is bounded by the number of packs a repo ever superseded within
@@ -338,39 +442,43 @@ async fn gc_superseded_packs(
     // bound below is what keeps an old marker on a re-adopted pack from
     // spending quota and starving real candidates.
     let mut candidates: Vec<(String, std::time::SystemTime)> = Vec::new();
-    let mut scanned = 0u64;
-    {
-        let mut stream = handle.store().list(keys::SUPERSEDED_DIR, None);
-        while let Some(m) = stream.next().await {
-            let m = m.map_err(|e| e.to_string())?;
-            if !m.key.starts_with(keys::SUPERSEDED_DIR) {
-                continue;
-            }
-            scanned += 1;
-            let Some((_, raw)) = handle
-                .store()
-                .get_bytes(&m.key)
-                .await
-                .map_err(|e| e.to_string())?
-            else {
-                continue;
-            };
-            let marker = SupersededPack::decode(raw.as_ref()).map_err(|e| e.to_string())?;
-            if live.contains(&marker.checksum) {
-                continue;
-            }
-            let Some(at) = marker
-                .superseded_at
-                .as_ref()
-                .map(walgit_proto::time::to_system)
-            else {
-                continue;
-            };
-            if now.duration_since(at).unwrap_or_default() <= retention {
-                continue;
-            }
-            candidates.push((marker.checksum, at));
+    // The marker keys came from the reconcile's LIST above — including the ones
+    // this pass just wrote (stamped `now`, so the retention check below drops
+    // them). Re-listing would be one more round trip for the same set.
+    //
+    // A marker a *concurrent* COMPACT writes between that LIST and this scan is
+    // not a candidate this pass. That can only delay it: its stamp is `now`, so
+    // it was never reclaimable now, and every deletion re-reads the marker and
+    // the retention from the claim-CAS manifest (plus a fresh live check), so a
+    // missed candidate can never be reclaimed *earlier*. (Re-listing would not
+    // close that window either — the marker can land after any LIST.)
+    let scanned = markers.len() as u64;
+    for checksum in &markers {
+        let key = keys::superseded_key(checksum);
+        let Some((_, raw)) = handle
+            .store()
+            .get_bytes(&key)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            // Marker retired between the LIST and this GET.
+            continue;
+        };
+        let marker = SupersededPack::decode(raw.as_ref()).map_err(|e| e.to_string())?;
+        if live.contains(&marker.checksum) {
+            continue;
         }
+        let Some(at) = marker
+            .superseded_at
+            .as_ref()
+            .map(walgit_proto::time::to_system)
+        else {
+            continue;
+        };
+        if now.duration_since(at).unwrap_or_default() <= retention {
+            continue;
+        }
+        candidates.push((marker.checksum, at));
     }
     // Adopted checksums that did not become candidates carry no work: their
     // marker vanished between our GET and the take-over CAS, or it is not aged
@@ -392,10 +500,15 @@ async fn gc_superseded_packs(
         }
     }
     if candidates.is_empty() {
-        return Ok((0, 0, true));
+        // A truncated reconcile is unfinished work: stay due (no gc.pb) so the
+        // next pass writes the remaining markers.
+        return Ok((0, 0, marked, !reconcile_truncated));
     }
     // Oldest first: a partial unit should reclaim the longest-dead packs.
-    candidates.sort_by_key(|(_, at)| *at);
+    // Oldest first, checksum as the tie-break: a COMPACT entry stamps every pack
+    // it drops with one `entry_time`, so ties are the norm — and a HashSet
+    // iteration order would make *which* 32 a bounded pass reclaim random.
+    candidates.sort_by_key(|(checksum, at)| (*at, checksum.clone()));
     // Anything past the bound is real work this pass did not do: the unit must
     // stay due, not wait a whole `gc_interval`.
     let truncated = candidates.len() > max;
@@ -470,7 +583,7 @@ async fn gc_superseded_packs(
 
     let mut deleted = 0u64;
     let mut freed = 0u64;
-    let mut all_complete = !truncated;
+    let mut all_complete = !truncated && !reconcile_truncated;
     // (checksum, marker version) for packs whose objects are all gone.
     let mut reclaimed: Vec<(String, walgit_store::Version)> = Vec::new();
     // Claims we hold but must release without deleting (the marker was
@@ -480,7 +593,9 @@ async fn gc_superseded_packs(
         if !owned.contains(&checksum) || live.contains(&checksum) {
             // A publisher re-adopted it before our claim, or another GC pass
             // owns it. Leave the pack and its marker alone.
-            log(format!("gc: {checksum} is live again or owned elsewhere — skipped"));
+            log(format!(
+                "gc: {checksum} is live again or owned elsewhere — skipped"
+            ));
             continue;
         }
         // Fail closed on a lease we no longer hold, and re-verify the fence in
@@ -492,7 +607,9 @@ async fn gc_superseded_packs(
             break;
         }
         if !claim_still_ours(handle, &checksum, owner, token).await? {
-            log(format!("gc: claim for {checksum} is no longer ours — skipped"));
+            log(format!(
+                "gc: claim for {checksum} is no longer ours — skipped"
+            ));
             all_complete = false;
             continue;
         }
@@ -523,6 +640,7 @@ async fn gc_superseded_packs(
             all_complete = false;
             continue;
         }
+        // Same spellings as WAL_OBJECT_EXTS (the reconcile only marks those).
         let side_files = [
             keys::pack_key(&checksum),
             keys::idx_key(&checksum),
@@ -557,9 +675,7 @@ async fn gc_superseded_packs(
                         break;
                     }
                     if !claim_still_ours(handle, &checksum, owner, token).await? {
-                        log(format!(
-                            "gc: claim for {checksum} moved on — leaving {key}"
-                        ));
+                        log(format!("gc: claim for {checksum} moved on — leaving {key}"));
                         complete = false;
                         all_complete = false;
                         break;
@@ -579,8 +695,7 @@ async fn gc_superseded_packs(
                     }
                     freed += meta.size;
                     match handle.store().delete(key, Some(meta.version)).await {
-                        Ok(())
-                        | Err(walgit_store::StoreError::NotFound { .. }) => {}
+                        Ok(()) | Err(walgit_store::StoreError::NotFound { .. }) => {}
                         Err(walgit_store::StoreError::PreconditionFailed { .. }) => {
                             log(format!("gc: {key} changed under us — leaving it"));
                             complete = false;
@@ -630,7 +745,9 @@ async fn gc_superseded_packs(
             // before it, so a claim a newer pass took over cannot be retired by
             // this stale one.
             if !claim_still_ours(handle, checksum, owner, token).await? {
-                log(format!("gc: claim for {checksum} moved on — leaving its marker"));
+                log(format!(
+                    "gc: claim for {checksum} moved on — leaving its marker"
+                ));
                 all_complete = false;
                 continue;
             }
@@ -679,7 +796,7 @@ async fn gc_superseded_packs(
             "gc: scanned {scanned} marker(s), reclaimed {deleted}, freed {freed} bytes"
         ));
     }
-    Ok((deleted, freed, all_complete))
+    Ok((deleted, freed, marked, all_complete))
 }
 
 /// Is `checksum` still listed under *this* pass's fence in the store? A later
@@ -700,8 +817,7 @@ async fn claim_still_ours(
     else {
         return Ok(false);
     };
-    let manifest =
-        walgit_proto::v1::Manifest::decode(raw.as_ref()).map_err(|e| e.to_string())?;
+    let manifest = walgit_proto::v1::Manifest::decode(raw.as_ref()).map_err(|e| e.to_string())?;
     Ok(manifest
         .reclaiming
         .iter()
@@ -712,11 +828,21 @@ async fn claim_still_ours(
 /// pass cannot monopolise a maintainer (D22).
 const GC_MAX_PACKS_PER_UNIT: usize = 32;
 
+/// Orphan *markers* one GC pass may write. Markers are tiny and writing one is
+/// a single conditional PUT, but a repo that predates the marker scheme (#177)
+/// has hundreds of orphans: bounding the pass keeps the unit inside its lease
+/// and makes it repeat until the reconcile is complete, instead of blocking the
+/// loop on one repo.
+pub const GC_MAX_MARKERS_PER_UNIT: usize = 512;
+
+/// `wal/<checksum>.<ext>` spellings the reclamation loop deletes. The reconcile
+/// only marks these: a key it cannot delete would be marked, skipped by the
+/// delete loop and marked again on the next pass — forever. Keep both sides in
+/// sync (the delete loop below spells them out as `keys::*_key`).
+const WAL_OBJECT_EXTS: [&str; 5] = ["pack", "idx", "rev", "bitmap", "commit-graph"];
 
 /// The last bucket-GC pass of `handle`'s repository, if any (#175).
-pub async fn read_gc(
-    handle: &RepoHandle,
-) -> Result<Option<walgit_proto::v1::GcReport>, String> {
+pub async fn read_gc(handle: &RepoHandle) -> Result<Option<walgit_proto::v1::GcReport>, String> {
     use walgit_store::ObjectStoreExt;
     match handle.store().get_bytes(walgit_proto::keys::GC).await {
         Ok(Some((_, bytes))) => walgit_proto::v1::GcReport::decode(bytes.as_ref())
@@ -1017,15 +1143,19 @@ async fn run(
             {
                 log(format!("gc: lease release failed: {e}"));
             }
-            let (packs, bytes, complete) = outcome?;
+            let (packs, bytes, marked, complete) = outcome?;
             if !complete {
                 // Something could not be deleted: the claims stay (correct — the
                 // pack is still there), so do NOT write gc.pb. The unit stays
                 // due and the next pass retries instead of leaving the checksum
                 // refused for a whole gc_interval.
                 return Ok((
-                    format!("gc: incomplete ({packs} reclaimed); retrying next pass"),
-                    serde_json::json!({"packs": packs, "bytes": bytes, "complete": false}),
+                    format!(
+                        "gc: incomplete ({packs} reclaimed, {marked} marked); retrying next pass"
+                    ),
+                    serde_json::json!({
+                        "packs": packs, "bytes": bytes, "marked": marked, "complete": false
+                    }),
                 ));
             }
             let report = walgit_proto::v1::GcReport {
@@ -1043,13 +1173,19 @@ async fn run(
                 )
                 .await
                 .map_err(|e| format!("writing gc.pb: {e}"))?;
-            let summary = if packs == 0 {
-                "gc: nothing superseded past retention".to_string()
-            } else {
-                format!("gc: {packs} superseded pack(s), {bytes} bytes freed")
+            let summary = match (packs, marked) {
+                (0, 0) => "gc: nothing superseded past retention".to_string(),
+                (0, m) => format!("gc: marked {m} orphan object(s); none past retention yet"),
+                (p, 0) => format!("gc: {p} superseded pack(s), {bytes} bytes freed"),
+                (p, m) => {
+                    format!("gc: {p} superseded pack(s), {bytes} bytes freed; marked {m} orphan(s)")
+                }
             };
-            tracing::info!(repo = %id, packs, bytes, "bucket gc");
-            Ok((summary, serde_json::json!({"packs": packs, "bytes": bytes})))
+            tracing::info!(repo = %id, packs, bytes, marked, "bucket gc");
+            Ok((
+                summary,
+                serde_json::json!({"packs": packs, "bytes": bytes, "marked": marked}),
+            ))
         }
 
         "compact" => {

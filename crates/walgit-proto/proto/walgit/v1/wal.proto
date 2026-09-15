@@ -219,7 +219,9 @@ message SupersededPack {
   string checksum = 1;
   // When the superseding COMPACT entry was committed.
   google.protobuf.Timestamp superseded_at = 2;
-  // Sequence of that COMPACT entry (diagnostics / provenance).
+  // Sequence of that COMPACT entry (diagnostics / provenance). 0 = the marker
+  // was stamped by the GC reconcile: the pack was already unreferenced, no
+  // COMPACT entry dropped it.
   uint64 seq = 3;
 }
 
