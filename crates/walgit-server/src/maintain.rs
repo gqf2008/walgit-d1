@@ -1061,7 +1061,8 @@ async fn heartbeat(
 }
 
 /// Start `op` as a task and wait for it. Returns true when it finished ok.
-async fn run_op(
+/// The unit dispatcher (also used by tests that drive one unit directly).
+pub async fn run_op(
     state: &Arc<AppState>,
     id: &RepoId,
     op: &str,

@@ -3416,3 +3416,115 @@ async fn backing_off_kinds_rotate_instead_of_starving_the_lower_one() -> anyhow:
     );
     Ok(())
 }
+
+/// #195 端到端：base 在 seq B 发布（并写下见证）→ 之后 push 让 head 前进、再 fold
+/// 把 live checkpoint 推过 B → **bundle compose 仍然成功**。修复前这条路径会失败在
+/// `refs at seq B are not replayable: log folded up to … and no checkpoint at or before`，
+/// 生产里 6 个仓库的 bundle 因此每 pass 失败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bundle_compose_works_after_a_fold_moved_past_the_base() -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use walgit_store::ObjectStore;
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.server.roles = vec![
+                walgit_config::Role::Serve,
+                walgit_config::Role::Maintain,
+                walgit_config::Role::Compact,
+                walgit_config::Role::Bundle,
+            ];
+            c.maintenance.disk = walgit_config::MaintainerDisk::Ssd;
+            c.cache.mode = walgit_config::CacheMode::Disk;
+            c.bundles.enabled = true;
+            c.bundles.strategy.truncate(1); // weekly only
+            c.compaction.enabled = true;
+            c.maintenance.checkpoints = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    // 1. Build the base (this is what #195 patches: it also writes the witness).
+    let mut params = HashMap::new();
+    params.insert("base".to_string(), "1".to_string());
+    params.insert("force".to_string(), "1".to_string());
+    assert!(
+        step!(
+            "base rebuild",
+            walgit_server::maintain::run_op(&server.state, &id, "compact", params)
+        ),
+        "the base rebuild must succeed"
+    );
+    step!("sync after rebuild", h.sync())?;
+    let base_seq = step!("base", async {
+        let base = walgit_wal::base_pack(&h.manifest())
+            .cloned()
+            .expect("a live tier-2 base");
+        Ok::<u64, anyhow::Error>(base.seq)
+    })?;
+    assert!(
+        h.store()
+            .head(&walgit_proto::keys::checkpoint_key(base_seq))
+            .await?
+            .is_some(),
+        "the rebuild must leave an exact witness checkpoint at the base's seq"
+    );
+
+    // 2. Advance past the base and fold: the live checkpoint now sits above base_seq.
+    std::fs::write(src.path().join("b.txt"), "two\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "two"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    step!("sync after push", h.sync())?;
+    let mut cp_params = HashMap::new();
+    cp_params.insert("trigger".to_string(), "test".to_string());
+    assert!(step!(
+        "fold",
+        walgit_server::maintain::run_op(&server.state, &id, "checkpoint", cp_params)
+    ));
+    step!("sync after fold", h.sync())?;
+    let live_cp = h
+        .manifest()
+        .checkpoint
+        .as_ref()
+        .map(|c| c.seq)
+        .unwrap_or_default();
+    assert!(
+        live_cp > base_seq,
+        "the fold must move the live checkpoint past the base ({live_cp} > {base_seq})"
+    );
+
+    // 3. Compose the weekly bundle: its compose replays refs at the base's seq.
+    let weekly = server.state.cfg.bundles.strategy[0].clone();
+    let slot = walgit_bundle::slots::last_slot_at_or_before(&weekly, std::time::SystemTime::now())?
+        .expect("a weekly slot");
+    let mut b_params = HashMap::new();
+    b_params.insert("strategy".to_string(), weekly.name.clone());
+    b_params.insert("slot".to_string(), slot.to_string());
+    assert!(
+        step!(
+            "compose",
+            walgit_server::maintain::run_op(&server.state, &id, "bundle", b_params)
+        ),
+        "compose must succeed even though the WAL folded past the base (was: refs not replayable)"
+    );
+    Ok(())
+}
