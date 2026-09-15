@@ -38,6 +38,8 @@ pub async fn run_loop(state: Arc<AppState>) {
     info!(interval = ?interval, host = %host, maintain = ?state.cfg.placement.maintain, exclude = ?state.cfg.placement.maintain_exclude, "maintenance loop started");
     let mut passes = 0u64;
     let mut last_unit = String::new();
+    // Survives passes (and only passes): see [`Backoff`].
+    let mut backoff = Backoff::default();
     loop {
         tokio::time::sleep(interval).await;
         if walgit_wal::tasks::draining() {
@@ -65,7 +67,9 @@ pub async fn run_loop(state: Arc<AppState>) {
                 }
             })
         };
-        let outcome = run_pass(&state).instrument(span.clone()).await;
+        let outcome = run_pass_with_backoff(&state, &mut backoff)
+            .instrument(span.clone())
+            .await;
         ticker.abort();
         match outcome {
             Ok(r) => {
@@ -142,6 +146,68 @@ pub enum Unit {
     Idle,
     /// Not this host's repository (placement).
     NotAssigned,
+}
+
+/// Consecutive failures of a unit kind before the planner is asked to skip it
+/// when lower-priority work is also due (#194).
+pub const BACKOFF_AFTER_FAILURES: u32 = 3;
+
+/// Units one repository may attempt in a single pass. The pass used to stop at
+/// the first unit; a repeatedly failing high-priority unit now hands the pass to
+/// the work below it, so the number of attempts has to stay bounded.
+const MAX_UNITS_PER_REPO_PER_PASS: u32 = 3;
+
+/// Consecutive failures per `(repo, unit kind)`.
+///
+/// This is *scheduling* state, not durable state: it lives in the maintainer
+/// loop, is lost on restart (losing it only means an immediately retried unit),
+/// and exists so a permanently failing high-priority unit cannot starve the
+/// units below it — the failure mode that kept `gc` from ever running while
+/// bundle composes failed every pass (#194). A kind that reaches
+/// [`BACKOFF_AFTER_FAILURES`] is skipped *only* while another unit is due; when
+/// it is the only work left it still runs (retrying is the point of a
+/// self-healing loop). Success clears the counter.
+#[derive(Debug, Default)]
+pub struct Backoff {
+    failures: std::collections::HashMap<(String, String), u32>,
+}
+
+impl Backoff {
+    pub fn strikes(&self, repo: &RepoId, kind: &str) -> u32 {
+        self.failures
+            .get(&(repo.to_string(), kind.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record a failure; returns the new strike count.
+    pub fn record_failure(&mut self, repo: &RepoId, kind: &str) -> u32 {
+        let entry = self
+            .failures
+            .entry((repo.to_string(), kind.to_string()))
+            .or_default();
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    pub fn clear(&mut self, repo: &RepoId, kind: &str) {
+        self.failures.remove(&(repo.to_string(), kind.to_string()));
+    }
+
+    /// Skip this kind? Only once it has failed [`BACKOFF_AFTER_FAILURES`] times
+    /// in a row.
+    pub fn should_skip(&self, repo: &RepoId, kind: &str) -> bool {
+        self.strikes(repo, kind) >= BACKOFF_AFTER_FAILURES
+    }
+
+    /// Any kind of this repo currently in backoff (drives the "only work left"
+    /// retry in the pass loop).
+    fn any_for(&self, repo: &RepoId) -> bool {
+        let prefix = repo.to_string();
+        self.failures
+            .iter()
+            .any(|((r, _), n)| *r == prefix && *n >= BACKOFF_AFTER_FAILURES)
+    }
 }
 
 /// Packs with at least this many objects get a `.rev` side-file (≈ 50 ns per
@@ -245,16 +311,21 @@ fn record_plan(
 /// The next unit for `id` on this host (pure w.r.t. side effects except a
 /// refs sync and a bundle-list read).
 pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Unit> {
-    next_unit_at(state, id, SystemTime::now()).await
+    next_unit_at(state, id, SystemTime::now(), None).await
 }
 
-/// `next_unit` with an injected planner clock. Production passes
+/// `next_unit` with an injected planner clock and an optional backoff: kinds
+/// this repo has failed [`BACKOFF_AFTER_FAILURES`] times in a row are skipped,
+/// so the pass can reach the work below them (#194). Production passes
 /// `SystemTime::now()`; tests use one fixed instant for plan + settle.
 async fn next_unit_at(
     state: &Arc<AppState>,
     id: &RepoId,
     now: SystemTime,
+    backoff: Option<&Backoff>,
 ) -> anyhow::Result<Unit> {
+    // Planner-local names match the labels `run_pass` records failures under.
+    let skip = |kind: &str| backoff.is_some_and(|b| b.should_skip(id, kind));
     if !state.cfg.placement.maintains(id.owner(), id.name()) {
         return Ok(Unit::NotAssigned);
     }
@@ -268,7 +339,10 @@ async fn next_unit_at(
         let m = handle.manifest();
         let cp_seq = m.checkpoint.as_ref().map_or(0, |c| c.seq);
         // f64 is the metrics-gauge contract; checkpoint lag in entries is ≪ 2^53.
-        #[allow(clippy::cast_precision_loss, reason = "f64 is the metrics-gauge contract; checkpoint lag in entries ≪ 2^53")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "f64 is the metrics-gauge contract; checkpoint lag in entries ≪ 2^53"
+        )]
         metrics::gauge!("walgit_checkpoint_lag_entries", "repo" => id.to_string())
             .set(m.head_seq.saturating_sub(cp_seq) as f64);
         if let Some(t) = m
@@ -285,16 +359,21 @@ async fn next_unit_at(
             );
         }
     }
-    if cfg.maintenance.checkpoints
-        && let Some(trigger) = handle.checkpoint_due() {
-            return Ok(Unit::Checkpoint(trigger.to_string()));
-        }
+    if !skip("checkpoint")
+        && cfg.maintenance.checkpoints
+        && let Some(trigger) = handle.checkpoint_due()
+    {
+        return Ok(Unit::Checkpoint(trigger.to_string()));
+    }
     // Integrity before everything else that builds on the object set.
     let fsck = crate::ops::read_fsck(&handle).await.ok().flatten();
     let gc = crate::ops::read_gc(&handle).await.ok().flatten();
     if let Some(f) = &fsck {
         // f64 is the metrics-gauge contract; missing-object counts are ≪ 2^53.
-        #[allow(clippy::cast_precision_loss, reason = "f64 is the metrics-gauge contract; missing-object counts ≪ 2^53")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "f64 is the metrics-gauge contract; missing-object counts ≪ 2^53"
+        )]
         metrics::gauge!("walgit_repo_missing_objects", "repo" => id.to_string()).set(
             if f.repaired_seq > 0 {
                 0.0
@@ -302,7 +381,11 @@ async fn next_unit_at(
                 f.missing_total as f64
             },
         );
-        if !f.missing.is_empty() && f.repaired_seq == 0 && cfg.upstream.git.is_some() {
+        if !skip("repair")
+            && !f.missing.is_empty()
+            && f.repaired_seq == 0
+            && cfg.upstream.git.is_some()
+        {
             return Ok(Unit::Repair(f.missing_total));
         }
     }
@@ -320,11 +403,7 @@ async fn next_unit_at(
                 tracing::warn!(repo = %id, error = %e, "bundle retention failed; the next publish applies it");
             }
         }
-        match state
-            .bundles
-            .settle_closed_slots(id, now)
-            .await
-        {
+        match state.bundles.settle_closed_slots(id, now).await {
             Ok(n) if n > 0 => {
                 tracing::info!(repo = %id, settled = n, "closed bundle slots settled");
             }
@@ -379,26 +458,31 @@ async fn next_unit_at(
                                 || base_predates_window(&handle, strat, r.slot, base.seq).await
                         }
                     };
-                    if holds && due {
+                    if !skip("base-rebuild") && holds && due {
                         return Ok(Unit::BaseRebuild(strat.name.clone(), r.slot));
                     }
                 }
-                return Ok(Unit::BundleSlot(strat.name.clone(), r.slot));
+                if !skip("bundle") {
+                    return Ok(Unit::BundleSlot(strat.name.clone(), r.slot));
+                }
             }
         }
     }
-    if cfg.compaction.enabled
+    if !skip("compact")
+        && cfg.compaction.enabled
         && state.cfg.has_role(walgit_config::Role::Compact)
         && handle.packs_fit()
-        && crate::ops::compaction_triggered(&handle, &cfg) {
-            return Ok(Unit::Compact);
-        }
+        && crate::ops::compaction_triggered(&handle, &cfg)
+    {
+        return Ok(Unit::Compact);
+    }
     // A big pack without its `.rev` side-file, where the pack is local (tmpfs
     // hosts link tier-2 bases from the mount: the maintainer with the disk does
     // it). Push packs (gix ingest, no .rev) stay as they are: git's in-memory
     // reverse index costs ~50 ns/object per pack-objects, nothing below the
     // threshold; a side-file per push would be manifest churn for no gain.
-    if handle.packs_fit() && state.cfg.has_role(walgit_config::Role::Compact) {
+    if !skip("rev-index") && handle.packs_fit() && state.cfg.has_role(walgit_config::Role::Compact)
+    {
         let m = handle.manifest();
         if let Some(p) = m
             .packs
@@ -414,14 +498,13 @@ async fn next_unit_at(
     // Bucket GC: refs-level (never reads pack data), so it runs anywhere the
     // repo is assigned. Time-triggered so the planner stays LIST-free.
     let gc_interval = cfg.maintenance.gc_interval;
-    if !gc_interval.is_zero() {
+    if !skip("gc") && !gc_interval.is_zero() {
         let due = match &gc {
             None => Some("never collected".to_string()),
             Some(g) => {
-                let at = g
-                    .at
-                    .as_ref()
-                    .map_or(SystemTime::UNIX_EPOCH, walgit_proto::time::to_system);
+                let at =
+                    g.at.as_ref()
+                        .map_or(SystemTime::UNIX_EPOCH, walgit_proto::time::to_system);
                 let age = SystemTime::now().duration_since(at).unwrap_or_default();
                 (age >= gc_interval).then(|| format!("last GC {}h ago", age.as_secs() / 3600))
             }
@@ -433,7 +516,7 @@ async fn next_unit_at(
     // Lowest priority: the audit itself. Only where the whole pack set is local
     // (fsck over a linked/remote base would read 32 GB through the mount).
     let interval = cfg.maintenance.fsck_interval;
-    if !interval.is_zero() && handle.packs_fit() {
+    if !skip("fsck") && !interval.is_zero() && handle.packs_fit() {
         let due = match &fsck {
             None => Some("never audited".to_string()),
             Some(f) if f.repaired_seq > 0 && handle.manifest().head_seq >= f.repaired_seq => {
@@ -546,12 +629,19 @@ pub async fn upcoming(
                 Some(b) if many || base_predates_window(handle, strat, slot, b.seq).await => {
                     // Display-only: the label rounds to tenths of a GiB and whole
                     // minutes; exact byte counts are not the point of a status string.
-                    #[allow(clippy::cast_precision_loss, reason = "display-only size label in tenths of a GiB")]
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "display-only size label in tenths of a GiB"
+                    )]
                     let gib = b.pack_size as f64 / (1u64 << 30) as f64;
                     // A tier-2 base is ≥ 1 GiB in practice, and even a 2^64-byte pack
                     // is only ~2^34 GiB: rounded and floored at 1, never negative and
                     // never truncated by the cast.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "GiB count after round().max(1.0) is ≥ 1 and < 2^53")]
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "GiB count after round().max(1.0) is ≥ 1 and < 2^53"
+                    )]
                     let mins = gib.max(1.0).round() as u64;
                     match &ssd {
                         Some(h) => (format!("base rebuild (repack {gib:.1} GiB, ~{mins} min on {h}) + compose"), Some(h.clone())),
@@ -598,20 +688,32 @@ pub async fn upcoming(
     out
 }
 
-/// One pass: one unit per assigned repository.
+/// One pass: one unit per assigned repository (a repeatedly failing unit may
+/// hand the pass to the work below it — see [`Backoff`]). Callers that want the
+/// backoff to persist across passes (the maintainer loop) use
+/// [`run_pass_with_backoff`]; this entry point starts from a fresh one.
 pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
-    run_pass_inner(state, None).await
+    run_pass_with_backoff(state, &mut Backoff::default()).await
 }
 
 /// `run_pass` with an injected scheduler clock. Tests use this to keep
 /// planner/settle decisions on the same instant as their assertions.
 pub async fn run_pass_at(state: &Arc<AppState>, now: SystemTime) -> anyhow::Result<PassReport> {
-    run_pass_inner(state, Some(now)).await
+    run_pass_inner(state, Some(now), &mut Backoff::default()).await
+}
+
+/// `run_pass` carrying [`Backoff`] across passes.
+pub async fn run_pass_with_backoff(
+    state: &Arc<AppState>,
+    backoff: &mut Backoff,
+) -> anyhow::Result<PassReport> {
+    run_pass_inner(state, None, backoff).await
 }
 
 async fn run_pass_inner(
     state: &Arc<AppState>,
     fixed_now: Option<SystemTime>,
+    backoff: &mut Backoff,
 ) -> anyhow::Result<PassReport> {
     let mut report = PassReport::default();
     let repos = state.registry.list().await?;
@@ -629,18 +731,43 @@ async fn run_pass_inner(
         // per stale slot (a large repository after the 08-21 restart: ~30 such slots stood
         // between the loop and the 05:00 hourly).
         let mut skipped_slots = 0u32;
+        let mut attempts = 0u32;
+        // A kind in backoff that turns out to be the *only* due work still gets
+        // one attempt this pass (retrying is the loop's whole job); remembered
+        // so the retry cannot loop.
+        let mut retried_backoff = false;
         loop {
+            attempts += 1;
+            if attempts > MAX_UNITS_PER_REPO_PER_PASS {
+                break;
+            }
             let before_bundles = report.bundles;
             // Production keeps the original per-planning-call clock; only the
             // test entry point freezes it for a synthetic scenario.
             let planner_now = fixed_now.unwrap_or_else(SystemTime::now);
-            let unit = match next_unit_at(state, &id, planner_now).await {
+            let planned = match next_unit_at(state, &id, planner_now, Some(backoff)).await {
                 Ok(u) => u,
                 Err(e) => {
                     warn!(repo = %id, error = %e, "maintenance: planning failed");
                     report.skipped += 1;
                     break;
                 }
+            };
+            // Nothing left once the backing-off kinds are skipped: if this repo
+            // has a kind in backoff, it is now the only due work — retry it.
+            let unit = if matches!(planned, Unit::Idle) && !retried_backoff && backoff.any_for(&id)
+            {
+                retried_backoff = true;
+                match next_unit_at(state, &id, planner_now, None).await {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(repo = %id, error = %e, "maintenance: planning failed");
+                        report.skipped += 1;
+                        break;
+                    }
+                }
+            } else {
+                planned
             };
             if matches!(unit, Unit::Idle | Unit::NotAssigned) {
                 break;
@@ -727,10 +854,30 @@ async fn run_pass_inner(
             metrics::histogram!("walgit_maintain_unit_seconds", "kind" => kind)
                 .record(t_unit.elapsed().as_secs_f64());
             if done {
+                backoff.clear(&id, kind);
                 report.units += 1;
                 report.last_unit = Some(format!("{id} {unit:?}"));
             } else {
                 report.skipped += 1;
+                let strikes = backoff.record_failure(&id, kind);
+                if strikes >= BACKOFF_AFTER_FAILURES {
+                    // Stop paying the whole pass for a unit that keeps failing:
+                    // the next planning call skips this kind, so the work below
+                    // it runs (this pass, not in a week when the slot closes).
+                    metrics::counter!(
+                        "walgit_maintain_backoff_total",
+                        "host" => host_name(state),
+                        "kind" => kind,
+                    )
+                    .increment(1);
+                    warn!(
+                        repo = %id,
+                        kind,
+                        strikes,
+                        "maintenance: unit keeps failing — handing the pass to lower-priority work"
+                    );
+                    continue;
+                }
             }
             let was_bundle = matches!(unit, Unit::BundleSlot(..));
             if done
@@ -761,23 +908,24 @@ pub async fn heartbeats(
     while let Some(m) = keys.next().await {
         let m = m?;
         if let Some((meta, bytes)) = state.store.get_bytes(&m.key).await?
-            && let Ok(hb) = walgit_proto::v1::MaintainerHeartbeat::decode(bytes.as_ref()) {
-                // A host that has not passed for a day is gone: purge its
-                // heartbeat so the plan shows only live maintainers.
-                let age = hb
-                    .last_pass_at
-                    .as_ref()
-                    .map(walgit_proto::time::to_system)
-                    .and_then(|t| SystemTime::now().duration_since(t).ok());
-                if age.is_some_and(|a| a > HEARTBEAT_EXPIRY) {
-                    if state.cfg.has_role(walgit_config::Role::Maintain) {
-                        info!(host = %hb.host, age_secs = age.map_or(0, |a| a.as_secs()), "maintenance: purging expired heartbeat");
-                        let _ = state.store.delete(&m.key, Some(meta.version)).await;
-                    }
-                    continue;
+            && let Ok(hb) = walgit_proto::v1::MaintainerHeartbeat::decode(bytes.as_ref())
+        {
+            // A host that has not passed for a day is gone: purge its
+            // heartbeat so the plan shows only live maintainers.
+            let age = hb
+                .last_pass_at
+                .as_ref()
+                .map(walgit_proto::time::to_system)
+                .and_then(|t| SystemTime::now().duration_since(t).ok());
+            if age.is_some_and(|a| a > HEARTBEAT_EXPIRY) {
+                if state.cfg.has_role(walgit_config::Role::Maintain) {
+                    info!(host = %hb.host, age_secs = age.map_or(0, |a| a.as_secs()), "maintenance: purging expired heartbeat");
+                    let _ = state.store.delete(&m.key, Some(meta.version)).await;
                 }
-                out.push(hb);
+                continue;
             }
+            out.push(hb);
+        }
     }
     Ok(out)
 }
@@ -865,5 +1013,58 @@ async fn run_op_value(
             None
         }
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::{BACKOFF_AFTER_FAILURES, Backoff};
+    use walgit_git::RepoId;
+
+    fn repo() -> RepoId {
+        RepoId::new("o", "r").expect("repo id")
+    }
+
+    #[test]
+    fn strikes_cross_the_threshold_and_clear_on_success() {
+        let mut b = Backoff::default();
+        let id = repo();
+        assert!(!b.should_skip(&id, "bundle"), "fresh backoff skips nothing");
+        for n in 1..BACKOFF_AFTER_FAILURES {
+            assert_eq!(b.record_failure(&id, "bundle"), n);
+            assert!(
+                !b.should_skip(&id, "bundle"),
+                "below the threshold the unit is still first in line"
+            );
+        }
+        assert_eq!(b.record_failure(&id, "bundle"), BACKOFF_AFTER_FAILURES);
+        assert!(
+            b.should_skip(&id, "bundle"),
+            "at the threshold the planner is asked to look below this kind"
+        );
+        // Another kind of the same repo, and another repo, are unaffected.
+        assert!(!b.should_skip(&id, "gc"));
+        assert!(!b.should_skip(&RepoId::new("o", "other").expect("id"), "bundle"));
+
+        b.clear(&id, "bundle");
+        assert_eq!(b.strikes(&id, "bundle"), 0);
+        assert!(!b.should_skip(&id, "bundle"), "success clears the strikes");
+    }
+
+    #[test]
+    fn a_backed_off_kind_is_still_the_only_work_when_nothing_else_is_due() {
+        let mut b = Backoff::default();
+        let id = repo();
+        for _ in 0..BACKOFF_AFTER_FAILURES {
+            b.record_failure(&id, "bundle");
+        }
+        assert!(b.should_skip(&id, "bundle"));
+        // `any_for` is what the pass loop uses to fall back to the backing-off
+        // kind when skipping it leaves nothing due.
+        assert!(b.any_for(&id), "the pass can tell there is work in backoff");
+        assert!(
+            !b.any_for(&RepoId::new("o", "other").expect("id")),
+            "per repo, not global"
+        );
     }
 }
