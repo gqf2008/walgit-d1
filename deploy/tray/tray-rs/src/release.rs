@@ -7,6 +7,10 @@
 //!
 //! 来源:macOS Swift 托盘(`ReleaseLogic.swift` + `walgit-tray.swift` 的
 //! `menuVersionLine`/`upgradeLine`);issue #183 把它迁到跨平台 tray-rs。
+//!
+//! 生产调用点只有 macOS 的 Release 通道;三平台都跑 `cargo test`,所以非
+//! macOS 的 release 构建里"没人用"是预期,不是死代码。
+#![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 
 use serde_json::Value;
 
@@ -274,6 +278,16 @@ mod tests {
         {"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/arm.dmg","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
       ]
     }"#;
+
+    #[test]
+    fn arch_slug_is_known_or_unknown() {
+        // 未知架构永远匹配不到 asset——宁可报"没有可用更新",也不装错包。
+        assert!(
+            matches!(arch_slug(), "arm64" | "x86_64" | "unknown"),
+            "unexpected arch slug: {}",
+            arch_slug()
+        );
+    }
 
     #[test]
     fn parses_arch_specific_asset() {

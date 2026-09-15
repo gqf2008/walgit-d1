@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use release::{
-    is_version_newer, parse_bundle_version, parse_latest_release, upgrade_line, ReleaseInfo,
-    ST_AVAILABLE, ST_CHECKING, ST_FAILED, ST_IDLE, ST_INSTALLING, ST_LATEST,
+    upgrade_line, ReleaseInfo, ST_AVAILABLE, ST_CHECKING, ST_FAILED, ST_IDLE, ST_INSTALLING,
+    ST_LATEST,
 };
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
@@ -38,6 +38,7 @@ use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
+#[cfg(target_os = "macos")]
 const DEFAULT_RELEASE_API: &str = "https://api.github.com/repos/gqf2008/walgit-d1/releases/latest";
 
 fn home() -> PathBuf {
@@ -132,6 +133,8 @@ fn app_bundle() -> Option<PathBuf> {
 fn app_version() -> String {
     #[cfg(target_os = "macos")]
     {
+        use release::parse_bundle_version;
+
         if let Some(bundle) = app_bundle() {
             if let Ok(plist) = std::fs::read_to_string(bundle.join("Contents/Info.plist")) {
                 if let Some(version) = parse_bundle_version(&plist) {
@@ -149,12 +152,15 @@ fn app_version() -> String {
 
 /// GitHub latest release(或 `WALGIT_RELEASE_FIXTURE` 指向的本地 JSON)。
 /// 只信 API 里的 sha256 digest:拿不到就当作「没有可用更新」而不是安装
-/// 一个未校验的包。
+/// 一个未校验的包。只有 macOS 的 Release 通道会用它。
+#[cfg(target_os = "macos")]
 fn latest_release() -> Option<ReleaseInfo> {
+    use release::{arch_slug, parse_latest_release};
+
     if let Ok(fixture) = std::env::var("WALGIT_RELEASE_FIXTURE") {
         if !fixture.is_empty() {
             let body = std::fs::read_to_string(&fixture).ok()?;
-            return parse_latest_release(&body, release::arch_slug()).ok();
+            return parse_latest_release(&body, arch_slug()).ok();
         }
     }
     let endpoint =
@@ -185,7 +191,7 @@ fn latest_release() -> Option<ReleaseInfo> {
         ));
         return None;
     }
-    match parse_latest_release(&body, release::arch_slug()) {
+    match parse_latest_release(&body, arch_slug()) {
         Ok(info) => Some(info),
         Err(e) => {
             log_line(&format!("release: {e}"));
@@ -198,6 +204,7 @@ fn latest_release() -> Option<ReleaseInfo> {
 enum Detected {
     Nothing,
     Source(String),
+    #[cfg(target_os = "macos")]
     Release(ReleaseInfo),
 }
 
@@ -206,11 +213,25 @@ fn has_source_repo() -> bool {
     repo_dir().join(".git").exists()
 }
 
+/// 是否跑在 DMG 装出来的 App Bundle 里(Release 升级通道)。
+fn release_channel() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        app_bundle().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// 检测可用更新。macOS 优先 Release(装好的 DMG 机器不需要源码仓库);
 /// Release 通道不可用(无网/无 bundle/资产缺失)且本机有源码仓库时退回源码检测。
 fn detected_update() -> Detected {
     #[cfg(target_os = "macos")]
     {
+        use release::is_version_newer;
+
         if app_bundle().is_some() {
             if let Some(info) = latest_release() {
                 let current = app_version();
@@ -241,6 +262,7 @@ fn detected_update() -> Detected {
 fn publish_detected(proxy: &EventLoopProxy<Msg>, detected: Detected) {
     match detected {
         Detected::Nothing => {
+            let _ = proxy.send_event(Msg::Release(None));
             let _ = proxy.send_event(Msg::UpdateState(ST_LATEST));
         }
         Detected::Source(sha) => {
@@ -248,6 +270,7 @@ fn publish_detected(proxy: &EventLoopProxy<Msg>, detected: Detected) {
             let _ = proxy.send_event(Msg::Available(sha));
             let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
         }
+        #[cfg(target_os = "macos")]
         Detected::Release(info) => {
             let _ = proxy.send_event(Msg::Available(String::new()));
             let _ = proxy.send_event(Msg::Release(Some(info.clone())));
@@ -261,6 +284,8 @@ fn publish_detected(proxy: &EventLoopProxy<Msg>, detected: Detected) {
 /// 成功返回后调用方立即退出托盘进程,把 bundle 让给辅助脚本。
 #[cfg(target_os = "macos")]
 fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<String, String> {
+    use release::parse_bundle_version;
+
     let bundle =
         app_bundle().ok_or_else(|| "不是 App Bundle 安装,无法走 Release 升级".to_string())?;
     let cache = home().join("Library/Caches/walgit");
@@ -400,6 +425,7 @@ fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<Str
 }
 
 /// 错误串只带尾部若干字符:命令输出可能很长,菜单/日志只需要线索。
+#[cfg(target_os = "macos")]
 fn tail(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     let skip = trimmed.chars().count().saturating_sub(max);
@@ -1040,8 +1066,7 @@ impl App {
         h.toggle.set_enabled(self.busy == 0);
         // 升级通道:macOS 装好的 DMG 走 Release(不需要源码仓库);开发机
         // 与 Windows/Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
-        let release_channel = cfg!(target_os = "macos") && app_bundle().is_some();
-        let can_upgrade = release_channel || has_source_repo() || self.release.is_some();
+        let can_upgrade = release_channel() || has_source_repo() || self.release.is_some();
         if !can_upgrade {
             h.upgrade
                 .set_text(format!("版本 {}(经安装器升级)", self.current_version()));
@@ -1292,8 +1317,7 @@ fn main() {
     // 两条通道:macOS App Bundle 走 GitHub Release(机器上不需要源码仓库);
     // 开发机与 Windows/Linux 走 WALGIT_REPO 指向的 checkout + rustup/cargo。
     // 两条都没有时整条停用——否则只会每 30 分钟往 tray.log 写一条 skip 噪音。
-    let release_channel = cfg!(target_os = "macos") && app_bundle().is_some();
-    if !release_channel && !has_source_repo() {
+    if !release_channel() && !has_source_repo() {
         log_line(&format!(
             "detect: no repo at {} — update checks disabled (set WALGIT_REPO to enable)",
             repo_dir().display()
