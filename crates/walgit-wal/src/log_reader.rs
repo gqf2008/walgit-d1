@@ -138,10 +138,15 @@ pub async fn refs_at_seq(
     let manifest = handle.manifest();
     let cp_ok = manifest.checkpoint.as_ref().is_some_and(|cp| cp.seq <= seq);
     if !cp_ok && manifest.min_seq > 1 && manifest.min_seq > seq {
-        return Err(WalError::Corrupt(format!(
-            "refs at seq {seq} are not replayable: log folded up to {} and no checkpoint at or before",
-            manifest.min_seq
-        )));
+        // The live checkpoint has folded past this cut. A **retained witness
+        // checkpoint** at or before the cut (#195, written by the base rebuild)
+        // still makes it replayable, so only fail when there is none.
+        if retained_witness_at_or_before(handle, seq).await?.is_none() {
+            return Err(WalError::Corrupt(format!(
+                "refs at seq {seq} are not replayable: log folded up to {} and no checkpoint at or before",
+                manifest.min_seq
+            )));
+        }
     }
     Ok(replay_refs(handle, Cut::Seq(seq)).await?.0)
 }
