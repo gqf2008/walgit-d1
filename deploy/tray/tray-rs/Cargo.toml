@@ -8,12 +8,18 @@ description = "walgit 服务托盘(macOS / Windows / Linux)"
 tray-icon = "0.14"
 winit = "0.30"
 
+# GitHub `releases/latest` 是第三方 JSON(转义/嵌套/null 都要正确解析),而这
+# 条数据决定「要不要下载并安装一个新二进制」——手写 JSON 扫描器在这里是负债。
+# 只用 Value 导航,不引 derive。
+serde_json = "1"
+
 [profile.release]
 opt-level = "z"
 strip = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
 
 # 单实例命名互斥(仅 Windows 用;版本对齐 tray-icon 传递依赖,不引入新树)。
 # Win32_Security 是 CreateMutexW 声明的 cfg 要求——没有它,今天能编译全靠

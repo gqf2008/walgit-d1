@@ -1,16 +1,16 @@
 # walgit 托盘应用(deploy/tray)
 
 本机 walgit 服务的系统托盘:启停、新版本自动检测(检测到只提示,**由用户
-点击才升级**)、退出仅退托盘(服务保持运行)。当前发布中 macOS 仍使用
-Swift 托盘，Windows/Linux 使用 Rust `tray-rs`；macOS 统一切到 `tray-rs`
-见 issue #183。
+点击才升级**)、退出仅退托盘(服务保持运行)。三平台共用同一套 Rust 实现
+`tray-rs`(issue #183);`macos/` 只负责 App Bundle / DMG 的组装、签名与
+公证,以及首次启动的状态目录 bootstrap。
 
 | 目录 | 平台 | 技术 |
 |---|---|---|
-| `macos/` | macOS | Swift + AppKit(菜单栏 NSStatusItem + Dock 双驻留,彩色状态图标,品牌 Dock 图标,点击 Dock 聚焦已开 Web UI 标签) |
-| `tray-rs/` | macOS / Windows / Linux | Rust + tray-icon + winit(独立 crate,**不加入** walgit workspace) |
+| `macos/` | macOS | 打包:`build.sh` 组 App Bundle、`build-dmg.sh` 签名+公证+出 DMG;`release-install.sh` 换装回滚 |
+| `tray-rs/` | macOS / Windows / Linux | Rust + tray-icon + winit(独立 crate,**不加入** walgit workspace;macOS 的托盘本体就是它) |
 
-## 菜单(两个实现一致)
+## 菜单(三平台一致)
 
 - **状态行**:`walgit 服务:运行中 · <版本>`(5 秒轮询 /healthz)
 - **启动 / 停止服务**:统一走程序二进制里的 `walgit service start|stop|status|restart`
@@ -23,11 +23,17 @@ Swift 托盘，Windows/Linux 使用 Rust `tray-rs`；macOS 统一切到 `tray-rs
 - **打开 Web UI**:直接打开页面(三平台一致)
 - **退出托盘(服务保持运行)**
 
+> macOS 取舍(#183):托盘现在就是 `tray-rs`,App Bundle 声明 `LSUIElement=true`,
+> 因此**只有菜单栏图标、没有 Dock 图标**——Swift 版曾同时驻留 Dock 并支持
+> "点 Dock 打开 Web UI",tray-rs 不提供该行为(三平台一致的纯菜单栏形态)。
+> 这是有意取舍,不是回归;需要 Dock 形态的话应作为独立工作单元重新设计。
+
 ## 升级语义
 
-自动的只有「检测」:启动 30 秒后、此后每 30 分钟检查一次。macOS Swift
-托盘同时比较已安装 app 版本与 GitHub latest release,以及源码仓库
-`HEAD` 与 `origin/main`；开发机即使源码已对齐 main,新 Release 仍会提示。
+自动的只有「检测」:启动 30 秒后、此后每 30 分钟检查一次。macOS 装好的
+App Bundle 比对已安装 app 版本与 GitHub latest release(机器上不需要源码
+仓库)；开发机(非 bundle 运行)与 Windows/Linux 比对源码仓库 `HEAD` 与
+`origin/main`——源码已对齐 main 时,新的 Release 仍会提示。
 发现更新 → 菜单行变「⬆️ 下载并升级」或「⬆️ 从源码升级」+ 系统通知；
 **升级必须由用户点击**。
 
@@ -61,20 +67,24 @@ Bundle 启动服务 → 健康验证；失败恢复旧 App Bundle。`~/.walgit` 
 - 服务地址:`http://127.0.0.1:8081`(托盘探活/开页与 `walgit.toml` 的
   `[server] listen` 同源解析,改端口不再需要改托盘;#73)
 - 内存后端:托盘点状态行与 Web 概览页横幅显式标注「数据不落盘」(#73)
-- 源码仓库:环境变量 `WALGIT_REPO`,默认 `/Volumes/Workspace/GitHub/walgit`
+- 源码仓库:环境变量 `WALGIT_REPO`,默认 `/Volumes/DataExt/GitHub/walgit`
+  (仅源码升级通道需要;macOS Release 升级不需要)
 - 日志:`~/.walgit/tray.log`
 
 ## 构建
 
-### macOS(Swift)
+### macOS(DMG)
 
 ```bash
-./build-dmg.sh 0.2.0                                # 自动构建/注入版本/签名/公证
-NOTARY_KEYCHAIN=/path/to/notary.keychain-db ./build-dmg.sh 0.2.0
-./test.sh                                           # Release 解析/版本/AppleDouble/公证凭据守卫
+./build.sh 0.6.4                                    # 只组 App Bundle(cargo 构建 tray-rs)
+./build-dmg.sh 0.6.4                                # 构建/注入版本/签名/公证
+NOTARY_KEYCHAIN=/path/to/notary.keychain-db ./build-dmg.sh 0.6.4
+./test.sh                                           # tray-rs 单测 + AppleDouble/公证/换装守卫
 ```
 
-`build-dmg.sh` 自己执行 `WALGIT_BUILD_SHA=v<version> cargo build` 并断言
+`build.sh` 用 `cargo build --release` 构建 `tray-rs` 并组装 App Bundle
+(`WALGIT_TRAY_BIN` 可传预构建产物)；`build-dmg.sh` 自己执行
+`WALGIT_BUILD_SHA=v<version> cargo build` 并断言
 `walgit --version`；在原生 APFS 临时目录组装/签名，去 AppleDouble 后
 用 `ditto --norsrc --noextattr` 提交公证，失败不会覆盖已有 DMG。默认
 notary profile 为 `voicecall-notary`；非交互环境可显式传
@@ -84,21 +94,22 @@ CI 使用 `APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD` 直传公证凭据
 并设置 `CODESIGN_KEYCHAIN` + `CODESIGN_KEYCHAIN_PASSWORD` 让 `codesign`
 显式使用临时钥匙串；三件套缺一即失败，不会悄悄回退到本机 profile。
 
-需要 Xcode Command Line Tools(swiftc)。`build.sh` 把 walgit 二进制 +
-`release-install.sh` + `walgit.toml.template` 打进 app Resources；首次
-启动只在 `~/.walgit` 初始化缺失的状态配置，产物做
-ad-hoc 整体签名,独立 `codesign --verify --deep --strict` 可过。`build-dmg.sh`
-走全链:app 签名+公证+装订 → hdiutil 出 DMG(拖放安装)→ DMG 签名+公证+
-装订;`swiftc` 用 `MACOSX_DEPLOYMENT_TARGET=14.0`。Dock 品牌图标:把
-`walgit.icns` 放在同目录再跑 build.sh(可选,缺省用通用图标)。开机自启:
-系统设置 → 通用 → 登录项 → 添加 walgit-tray.app。
+构建只需要 Rust 工具链(无 Swift/Xcode SDK 依赖)。`build.sh` 把托盘
+`walgit-tray`(tray-rs)放进 `Contents/MacOS`,walgit 二进制 +
+`release-install.sh` + `walgit.toml.template` 打进 app Resources；首次启动
+只在 `~/.walgit` 初始化缺失的状态配置(旧 `~/walgit` 布局则复制状态并留
+5 分钟升级桥),产物做 ad-hoc 整体签名,独立
+`codesign --verify --deep --strict` 可过。`build-dmg.sh` 走全链:app 签名+
+公证+装订 → hdiutil 出 DMG(拖放安装)→ DMG 签名+公证+装订。Dock 品牌
+图标:把 `walgit.icns` 放在同目录再跑 build.sh(可选,缺省用通用图标)。
+开机自启:系统设置 → 通用 → 登录项 → 添加 walgit-tray.app。
 
 菜单上的版本语义:upgrade 行显示**托盘 app 版本**(`版本 X`),正在跑的服务
 版本另附为 `· 服务 Y`——两者不同步时不再把服务版本当成"当前/已最新"
 (#170)。
 
-`test.sh` 覆盖 Release JSON 解析(含 stale asset/缺 digest 负例)、
-语义版本比较(含 build metadata)、AppleDouble/损坏 zip 守卫,并用 fixture 覆盖:
+`test.sh` 先跑 tray-rs 单测(Release JSON 解析含 stale asset/缺 digest 负例、
+语义版本比较含 build metadata、菜单版本语义),再跑打包链路守卫, fixture 覆盖:
 
 - 真实 App Bundle 布局：程序在 Resources，缺席 `walgit-ensure` /
   `run-walgit.sh` 等旧托管文件；
@@ -107,8 +118,7 @@ ad-hoc 整体签名,独立 `codesign --verify --deep --strict` 可过。`build-d
 - **升级前服务在跑** → 从新 App Bundle 重启并确认 `/healthz` 到 `v<new>`;
   **升级前停着** → 不拉起(尊重"停止服务"的显式意图);
   新版本;
-- 菜单 upgrade 行在 idle/checking/latest/available(Release + 源码)/installing/
-  failed 各状态的文案,以及 /healthz 版本字段的精确解析(v0.5.1 不匹配 v0.5.10)。
+- 构建/发布路径不再出现 Swift 托盘(源码名或编译命令命中即红)。
 
 全部在临时状态目录内完成,不碰真实 `~/.walgit` 与 launchd/服务。
 

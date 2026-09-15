@@ -11,6 +11,7 @@
 #   CODESIGN_KEYCHAIN     CI 临时钥匙串；同时提供 CODESIGN_KEYCHAIN_PASSWORD
 #   WALGIT_IDENTITY       可选：Developer ID 身份
 #   WALGIT_BIN            可选：预构建 walgit；默认 target/release/walgit
+#   WALGIT_TRAY_BIN       可选：预构建的 tray-rs 托盘；默认 target/release/walgit-tray
 #   WALGIT_SKIP_BUILD=1   CI：跳过 web/cargo 构建，使用预构建 WALGIT_BIN
 #   WALGIT_CLEAN_TARGET_AFTER_APP=1
 #                         CI：app 组装后删除 $ROOT/target，给 DMG 腾空间
@@ -146,7 +147,9 @@ case "$VERSION" in
     ''|*[!0-9A-Za-z.+-]*) echo "invalid version: $VERSION" >&2; exit 1 ;;
 esac
 
-for tool in cargo swiftc dot_clean ditto hdiutil plutil codesign security xcrun; do
+# Swift 编译器已不在链路里(macOS 托盘 = tray-rs,issue #183):发布路径
+# 不许再有 Swift 编译依赖——少一个工具就是少一个只在发布机上才炸的失败面。
+for tool in cargo dot_clean ditto hdiutil plutil codesign security xcrun; do
     command -v "$tool" >/dev/null 2>&1 || { echo "missing tool: $tool" >&2; exit 1; }
 done
 notary_mode >/dev/null
@@ -167,19 +170,26 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/walgit-dmg.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 WALGIT_BIN="${WALGIT_BIN:-$ROOT/target/release/walgit}"
+WALGIT_TRAY_BIN="${WALGIT_TRAY_BIN:-$ROOT/target/release/walgit-tray}"
 if [ "${WALGIT_SKIP_BUILD:-0}" = "1" ]; then
-    echo "== [1/8] build release binary (skipped; using prebuilt) =="
+    echo "== [1/8] build release binaries (skipped; using prebuilt) =="
 else
-    echo "== [1/8] build release binary =="
+    echo "== [1/8] build release binaries =="
     ( cd "$ROOT" && just web-build >/dev/null )
     WALGIT_BUILD_SHA="v$VERSION" cargo build --release --bin walgit --manifest-path "$ROOT/Cargo.toml"
+    # 托盘 = 跨平台 tray-rs(独立 workspace,自己的 lock);--target-dir 与
+    # tray.yml/release.yml 一致,产物落在仓库根 target/。
+    ( cd "$ROOT" && cargo build --release --target-dir target \
+        --manifest-path "$ROOT/deploy/tray/tray-rs/Cargo.toml" )
 fi
 check_version "$WALGIT_BIN" "$VERSION"
+[ -x "$WALGIT_TRAY_BIN" ] || { echo "❌ missing tray binary: $WALGIT_TRAY_BIN" >&2; exit 1; }
 
 echo "== [2/8] assemble app =="
 APP_ROOT="$WORK/app"
 mkdir -p "$APP_ROOT"
-WALGIT_BIN="$WALGIT_BIN" TRAY_APP_DIR="$APP_ROOT" "$SCRIPT_DIR/build.sh" "$VERSION"
+WALGIT_BIN="$WALGIT_BIN" WALGIT_TRAY_BIN="$WALGIT_TRAY_BIN" \
+    TRAY_APP_DIR="$APP_ROOT" "$SCRIPT_DIR/build.sh" "$VERSION"
 APP="$APP_ROOT/walgit-tray.app"
 dot_clean -m "$APP" >/dev/null 2>&1 || true
 check_tree "$APP"

@@ -34,6 +34,14 @@ jobs:
             deploy/tray/tray-rs -> target
       - name: Build (release)
         run: cargo build --release --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
+      # 版本比较/release 解析/菜单文本是升级路径的判断依据(#183)——三平台
+      # 都跑单测,别只在 macOS 上才验证。
+      - name: Unit tests
+        run: cargo test --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
+      - name: Clippy (deny warnings)
+        run: cargo clippy --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml --all-targets -- -D warnings
       - name: macOS tray release/package guards
         if: runner.os == 'macOS'
+        env:
+          WALGIT_TRAY_BIN: ${{ github.workspace }}/target/release/walgit-tray
         run: deploy/tray/macos/test.sh

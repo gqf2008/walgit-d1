@@ -8,10 +8,11 @@
 - **启动 / 停止服务**:macOS 直接调用安装目录里的 `walgit service …`；
   Windows/Linux 由托盘的 supervisor 启动 `walgit serve`（setup wizard 保存后
   exit 75 需要立即重启），pidfile 写到 `~/.walgit`。程序文件不复制到状态目录。
-- **⬆️ 发现新版本 — 点击升级** / **立即升级(拉 main 重建)**:升级**只由用户
-  点击触发**——ff-merge main → `cargo build --release -p walgit-cli` →
-  备份(`walgit.bak-tray`)→ 停 → 热换 → 起服务 → 15s 健康验证,
-  失败自动回滚
+- **⬆️ 发现新版本 — 点击升级**:升级**只由用户点击触发**。macOS App Bundle
+  走 Release 管线:下载 DMG → 校验 sha256/签名/公证/版本 → 交给
+  `release-install.sh` 换装(失败回滚旧 bundle);开发机与 Windows/Linux 走
+  源码管线:ff-merge main → `cargo build --release -p walgit-cli` →
+  备份(`walgit.bak-tray`)→ 停 → 热换 → 起服务 → 15s 健康验证,失败回滚
 - **自动检测新版本:开/关**:开着时每 30 分钟(+启动 30 秒)`fetch` 比对;
   发现新版本仅提示(菜单 ⬆️ 项 + 图标状态),不自动升级
 - **打开 Web UI** / **退出托盘(服务保持运行)**
@@ -26,8 +27,10 @@ cargo build --release        # 产物 target/release/walgit-tray(.exe)
 (`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev`)——tray-icon 在
 Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统依赖。
 
-- macOS:产物可直接运行；正式 DMG 打包仍由 `deploy/tray/macos/` 负责，
-  切到 `tray-rs` 见 #183
+- macOS:产物可直接运行；正式 DMG 打包由 `deploy/tray/macos/`(`build.sh` /
+  `build-dmg.sh`)负责，App Bundle 的托盘本体就是这个二进制(#183)。
+  首次启动会 bootstrap `~/.walgit`(旧 `~/walgit` 布局自动复制迁移并留 5
+  分钟升级桥)，并在 `WALGIT_CLI_LINK`(默认 `/usr/local/bin/walgit`)建软链
 - Windows:在 Windows 主机上 `cargo build --release`；安装目录放
   `walgit.exe` + `walgit-tray.exe`，状态目录是 `%USERPROFILE%\.walgit`
 - Linux:同 Windows 形态，状态目录是 `~/.walgit`，桌面环境需支持 appindicator
@@ -50,7 +53,8 @@ Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统
 
 - 程序目录：安装目录 / App Bundle；状态目录：`~/.walgit`
   (Windows: `%USERPROFILE%\.walgit`)
-- 源码仓库:`$WALGIT_REPO`,默认 `/Volumes/Workspace/GitHub/walgit`
+- 源码仓库:`$WALGIT_REPO`,默认 `/Volumes/DataExt/GitHub/walgit`(仅源码
+  升级通道需要;macOS Release 升级不需要本机 checkout)
 - 服务地址:`http://127.0.0.1:8081`(healthz)
 - 日志:`~/.walgit/tray.log`
 

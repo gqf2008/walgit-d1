@@ -1,9 +1,34 @@
 #!/bin/bash
 # macOS tray/package tests. Runs without starting the real service.
+#
+# 托盘本体是跨平台 tray-rs(issue #183);这里测的是 macOS 打包链路:
+# App Bundle 组装、AppleDouble/公证守卫、Release 安装/回滚、bootstrap 迁移。
+# tray-rs 自己的纯逻辑(版本比较/release 解析/菜单文本)由 cargo test 覆盖。
 set -euo pipefail
 cd "$(dirname "$0")"
+ROOT="$(cd ../../.. && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/walgit-tray-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+
+# 无 WALGIT_TRAY_BIN(=本地跑)时**每次**都构建:只判"文件在不在"会拿旧产物
+# 跑 fixture(实测踩过:改完源码后 WALGIT_DETECT_ONCE 没生效,托盘照常起
+# 事件循环,测试挂死)。CI 传预构建产物,cargo 增量构建本身也很快。
+TRAY_BIN="${WALGIT_TRAY_BIN:-}"
+if [ -z "$TRAY_BIN" ]; then
+    ( cd "$ROOT" && cargo build --release --target-dir "$ROOT/target" \
+        --manifest-path "$ROOT/deploy/tray/tray-rs/Cargo.toml" )
+    TRAY_BIN="$ROOT/target/release/walgit-tray"
+fi
+[ -x "$TRAY_BIN" ] || { echo "FAIL: missing tray binary $TRAY_BIN" >&2; exit 1; }
+
+# issue #183 验收:构建/发布路径不得再出现 Swift 托盘(编译命令或源码名)。
+if grep -rnE 'swiftc|walgit-tray\.swift|ReleaseLogic\.swift' \
+    "$ROOT/.github/workflows" build.sh build-dmg.sh >/dev/null 2>&1; then
+    echo "FAIL: Swift tray still referenced in the build/release path" >&2
+    grep -rnE 'swiftc|walgit-tray\.swift|ReleaseLogic\.swift' \
+        "$ROOT/.github/workflows" build.sh build-dmg.sh >&2
+    exit 1
+fi
 
 free_port() {
     python3 - <<'PY'
@@ -12,11 +37,8 @@ s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.clos
 PY
 }
 
-# Swift compile and Release-logic tests.
-swiftc -swift-version 5 -typecheck ReleaseLogic.swift walgit-tray.swift -framework AppKit
-cp release_logic_test_main.swift "$TMP/main.swift"
-swiftc -swift-version 5 ReleaseLogic.swift "$TMP/main.swift" -o "$TMP/release-logic-tests"
-"$TMP/release-logic-tests"
+# tray-rs 单元测试(版本比较 / GitHub release 解析 / 菜单文本语义)。
+cargo test --manifest-path "$ROOT/deploy/tray/tray-rs/Cargo.toml"
 
 cat >"$TMP/walgit-good" <<'EOF'
 #!/bin/sh
@@ -96,19 +118,11 @@ bash_compat_smoke() {
 [ "${1:-}" = "--version" ] && echo "walgit v0.0.0-ci"
 EOF
     chmod +x "$base/walgit"
-    cat >"$fake/swiftc" <<'EOF'
+    cat >"$base/tray" <<'EOF'
 #!/bin/sh
-out=""; prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then out="$arg"; break; fi
-  prev="$arg"
-done
-[ -n "$out" ] || exit 2
-printf '#!/bin/sh
 exit 0
-' >"$out"
-chmod +x "$out"
 EOF
+    chmod +x "$base/tray"
     printf '#!/bin/sh
 exit 0
 ' >"$fake/codesign"
@@ -131,7 +145,8 @@ EOF
 
     # Cleanup disabled: the sentinel must survive.
     PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
-        WALGIT_BIN="$base/walgit" WALGIT_IDENTITY='Developer ID Application: Test' \
+        WALGIT_BIN="$base/walgit" WALGIT_TRAY_BIN="$base/tray" \
+        WALGIT_IDENTITY='Developer ID Application: Test' \
         NOTARY_PROFILE=test /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
     local built
     built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
@@ -143,6 +158,7 @@ EOF
     # CI cleanup: target goes away only after the app has been assembled.
     PATH="$fake:$PATH" WALGIT_SKIP_BUILD=1 WALGIT_TEST_ROOT="$base/root" \
         WALGIT_CLEAN_TARGET_AFTER_APP=1 WALGIT_BIN="$base/walgit" \
+        WALGIT_TRAY_BIN="$base/tray" \
         WALGIT_IDENTITY='Developer ID Application: Test' NOTARY_PROFILE=test \
         /bin/bash ./build-dmg.sh 0.0.0-ci >/dev/null 2>&1
     built="$(ls dist/walgit-0.0.0-ci-*.dmg 2>/dev/null | head -1)"
@@ -169,8 +185,8 @@ EOF
 exit 0
 EOF
     chmod +x "$base/bin/codesign"
-    PATH="$base/bin:$PATH" WALGIT_BIN="$base/walgit" TRAY_APP_DIR="$base" \
-        ./build.sh 0.5.0 >/dev/null
+    PATH="$base/bin:$PATH" WALGIT_BIN="$base/walgit" WALGIT_TRAY_BIN="$TRAY_BIN" \
+        TRAY_APP_DIR="$base" ./build.sh 0.5.0 >/dev/null
     [ -x "$app/Contents/Resources/walgit" ] || { echo "FAIL(layout): missing bundled walgit" >&2; return 1; }
     [ -x "$app/Contents/Resources/release-install.sh" ] || { echo "FAIL(layout): missing release-install.sh" >&2; return 1; }
     [ -f "$app/Contents/Resources/walgit.toml" ] || { echo "FAIL(layout): missing state template" >&2; return 1; }
@@ -194,8 +210,7 @@ bootstrap_fixture() {
     port="$(free_port)"
     mkdir -p "$app/Contents/MacOS" "$res" "$state/cache"
     pkginfo "$app" 0.5.0
-    swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
-        -o "$app/Contents/MacOS/walgit-tray"
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
     cat >"$res/walgit" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
@@ -246,8 +261,7 @@ legacy_migration_fixture() {
     port="$(free_port)"
     mkdir -p "$app/Contents/MacOS" "$res" "$old/keys" "$old/cache"
     pkginfo "$app" 0.5.0
-    swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
-        -o "$app/Contents/MacOS/walgit-tray"
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
     cat >"$res/walgit" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = "--version" ] && echo "walgit v0.5.0"
@@ -295,8 +309,7 @@ manual_legacy_migration_fixture() {
     port="$(free_port)"
     mkdir -p "$app/Contents/MacOS" "$res" "$old"
     pkginfo "$app" 0.5.0
-    swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
-        -o "$app/Contents/MacOS/walgit-tray"
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
     cat >"$res/walgit" <<STUB
 #!/bin/sh
 case "\${1:-}" in
@@ -339,6 +352,64 @@ PYS
     [ -f "$old/walgit.toml" ] || { echo "FAIL(manual-legacy): old config lost" >&2; return 1; }
     [ "$(cat "$version_file")" = "v0.5.0" ] \
         || { echo "FAIL(manual-legacy): service not restarted from new bundle" >&2; return 1; }
+    return 0
+}
+
+# Release 检测自检:无 GUI 也要能验证「菜单指向哪个版本」(macOS Release 通道)。
+# WALGIT_DETECT_ONCE=1 让托盘跑一次检测后打印菜单行退出,WALGIT_RELEASE_FIXTURE
+# 用本地 JSON 代替 GitHub API,检查结果同时落在 tray.log。
+release_detect_fixture() {
+    local base="$TMP/release-detect"
+    local app="$base/walgit-tray.app"
+    local res="$app/Contents/Resources"
+    local state="$base/state"
+    local arch
+    case "$(uname -m)" in
+        arm64) arch=arm64 ;;
+        x86_64) arch=x86_64 ;;
+        *) echo "skip(release-detect): unsupported arch" >&2; return 0 ;;
+    esac
+    mkdir -p "$app/Contents/MacOS" "$res" "$state"
+    pkginfo "$app" 0.5.0
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
+    printf '#!/bin/sh\n[ "${1:-}" = "--version" ] && echo "walgit v0.5.0"\n' >"$res/walgit"
+    chmod +x "$res/walgit"
+    # 空端口:别让 fixture 读到开发机上真实在跑的服务(菜单行要可预期)。
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$(free_port)" >"$state/walgit.toml"
+
+    write_release_fixture() { # <file> <version>
+        printf '{"tag_name":"v%s","assets":[{"name":"walgit-%s-%s.dmg","browser_download_url":"https://example.invalid/w.dmg","digest":"sha256:%s"}]}\n' \
+            "$2" "$2" "$arch" "$(printf 'a%.0s' $(seq 1 64))" >"$1"
+    }
+
+    write_release_fixture "$base/newer.json" 0.9.9
+    local out
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/newer.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"⬆️ 下载并升级到 v0.9.9"*"当前 0.5.0"*) ;;
+        *) echo "FAIL(release-detect): menu line wrong: $out" >&2; return 1 ;;
+    esac
+    grep -q "detect: app=0.5.0 release=v0.9.9 → available" "$state/tray.log" \
+        || { echo "FAIL(release-detect): detection not logged" >&2; return 1; }
+
+    # 同版本 → 已是最新(不能自己提示升级到自己)。
+    write_release_fixture "$base/same.json" 0.5.0
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/same.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"已是最新"*) ;;
+        *) echo "FAIL(release-detect): same version not up-to-date: $out" >&2; return 1 ;;
+    esac
+
+    # 旧版本 → 已是最新(降级提示是 bug)。
+    write_release_fixture "$base/older.json" 0.4.0
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/older.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"已是最新"*) ;;
+        *) echo "FAIL(release-detect): older release offered: $out" >&2; return 1 ;;
+    esac
     return 0
 }
 
@@ -493,45 +564,14 @@ PYS
     return 0
 }
 
-# Menu/version semantics remain app-version based; service version is separate.
-menu_fixture() {
-    local app="$TMP/menu/walgit-tray.app"
-    local tray_bin="$app/Contents/MacOS/walgit-tray"
-    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-    swiftc -swift-version 5 -framework AppKit walgit-tray.swift ReleaseLogic.swift \
-        -o "$tray_bin" || { echo "FAIL(menu): compile tray" >&2; return 1; }
-    local out
-    case "$(WALGIT_HEALTH_TEST='{"status":"ok","version":"v0.5.10"}' "$tray_bin")" in
-        v0.5.10) ;;
-        *) echo "FAIL(menu): healthz version parse wrong" >&2; return 1 ;;
-    esac
-    case "$(WALGIT_HEALTH_TEST='{ "status": "ok", "version": "v0.5.1" }' "$tray_bin")" in
-        v0.5.1) ;;
-        *) echo "FAIL(menu): spaced healthz JSON not parsed" >&2; return 1 ;;
-    esac
-    out="$(WALGIT_MENU_TEST=0.5.1 WALGIT_MENU_SERVICE=v0.5.0 WALGIT_MENU_STATE=idle "$tray_bin")"
-    case "$out" in
-        *"版本 0.5.1"*"服务 0.5.0"*"检查更新…"*) ;;
-        *) echo "FAIL(menu): idle line wrong: $out" >&2; return 1 ;;
-    esac
-    out="$(WALGIT_MENU_TEST=0.5.1 WALGIT_MENU_SERVICE=v0.5.0 WALGIT_MENU_STATE=latest "$tray_bin")"
-    case "$out" in
-        *"版本 0.5.1"*"已是最新"*) ;;
-        *) echo "FAIL(menu): upgrade line wrong: $out" >&2; return 1 ;;
-    esac
-    case "$out" in
-        *"版本 0.5.0"*) echo "FAIL(menu): service version used as current: $out" >&2; return 1 ;;
-    esac
-}
-
 bash_compat_smoke
 layout_fixture
 bootstrap_fixture
 legacy_migration_fixture
 manual_legacy_migration_fixture
+release_detect_fixture
 release_install_fixture success
 release_install_fixture rollback
 release_service_fixture
-menu_fixture
 bash -n release-install.sh
 echo "tray macos tests: ok"
