@@ -55,7 +55,10 @@ impl EntryRef {
     /// principal; a policy that lets anyone write any inbox must not smuggle
     /// an entry across principals — the signature alone only proves the actor
     /// signed it, not that it belongs in this inbox.
-    pub fn is_verified(&self, principals: &HashMap<String, String, impl std::hash::BuildHasher>) -> bool {
+    pub fn is_verified(
+        &self,
+        principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+    ) -> bool {
         self.principal == self.entry.actor
             && principals
                 .get(&self.entry.actor)
@@ -244,7 +247,10 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Snapshot, String> {
         ));
     }
     if snap.kind != "collab_snapshot" {
-        return Err(format!("collab snapshot: kind {:?} is not collab_snapshot", snap.kind));
+        return Err(format!(
+            "collab snapshot: kind {:?} is not collab_snapshot",
+            snap.kind
+        ));
     }
     Ok(snap)
 }
@@ -416,17 +422,17 @@ pub fn broken_refs<S: std::hash::BuildHasher>(
 }
 
 pub fn thread<'a>(entries: &[&'a EntryRef]) -> Vec<&'a EntryRef> {
-    let by_oid: HashMap<&str, &EntryRef> = entries
-        .iter()
-        .map(|e| (e.oid.as_str(), *e))
-        .collect();
+    let by_oid: HashMap<&str, &EntryRef> = entries.iter().map(|e| (e.oid.as_str(), *e)).collect();
     let mut emitted: HashMap<&str, bool> = HashMap::new();
     let mut out: Vec<&EntryRef> = Vec::new();
     // Deterministic first pass order: (ts, actor, oid).
     let mut pending: Vec<&EntryRef> = entries.to_vec();
     pending.sort_by(|a, b| {
-        (a.entry.ts, a.entry.actor.as_str(), a.oid.as_str())
-            .cmp(&(b.entry.ts, b.entry.actor.as_str(), b.oid.as_str()))
+        (a.entry.ts, a.entry.actor.as_str(), a.oid.as_str()).cmp(&(
+            b.entry.ts,
+            b.entry.actor.as_str(),
+            b.oid.as_str(),
+        ))
     });
     let mut guard = 0usize;
     while !pending.is_empty() && guard < pending.len() * 2 + 1 {
@@ -435,7 +441,10 @@ pub fn thread<'a>(entries: &[&'a EntryRef]) -> Vec<&'a EntryRef> {
         for e in pending {
             let ready = e.entry.parent.is_empty()
                 || !by_oid.contains_key(e.entry.parent.as_str())
-                || emitted.get(e.entry.parent.as_str()).copied().unwrap_or(false);
+                || emitted
+                    .get(e.entry.parent.as_str())
+                    .copied()
+                    .unwrap_or(false);
             if ready {
                 emitted.insert(&e.oid, true);
                 out.push(e);
@@ -536,7 +545,10 @@ pub fn pr_view(
         }
     }
     PrView {
-        id: ordered.first().map(|r| r.entry.id.clone()).unwrap_or_default(),
+        id: ordered
+            .first()
+            .map(|r| r.entry.id.clone())
+            .unwrap_or_default(),
         base,
         head,
         status,
@@ -705,10 +717,9 @@ pub fn build_report(
         // §8.3): their surfaces are `walgit ci status`, the report's CI
         // section and the SPA thread badge — on a board they would only ever
         // be untitled "open" cards.
-        if group
-            .iter()
-            .all(|r| r.entry.kind == crate::ci::CI_CLAIM_KIND || r.entry.kind == crate::ci::CI_RESULT_KIND)
-        {
+        if group.iter().all(|r| {
+            r.entry.kind == crate::ci::CI_CLAIM_KIND || r.entry.kind == crate::ci::CI_RESULT_KIND
+        }) {
             continue;
         }
         let ordered = thread(group);
@@ -752,11 +763,9 @@ pub fn build_report(
     // activity first. PRs: `open` before `merged` before `closed`, then newest
     // activity first. Both tie-break on id ascending, so the sort is a total
     // order over the input: the same refs give the same bytes on every client.
-    report.threads.sort_by(|a, b| {
-        b.last_ts
-            .cmp(&a.last_ts)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    report
+        .threads
+        .sort_by(|a, b| b.last_ts.cmp(&a.last_ts).then_with(|| a.id.cmp(&b.id)));
     prs.sort_by(|(ts_a, a), (ts_b, b)| {
         let rank = |s: &str| match s {
             "open" => 0u8,
@@ -787,8 +796,14 @@ pub fn build_report(
         *by_actor.entry(&r.entry.actor).or_default() += 1;
         *by_kind.entry(&r.entry.kind).or_default() += 1;
     }
-    report.by_actor = by_actor.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    report.by_kind = by_kind.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    report.by_actor = by_actor
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    report.by_kind = by_kind
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
     // §8.3: the skipped pure-CI threads are the report's CI section — one
     // summary per run, straight from the §7 aggregation (only verified,
     // well-formed entries drive it; unverified stay visible in by_kind).
@@ -1171,10 +1186,9 @@ pub fn build_board(
         // §8.3): their surfaces are `walgit ci status`, the report's CI
         // section and the SPA thread badge — on a board they would only ever
         // be untitled "open" cards.
-        if group
-            .iter()
-            .all(|r| r.entry.kind == crate::ci::CI_CLAIM_KIND || r.entry.kind == crate::ci::CI_RESULT_KIND)
-        {
+        if group.iter().all(|r| {
+            r.entry.kind == crate::ci::CI_CLAIM_KIND || r.entry.kind == crate::ci::CI_RESULT_KIND
+        }) {
             continue;
         }
         let ordered = thread(group);
@@ -1238,7 +1252,14 @@ mod board_tests {
         e.sig = sign_entry(e, sk);
     }
 
-    fn entry(id: &str, kind: &str, actor: &str, parent: &str, ts: i64, body: serde_json::Value) -> Entry {
+    fn entry(
+        id: &str,
+        kind: &str,
+        actor: &str,
+        parent: &str,
+        ts: i64,
+        body: serde_json::Value,
+    ) -> Entry {
         Entry {
             version: 1,
             kind: kind.into(),
@@ -1301,7 +1322,14 @@ mod board_tests {
             950,
             serde_json::json!({"task": "build", "conclusion": "success", "claim": "x"}),
         );
-        let issue = entry("pr1", "issue", "alice", "", 900, serde_json::json!({"title": "add thing"}));
+        let issue = entry(
+            "pr1",
+            "issue",
+            "alice",
+            "",
+            900,
+            serde_json::json!({"title": "add thing"}),
+        );
         let owned = refs_of(&[claim, result, issue]);
         let refs: Vec<&EntryRef> = owned.iter().collect();
         let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
@@ -1313,7 +1341,10 @@ mod board_tests {
             "a ci run thread must not become a board card"
         );
         assert!(
-            column_of(&board, "open").cards.iter().any(|c| c.id == "pr1"),
+            column_of(&board, "open")
+                .cards
+                .iter()
+                .any(|c| c.id == "pr1"),
             "work units still board"
         );
     }
@@ -1352,12 +1383,22 @@ name = "everything else"
 
         // Fails closed on a broken definition — every one of these must error,
         // not silently fold cards into a wrong lane.
-        assert!(parse_board_def("version = 2\n[[column]]\nname = \"x\"\n").is_err(), "unknown version");
-        assert!(parse_board_def("[sort]\n[[column]]\nname = \"x\"\n").is_err(), "version required");
-        assert!(parse_board_def("version = 1\n").is_err(), "no columns");
-        assert!(parse_board_def("version = 1\n[[column]]\nname = \"\"\n").is_err(), "empty name");
         assert!(
-            parse_board_def("version = 1\n[[column]]\nname = \"a\"\n[[column]]\nname = \"a\"\n").is_err(),
+            parse_board_def("version = 2\n[[column]]\nname = \"x\"\n").is_err(),
+            "unknown version"
+        );
+        assert!(
+            parse_board_def("[sort]\n[[column]]\nname = \"x\"\n").is_err(),
+            "version required"
+        );
+        assert!(parse_board_def("version = 1\n").is_err(), "no columns");
+        assert!(
+            parse_board_def("version = 1\n[[column]]\nname = \"\"\n").is_err(),
+            "empty name"
+        );
+        assert!(
+            parse_board_def("version = 1\n[[column]]\nname = \"a\"\n[[column]]\nname = \"a\"\n")
+                .is_err(),
             "duplicate names"
         );
         assert!(
@@ -1379,21 +1420,98 @@ name = "everything else"
 
         // Specified with symbolic keys; parents resolve to the content-derived
         // oids below, exactly like a real thread chains on blob shas.
-        let mut patch = entry("t1", "patch", "alice", "a4", 5, serde_json::json!({"message": "the change"}));
+        let mut patch = entry(
+            "t1",
+            "patch",
+            "alice",
+            "a4",
+            5,
+            serde_json::json!({"message": "the change"}),
+        );
         patch.refs = Some(EntryRefs {
             base: Some("refs/heads/main".into()),
             head: Some("refs/heads/topic".into()),
         });
         let specs: Vec<(&str, Entry)> = vec![
-            ("a1", entry("t1", "issue", "alice", "", 1, serde_json::json!({"title": "add thing"}))),
-            ("a2", entry("t1", "comment", "bob", "a1", 2, serde_json::json!({"text": "looks right"}))),
-            ("a3", entry("t1", "status", "alice", "a2", 3, serde_json::json!({"status": "needs-review"}))),
-            ("a4", entry("t1", "review", "bob", "a3", 4, serde_json::json!({"decision": "approve"}))),
+            (
+                "a1",
+                entry(
+                    "t1",
+                    "issue",
+                    "alice",
+                    "",
+                    1,
+                    serde_json::json!({"title": "add thing"}),
+                ),
+            ),
+            (
+                "a2",
+                entry(
+                    "t1",
+                    "comment",
+                    "bob",
+                    "a1",
+                    2,
+                    serde_json::json!({"text": "looks right"}),
+                ),
+            ),
+            (
+                "a3",
+                entry(
+                    "t1",
+                    "status",
+                    "alice",
+                    "a2",
+                    3,
+                    serde_json::json!({"status": "needs-review"}),
+                ),
+            ),
+            (
+                "a4",
+                entry(
+                    "t1",
+                    "review",
+                    "bob",
+                    "a3",
+                    4,
+                    serde_json::json!({"decision": "approve"}),
+                ),
+            ),
             ("a5", patch),
             // t2/t3: unsigned entries stay unverified.
-            ("b1", entry("t2", "issue", "bob", "", 5, serde_json::json!({"title": "other thing"}))),
-            ("c1", entry("t3", "issue", "alice", "", 6, serde_json::json!({"title": "third"}))),
-            ("c2", entry("t3", "status", "alice", "c1", 7, serde_json::json!({"status": "closed"}))),
+            (
+                "b1",
+                entry(
+                    "t2",
+                    "issue",
+                    "bob",
+                    "",
+                    5,
+                    serde_json::json!({"title": "other thing"}),
+                ),
+            ),
+            (
+                "c1",
+                entry(
+                    "t3",
+                    "issue",
+                    "alice",
+                    "",
+                    6,
+                    serde_json::json!({"title": "third"}),
+                ),
+            ),
+            (
+                "c2",
+                entry(
+                    "t3",
+                    "status",
+                    "alice",
+                    "c1",
+                    7,
+                    serde_json::json!({"status": "closed"}),
+                ),
+            ),
         ];
         // Content addressing, bottom-up like git: sign the entry, resolve its
         // parent to the already-computed oid, then hash the final bytes.
@@ -1463,7 +1581,10 @@ name = "everything else"
         assert_eq!(column_of(&board, "done").cards[0].id, "t3");
         assert_eq!(column_of(&board, "suspect").cards[0].id, "t2");
         assert_eq!(column_of(&board, "suspect").cards[0].unverified, 1);
-        assert!(column_of(&board, "mergeable").cards.is_empty(), "first match wins");
+        assert!(
+            column_of(&board, "mergeable").cards.is_empty(),
+            "first match wins"
+        );
         assert!(column_of(&board, "everything else").cards.is_empty());
     }
 
@@ -1473,8 +1594,22 @@ name = "everything else"
         let mut principals = HashMap::new();
         principals.insert("alice".to_string(), pk);
         let mut es = vec![
-            entry("t1", "issue", "alice", "", 1, serde_json::json!({"title": "move me"})),
-            entry("t1", "status", "alice", "a1", 2, serde_json::json!({"status": "in-progress"})),
+            entry(
+                "t1",
+                "issue",
+                "alice",
+                "",
+                1,
+                serde_json::json!({"title": "move me"}),
+            ),
+            entry(
+                "t1",
+                "status",
+                "alice",
+                "a1",
+                2,
+                serde_json::json!({"status": "in-progress"}),
+            ),
         ];
         signed(&sk, &mut es[0]);
         signed(&sk, &mut es[1]);
@@ -1485,7 +1620,11 @@ name = "everything else"
         def.validate().expect("default board is valid");
 
         let board = build_board(&borrowed, &principals, &rules, &def);
-        assert_eq!(column_of(&board, "open").cards.len(), 0, "status moved it out of open");
+        assert_eq!(
+            column_of(&board, "open").cards.len(),
+            0,
+            "status moved it out of open"
+        );
         assert_eq!(
             column_of(&board, "other").cards.len(),
             1,
@@ -1495,7 +1634,14 @@ name = "everything else"
 
         // The move: one more signed `status` entry — the only write the board
         // ever needs — and the card is in "merged" for the next projection.
-        let mut done = entry("t1", "status", "alice", "a2", 3, serde_json::json!({"status": "merged"}));
+        let mut done = entry(
+            "t1",
+            "status",
+            "alice",
+            "a2",
+            3,
+            serde_json::json!({"status": "merged"}),
+        );
         signed(&sk, &mut done);
         let mut es2 = es.clone();
         es2.push(done);
@@ -1507,16 +1653,34 @@ name = "everything else"
         // Newest first within a column; the id breaks ties. Both threads sit
         // in the catch-all (neither is "open"), both last active at ts 2.
         let mut tie = es.clone();
-        let mut t9_issue = entry("t9", "issue", "alice", "", 1, serde_json::json!({"title": "tie"}));
+        let mut t9_issue = entry(
+            "t9",
+            "issue",
+            "alice",
+            "",
+            1,
+            serde_json::json!({"title": "tie"}),
+        );
         signed(&sk, &mut t9_issue);
-        let mut t9_status = entry("t9", "status", "alice", "", 2, serde_json::json!({"status": "in-progress"}));
+        let mut t9_status = entry(
+            "t9",
+            "status",
+            "alice",
+            "",
+            2,
+            serde_json::json!({"status": "in-progress"}),
+        );
         signed(&sk, &mut t9_status);
         tie.push(t9_issue);
         tie.push(t9_status);
         let refs3 = refs_of(&tie);
         let borrowed3: Vec<&EntryRef> = refs3.iter().collect();
         let board3 = build_board(&borrowed3, &principals, &rules, &def);
-        let other_col: Vec<&str> = column_of(&board3, "other").cards.iter().map(|c| c.id.as_str()).collect();
+        let other_col: Vec<&str> = column_of(&board3, "other")
+            .cards
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
         assert_eq!(other_col, vec!["t1", "t9"], "equal ts: id ascending");
     }
 
@@ -1524,7 +1688,14 @@ name = "everything else"
     fn board_card_carries_and_inherits_work_context() {
         let principals = HashMap::new();
         let mut entries = vec![
-            entry("t1", "issue", "alice", "", 1, serde_json::json!({"title": "owned"})),
+            entry(
+                "t1",
+                "issue",
+                "alice",
+                "",
+                1,
+                serde_json::json!({"title": "owned"}),
+            ),
             entry(
                 "t1",
                 "status",
@@ -1554,10 +1725,18 @@ name = "everything else"
         ];
         let refs = refs_of(&entries);
         let borrowed: Vec<&EntryRef> = refs.iter().collect();
-        let board = build_board(&borrowed, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(
+            &borrowed,
+            &principals,
+            &MergeRules::default(),
+            &default_board(),
+        );
         let card = &column_of(&board, "other").cards[0];
         assert_eq!(card.owner, "agent-b");
-        assert_eq!(card.worktree, "wt-a", "worktree inherits across status moves");
+        assert_eq!(
+            card.worktree, "wt-a",
+            "worktree inherits across status moves"
+        );
         assert_eq!(card.branch, "feat/a", "branch inherits across status moves");
         assert_eq!(card.work, "reviewing");
 
@@ -1578,7 +1757,12 @@ name = "everything else"
         entries.push(clear);
         let refs = refs_of(&entries);
         let borrowed: Vec<&EntryRef> = refs.iter().collect();
-        let board = build_board(&borrowed, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(
+            &borrowed,
+            &principals,
+            &MergeRules::default(),
+            &default_board(),
+        );
         let card = &column_of(&board, "other").cards[0];
         assert_eq!(card.owner, "");
         assert_eq!(card.worktree, "");
@@ -1589,9 +1773,19 @@ name = "everything else"
     #[test]
     fn cards_matching_no_column_are_not_on_the_board() {
         let principals = HashMap::new();
-        let refs = refs_of(&[entry("t1", "issue", "alice", "", 1, serde_json::json!({"title": "x"}))]);
+        let refs = refs_of(&[entry(
+            "t1",
+            "issue",
+            "alice",
+            "",
+            1,
+            serde_json::json!({"title": "x"}),
+        )]);
         let borrowed: Vec<&EntryRef> = refs.iter().collect();
-        let def = parse_board_def("version = 1\n[[column]]\nname = \"only blocked\"\nstatus = \"blocked\"\n").expect("def");
+        let def = parse_board_def(
+            "version = 1\n[[column]]\nname = \"only blocked\"\nstatus = \"blocked\"\n",
+        )
+        .expect("def");
         let board = build_board(&borrowed, &principals, &MergeRules::default(), &def);
         assert!(board.columns.len() == 1 && board.columns[0].cards.is_empty());
     }
@@ -1624,9 +1818,30 @@ name = "everything else"
                 serde_json::json!({"title": "ship the report"}),
             ),
             patch,
-            entry("ci-9", "comment", "bob", "", 3, serde_json::json!({"text": "no title here"})),
-            entry("solo-7", "comment", "bob", "", 4, serde_json::json!({"text": "root has no title"})),
-            entry("solo-7", "comment", "bob", "", 5, serde_json::json!({"title": "title only below the root"})),
+            entry(
+                "ci-9",
+                "comment",
+                "bob",
+                "",
+                3,
+                serde_json::json!({"text": "no title here"}),
+            ),
+            entry(
+                "solo-7",
+                "comment",
+                "bob",
+                "",
+                4,
+                serde_json::json!({"text": "root has no title"}),
+            ),
+            entry(
+                "solo-7",
+                "comment",
+                "bob",
+                "",
+                5,
+                serde_json::json!({"title": "title only below the root"}),
+            ),
         ]);
         let refs: Vec<&EntryRef> = owned.iter().collect();
         let report = build_report(&refs, &principals, &MergeRules::default(), 10);
@@ -1640,9 +1855,17 @@ name = "everything else"
                 .title
                 .clone()
         };
-        assert_eq!(title_of("pr-1"), "ship the report", "root title wins over a child's");
+        assert_eq!(
+            title_of("pr-1"),
+            "ship the report",
+            "root title wins over a child's"
+        );
         assert_eq!(title_of("ci-9"), "", "untitled thread is \"\"");
-        assert_eq!(title_of("solo-7"), "", "a title below the root is not the thread's");
+        assert_eq!(
+            title_of("solo-7"),
+            "",
+            "a title below the root is not the thread's"
+        );
         assert_eq!(report.prs.len(), 1);
         assert_eq!(report.prs[0].id, "pr-1");
         assert_eq!(
@@ -1670,7 +1893,14 @@ name = "everything else"
     fn report_lists_arrive_ordered_from_the_projection() {
         let principals = HashMap::new();
         let mk_patch = |id: &str, ts: i64| {
-            let mut p = entry(id, "patch", "alice", "", ts, serde_json::json!({"title": id}));
+            let mut p = entry(
+                id,
+                "patch",
+                "alice",
+                "",
+                ts,
+                serde_json::json!({"title": id}),
+            );
             p.refs = Some(EntryRefs {
                 base: Some("refs/heads/main".into()),
                 head: Some(format!("refs/heads/{id}")),
@@ -1762,7 +1992,14 @@ mod snapshot_tests {
         }
     }
 
-    fn entry(id: &str, kind: &str, actor: &str, parent: &str, ts: i64, body: serde_json::Value) -> Entry {
+    fn entry(
+        id: &str,
+        kind: &str,
+        actor: &str,
+        parent: &str,
+        ts: i64,
+        body: serde_json::Value,
+    ) -> Entry {
         Entry {
             version: 1,
             kind: kind.into(),
@@ -1788,8 +2025,11 @@ mod snapshot_tests {
             protect: vec!["refs/heads/main".into()],
             require_human_approvals: 1,
         };
-        let mut out = serde_json::to_vec(&build_report(refs, principals, &rules, i64::MAX)).unwrap();
-        out.extend_from_slice(&serde_json::to_vec(&build_board(refs, principals, &rules, &default_board())).unwrap());
+        let mut out =
+            serde_json::to_vec(&build_report(refs, principals, &rules, i64::MAX)).unwrap();
+        out.extend_from_slice(
+            &serde_json::to_vec(&build_board(refs, principals, &rules, &default_board())).unwrap(),
+        );
         let mut ids: Vec<&str> = refs.iter().map(|r| r.entry.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -1831,37 +2071,125 @@ mod snapshot_tests {
         // Append an entry to the history: resolve `parent` is already an oid
         // (or ""), sign unless told not to, derive the record's oid from the
         // exact stored bytes. Returns the oid for chaining.
-        let mut push = |principal: &str,
-                        pretty: bool,
-                        sign_with: Option<&SigningKey>,
-                        e: Entry|
-         -> String {
-            let mut e = e;
-            if let Some(sk) = sign_with {
-                e.sig = sign_entry(&mut e, sk);
-            }
-            let rec = record(&e, principal, pretty);
-            let oid = rec.oid.clone();
-            records.push(rec);
-            oid
-        };
+        let mut push =
+            |principal: &str, pretty: bool, sign_with: Option<&SigningKey>, e: Entry| -> String {
+                let mut e = e;
+                if let Some(sk) = sign_with {
+                    e.sig = sign_entry(&mut e, sk);
+                }
+                let rec = record(&e, principal, pretty);
+                let oid = rec.oid.clone();
+                records.push(rec);
+                oid
+            };
 
         // pr1: issue -> comment -> status(needs-review) -> review(approve) ->
         // patch -> an unsigned comment by the unregistered carol.
-        let o1 = push("alice", true, Some(&alice_sk), entry("pr1", "issue", "alice", "", 1, serde_json::json!({"title": "add thing"})));
-        let o2 = push("bob", true, Some(&bob_sk), entry("pr1", "comment", "bob", &o1, 2, serde_json::json!({"text": "looks right"})));
-        let o3 = push("alice", false, Some(&alice_sk), entry("pr1", "status", "alice", &o2, 3, serde_json::json!({"status": "needs-review", "owner": "svc-a"})));
-        let o4 = push("bob", true, Some(&bob_sk), entry("pr1", "review", "bob", &o3, 4, serde_json::json!({"decision": "approve"})));
-        let mut patch = entry("pr1", "patch", "alice", &o4, 5, serde_json::json!({"message": "the change"}));
+        let o1 = push(
+            "alice",
+            true,
+            Some(&alice_sk),
+            entry(
+                "pr1",
+                "issue",
+                "alice",
+                "",
+                1,
+                serde_json::json!({"title": "add thing"}),
+            ),
+        );
+        let o2 = push(
+            "bob",
+            true,
+            Some(&bob_sk),
+            entry(
+                "pr1",
+                "comment",
+                "bob",
+                &o1,
+                2,
+                serde_json::json!({"text": "looks right"}),
+            ),
+        );
+        let o3 = push(
+            "alice",
+            false,
+            Some(&alice_sk),
+            entry(
+                "pr1",
+                "status",
+                "alice",
+                &o2,
+                3,
+                serde_json::json!({"status": "needs-review", "owner": "svc-a"}),
+            ),
+        );
+        let o4 = push(
+            "bob",
+            true,
+            Some(&bob_sk),
+            entry(
+                "pr1",
+                "review",
+                "bob",
+                &o3,
+                4,
+                serde_json::json!({"decision": "approve"}),
+            ),
+        );
+        let mut patch = entry(
+            "pr1",
+            "patch",
+            "alice",
+            &o4,
+            5,
+            serde_json::json!({"message": "the change"}),
+        );
         patch.refs = Some(EntryRefs {
             base: Some("refs/heads/main".into()),
             head: Some("refs/heads/topic".into()),
         });
         let o5 = push("alice", true, Some(&alice_sk), patch);
-        let _o6 = push("carol", true, None, entry("pr1", "comment", "carol", &o5, 6, serde_json::json!({"text": "unsigned"})));
+        let _o6 = push(
+            "carol",
+            true,
+            None,
+            entry(
+                "pr1",
+                "comment",
+                "carol",
+                &o5,
+                6,
+                serde_json::json!({"text": "unsigned"}),
+            ),
+        );
         // t2: references pr1's comment via `related` (issue #75 ③) and closes.
-        let t2 = push("alice", true, None, entry("t2", "issue", "alice", "", 7, serde_json::json!({"title": "second", "related": [o2]})));
-        let _t2s = push("alice", true, Some(&alice_sk), entry("t2", "status", "alice", &t2, 8, serde_json::json!({"status": "closed"})));
+        let t2 = push(
+            "alice",
+            true,
+            None,
+            entry(
+                "t2",
+                "issue",
+                "alice",
+                "",
+                7,
+                serde_json::json!({"title": "second", "related": [o2]}),
+            ),
+        );
+        let _t2s = push(
+            "alice",
+            true,
+            Some(&alice_sk),
+            entry(
+                "t2",
+                "status",
+                "alice",
+                &t2,
+                8,
+                serde_json::json!({"status": "closed"}),
+            ),
+        );
         // A CI run thread (docs/D1_CI_PROTOCOL.md): claim -> result.
         let claim = push(
             "ci-runner-a",
@@ -1949,14 +2277,19 @@ mod snapshot_tests {
             .iter()
             .filter_map(|record| record.entry_ref(ObjectFormat::Sha1))
             .collect();
-        let mut seen: std::collections::HashSet<String> = union.iter().map(|e| e.oid.clone()).collect();
+        let mut seen: std::collections::HashSet<String> =
+            union.iter().map(|e| e.oid.clone()).collect();
         for r in &unfolded {
             if seen.insert(r.oid.clone()) {
                 union.push(r.clone());
             }
         }
         let after: Vec<&EntryRef> = union.iter().collect();
-        assert_eq!(fp_before, fingerprint(&after, &principals), "snapshot ∪ tail == unfolded");
+        assert_eq!(
+            fp_before,
+            fingerprint(&after, &principals),
+            "snapshot ∪ tail == unfolded"
+        );
 
         // The fold is a pure function of the set: same records, any input
         // order, produce the same snapshot bytes.
@@ -1997,10 +2330,16 @@ mod snapshot_tests {
         let snap = build_snapshot("alice", 1, vec![], &sk);
         let mut doc = serde_json::to_value(&snap).unwrap();
         doc["version"] = serde_json::json!(2);
-        assert!(parse_snapshot(doc.to_string().as_bytes()).is_err(), "unknown version");
+        assert!(
+            parse_snapshot(doc.to_string().as_bytes()).is_err(),
+            "unknown version"
+        );
         doc["version"] = serde_json::json!(1);
         doc["kind"] = serde_json::json!("something_else");
-        assert!(parse_snapshot(doc.to_string().as_bytes()).is_err(), "unknown kind");
+        assert!(
+            parse_snapshot(doc.to_string().as_bytes()).is_err(),
+            "unknown kind"
+        );
         assert!(parse_snapshot(b"{{{{").is_err(), "not json at all");
     }
 
@@ -2023,7 +2362,17 @@ mod snapshot_tests {
         let (sk, pk) = keypair(7);
         let mut principals = HashMap::new();
         principals.insert("alice".to_string(), pk);
-        let e = signed(&sk, entry("t", "issue", "alice", "", 1, serde_json::json!({"title": "x"})));
+        let e = signed(
+            &sk,
+            entry(
+                "t",
+                "issue",
+                "alice",
+                "",
+                1,
+                serde_json::json!({"title": "x"}),
+            ),
+        );
         let legit = record(&e, "alice", true);
         let planted = SnapshotRecord {
             principal: "bob".into(),
@@ -2048,7 +2397,14 @@ mod snapshot_tests {
 mod transition_tests {
     use super::*;
 
-    fn entry(kind: &str, id: &str, actor: &str, oid: &str, ts: i64, body: serde_json::Value) -> EntryRef {
+    fn entry(
+        kind: &str,
+        id: &str,
+        actor: &str,
+        oid: &str,
+        ts: i64,
+        body: serde_json::Value,
+    ) -> EntryRef {
         EntryRef {
             oid: oid.to_string(),
             principal: actor.to_string(),
@@ -2070,7 +2426,15 @@ mod transition_tests {
         ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
     }
 
-    fn signed_entry(key: &ed25519_dalek::SigningKey, kind: &str, id: &str, actor: &str, oid: &str, ts: i64, body: serde_json::Value) -> EntryRef {
+    fn signed_entry(
+        key: &ed25519_dalek::SigningKey,
+        kind: &str,
+        id: &str,
+        actor: &str,
+        oid: &str,
+        ts: i64,
+        body: serde_json::Value,
+    ) -> EntryRef {
         let mut e = Entry {
             version: 1,
             kind: kind.to_string(),
@@ -2083,28 +2447,62 @@ mod transition_tests {
             sig: String::new(),
         };
         e.sig = sign_entry(&mut e, key);
-        EntryRef { oid: oid.to_string(), principal: actor.to_string(), entry: e }
+        EntryRef {
+            oid: oid.to_string(),
+            principal: actor.to_string(),
+            entry: e,
+        }
     }
 
     #[test]
     fn done_requires_needs_review_and_verified_approve() {
         let key = make_key();
-        let pub_b64 = base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
         let mut principals = HashMap::new();
         principals.insert("alice".to_string(), pub_b64);
 
         // thread: issue -> review(approve) -> status(needs-review)
-        let e1 = signed_entry(&key, "issue", "t1", "alice", "e1", 1, serde_json::json!({"title": "x"}));
-        let e3 = signed_entry(&key, "review", "t1", "alice", "e3", 3, serde_json::json!({"decision": "approve"}));
-        let e4 = signed_entry(&key, "status", "t1", "alice", "e4", 4, serde_json::json!({"status": "needs-review"}));
+        let e1 = signed_entry(
+            &key,
+            "issue",
+            "t1",
+            "alice",
+            "e1",
+            1,
+            serde_json::json!({"title": "x"}),
+        );
+        let e3 = signed_entry(
+            &key,
+            "review",
+            "t1",
+            "alice",
+            "e3",
+            3,
+            serde_json::json!({"decision": "approve"}),
+        );
+        let e4 = signed_entry(
+            &key,
+            "status",
+            "t1",
+            "alice",
+            "e4",
+            4,
+            serde_json::json!({"status": "needs-review"}),
+        );
         let entries = [e1, e3, e4];
         let refs: Vec<&EntryRef> = entries.iter().collect();
         assert!(validate_status_transition(&refs, &principals).is_ok());
 
         // open -> done: no needs-review prerequisite -> reject
-        let entries_open = [
-            entry("issue", "t2", "alice", "f1", 1, serde_json::json!({"title": "x"})),
-        ];
+        let entries_open = [entry(
+            "issue",
+            "t2",
+            "alice",
+            "f1",
+            1,
+            serde_json::json!({"title": "x"}),
+        )];
         let refs2: Vec<&EntryRef> = entries_open.iter().collect();
         assert!(validate_status_transition(&refs2, &principals).is_err());
     }
@@ -2116,14 +2514,47 @@ mod transition_tests {
         // 不先 thread() 就会误放行 done。本测试锁「thread() 先行」的语义:
         // 危险顺序下旧行为误判放行,thread() 后按链序正确拒绝。
         let key = make_key();
-        let pub_b64 = base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
         let mut principals = HashMap::new();
         principals.insert("alice".to_string(), pub_b64);
 
-        let issue = signed_entry(&key, "issue", "t9", "alice", "i1", 1, serde_json::json!({"title": "x"}));
-        let approve = signed_entry(&key, "review", "t9", "alice", "a1", 3, serde_json::json!({"decision": "approve"}));
-        let in_progress = signed_entry(&key, "status", "t9", "alice", "s2", 4, serde_json::json!({"status": "in-progress"}));
-        let needs_review = signed_entry(&key, "status", "t9", "alice", "s1", 2, serde_json::json!({"status": "needs-review"}));
+        let issue = signed_entry(
+            &key,
+            "issue",
+            "t9",
+            "alice",
+            "i1",
+            1,
+            serde_json::json!({"title": "x"}),
+        );
+        let approve = signed_entry(
+            &key,
+            "review",
+            "t9",
+            "alice",
+            "a1",
+            3,
+            serde_json::json!({"decision": "approve"}),
+        );
+        let in_progress = signed_entry(
+            &key,
+            "status",
+            "t9",
+            "alice",
+            "s2",
+            4,
+            serde_json::json!({"status": "in-progress"}),
+        );
+        let needs_review = signed_entry(
+            &key,
+            "status",
+            "t9",
+            "alice",
+            "s1",
+            2,
+            serde_json::json!({"status": "needs-review"}),
+        );
 
         // 反收集顺序:needs-review 排最后——不 thread() 的旧行为会误判当前
         // 状态为 needs-review 且有 verified approve → 错误放行。
@@ -2145,8 +2576,22 @@ mod transition_tests {
         principals.insert("alice".to_string(), "fake".to_string());
 
         let entries = [
-            entry("issue", "t3", "alice", "g1", 1, serde_json::json!({"title": "x"})),
-            entry("status", "t3", "alice", "g2", 2, serde_json::json!({"status": "needs-review"})),
+            entry(
+                "issue",
+                "t3",
+                "alice",
+                "g1",
+                1,
+                serde_json::json!({"title": "x"}),
+            ),
+            entry(
+                "status",
+                "t3",
+                "alice",
+                "g2",
+                2,
+                serde_json::json!({"status": "needs-review"}),
+            ),
         ];
         let refs: Vec<&EntryRef> = entries.iter().collect();
         assert!(validate_status_transition(&refs, &principals).is_err());

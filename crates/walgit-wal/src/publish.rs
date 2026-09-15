@@ -165,9 +165,11 @@ pub(crate) async fn update_reclaiming(
             }
         }
         if updated.reclaiming.len() == current.reclaiming.len()
-            && updated.reclaiming.iter().zip(current.reclaiming.iter()).all(
-                |(a, b)| a.checksum == b.checksum && a.owner == b.owner && a.token == b.token,
-            )
+            && updated
+                .reclaiming
+                .iter()
+                .zip(current.reclaiming.iter())
+                .all(|(a, b)| a.checksum == b.checksum && a.owner == b.owner && a.token == b.token)
         {
             // Nothing to change: the caller still gets the manifest the claim
             // set is defined against, so it can compute per-repo config for
@@ -240,9 +242,7 @@ pub(crate) async fn put_immutable_create(
     // Big packs go up striped (parts + server-side compose, ~8 × 100 MB/s):
     // a large repository's rebuilt base (32.4 GB) took 431 s single-stream at 75 MB/s in the
     // weekly dry run of 2026-08-21. Small packs (every push) stay one PUT.
-    let size = tokio::fs::metadata(&path)
-        .await
-        .map_or(0, |m| m.len());
+    let size = tokio::fs::metadata(&path).await.map_or(0, |m| m.len());
     let put = if size >= PARALLEL_PUT_MIN_BYTES && store.supports_compose() {
         walgit_store::util::put_file_parallel(store, &key, &path, opts(), PARALLEL_PUT_STRIPES)
             .await
@@ -484,7 +484,12 @@ fn refs_diag_on() -> bool {
 fn refs_diag_report(handle: &RepoHandle, tag: &str, ref_name: &str, detail: &str) {
     let d = handle.local.refs_diag(ref_name);
     let (cache_current, cache_data, cache_key_gen, cache_pending) = match &d.cache {
-        Some(c) => (c.current, c.data_oid.clone(), c.key_generation, c.pending_oids.clone()),
+        Some(c) => (
+            c.current,
+            c.data_oid.clone(),
+            c.key_generation,
+            c.pending_oids.clone(),
+        ),
         None => (false, String::new(), 0, Vec::new()),
     };
     tracing::warn!(
@@ -754,16 +759,17 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             if let Some(ts) = &req.created_at {
                 let t = time::to_system(ts);
                 if let Some(f) = floor
-                    && t < f {
-                        let msg = format!(
-                            "created_at {} is before the WAL head's {} (entries must be monotonic)",
-                            chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339(),
-                            chrono::DateTime::<chrono::Utc>::from(f).to_rfc3339()
-                        );
-                        for (_, r) in &mut per_ref {
-                            *r = Err(RefError::Rejected(msg.clone()));
-                        }
+                    && t < f
+                {
+                    let msg = format!(
+                        "created_at {} is before the WAL head's {} (entries must be monotonic)",
+                        chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339(),
+                        chrono::DateTime::<chrono::Utc>::from(f).to_rfc3339()
+                    );
+                    for (_, r) in &mut per_ref {
+                        *r = Err(RefError::Rejected(msg.clone()));
                     }
+                }
                 if per_ref.iter().all(|(_, r)| r.is_ok()) {
                     floor = Some(t);
                 }
@@ -797,16 +803,15 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                     } else {
                         d.loose_oid.clone()
                     };
-                    let (cache_key_gen, cache_current, cache_data, cache_pending) =
-                        match &d.cache {
-                            Some(c) => (
-                                c.key_generation,
-                                c.current,
-                                c.data_oid.clone(),
-                                c.pending_oids.clone(),
-                            ),
-                            None => (0, false, String::new(), Vec::new()),
-                        };
+                    let (cache_key_gen, cache_current, cache_data, cache_pending) = match &d.cache {
+                        Some(c) => (
+                            c.key_generation,
+                            c.current,
+                            c.data_oid.clone(),
+                            c.pending_oids.clone(),
+                        ),
+                        None => (0, false, String::new(), Vec::new()),
+                    };
                     let gen_now = d.generation;
                     let parses = d.parses;
                     let rev = handle.manifest().revision;
@@ -1071,13 +1076,16 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                     .flat_map(|(v, req)| {
                         let _ = v;
                         req.txn.updates.iter().map(move |u| {
-                            let short = |oid: &str| {
-                                oid.get(..7.min(oid.len())).unwrap_or(oid).to_string()
-                            };
+                            let short =
+                                |oid: &str| oid.get(..7.min(oid.len())).unwrap_or(oid).to_string();
                             format!(
                                 "{}:{}->{}",
                                 u.name,
-                                if u.old_oid.is_empty() { "∅".to_string() } else { short(&u.old_oid) },
+                                if u.old_oid.is_empty() {
+                                    "∅".to_string()
+                                } else {
+                                    short(&u.old_oid)
+                                },
                                 short(&u.new_oid)
                             )
                         })
@@ -1139,7 +1147,8 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                                 && let Ok(view) = handle.local.ref_view()
                             {
                                 for u in &req.txn.updates {
-                                    if !u.new_symbolic_target.is_empty() || is_null_oid(&u.new_oid) {
+                                    if !u.new_symbolic_target.is_empty() || is_null_oid(&u.new_oid)
+                                    {
                                         continue;
                                     }
                                     if view.get(&u.name).as_deref() != Some(u.new_oid.as_str()) {
@@ -1183,10 +1192,9 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                             state.packs_revision = committed.revision;
                         }
                     }
-                    if let Err(e) = crate::state::save_state(
-                        handle.local.path(),
-                        &handle.state.lock().clone(),
-                    ) {
+                    if let Err(e) =
+                        crate::state::save_state(handle.local.path(), &handle.state.lock().clone())
+                    {
                         tracing::warn!(repo = %handle.id, error = %e, "published (CAS ok), but saving local state failed; the next sync repairs it");
                     }
                 } else {
@@ -1208,13 +1216,14 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             // Fold the pushed packs' commits into the local commit-graph
             // chain (cheap, incremental; off the client's critical path).
             if !new_packs.is_empty()
-                && let Some(arc) = handle.self_arc.get().cloned() {
-                    let packs = new_packs.clone();
-                    tokio::spawn(async move {
-                        let manifest = arc.manifest();
-                        crate::sync::maintain_commit_graph(&arc, &manifest, &packs).await;
-                    });
-                }
+                && let Some(arc) = handle.self_arc.get().cloned()
+            {
+                let packs = new_packs.clone();
+                tokio::spawn(async move {
+                    let manifest = arc.manifest();
+                    crate::sync::maintain_commit_graph(&arc, &manifest, &packs).await;
+                });
+            }
 
             // Build all responses (success for valid, rejection for invalid)
             let mut responses: Vec<PublishResult> = Vec::with_capacity(batch.len());
@@ -1323,18 +1332,19 @@ fn maybe_trigger_checkpoint(handle: &RepoHandle, _head_seq: u64) {
     // `maintain` role covers repos nobody pushes to (age trigger).
     let due = crate::checkpoint::checkpoint_due(&handle.manifest.read(), &handle.cfg.wal);
     if let Some(trigger) = due
-        && let Some(arc) = handle.self_arc.get().cloned() {
-            tokio::spawn(async move {
-                match crate::checkpoint::write_checkpoint_impl(&arc).await {
-                    Ok(cp) => {
-                        tracing::info!(repo = %arc.id, seq = cp.seq, %trigger, "auto checkpoint written");
-                    }
-                    Err(e) => {
-                        tracing::warn!(repo = %arc.id, %trigger, "auto checkpoint failed: {e}");
-                    }
+        && let Some(arc) = handle.self_arc.get().cloned()
+    {
+        tokio::spawn(async move {
+            match crate::checkpoint::write_checkpoint_impl(&arc).await {
+                Ok(cp) => {
+                    tracing::info!(repo = %arc.id, seq = cp.seq, %trigger, "auto checkpoint written");
                 }
-            });
-        }
+                Err(e) => {
+                    tracing::warn!(repo = %arc.id, %trigger, "auto checkpoint failed: {e}");
+                }
+            }
+        });
+    }
 }
 
 // ---- publish_compact ----
@@ -1397,9 +1407,11 @@ pub async fn write_superseded_markers(
     for attempt in 0..3u32 {
         // Concurrent: a 500-pack supersede must not add 500 serial PUTs to the
         // compaction critical path.
-        let results = futures::future::join_all(pending.iter().map(|(key, body)| {
-            store.put(key, PutBody::Bytes(body.clone()), opts.clone())
-        }))
+        let results = futures::future::join_all(
+            pending
+                .iter()
+                .map(|(key, body)| store.put(key, PutBody::Bytes(body.clone()), opts.clone())),
+        )
         .await;
         let mut failed: Vec<(String, bytes::Bytes)> = Vec::new();
         for ((key, body), result) in pending.drain(..).zip(results) {
@@ -1469,7 +1481,10 @@ pub(crate) async fn publish_compact_impl(
     }
 
     let pack_ref = pack_ref_from_info(&new_pack, 0, tier); // seq set below
-    let supersedes_hex: Vec<String> = supersedes.iter().map(std::string::ToString::to_string).collect();
+    let supersedes_hex: Vec<String> = supersedes
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
 
     let mut attempts = 0u32;
 
@@ -1522,8 +1537,10 @@ pub(crate) async fn publish_compact_impl(
         // Build updated manifest
         let mut updated: Manifest = (*manifest).clone();
         updated.head_seq = seq;
-        let sup_set: std::collections::HashSet<&str> =
-            supersedes_hex.iter().map(std::string::String::as_str).collect();
+        let sup_set: std::collections::HashSet<&str> = supersedes_hex
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         updated
             .packs
             .retain(|p| !sup_set.contains(p.checksum.as_str()) && p.checksum != pack_ref.checksum);

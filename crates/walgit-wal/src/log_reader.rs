@@ -82,6 +82,55 @@ pub async fn refs_as_of(
 /// transaction through `seq`, in memory). `Err(Corrupt)` when the log before the only checkpoint
 /// is folded away (`min_seq > seq`): that state is no longer replayable. Used by the weekly
 /// compose, whose header must carry the refs at the base pack's seq whatever moved since.
+
+/// Newest **retained witness checkpoint** at or before `cut_seq` (#195): a
+/// `checkpoints/<seq>/` directory holding both objects the replay needs
+/// (`checkpoint.pb` + `refs.pb`), found by listing. Returns `None` when there is
+/// nothing usable, so the caller keeps its existing "not replayable" behaviour.
+async fn retained_witness_at_or_before(
+    handle: &super::handle::RepoHandle,
+    cut_seq: u64,
+) -> Result<Option<walgit_proto::v1::CheckpointRef>, WalError> {
+    use futures::StreamExt;
+    use walgit_proto::keys;
+    use walgit_store::ObjectStore;
+
+    let mut dirs: std::collections::BTreeMap<u64, std::collections::HashSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut stream = handle.store().list(keys::CHECKPOINTS_DIR, None);
+    while let Some(m) = stream.next().await {
+        let m = m.map_err(|e| WalError::Corrupt(format!("list checkpoints: {e}")))?;
+        let Some(rest) = m.key.strip_prefix(keys::CHECKPOINTS_DIR) else {
+            continue;
+        };
+        let Some((seq_hex, _)) = rest.split_once('/') else {
+            continue;
+        };
+        let Ok(seq) = u64::from_str_radix(seq_hex, 16) else {
+            continue;
+        };
+        if seq > cut_seq {
+            continue;
+        }
+        dirs.entry(seq).or_default().insert(m.key);
+    }
+    for (seq, objects) in dirs.iter().rev() {
+        let cp_key = keys::checkpoint_key(*seq);
+        let refs_key = keys::checkpoint_refs_key(*seq);
+        if !objects.contains(&cp_key) || !objects.contains(&refs_key) {
+            continue; // half-written directory is not a witness
+        }
+        return Ok(Some(walgit_proto::v1::CheckpointRef {
+            seq: *seq,
+            key: cp_key,
+            created_at: None, // this path only needs the refs it points at
+            first_state_at: None,
+            as_of: None,
+        }));
+    }
+    Ok(None)
+}
+
 pub async fn refs_at_seq(
     handle: &super::handle::RepoHandle,
     seq: u64,
@@ -138,10 +187,28 @@ async fn replay_refs(
                 }
             }
         } else if manifest.min_seq > 1 {
-            // History before the checkpoint is folded and the checkpoint is
-            // newer than the cut: the best we can do is the checkpoint state
-            // (the cut predates what is replayable). Callers treat seq 0 as
-            // "nothing at that time".
+            // The live checkpoint has moved past the cut. That is exactly the
+            // shape a rebuilt base leaves behind: it was published at seq B and
+            // a later fold advanced the checkpoint beyond B. Look for a
+            // **retained witness checkpoint at or before the cut** (#195) — the
+            // base rebuild writes one at its own seq — and replay from there.
+            //
+            // This LIST runs only on this path (the live checkpoint cannot serve
+            // the cut) and compose/materialize are not hot paths; the exact case
+            // (`witness.seq == cut`) needs no tail at all, because the witness
+            // *is* the state at that seq.
+            if let Cut::Seq(cut_seq) = cut
+                && let Some(witness) = retained_witness_at_or_before(handle, cut_seq).await?
+                && let Some((_, bytes)) = handle.store().get_bytes(&witness.key).await?
+            {
+                let cpo = walgit_proto::v1::Checkpoint::decode(bytes.as_ref())
+                    .map_err(|e| WalError::Corrupt(format!("checkpoint decode: {e}")))?;
+                if let Some((_, rb)) = handle.store().get_bytes(&cpo.refs_key).await? {
+                    snap = walgit_proto::v1::RefSnapshot::decode(rb.as_ref())
+                        .map_err(|e| WalError::Corrupt(format!("refs decode: {e}")))?;
+                    from_seq = witness.seq;
+                }
+            }
         }
     }
     let to_seq = match cut {

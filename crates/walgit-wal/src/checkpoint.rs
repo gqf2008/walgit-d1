@@ -109,6 +109,83 @@ pub(crate) async fn write_checkpoint_impl(handle: &RepoHandle) -> Result<Checkpo
     r
 }
 
+/// Write a **retained witness checkpoint** at an older `seq` (#195), without
+/// touching the manifest: the pair of immutable objects lands under
+/// `checkpoints/<seq>/` and readers find it by listing when the live checkpoint
+/// has moved past the seq they need.
+///
+/// A base pack published at seq `B` needs exactly this: bundle compose replays
+/// the base's refs with `refs_at_seq(B)`, and once a later fold makes the live
+/// checkpoint newer than `B`, "live checkpoint + log tail" can no longer reach
+/// `B` — the tail below `min_seq` is folded. An exact checkpoint at `B` makes
+/// that replay a one-hop load (`Cut::Seq(B)` with `cp.seq == B`).
+///
+/// `packs` is the pack set to record (the publisher passes the manifest's packs
+/// at that moment). Idempotent: the objects are immutable and keyed by `seq`.
+pub async fn write_witness_checkpoint(
+    handle: &RepoHandle,
+    seq: u64,
+    packs: Vec<walgit_proto::v1::PackRef>,
+) -> Result<CheckpointRef, WalError> {
+    use prost::Message;
+    use walgit_store::{ObjectStore, PutMode};
+
+    if seq == 0 {
+        return Err(WalError::Corrupt(
+            "cannot write a witness checkpoint for seq 0".into(),
+        ));
+    }
+    // The refs as of `seq`: at publish time this is a checkpoint+tail replay
+    // (the live checkpoint is older than the freshly published base), so it is
+    // the same pure function the reader would run.
+    let snap = crate::log_reader::refs_at_seq(handle, seq).await?;
+    let refs_key = walgit_proto::keys::checkpoint_refs_key(seq);
+    let cp_key = walgit_proto::keys::checkpoint_key(seq);
+    let created_at = time::now();
+    let checkpoint = Checkpoint {
+        seq,
+        object_format: handle.manifest().object_format.clone(),
+        packs,
+        refs_key: refs_key.clone(),
+        ref_count: snap.refs.len() as u64,
+        bundle_key: String::new(),
+        created_at: Some(created_at),
+        writer: crate::handle::instance_id().to_string(),
+    };
+    let immutable = walgit_store::PutOptions {
+        immutable: true,
+        ..Default::default()
+    };
+    handle
+        .store()
+        .put(
+            &refs_key,
+            walgit_store::PutBody::Bytes(bytes::Bytes::from(snap.encode_to_vec())),
+            immutable.clone(),
+        )
+        .await?;
+    handle
+        .store()
+        .put(
+            &cp_key,
+            walgit_store::PutBody::Bytes(bytes::Bytes::from(checkpoint.encode_to_vec())),
+            immutable,
+        )
+        .await?;
+    let _ = PutMode::Create; // (documented above: immutability is the store's)
+    Ok(CheckpointRef {
+        seq,
+        key: cp_key,
+        created_at: Some(created_at),
+        first_state_at: handle
+            .manifest()
+            .checkpoint
+            .as_ref()
+            .and_then(|c| c.first_state_at),
+        as_of: handle.last_entry_time.lock().map(time::from_system),
+    })
+}
+
 async fn write_checkpoint_inner(handle: &RepoHandle) -> Result<CheckpointRef, WalError> {
     let writer = crate::handle::instance_id();
     let max_retries = handle.cfg.wal.cas_max_retries;

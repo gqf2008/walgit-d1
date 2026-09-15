@@ -101,7 +101,9 @@ impl Registry {
         };
 
         // Open or init local repo (LocalRepo joins owner/name.git onto the root).
-        let local = if let Some(l) = LocalRepo::open(&self.cache_root, id)? { l } else {
+        let local = if let Some(l) = LocalRepo::open(&self.cache_root, id)? {
+            l
+        } else {
             let format = parse_object_format(&manifest.object_format);
             LocalRepo::init(&self.cache_root, id, format)?
         };
@@ -383,7 +385,11 @@ impl Registry {
     /// Disk cache maintenance: evict idle repos beyond `cache.max_bytes` / `evict_idle_after`.
     // pub API: the server's maintenance loop and the sim await it; its work is
     // sync (fs scans + registry removal) so `async` is only the crate boundary.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl, reason = "pub async fn awaited by callers in walgit-server; the body is sync by nature")]
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "pub async fn awaited by callers in walgit-server; the body is sync by nature"
+    )]
     pub async fn evict_idle(&self) -> Result<EvictReport, WalError> {
         let evict_after = self.cfg.cache.evict_idle_after;
         // D25: budget mode evicts past `cache.max_bytes`; disk mode only under
@@ -394,7 +400,10 @@ impl Registry {
                 Some((used, total)) if total > 0 && self.cfg.cache.disk_high_watermark > 0.0 => {
                     // Watermark config is a fraction; byte counts past f64's
                     // 2^53 (8 PiB) are outside any filesystem this targets.
-                    #[allow(clippy::cast_precision_loss, reason = "disk-watermark arithmetic is f64 by design (config fraction vs. byte counts)")]
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "disk-watermark arithmetic is f64 by design (config fraction vs. byte counts)"
+                    )]
                     let frac = used as f64 / total as f64;
                     metrics::gauge!("walgit_cache_disk_used_fraction").set(frac);
                     if frac <= self.cfg.cache.disk_high_watermark {
@@ -402,7 +411,12 @@ impl Registry {
                     }
                     // `low` is a fraction of `total`, so it is always in
                     // [0, total]: no truncation or sign loss is possible.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss, reason = "low = (watermark − 10%) × total, in [0, total] by construction")]
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_precision_loss,
+                        reason = "low = (watermark − 10%) × total, in [0, total] by construction"
+                    )]
                     let low = ((self.cfg.cache.disk_high_watermark - 0.10).max(0.0) * total as f64)
                         as u64;
                     // Other data on the filesystem counts against us: target =
