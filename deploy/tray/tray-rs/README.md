@@ -30,7 +30,9 @@ Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统
 - macOS:产物可直接运行；正式 DMG 打包由 `deploy/tray/macos/`(`build.sh` /
   `build-dmg.sh`)负责，App Bundle 的托盘本体就是这个二进制(#183)。
   首次启动会 bootstrap `~/.walgit`(旧 `~/walgit` 布局自动复制迁移并留 5
-  分钟升级桥)，并在 `WALGIT_CLI_LINK`(默认 `/usr/local/bin/walgit`)建软链
+  分钟升级桥)，并优先在 `/usr/local/bin/walgit` 建 CLI 软链；该位置不可写时
+  回退到 `~/.local/bin/walgit`，不再把正常的回退写成权限错误。显式
+  `WALGIT_CLI_LINK` 仍保持单目标、失败即报错
 - Windows:在 Windows 主机上 `cargo build --release`；安装目录放
   `walgit.exe` + `walgit-tray.exe`，状态目录是 `%USERPROFILE%\.walgit`
 - Linux:同 Windows 形态，状态目录是 `~/.walgit`，桌面环境需支持 appindicator

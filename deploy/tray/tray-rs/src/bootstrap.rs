@@ -226,37 +226,86 @@ mod macos {
         }
     }
 
+    /// 终端入口候选。显式 `WALGIT_CLI_LINK` 仍是单目标、失败即报错；
+    /// 未显式指定时先试 `/usr/local/bin/walgit`，不可写再回退到用户入口
+    /// `~/.local/bin/walgit`。后两个环境变量是测试/多部署覆盖。
+    fn cli_link_paths() -> (Vec<PathBuf>, bool) {
+        if let Some(link) = env_path("WALGIT_CLI_LINK") {
+            return (vec![link], true);
+        }
+        let primary = env_path("WALGIT_CLI_LINK_PRIMARY")
+            .unwrap_or_else(|| PathBuf::from("/usr/local/bin/walgit"));
+        let fallback = env_path("WALGIT_CLI_LINK_FALLBACK")
+            .unwrap_or_else(|| crate::home().join(".local/bin/walgit"));
+        let mut paths = vec![primary];
+        if paths[0] != fallback {
+            paths.push(fallback);
+        }
+        (paths, false)
+    }
+
+    /// `Ok(true)` = link is now installed (or already correct), `Ok(false)` =
+    /// a user-owned non-symlink occupies the path, `Err` = cannot install.
+    fn install_one_cli_link(link: &Path, target: &Path) -> Result<bool, String> {
+        match std::fs::symlink_metadata(link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if std::fs::read_link(link).ok() == Some(target.to_path_buf()) {
+                    return Ok(true);
+                }
+                std::fs::remove_file(link)
+                    .map_err(|e| format!("remove {}: {e}", link.display()))?;
+                std::os::unix::fs::symlink(target, link)
+                    .map_err(|e| format!("symlink {}: {e}", link.display()))?;
+                log_line(&format!("bootstrap: 更新 CLI 软链 {}", link.display()));
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(_) => {
+                if let Some(parent) = link.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
+                }
+                std::os::unix::fs::symlink(target, link)
+                    .map_err(|e| format!("symlink {}: {e}", link.display()))?;
+                log_line(&format!("bootstrap: 建 CLI 软链 {}", link.display()));
+                Ok(true)
+            }
+        }
+    }
+
     /// 终端入口指向 App Bundle 内的程序,不制造第二份副本。
     fn install_cli_link(state: &Path, resources: &Path) {
         if !state.is_absolute() {
             log_line("bootstrap: deployDir 非绝对路径,跳过 CLI 软链");
             return;
         }
-        let link =
-            env_path("WALGIT_CLI_LINK").unwrap_or_else(|| PathBuf::from("/usr/local/bin/walgit"));
         let target = resources.join("walgit");
-        match std::fs::symlink_metadata(&link) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                if std::fs::read_link(&link).ok() != Some(target.clone()) {
-                    let _ = std::fs::remove_file(&link);
-                    match std::os::unix::fs::symlink(&target, &link) {
-                        Ok(()) => log_line(&format!("bootstrap: 更新 CLI 软链 {}", link.display())),
-                        Err(e) => log_line(&format!("bootstrap: CLI 软链失败: {e}")),
+        let (links, explicit) = cli_link_paths();
+        let mut last_error: Option<(PathBuf, String)> = None;
+        for link in &links {
+            match install_one_cli_link(link, &target) {
+                Ok(true) => return,
+                Ok(false) => {
+                    log_line(&format!(
+                        "bootstrap: {} 已存在且非软链(用户自己的文件),不覆盖",
+                        link.display()
+                    ));
+                }
+                Err(e) => {
+                    if explicit {
+                        log_line(&format!("bootstrap: CLI 软链失败: {e}"));
+                        return;
                     }
+                    last_error = Some((link.clone(), e));
                 }
             }
-            Ok(_) => log_line(&format!(
-                "bootstrap: {} 已存在且非软链(用户自己的文件),不覆盖",
-                link.display()
-            )),
-            Err(_) => {
-                if let Some(parent) = link.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::os::unix::fs::symlink(&target, &link) {
-                    Ok(()) => log_line(&format!("bootstrap: 建 CLI 软链 {}", link.display())),
-                    Err(e) => log_line(&format!("bootstrap: CLI 软链失败: {e}")),
-                }
+        }
+        if !explicit {
+            if let Some((link, _)) = last_error {
+                log_line(&format!(
+                    "bootstrap: CLI 软链未创建（{} 等默认位置不可写；可用 WALGIT_CLI_LINK 覆盖）",
+                    link.display()
+                ));
             }
         }
     }
