@@ -1,7 +1,8 @@
 //! HTTP serving of immutable store objects (bundles, LFS objects, packs) with
 //! the complete conditional/range contract a CDN or `git` expects:
 //!
-//! * strong `ETag` = the store version (GCS generation / S3 `ETag`), quoted;
+//! * strong `ETag` = the store version's HTTP ETag part (GCS generation /
+//!   S3 `ETag`), quoted;
 //! * `If-None-Match` (list or `*`) → `304` with the same validators;
 //! * `If-Range` (`ETag` or ignored date) gating `Range`;
 //! * single byte ranges incl. open-ended (`bytes=N-`) and suffix (`bytes=-N`),
@@ -108,7 +109,7 @@ impl RangeSpec {
 
 /// `ETag` header value for a store version.
 pub fn etag_of(version: &Version) -> HeaderValue {
-    let v = version.as_str().trim_matches('"');
+    let v = version.http_etag().trim_matches('"');
     HeaderValue::from_str(&format!("\"{v}\"")).unwrap_or_else(|_| HeaderValue::from_static("\"-\""))
 }
 
@@ -132,7 +133,7 @@ fn etags(headers: &HeaderMap, name: header::HeaderName) -> Vec<String> {
 
 fn if_none_match_hit(headers: &HeaderMap, version: &Version) -> bool {
     let tags = etags(headers, header::IF_NONE_MATCH);
-    let cur = version.as_str().trim_matches('"');
+    let cur = version.http_etag().trim_matches('"');
     tags.iter().any(|t| t == "*" || t == cur)
 }
 
@@ -144,7 +145,7 @@ fn if_range_allows(headers: &HeaderMap, version: &Version) -> bool {
         None => true,
         Some(v) if v.contains('"') => {
             v.trim().trim_start_matches("W/").trim_matches('"')
-                == version.as_str().trim_matches('"')
+                == version.http_etag().trim_matches('"')
         }
         Some(_) => false,
     }
@@ -476,5 +477,15 @@ mod tests {
         assert!(!if_range_allows(&h, &Version::new("123")));
         assert_eq!(etag_of(&Version::new("12345")), "\"12345\"");
         assert_eq!(etag_of(&Version::new("\"e\"")), "\"e\"");
+        let composite = Version::new("abc123@incarnation");
+        assert_eq!(etag_of(&composite), "\"abc123\"");
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"abc123\""),
+        );
+        h.insert(header::IF_RANGE, HeaderValue::from_static("\"abc123\""));
+        assert!(if_none_match_hit(&h, &composite));
+        assert!(if_range_allows(&h, &composite));
     }
 }

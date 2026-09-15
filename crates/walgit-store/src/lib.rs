@@ -13,7 +13,7 @@
 use std::{fmt, ops::Range, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use tracing::Instrument;
 
 pub mod coord;
@@ -39,6 +39,13 @@ impl Version {
     }
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The bare entity tag used on the HTTP/S3 wire. A store version may be
+    /// composite (`<etag>@<incarnation>` on S3/R2); conditional HTTP clients
+    /// and S3 `If-Match`/`If-None-Match` still speak only the ETag part.
+    pub fn http_etag(&self) -> &str {
+        self.0.split_once('@').map_or(&self.0, |(etag, _)| etag)
     }
 }
 impl fmt::Debug for Version {
@@ -220,6 +227,12 @@ pub trait ObjectStore: Send + Sync + 'static {
 
     /// Delete. `if_version` = CAS delete. Deleting an absent object is `Ok(())`
     /// when unconditional and `NotFound` when conditional.
+    ///
+    /// Backends without a native conditional delete compare the full store
+    /// version and then issue a guarded delete. The generic contract does not
+    /// promise atomicity across a same-ETag re-create landing between those
+    /// two steps; callers that need that window closed (today, pack GC) hold a
+    /// claim/fence across the comparison.
     async fn delete(&self, key: &str, if_version: Option<Version>) -> Result<()>;
 
     /// Lexicographically ordered listing of keys with `prefix`, starting after
@@ -229,6 +242,17 @@ pub trait ObjectStore: Send + Sync + 'static {
         prefix: &str,
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<ObjectMeta>>;
+
+    /// Cheap key-only listing for callers that do not need object metadata.
+    /// Backends whose [`list`](ObjectStore::list) must fetch a full incarnation
+    /// (S3/R2) override this to keep bulk walks one LIST per page.
+    fn list_keys(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        Box::pin(self.list(prefix, start_after).map(|r| r.map(|m| m.key)))
+    }
 
     /// The "directories" directly below `prefix`: every distinct `prefix + <segment>/` among the
     /// keys under `prefix` (a delimited listing — GCS/S3 `delimiter = "/"` — so it walks the
@@ -581,6 +605,28 @@ impl ObjectStore for Prefixed {
             self.inner
                 .list(&full_prefix, start_after.as_deref())
                 .map(move |r| r.map(|m| this.strip(m))),
+        )
+    }
+
+    fn list_keys(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        let full_prefix = self.full(prefix);
+        let start_after = start_after.map(|s| self.full(s));
+        let prefix = Arc::clone(&self.prefix);
+        Box::pin(
+            self.inner
+                .list_keys(&full_prefix, start_after.as_deref())
+                .map(move |r| {
+                    r.map(|mut key| {
+                        if let Some(rest) = key.strip_prefix(&*prefix) {
+                            key = rest.to_owned();
+                        }
+                        key
+                    })
+                }),
         )
     }
     async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>> {

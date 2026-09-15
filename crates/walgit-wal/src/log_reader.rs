@@ -125,10 +125,10 @@ async fn retained_witness_for_cut(
 
     let mut dirs: std::collections::BTreeMap<u64, std::collections::HashSet<String>> =
         std::collections::BTreeMap::new();
-    let mut stream = handle.store().list(keys::CHECKPOINTS_DIR, None);
-    while let Some(m) = stream.next().await {
-        let m = m.map_err(|e| WalError::Corrupt(format!("list checkpoints: {e}")))?;
-        let Some(rest) = m.key.strip_prefix(keys::CHECKPOINTS_DIR) else {
+    let mut stream = handle.store().list_keys(keys::CHECKPOINTS_DIR, None);
+    while let Some(key) = stream.next().await {
+        let key = key.map_err(|e| WalError::Corrupt(format!("list checkpoints: {e}")))?;
+        let Some(rest) = key.strip_prefix(keys::CHECKPOINTS_DIR) else {
             continue;
         };
         let Some((seq_hex, _)) = rest.split_once('/') else {
@@ -140,7 +140,7 @@ async fn retained_witness_for_cut(
         if seq > cut_seq {
             continue;
         }
-        dirs.entry(seq).or_default().insert(m.key);
+        dirs.entry(seq).or_default().insert(key);
     }
     let manifest = handle.manifest();
     for (seq, objects) in dirs.iter().rev() {

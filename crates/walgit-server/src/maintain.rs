@@ -992,10 +992,10 @@ pub async fn heartbeats(
     use futures::StreamExt;
     use walgit_store::ObjectStoreExt;
     let mut out = Vec::new();
-    let mut keys = state.store.list(walgit_proto::keys::MAINTAIN_DIR, None);
-    while let Some(m) = keys.next().await {
-        let m = m?;
-        if let Some((meta, bytes)) = state.store.get_bytes(&m.key).await?
+    let mut keys = state.store.list_keys(walgit_proto::keys::MAINTAIN_DIR, None);
+    while let Some(key) = keys.next().await {
+        let key = key?;
+        if let Some((meta, bytes)) = state.store.get_bytes(&key).await?
             && let Ok(hb) = walgit_proto::v1::MaintainerHeartbeat::decode(bytes.as_ref())
         {
             // A host that has not passed for a day is gone: purge its
@@ -1008,7 +1008,7 @@ pub async fn heartbeats(
             if age.is_some_and(|a| a > HEARTBEAT_EXPIRY) {
                 if state.cfg.has_role(walgit_config::Role::Maintain) {
                     info!(host = %hb.host, age_secs = age.map_or(0, |a| a.as_secs()), "maintenance: purging expired heartbeat");
-                    let _ = state.store.delete(&m.key, Some(meta.version)).await;
+                    let _ = state.store.delete(&key, Some(meta.version)).await;
                 }
                 continue;
             }

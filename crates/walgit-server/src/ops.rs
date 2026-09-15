@@ -221,10 +221,10 @@ const GC_MAX_WAL_OBJECTS_PER_UNIT: usize = 512;
 /// `RefSnapshot.created_at` is `None`, so a refs-only remnant would have no
 /// durable age; the checkpoint object retains its own timestamp until the
 /// directory is fully gone.
-fn order_checkpoint_deletes(seq: u64, objects: &mut [(String, u64)]) {
+fn order_checkpoint_deletes(seq: u64, objects: &mut [String]) {
     let cp_key = walgit_proto::keys::checkpoint_key(seq);
     let refs_key = walgit_proto::keys::checkpoint_refs_key(seq);
-    objects.sort_by_key(|(key, _)| match key.as_str() {
+    objects.sort_by_key(|key| match key.as_str() {
         _ if *key == cp_key => 2,
         _ if *key == refs_key => 1,
         _ => 0,
@@ -274,13 +274,13 @@ async fn gc_wal_objects(
     };
 
     // List both prefixes once: the deletion set is derived from what exists.
-    let mut log_segments: Vec<(String, u64, u64)> = Vec::new(); // (key, first_seq, size)
-    let checkpoint_dirs: Vec<(u64, Vec<(String, u64)>)>; // (seq, objects)
+    let mut log_segments: Vec<(String, u64)> = Vec::new(); // (key, first_seq)
+    let checkpoint_dirs: Vec<(u64, Vec<String>)>; // (seq, objects)
     {
-        let mut stream = handle.store().list(keys::LOG_DIR, None);
-        while let Some(m) = stream.next().await {
-            let m = m.map_err(|e| e.to_string())?;
-            let Some(name) = m.key.strip_prefix(keys::LOG_DIR) else {
+        let mut stream = handle.store().list_keys(keys::LOG_DIR, None);
+        while let Some(key) = stream.next().await {
+            let key = key.map_err(|e| e.to_string())?;
+            let Some(name) = key.strip_prefix(keys::LOG_DIR) else {
                 continue;
             };
             let Some(seq_hex) = name.strip_suffix(".pb") else {
@@ -289,14 +289,14 @@ async fn gc_wal_objects(
             let Ok(first_seq) = u64::from_str_radix(seq_hex, 16) else {
                 continue;
             };
-            log_segments.push((m.key, first_seq, m.size));
+            log_segments.push((key, first_seq));
         }
-        let mut dirs: std::collections::BTreeMap<u64, Vec<(String, u64)>> =
+        let mut dirs: std::collections::BTreeMap<u64, Vec<String>> =
             std::collections::BTreeMap::new();
-        let mut stream = handle.store().list(keys::CHECKPOINTS_DIR, None);
-        while let Some(m) = stream.next().await {
-            let m = m.map_err(|e| e.to_string())?;
-            let Some(rest) = m.key.strip_prefix(keys::CHECKPOINTS_DIR) else {
+        let mut stream = handle.store().list_keys(keys::CHECKPOINTS_DIR, None);
+        while let Some(key) = stream.next().await {
+            let key = key.map_err(|e| e.to_string())?;
+            let Some(rest) = key.strip_prefix(keys::CHECKPOINTS_DIR) else {
                 continue;
             };
             let Some((seq_hex, _)) = rest.split_once('/') else {
@@ -305,7 +305,7 @@ async fn gc_wal_objects(
             let Ok(seq) = u64::from_str_radix(seq_hex, 16) else {
                 continue;
             };
-            dirs.entry(seq).or_default().push((m.key, m.size));
+            dirs.entry(seq).or_default().push(key);
         }
         checkpoint_dirs = dirs.into_iter().collect();
     }
@@ -332,7 +332,7 @@ async fn gc_wal_objects(
             .iter()
             .filter(|(seq, _)| *seq == base.seq)
             .any(|(_, objects)| {
-                let has = |want: &str| objects.iter().any(|(key, _)| key == want);
+                let has = |want: &str| objects.iter().any(|key| key == want);
                 has(&keys::checkpoint_key(base.seq)) && has(&keys::checkpoint_refs_key(base.seq))
             });
         if !exact {
@@ -364,14 +364,14 @@ async fn gc_wal_objects(
     let mut pending: Vec<Vec<(String, u64)>> = Vec::new();
     let mut pending_objects = 0usize;
 
-    for (key, first_seq, size) in log_segments {
+    for (key, first_seq) in log_segments {
         if live_logs.contains(&first_seq) || first_seq >= manifest.min_seq {
             continue; // still needed for replay
         }
         if keep_all_folded_logs || keep_logs.contains(&first_seq) {
             continue; // a live base's replay witness (or nothing provable)
         }
-        let Some((_, bytes)) = handle.store().get_bytes(&key).await.map_err(|e| e.to_string())? else {
+        let Some((meta, bytes)) = handle.store().get_bytes(&key).await.map_err(|e| e.to_string())? else {
             continue; // a vanished object has nothing left to reclaim
         };
         let (entries, _) = walgit_proto::frame::decode_entries(&bytes)
@@ -388,7 +388,7 @@ async fn gc_wal_objects(
             break;
         }
         pending_objects += 1;
-        pending.push(vec![(key, size)]);
+        pending.push(vec![(key, meta.size)]);
     }
     for (seq, objects) in checkpoint_dirs {
         if keep.contains(&seq) {
@@ -448,8 +448,15 @@ async fn gc_wal_objects(
         }
         let mut objects = objects;
         order_checkpoint_deletes(seq, &mut objects);
-        pending_objects += objects.len();
-        pending.push(objects);
+        let mut with_sizes = Vec::with_capacity(objects.len());
+        for key in objects {
+            let Some(meta) = handle.store().head(&key).await.map_err(|e| e.to_string())? else {
+                continue;
+            };
+            with_sizes.push((key, meta.size));
+        }
+        pending_objects += with_sizes.len();
+        pending.push(with_sizes);
     }
 
     for objects in pending {
@@ -669,10 +676,10 @@ async fn gc_superseded_packs_with_grace(
     let marker_prefix = keys::superseded_key("");
     let mut markers: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
-        let mut stream = handle.store().list(keys::SUPERSEDED_DIR, None);
-        while let Some(m) = stream.next().await {
-            let m = m.map_err(|e| e.to_string())?;
-            if let Some(checksum) = m.key.strip_prefix(&marker_prefix) {
+        let mut stream = handle.store().list_keys(keys::SUPERSEDED_DIR, None);
+        while let Some(key) = stream.next().await {
+            let key = key.map_err(|e| e.to_string())?;
+            if let Some(checksum) = key.strip_prefix(&marker_prefix) {
                 markers.insert(checksum.to_string());
             }
         }
@@ -680,10 +687,10 @@ async fn gc_superseded_packs_with_grace(
     let mut marked = 0u64;
     let mut reconcile_truncated = false;
     {
-        let mut stream = handle.store().list(keys::WAL_DIR, None);
-        while let Some(m) = stream.next().await {
-            let m = m.map_err(|e| e.to_string())?;
-            let Some(rest) = m.key.strip_prefix(keys::WAL_DIR) else {
+        let mut stream = handle.store().list_keys(keys::WAL_DIR, None);
+        while let Some(key) = stream.next().await {
+            let key = key.map_err(|e| e.to_string())?;
+            let Some(rest) = key.strip_prefix(keys::WAL_DIR) else {
                 continue;
             };
             // Markers live one segment down (`wal/_superseded/<checksum>`) and
@@ -1977,13 +1984,9 @@ mod gc_tests {
         let cp = walgit_proto::keys::checkpoint_key(seq);
         let refs = walgit_proto::keys::checkpoint_refs_key(seq);
         let side = format!("{}{}.bundle", walgit_proto::keys::CHECKPOINTS_DIR, "0000000000000007/");
-        let mut objects = vec![
-            (cp.clone(), 1),
-            (refs.clone(), 2),
-            (side.clone(), 3),
-        ];
+        let mut objects = vec![cp.clone(), refs.clone(), side.clone()];
         order_checkpoint_deletes(seq, &mut objects);
-        let names: Vec<&str> = objects.iter().map(|(key, _)| key.as_str()).collect();
+        let names: Vec<&str> = objects.iter().map(String::as_str).collect();
         assert_eq!(names[0], side, "optional side files delete first");
         assert_eq!(names[1], refs, "refs delete before the checkpoint");
         assert_eq!(names[2], cp, "checkpoint.pb must be the last delete");

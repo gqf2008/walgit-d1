@@ -152,6 +152,65 @@ jobs:
             exit 1
           fi
 
+  # #178: the S3/R2 store contract was only exercised on a developer's
+  # machine. rustfs is the reference local endpoint; the test creates a unique
+  # prefix and cleans it up, so this job owns only the bucket itself.
+  s3-contract:
+    name: s3 store contract
+    runs-on: ubuntu-latest
+    services:
+      rustfs:
+        image: rustfs/rustfs:latest
+        env:
+          RUSTFS_ACCESS_KEY: walgit-dev
+          RUSTFS_SECRET_KEY: walgit-dev-secret
+          RUSTFS_ADDRESS: 0.0.0.0:9000
+          RUSTFS_VOLUMES: /data
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -sf http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install the stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable && rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Create the rustfs bucket
+        run: |
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/minio/health/live && break
+            sleep 1
+          done
+          # rustfs can report /minio/health/live before its storage quorum is
+          # ready; a fresh bucket PUT then returns 503. Retry that, accept 409
+          # as an already-created bucket, and fail loudly on anything else.
+          for attempt in $(seq 1 30); do
+            code="$(curl -sS -o /tmp/walgit-mk-bucket.out -w '%{http_code}' \
+              --aws-sigv4 'aws:amz:us-east-1:s3' \
+              --user 'walgit-dev:walgit-dev-secret' \
+              -X PUT http://127.0.0.1:9000/walgit-test || true)"
+            case "$code" in
+              200|409) break ;;
+              503) sleep 1 ;;
+              *) cat /tmp/walgit-mk-bucket.out; exit 1 ;;
+            esac
+            if [ "$attempt" = 30 ]; then
+              echo "rustfs bucket never became ready (last HTTP $code)"
+              cat /tmp/walgit-mk-bucket.out
+              exit 1
+            fi
+          done
+      - name: S3 store contract
+        run: just test-s3
+
   # Known-red until the debt lands (issue #1, ~1300 pre-existing pedantic
   # hits): the gate fails by design, so it is a separate job with
   # continue-on-error — never a merge blocker, always visible. A PR must keep

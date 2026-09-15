@@ -110,10 +110,10 @@ pub(crate) async fn host_principals_map(st: &AppState) -> Result<HashMap<String,
 
 async fn host_principals_read(st: &AppState) -> Result<HashMap<String, String>, ApiError> {
     let mut map = HashMap::new();
-    let mut stream = st.store.list(HOST_PRINCIPALS, None);
+    let mut stream = st.store.list_keys(HOST_PRINCIPALS, None);
     while let Some(item) = stream.next().await {
-        let meta = item.map_err(|e| ApiError::Internal(e.to_string()))?;
-        let Some(principal) = meta.key.strip_prefix(HOST_PRINCIPALS) else {
+        let key = item.map_err(|e| ApiError::Internal(e.to_string()))?;
+        let Some(principal) = key.strip_prefix(HOST_PRINCIPALS) else {
             continue;
         };
         if principal.is_empty() || principal.contains('/') {
@@ -121,7 +121,7 @@ async fn host_principals_read(st: &AppState) -> Result<HashMap<String, String>, 
         }
         let Some((_, bytes)) = st
             .store
-            .get_bytes(&meta.key)
+            .get_bytes(&key)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
         else {
