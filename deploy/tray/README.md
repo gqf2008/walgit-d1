@@ -23,11 +23,14 @@
 - **打开 Web UI**:直接打开页面(三平台一致)
 - **退出托盘(服务保持运行)**
 
-> macOS 入口(#197):App Bundle 声明 `LSUIElement=false`,托盘同时驻留 **Dock**
-> 与菜单栏——菜单栏状态项会被塞满、被刘海挡住在全屏应用下不可见,没有 Dock
-> 入口就等于整个应用找不到(Swift 版有 Dock,本轮迁移曾丢掉,已恢复)。
-> 点 Dock 图标唤起托盘菜单/打开 Web UI 需要 AppKit 钩子(winit 不暴露
-> `applicationShouldHandleReopen`),仍跟踪在 #197。
+> macOS 入口(#197/#200):App Bundle 声明 `LSUIElement=false`,托盘同时驻留
+> **Dock** 与菜单栏 —— 菜单栏状态项会被塞满、被刘海挡住在全屏应用下不可见,
+> 没有 Dock 入口就等于整个应用找不到(Swift 版有 Dock,本轮迁移曾丢掉,已恢复)。
+> **点 Dock 图标 = 打开 Web UI**:macOS 把这件事投递给应用 delegate 的
+> `applicationShouldHandleReopen:hasVisibleWindows:`,winit 不转发它,所以托盘在
+> 启动时把该方法注入 **winit 的 delegate 类**(它没实现,故不覆盖其行为;实现见
+> `deploy/tray/tray-rs/src/main.rs` 的 `install_dock_reopen_hook`)。CI 没有 Dock
+> 可点,`test.sh` 用 `WALGIT_REOPEN_SELFTEST=1` 直接调那个选择子作为回归门禁。
 
 ## 升级语义
 

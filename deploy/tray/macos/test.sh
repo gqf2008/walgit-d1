@@ -379,7 +379,9 @@ release_detect_fixture() {
     printf '#!/bin/sh\n[ "${1:-}" = "--version" ] && echo "walgit v0.5.0"\n' >"$res/walgit"
     chmod +x "$res/walgit"
     # 空端口:别让 fixture 读到开发机上真实在跑的服务(菜单行要可预期)。
-    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$(free_port)" >"$state/walgit.toml"
+    local port
+    port="$(free_port)"
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$port" >"$state/walgit.toml"
 
     write_release_fixture() { # <file> <version>
         printf '{"tag_name":"v%s","assets":[{"name":"walgit-%s-%s.dmg","browser_download_url":"https://example.invalid/w.dmg","digest":"sha256:%s"}]}\n' \
@@ -414,6 +416,60 @@ release_detect_fixture() {
         *"已是最新"*) ;;
         *) echo "FAIL(release-detect): older release offered: $out" >&2; return 1 ;;
     esac
+    return 0
+}
+
+# #200：点 Dock 图标 → reopen 钩子（注入到 winit 的 delegate 类）→ 打开 Web UI。
+# CI 没有 Dock 可点，所以让托盘用 `WALGIT_REOPEN_SELFTEST=1` 直接调那个选择子：
+# 走的正是 AppKit 点击时调用的同一个 IMP，调用完即退出（不需要窗口服务器）。
+reopen_hook_fixture() {
+    local base="$TMP/reopen"
+    local app="$base/walgit-tray.app"
+    local res="$app/Contents/Resources"
+    local state="$base/state"
+    mkdir -p "$app/Contents/MacOS" "$res" "$state"
+    pkginfo "$app" 0.6.4
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
+    printf '#!/bin/sh\nexit 0\n' >"$res/walgit"
+    chmod +x "$res/walgit"
+    local port
+    port="$(free_port)"
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$port" >"$state/walgit.toml"
+
+    # Bounded: without the hook the selftest never runs, the tray enters its GUI
+    # loop and would hang the fixture forever (found the hard way) — so the run
+    # gets a deadline and "still alive" is a failure, not a wait.
+    local out
+    # `WALGIT_OPEN_URL_FILE`: the hook's action (open the Web UI) writes the URL
+    # there instead of launching a browser — the fixture asserts *that*, so
+    # deleting `open_web()` from the hook cannot stay green, and CI never pops a
+    # browser window.
+    WALGIT_STATE_DIR="$state" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_REOPEN_SELFTEST=1 WALGIT_OPEN_URL_FILE="$base/open-url.txt" \
+        "$app/Contents/MacOS/walgit-tray" >"$base/out.txt" 2>&1 &
+    local pid=$!
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 60 ]; do
+        sleep 0.25
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null
+        echo "FAIL(reopen): selftest did not exit within 15s (hook not installed?)" >&2
+        return 1
+    fi
+    wait "$pid" 2>/dev/null || true
+    out="$(cat "$base/out.txt")"
+    case "$out" in
+        *"reopen-selftest handled=false"*) ;;
+        *) echo "FAIL(reopen): selftest did not invoke the hook: $out" >&2; return 1 ;;
+    esac
+    grep -q "dock: reopen hook installed=true" "$state/tray.log" \
+        || { echo "FAIL(reopen): hook not installed on the delegate class" >&2; return 1; }
+    # The action itself: the hook must have asked for the Web UI URL. (A log line
+    # alone stayed green even with `open_web()` deleted — review finding.)
+    grep -Fqx "http://127.0.0.1:$port/" "$base/open-url.txt" \
+        || { echo "FAIL(reopen): the hook did not open the Web UI: $(cat "$base/open-url.txt" 2>/dev/null)" >&2; return 1; }
     return 0
 }
 
@@ -574,6 +630,7 @@ bootstrap_fixture
 legacy_migration_fixture
 manual_legacy_migration_fixture
 release_detect_fixture
+reopen_hook_fixture
 release_install_fixture success
 release_install_fixture rollback
 release_service_fixture
