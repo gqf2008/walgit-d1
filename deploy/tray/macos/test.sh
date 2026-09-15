@@ -10,10 +10,14 @@ ROOT="$(cd ../../.. && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/walgit-tray-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-TRAY_BIN="${WALGIT_TRAY_BIN:-$ROOT/target/release/walgit-tray}"
-if [ ! -x "$TRAY_BIN" ]; then
+# 无 WALGIT_TRAY_BIN(=本地跑)时**每次**都构建:只判"文件在不在"会拿旧产物
+# 跑 fixture(实测踩过:改完源码后 WALGIT_DETECT_ONCE 没生效,托盘照常起
+# 事件循环,测试挂死)。CI 传预构建产物,cargo 增量构建本身也很快。
+TRAY_BIN="${WALGIT_TRAY_BIN:-}"
+if [ -z "$TRAY_BIN" ]; then
     ( cd "$ROOT" && cargo build --release --target-dir "$ROOT/target" \
         --manifest-path "$ROOT/deploy/tray/tray-rs/Cargo.toml" )
+    TRAY_BIN="$ROOT/target/release/walgit-tray"
 fi
 [ -x "$TRAY_BIN" ] || { echo "FAIL: missing tray binary $TRAY_BIN" >&2; exit 1; }
 
@@ -351,6 +355,64 @@ PYS
     return 0
 }
 
+# Release 检测自检:无 GUI 也要能验证「菜单指向哪个版本」(macOS Release 通道)。
+# WALGIT_DETECT_ONCE=1 让托盘跑一次检测后打印菜单行退出,WALGIT_RELEASE_FIXTURE
+# 用本地 JSON 代替 GitHub API,检查结果同时落在 tray.log。
+release_detect_fixture() {
+    local base="$TMP/release-detect"
+    local app="$base/walgit-tray.app"
+    local res="$app/Contents/Resources"
+    local state="$base/state"
+    local arch
+    case "$(uname -m)" in
+        arm64) arch=arm64 ;;
+        x86_64) arch=x86_64 ;;
+        *) echo "skip(release-detect): unsupported arch" >&2; return 0 ;;
+    esac
+    mkdir -p "$app/Contents/MacOS" "$res" "$state"
+    pkginfo "$app" 0.5.0
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
+    printf '#!/bin/sh\n[ "${1:-}" = "--version" ] && echo "walgit v0.5.0"\n' >"$res/walgit"
+    chmod +x "$res/walgit"
+    # 空端口:别让 fixture 读到开发机上真实在跑的服务(菜单行要可预期)。
+    printf '[server]\nlisten = "127.0.0.1:%s"\n' "$(free_port)" >"$state/walgit.toml"
+
+    write_release_fixture() { # <file> <version>
+        printf '{"tag_name":"v%s","assets":[{"name":"walgit-%s-%s.dmg","browser_download_url":"https://example.invalid/w.dmg","digest":"sha256:%s"}]}\n' \
+            "$2" "$2" "$arch" "$(printf 'a%.0s' $(seq 1 64))" >"$1"
+    }
+
+    write_release_fixture "$base/newer.json" 0.9.9
+    local out
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/newer.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"⬆️ 下载并升级到 v0.9.9"*"当前 0.5.0"*) ;;
+        *) echo "FAIL(release-detect): menu line wrong: $out" >&2; return 1 ;;
+    esac
+    grep -q "detect: app=0.5.0 release=v0.9.9 → available" "$state/tray.log" \
+        || { echo "FAIL(release-detect): detection not logged" >&2; return 1; }
+
+    # 同版本 → 已是最新(不能自己提示升级到自己)。
+    write_release_fixture "$base/same.json" 0.5.0
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/same.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"已是最新"*) ;;
+        *) echo "FAIL(release-detect): same version not up-to-date: $out" >&2; return 1 ;;
+    esac
+
+    # 旧版本 → 已是最新(降级提示是 bug)。
+    write_release_fixture "$base/older.json" 0.4.0
+    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/older.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"已是最新"*) ;;
+        *) echo "FAIL(release-detect): older release offered: $out" >&2; return 1 ;;
+    esac
+    return 0
+}
+
 pkginfo() { # pkginfo <app> <version>
     mkdir -p "$1/Contents/Resources"
     cat >"$1/Contents/Info.plist" <<PLIST
@@ -507,6 +569,7 @@ layout_fixture
 bootstrap_fixture
 legacy_migration_fixture
 manual_legacy_migration_fixture
+release_detect_fixture
 release_install_fixture success
 release_install_fixture rollback
 release_service_fixture

@@ -228,22 +228,39 @@ fn release_channel() -> bool {
 /// 检测可用更新。macOS 优先 Release(装好的 DMG 机器不需要源码仓库);
 /// Release 通道不可用(无网/无 bundle/资产缺失)且本机有源码仓库时退回源码检测。
 fn detected_update() -> Detected {
+    // 每条检测都留痕:菜单为什么写「可升级/已最新」要能从 tray.log 倒推,
+    // 否则现场只能猜(原 Swift 托盘同样打 detect 行)。
     #[cfg(target_os = "macos")]
     {
         use release::is_version_newer;
 
         if app_bundle().is_some() {
-            if let Some(info) = latest_release() {
-                let current = app_version();
-                return if is_version_newer(&info.version, &current) {
-                    Detected::Release(info)
-                } else {
-                    Detected::Nothing
-                };
+            let current = app_version();
+            match latest_release() {
+                Some(info) => {
+                    let newer = is_version_newer(&info.version, &current);
+                    log_line(&format!(
+                        "detect: app={current} release=v{} → {}",
+                        info.version,
+                        if newer { "available" } else { "up-to-date" }
+                    ));
+                    return if newer {
+                        Detected::Release(info)
+                    } else {
+                        Detected::Nothing
+                    };
+                }
+                None => log_line(&format!(
+                    "detect: app={current} release=none(lookup 失败)→ 退回源码检测"
+                )),
             }
         }
     }
     if !has_source_repo() {
+        log_line(&format!(
+            "detect: source=none(无仓库 {})",
+            repo_dir().display()
+        ));
         return Detected::Nothing;
     }
     let repo = repo_dir();
@@ -252,10 +269,25 @@ fn detected_update() -> Detected {
     let (c2, rout) = run(Some(&repo), "git", &["rev-parse", "origin/main"], &[]);
     let local = lout.trim().to_string();
     let remote = rout.trim().to_string();
-    if c1 != 0 || c2 != 0 || local.is_empty() || remote.is_empty() || local == remote {
+    if c1 != 0 || c2 != 0 || local.is_empty() || remote.is_empty() {
+        log_line("detect: source skip(git failed)");
         return Detected::Nothing;
     }
-    Detected::Source(remote[..7.min(remote.len())].to_string())
+    let short = |sha: &str| sha[..7.min(sha.len())].to_string();
+    log_line(&format!(
+        "detect: local={} remote={} → {}",
+        short(&local),
+        short(&remote),
+        if local == remote {
+            "up-to-date"
+        } else {
+            "available"
+        }
+    ));
+    if local == remote {
+        return Detected::Nothing;
+    }
+    Detected::Source(short(&remote))
 }
 
 /// 把检测结果送进事件循环。
@@ -1244,6 +1276,31 @@ fn main() {
     // 跑一遍 bootstrap 后立即退出(WALGIT_BOOTSTRAP_ONLY=1)。
     bootstrap::bootstrap_deploy();
     if std::env::var("WALGIT_BOOTSTRAP_ONLY").as_deref() == Ok("1") {
+        return;
+    }
+
+    // 检测一次就退出(WALGIT_DETECT_ONCE=1):CI 的 macOS leg 没有可靠窗口
+    // 服务器,但"菜单说升级到哪个版本"是 Release 通道最该被守住的语义。
+    // 与 fixture(WALGIT_RELEASE_FIXTURE)配合即可离线断言。
+    if std::env::var("WALGIT_DETECT_ONCE").as_deref() == Ok("1") {
+        let detected = detected_update();
+        let (state, release, sha) = match detected {
+            Detected::Nothing => (ST_LATEST, None, String::new()),
+            Detected::Source(sha) => (ST_AVAILABLE, None, sha),
+            #[cfg(target_os = "macos")]
+            Detected::Release(info) => (ST_AVAILABLE, Some(info), String::new()),
+        };
+        println!(
+            "{}",
+            upgrade_line(
+                state,
+                &app_version(),
+                &service_version(),
+                release.as_ref(),
+                &sha,
+                ""
+            )
+        );
         return;
     }
 
