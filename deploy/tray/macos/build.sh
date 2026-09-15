@@ -63,7 +63,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleIconFile</key><string>walgit</string>
-    <key>LSUIElement</key><true/>
+    <!-- A Dock icon, not a pure menu-bar agent (#197): the status item can be
+         occluded (full menu bar, the notch, full-screen apps), and without a
+         Dock icon the app is then unreachable — no Dock, no Cmd+Tab. -->
+    <key>LSUIElement</key><false/>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

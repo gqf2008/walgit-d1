@@ -187,6 +187,10 @@ EOF
     chmod +x "$base/bin/codesign"
     PATH="$base/bin:$PATH" WALGIT_BIN="$base/walgit" WALGIT_TRAY_BIN="$TRAY_BIN" \
         TRAY_APP_DIR="$base" ./build.sh 0.5.0 >/dev/null
+    # #197：菜单栏状态项被遮挡时，Dock 是唯一入口 —— 这条键必须一直是 false，
+    # 否则应用会退回"纯菜单栏"，图标一被挤掉就彻底找不到。
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist" 2>/dev/null)" = "false" ] \
+        || { echo "FAIL(layout): LSUIElement must be false (a Dock icon is the fallback entry point)" >&2; return 1; }
     [ -x "$app/Contents/Resources/walgit" ] || { echo "FAIL(layout): missing bundled walgit" >&2; return 1; }
     [ -x "$app/Contents/Resources/release-install.sh" ] || { echo "FAIL(layout): missing release-install.sh" >&2; return 1; }
     [ -f "$app/Contents/Resources/walgit.toml" ] || { echo "FAIL(layout): missing state template" >&2; return 1; }
