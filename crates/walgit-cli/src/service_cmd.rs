@@ -330,12 +330,10 @@ mod tests {
         cmd.arg("5");
         detach_process(&mut cmd);
         let mut child = cmd.spawn().unwrap();
-        let pid = child.id().to_string();
-        let out = std::process::Command::new("ps")
-            .args(["-o", "sid=", "-p", &pid])
-            .output()
-            .unwrap();
-        let sid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let pid = i32::try_from(child.id()).expect("child pid fits pid_t");
+        // SAFETY: getsid only reads the session id for the live child process;
+        // `pid` was checked to fit pid_t above.
+        let sid = unsafe { libc::getsid(pid) };
         assert_eq!(sid, pid, "child must lead its own session");
         let _ = child.kill();
         let _ = child.wait();
