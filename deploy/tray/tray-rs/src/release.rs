@@ -20,7 +20,8 @@ pub const ST_CHECKING: u8 = 1; // 正在检查更新…
 pub const ST_LATEST: u8 = 2; // 已是最新 ✓(点击重查)
 pub const ST_AVAILABLE: u8 = 3; // ⬆️ 升级到新版本
 pub const ST_INSTALLING: u8 = 4; // 升级中…
-pub const ST_FAILED: u8 = 5; // 失败(点击重查)
+pub const ST_FAILED: u8 = 5; // 升级失败(点击重查)
+pub const ST_CHECK_FAILED: u8 = 6; // 更新检查失败(点击重试)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseAsset {
@@ -37,7 +38,7 @@ pub struct ReleaseInfo {
 }
 
 /// 当前架构的资产后缀。未知架构返回 `unknown`——此时永远匹配不到 asset,
-/// 菜单停在「上次升级失败」而不是抓错包。
+/// 更新检查会报失败,而不是抓错包。
 pub fn arch_slug() -> &'static str {
     #[cfg(target_arch = "aarch64")]
     {
@@ -263,6 +264,7 @@ pub fn upgrade_line(
             }
         }
         ST_FAILED => "上次升级失败(点击重查)".into(),
+        ST_CHECK_FAILED => "更新检查失败(点击重试)".into(),
         _ => format!("{version_text} · 检查更新…"),
     }
 }
@@ -439,6 +441,10 @@ mod tests {
         assert_eq!(
             upgrade_line(ST_FAILED, "0.5.0", "", None, "", ""),
             "上次升级失败(点击重查)"
+        );
+        assert_eq!(
+            upgrade_line(ST_CHECK_FAILED, "0.5.0", "", None, "", ""),
+            "更新检查失败(点击重试)"
         );
     }
 }
