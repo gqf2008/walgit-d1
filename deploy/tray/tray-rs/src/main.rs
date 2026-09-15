@@ -26,7 +26,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use release::{
     upgrade_line, ReleaseInfo, ST_AVAILABLE, ST_CHECKING, ST_CHECK_FAILED, ST_FAILED, ST_IDLE,
@@ -314,9 +314,21 @@ impl DetectEpoch {
         self.latest
     }
 
+    /// 作废当前这一代检测。进入升级时调用,让升级前发出的结果永久失效。
+    fn invalidate(&mut self) {
+        self.next += 1;
+        self.latest = self.next;
+    }
+
     fn accepts(&self, generation: u64, busy: u8) -> bool {
         busy != 2 && generation == self.latest
     }
+}
+
+/// 自动检测只在空闲且没有需要用户处理的终止状态时触发。升级失败必须
+/// 停在 ST_FAILED,不能被定时器悄悄翻回「可升级/已最新」。
+fn auto_detect_allowed(busy: u8, state: u8) -> bool {
+    busy == 0 && !matches!(state, ST_CHECKING | ST_INSTALLING | ST_FAILED)
 }
 
 /// macOS Release 升级:下载 DMG → 校验 sha256 → 挂载 → 校验签名/公证/版本
@@ -1154,10 +1166,9 @@ fn icon_rgba(size: usize, color: [u8; 3]) -> Vec<u8> {
 #[derive(Debug, Clone)]
 enum Msg {
     Status(bool, String),
-    UpdateState(u8),
     Note(String),
     Busy(u8),
-    AutoDetect,
+    UpgradeFinished { ok: bool },
     Detected { generation: u64, detected: Detected },
 }
 
@@ -1181,6 +1192,7 @@ struct App {
     release: Option<ReleaseInfo>,
     note: String,
     detect_epoch: DetectEpoch,
+    next_auto_detect: Option<Instant>,
 }
 
 impl App {
@@ -1223,6 +1235,25 @@ impl App {
                 detected,
             });
         });
+    }
+
+    /// 事件循环驱动的 30 分钟自动检测。相比独立线程投递 tick,这里能在
+    /// 升级/失败状态上直接拒绝,不存在排队 tick 穿透终止态的问题。
+    fn maybe_auto_detect(&mut self) {
+        if !auto_detect_allowed(self.busy, self.state) {
+            return;
+        }
+        let Some(next) = self.next_auto_detect else {
+            return;
+        };
+        let now = Instant::now();
+        if now < next {
+            return;
+        }
+        self.next_auto_detect = Some(now + Duration::from_secs(1800));
+        if let Some(proxy) = self.proxy.clone() {
+            self.start_detection(&proxy, false);
+        }
     }
 
     /// 一次性应用检测结果:菜单状态与对应的 payload 必须同代写入。
@@ -1338,21 +1369,14 @@ impl ApplicationHandler<Msg> for App {
                     self.service_version = service_version;
                 }
             }
-            // 升级进行中(busy==2)不接受状态翻转:30 分钟检测线程可能在
-            // 一次超长 cargo build 中把「升级中…」翻回「⬆️ 可升级」。
-            Msg::UpdateState(s) => {
-                if self.busy != 2 {
-                    self.state = s;
-                }
-            }
             Msg::Note(n) => self.note = n,
             Msg::Busy(b) => self.busy = b,
-            Msg::AutoDetect => {
-                if self.busy != 2 {
-                    if let Some(proxy) = self.proxy.clone() {
-                        self.start_detection(&proxy, false);
-                    }
-                }
+            // 升级结束必须是一次原子状态转换:不能先把 busy 清掉、等下一
+            // 条消息才落 ST_FAILED,否则在途检测会从窗口里穿过去。
+            Msg::UpgradeFinished { ok } => {
+                self.busy = 0;
+                self.note.clear();
+                self.state = if ok { ST_LATEST } else { ST_FAILED };
             }
             Msg::Detected {
                 generation,
@@ -1396,7 +1420,9 @@ impl ApplicationHandler<Msg> for App {
                         self.start_detection(&proxy, true);
                     }
                     ST_AVAILABLE => {
-                        // 用户点击升级:这里才真正跑升级管线
+                        // 用户点击升级:这里才真正跑升级管线。先作废升级前
+                        // 启动的检测,防止它在新状态落定后回灌。
+                        self.detect_epoch.invalidate();
                         self.state = ST_INSTALLING;
                         self.busy = 2;
                         self.rebuild_menu();
@@ -1415,13 +1441,7 @@ impl ApplicationHandler<Msg> for App {
                                 log_line(&format!("upgrade -> {r:?}"));
                                 std::process::exit(0);
                             }
-                            let _ = proxy.send_event(Msg::Busy(0));
-                            let _ = proxy.send_event(Msg::Note(String::new()));
-                            let _ = proxy.send_event(Msg::UpdateState(if r.is_ok() {
-                                ST_LATEST
-                            } else {
-                                ST_FAILED
-                            }));
+                            let _ = proxy.send_event(Msg::UpgradeFinished { ok: r.is_ok() });
                             let _ = proxy
                                 .send_event(Msg::Status(healthz().is_some(), service_version()));
                             log_line(&format!("upgrade -> {r:?}"));
@@ -1435,6 +1455,7 @@ impl ApplicationHandler<Msg> for App {
             }
             self.rebuild_menu();
         }
+        self.maybe_auto_detect();
     }
 }
 
@@ -1560,6 +1581,13 @@ fn main() {
         .build()
         .expect("tray build");
 
+    let detect_enabled = release_channel() || has_source_repo();
+    if !detect_enabled {
+        log_line(&format!(
+            "detect: no repo at {} — update checks disabled (set WALGIT_REPO to enable)",
+            repo_dir().display()
+        ));
+    }
     let mut app = App {
         tray: Some(tray),
         items: Some(MenuHandles {
@@ -1578,6 +1606,7 @@ fn main() {
         release: None,
         note: String::new(),
         detect_epoch: DetectEpoch::default(),
+        next_auto_detect: detect_enabled.then(|| Instant::now() + Duration::from_secs(30)),
     };
     app.rebuild_menu();
 
@@ -1590,25 +1619,6 @@ fn main() {
         let _ = poll_proxy.send_event(Msg::Status(up, version));
         std::thread::sleep(Duration::from_secs(5));
     });
-    // 自动检测线程(启动 30 秒一次,此后每 30 分钟;静默,失败不打扰)。
-    // 两条通道:macOS App Bundle 走 GitHub Release(机器上不需要源码仓库);
-    // 开发机与 Windows/Linux 走 WALGIT_REPO 指向的 checkout + rustup/cargo。
-    // 两条都没有时整条停用——否则只会每 30 分钟往 tray.log 写一条 skip 噪音。
-    if !release_channel() && !has_source_repo() {
-        log_line(&format!(
-            "detect: no repo at {} — update checks disabled (set WALGIT_REPO to enable)",
-            repo_dir().display()
-        ));
-    } else {
-        let detect_proxy = event_loop.create_proxy();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(30));
-            loop {
-                let _ = detect_proxy.send_event(Msg::AutoDetect);
-                std::thread::sleep(Duration::from_secs(1800));
-            }
-        });
-    }
 
     #[cfg(target_os = "macos")]
     install_dock_reopen_hook();
@@ -1643,5 +1653,26 @@ mod tests {
         let mut epoch = DetectEpoch::default();
         let generation = epoch.start();
         assert!(!epoch.accepts(generation, 2));
+    }
+
+    #[test]
+    fn upgrade_failure_is_not_overwritten_by_pre_upgrade_detection() {
+        let mut epoch = DetectEpoch::default();
+        let in_flight = epoch.start();
+
+        // 进入升级:在途检测作废。
+        epoch.invalidate();
+        assert!(!epoch.accepts(in_flight, 2));
+
+        // 旧结果在升级终止后到达,仍不能落到已经恢复的空闲状态上。
+        let busy = 0;
+        let mut state = ST_FAILED;
+        if epoch.accepts(in_flight, busy) {
+            state = ST_LATEST;
+        }
+        assert_eq!(state, ST_FAILED);
+
+        // 终止态也不会被自动 tick 立刻重新开启检测。
+        assert!(!auto_detect_allowed(busy, state));
     }
 }
