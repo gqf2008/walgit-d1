@@ -679,6 +679,32 @@ impl RepoHandle {
         Ok(guard)
     }
 
+    /// Like [`sync_refs`], but always performs the conditional manifest GET,
+    /// bypassing `wal.freshness_ttl`. Destructive maintenance reads per-repo
+    /// settings (retention windows) from the manifest it just fetched; a TTL
+    /// shortcut could otherwise act on a settings revision another instance
+    /// has already superseded.
+    pub async fn sync_refs_fresh(&self) -> Result<Arc<walgit_proto::v1::Manifest>, WalError> {
+        let span = tracing::info_span!(
+            "wal.sync",
+            repo = %self.id,
+            level = ?SyncLevel::Refs,
+            changed = false,
+            entries_applied = 0u64,
+        );
+        self.touch();
+        let _sync_guard = crate::lockwait::timed(
+            "sync_mutex",
+            &self.id,
+            self.cfg.telemetry.lock_wait_warn,
+            || self.sync_mutex.try_lock().ok(),
+            self.sync_mutex.lock(),
+        )
+        .await;
+        self.sync_locked_inner(&span, false).await?;
+        Ok(self.manifest())
+    }
+
     /// Whether a refs-level sync should pull the serving copy in the background:
     /// configured, not yet reconciled, this host serves the repository's objects
     /// (placement — a host that does not never pulls its packs, not even in the

@@ -323,6 +323,16 @@ async fn write_checkpoint_inner(handle: &RepoHandle) -> Result<CheckpointRef, Wa
         {
             return Ok(cp.clone());
         }
+        // Never install a *older* checkpoint than the live one. This CAS loop can
+        // be retried after another writer committed a newer checkpoint (its
+        // `cp_ref` was computed before the retry), and a CAS that regressed
+        // `manifest.checkpoint` would both lose state and point readers at a
+        // directory bucket GC may already have reclaimed (#202 review).
+        if let Some(ref current) = current_manifest.checkpoint
+            && current.seq >= cp_ref.seq
+        {
+            return Ok(current.clone());
+        }
 
         let mut updated: Manifest = (*current_manifest).clone();
         updated.checkpoint = Some(cp_ref.clone());
