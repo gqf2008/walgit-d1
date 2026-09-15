@@ -550,7 +550,60 @@ release_detect_fixture() {
     grep -q "latest lookup failed" "$state/tray.log" \
         || { echo "FAIL(release-detect): lookup failure reason not logged" >&2; return 1; }
 
-    # 旧版本 → 已是最新(降级提示是 bug)。
+    # Release 检查失败 + 有源码仓库,但 git fetch 失败:不能拿陈旧的
+    # origin/main 说「已是最新」——否则断网时会把不可验证的旧 refs 当成最新。
+    mkdir -p "$base/fetch-repo/.git" "$base/fetch-fail-bin"
+    cat >"$base/fetch-fail-bin/git" <<'GIT'
+#!/bin/sh
+case "${1:-}" in
+  fetch) echo "simulated fetch failure" >&2; exit 128 ;;
+  rev-parse)
+    case "${2:-}" in
+      HEAD|origin/main) echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; exit 0 ;;
+    esac
+    ;;
+esac
+exit 1
+GIT
+    chmod +x "$base/fetch-fail-bin/git"
+    out="$(PATH="$base/fetch-fail-bin:$PATH" WALGIT_STATE_DIR="$state" \
+        WALGIT_REPO="$base/fetch-repo" WALGIT_RELEASE_FIXTURE="$base/no-digest.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"更新检查失败"*) ;;
+        *) echo "FAIL(release-detect): source fetch failure was treated as latest: $out" >&2; return 1 ;;
+    esac
+    case "$out" in
+        *"已是最新"*) echo "FAIL(release-detect): source fetch failure said latest: $out" >&2; return 1 ;;
+    esac
+    grep -q "source fetch failed" "$state/tray.log" \
+        || { echo "FAIL(release-detect): source fetch failure reason not logged" >&2; return 1; }
+
+    # 正向回退保持可用:Release 资产失败但源码 fetch/rev-parse 成功时,
+    # 菜单仍应给出源码升级目标,而不是把所有 Release 失败都报成检查失败。
+    mkdir -p "$base/source-repo/.git" "$base/source-bin"
+    cat >"$base/source-bin/git" <<'GIT'
+#!/bin/sh
+case "${1:-}" in
+  fetch) exit 0 ;;
+  rev-parse)
+    case "${2:-}" in
+      HEAD) echo "1111111111111111111111111111111111111111"; exit 0 ;;
+      origin/main) echo "2222222222222222222222222222222222222222"; exit 0 ;;
+    esac
+    ;;
+esac
+exit 1
+GIT
+    chmod +x "$base/source-bin/git"
+    out="$(PATH="$base/source-bin:$PATH" WALGIT_STATE_DIR="$state" \
+        WALGIT_REPO="$base/source-repo" WALGIT_RELEASE_FIXTURE="$base/no-digest.json" \
+        WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
+    case "$out" in
+        *"从源码升级到 2222222"*) ;;
+        *) echo "FAIL(release-detect): source fallback broken: $out" >&2; return 1 ;;
+    esac
+
     # 旧版本 → 已是最新(降级提示是 bug)。
     write_release_fixture "$base/older.json" 0.4.0
     out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/older.json" \

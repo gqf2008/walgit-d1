@@ -151,8 +151,9 @@ fn app_version() -> String {
 }
 
 /// GitHub latest release(或 `WALGIT_RELEASE_FIXTURE` 指向的本地 JSON)。
-/// 只信 API 里的 sha256 digest:拿不到就当作「没有可用更新」而不是安装
-/// 一个未校验的包。只有 macOS 的 Release 通道会用它。
+/// 只信 API 里的 sha256 digest:拿不到就返回失败原因,由调用方决定回退
+/// 源码检测还是向用户显示「更新检查失败」,绝不安装未校验的包。
+/// 只有 macOS 的 Release 通道会用它。
 #[cfg(target_os = "macos")]
 fn latest_release() -> Result<ReleaseInfo, String> {
     use release::{arch_slug, parse_latest_release};
@@ -195,6 +196,7 @@ fn latest_release() -> Result<ReleaseInfo, String> {
 }
 
 /// 检测结果:菜单状态机据此选「下载并升级(Release)」还是「从源码升级」。
+#[derive(Debug, Clone)]
 enum Detected {
     Nothing,
     Source(String),
@@ -264,7 +266,14 @@ fn detected_update() -> Detected {
         return Detected::Failed;
     }
     let repo = repo_dir();
-    let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
+    let (fc, fout) = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
+    if fc != 0 {
+        log_line(&format!(
+            "detect: source fetch failed {}",
+            fout.trim().chars().take(160).collect::<String>()
+        ));
+        return Detected::Failed;
+    }
     let (c1, lout) = run(Some(&repo), "git", &["rev-parse", "HEAD"], &[]);
     let (c2, rout) = run(Some(&repo), "git", &["rev-parse", "origin/main"], &[]);
     let local = lout.trim().to_string();
@@ -290,29 +299,23 @@ fn detected_update() -> Detected {
     Detected::Source(short(&remote))
 }
 
-/// 把检测结果送进事件循环。
-fn publish_detected(proxy: &EventLoopProxy<Msg>, detected: Detected) {
-    match detected {
-        Detected::Nothing => {
-            let _ = proxy.send_event(Msg::Release(None));
-            let _ = proxy.send_event(Msg::UpdateState(ST_LATEST));
-        }
-        Detected::Source(sha) => {
-            let _ = proxy.send_event(Msg::Release(None));
-            let _ = proxy.send_event(Msg::Available(sha));
-            let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
-        }
-        Detected::Failed => {
-            let _ = proxy.send_event(Msg::Release(None));
-            let _ = proxy.send_event(Msg::Available(String::new()));
-            let _ = proxy.send_event(Msg::UpdateState(ST_CHECK_FAILED));
-        }
-        #[cfg(target_os = "macos")]
-        Detected::Release(info) => {
-            let _ = proxy.send_event(Msg::Available(String::new()));
-            let _ = proxy.send_event(Msg::Release(Some(info.clone())));
-            let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
-        }
+/// 每次检测启动都分配递增 generation。自动检测和点击重试可能并发,
+/// 事件循环只接受最新 generation 的结果,晚到的旧结果不得覆盖新结果。
+#[derive(Default)]
+struct DetectEpoch {
+    next: u64,
+    latest: u64,
+}
+
+impl DetectEpoch {
+    fn start(&mut self) -> u64 {
+        self.next += 1;
+        self.latest = self.next;
+        self.latest
+    }
+
+    fn accepts(&self, generation: u64, busy: u8) -> bool {
+        busy != 2 && generation == self.latest
     }
 }
 
@@ -1152,10 +1155,10 @@ fn icon_rgba(size: usize, color: [u8; 3]) -> Vec<u8> {
 enum Msg {
     Status(bool, String),
     UpdateState(u8),
-    Available(String),
-    Release(Option<ReleaseInfo>),
     Note(String),
     Busy(u8),
+    AutoDetect,
+    Detected { generation: u64, detected: Detected },
 }
 
 struct MenuHandles {
@@ -1177,6 +1180,7 @@ struct App {
     available_sha: String,   // 源码升级目标
     release: Option<ReleaseInfo>,
     note: String,
+    detect_epoch: DetectEpoch,
 }
 
 impl App {
@@ -1201,6 +1205,50 @@ impl App {
             String::new()
         } else {
             service
+        }
+    }
+
+    /// 启动一次检测。generation 在事件循环线程分配,结果回来时只认最新一代。
+    fn start_detection(&mut self, proxy: &Arc<EventLoopProxy<Msg>>, show_checking: bool) {
+        let generation = self.detect_epoch.start();
+        if show_checking {
+            self.state = ST_CHECKING;
+            self.rebuild_menu();
+        }
+        let proxy = Arc::clone(proxy);
+        std::thread::spawn(move || {
+            let detected = detected_update();
+            let _ = proxy.send_event(Msg::Detected {
+                generation,
+                detected,
+            });
+        });
+    }
+
+    /// 一次性应用检测结果:菜单状态与对应的 payload 必须同代写入。
+    fn apply_detected(&mut self, detected: Detected) {
+        match detected {
+            Detected::Nothing => {
+                self.release = None;
+                self.available_sha.clear();
+                self.state = ST_LATEST;
+            }
+            Detected::Source(sha) => {
+                self.release = None;
+                self.available_sha = sha;
+                self.state = ST_AVAILABLE;
+            }
+            Detected::Failed => {
+                self.release = None;
+                self.available_sha.clear();
+                self.state = ST_CHECK_FAILED;
+            }
+            #[cfg(target_os = "macos")]
+            Detected::Release(info) => {
+                self.available_sha.clear();
+                self.release = Some(info);
+                self.state = ST_AVAILABLE;
+            }
         }
     }
 
@@ -1297,10 +1345,23 @@ impl ApplicationHandler<Msg> for App {
                     self.state = s;
                 }
             }
-            Msg::Available(sha) => self.available_sha = sha,
-            Msg::Release(info) => self.release = info,
             Msg::Note(n) => self.note = n,
             Msg::Busy(b) => self.busy = b,
+            Msg::AutoDetect => {
+                if self.busy != 2 {
+                    if let Some(proxy) = self.proxy.clone() {
+                        self.start_detection(&proxy, false);
+                    }
+                }
+            }
+            Msg::Detected {
+                generation,
+                detected,
+            } => {
+                if self.detect_epoch.accepts(generation, self.busy) {
+                    self.apply_detected(detected);
+                }
+            }
         }
         self.update_icon();
         self.rebuild_menu();
@@ -1332,12 +1393,7 @@ impl ApplicationHandler<Msg> for App {
                 }
                 "upgrade" => match self.state {
                     ST_IDLE | ST_LATEST | ST_FAILED | ST_CHECK_FAILED => {
-                        self.state = ST_CHECKING;
-                        self.rebuild_menu();
-                        std::thread::spawn(move || {
-                            let detected = detected_update();
-                            publish_detected(&proxy, detected);
-                        });
+                        self.start_detection(&proxy, true);
                     }
                     ST_AVAILABLE => {
                         // 用户点击升级:这里才真正跑升级管线
@@ -1521,6 +1577,7 @@ fn main() {
         available_sha: String::new(),
         release: None,
         note: String::new(),
+        detect_epoch: DetectEpoch::default(),
     };
     app.rebuild_menu();
 
@@ -1547,7 +1604,7 @@ fn main() {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(30));
             loop {
-                publish_detected(&detect_proxy, detected_update());
+                let _ = detect_proxy.send_event(Msg::AutoDetect);
                 std::thread::sleep(Duration::from_secs(1800));
             }
         });
@@ -1557,4 +1614,34 @@ fn main() {
     install_dock_reopen_hook();
 
     event_loop.run_app(&mut app).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_detection_cannot_overwrite_newer_result() {
+        let mut epoch = DetectEpoch::default();
+        let automatic = epoch.start();
+        let retry = epoch.start();
+        let mut state = ST_CHECKING;
+
+        // 点击重试更新一代,先回来并写入结果……
+        if epoch.accepts(retry, 0) {
+            state = ST_LATEST;
+        }
+        // ……更慢的自动检测旧结果后到,不能把菜单覆盖回旧状态。
+        if epoch.accepts(automatic, 0) {
+            state = ST_AVAILABLE;
+        }
+        assert_eq!(state, ST_LATEST);
+    }
+
+    #[test]
+    fn detection_result_is_ignored_during_upgrade() {
+        let mut epoch = DetectEpoch::default();
+        let generation = epoch.start();
+        assert!(!epoch.accepts(generation, 2));
+    }
 }

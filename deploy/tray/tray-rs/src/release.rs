@@ -38,7 +38,7 @@ pub struct ReleaseInfo {
 }
 
 /// 当前架构的资产后缀。未知架构返回 `unknown`——此时永远匹配不到 asset,
-/// 菜单停在「上次升级失败」而不是抓错包。
+/// 更新检查会报失败,而不是抓错包。
 pub fn arch_slug() -> &'static str {
     #[cfg(target_arch = "aarch64")]
     {
