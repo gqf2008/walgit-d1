@@ -23,10 +23,11 @@
 - **打开 Web UI**:直接打开页面(三平台一致)
 - **退出托盘(服务保持运行)**
 
-> macOS 取舍(#183):托盘现在就是 `tray-rs`,App Bundle 声明 `LSUIElement=true`,
-> 因此**只有菜单栏图标、没有 Dock 图标**——Swift 版曾同时驻留 Dock 并支持
-> "点 Dock 打开 Web UI",tray-rs 不提供该行为(三平台一致的纯菜单栏形态)。
-> 这是有意取舍,不是回归;需要 Dock 形态的话应作为独立工作单元重新设计。
+> macOS 入口(#197):App Bundle 声明 `LSUIElement=false`,托盘同时驻留 **Dock**
+> 与菜单栏——菜单栏状态项会被塞满、被刘海挡住在全屏应用下不可见,没有 Dock
+> 入口就等于整个应用找不到(Swift 版有 Dock,本轮迁移曾丢掉,已恢复)。
+> 点 Dock 图标唤起托盘菜单/打开 Web UI 需要 AppKit 钩子(winit 不暴露
+> `applicationShouldHandleReopen`),仍跟踪在 #197。
 
 ## 升级语义
 

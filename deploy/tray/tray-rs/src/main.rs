@@ -1338,7 +1338,18 @@ fn main() {
         log_line("autostart marker: starting service");
         let _ = service_start();
     }
-    let event_loop = EventLoop::<Msg>::with_user_event().build().unwrap();
+    // macOS: a *regular* app (Dock icon + Cmd+Tab), not an accessory one. The
+    // status item can be occluded — a full menu bar, the notch, a full-screen
+    // app — and an accessory app has no other entry point at all (#197).
+    // The bundle's `LSUIElement=false` is what LaunchServices reads; setting the
+    // policy here keeps a bare `cargo run` (no bundle) equally reachable.
+    let mut loop_builder = EventLoop::<Msg>::with_user_event();
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        loop_builder.with_activation_policy(ActivationPolicy::Regular);
+    }
+    let event_loop = loop_builder.build().unwrap();
     let proxy = Arc::new(event_loop.create_proxy());
 
     let icon = tray_icon::Icon::from_rgba(icon_rgba(32, state_color(false, 0)), 32, 32)
