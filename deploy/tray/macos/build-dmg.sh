@@ -198,7 +198,19 @@ check_version "$APP/Contents/Resources/walgit" "$VERSION"
 
 if [ "${WALGIT_CLEAN_TARGET_AFTER_APP:-0}" = "1" ]; then
     echo "== [2b/8] clean CI build tree =="
+    echo "disk before CI cleanup:"
+    df -h "$ROOT" "$WORK" || true
+    du -sh "$ROOT/target" "$WORK" 2>/dev/null || true
     rm -rf "$ROOT/target"
+    # The build is done; codesign/notarytool/hdiutil do not need cargo/rustup or
+    # package-manager caches. Reclaim them before the DMG stage: the macOS
+    # runner is otherwise close enough to full that hdiutil create can fail
+    # after the app has been notarized (release run 35005976205, #204).
+    if [ "${WALGIT_CLEAN_HOME_CACHES:-0}" = "1" ] && [ -n "${HOME:-}" ] && [ "$HOME" != "/" ]; then
+        rm -rf             "$HOME/.cargo/registry"             "$HOME/.cargo/git"             "$HOME/.rustup/toolchains"             "$HOME/Library/Caches/pnpm"             "$HOME/Library/pnpm/store"             "$HOME/Library/Caches/Homebrew" 2>/dev/null || true
+    fi
+    echo "disk after CI cleanup:"
+    df -h "$ROOT" "$WORK" || true
 fi
 
 echo "== [3/8] sign app =="
@@ -221,16 +233,23 @@ notary_submit "$APP_ZIP"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 spctl --assess --type execute --verbose=2 "$APP" 2>&1 | tail -1
+# The notarization archive is no longer needed; freeing it before hdiutil
+# avoids keeping a second copy of the app around during DMG creation.
+rm -f "$APP_ZIP"
 
 echo "== [5/8] assemble DMG =="
 ARCH="$(uname -m)"
 [ "$ARCH" = "arm64" ] || [ "$ARCH" = "x86_64" ] || ARCH="unknown"
 STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
-ditto --norsrc --noextattr "$APP" "$STAGE/walgit-tray.app"
+# Move instead of copy: the notarized app is no longer needed at its old path,
+# and one app copy can be the difference between a successful hdiutil create
+# and ENOSPC on the release runner.
+mv "$APP" "$STAGE/walgit-tray.app"
 ln -s /Applications "$STAGE/Applications"
 check_tree "$STAGE"
 TMP_DMG="$WORK/walgit-${VERSION}-${ARCH}.dmg"
+df -h "$WORK" || true
 hdiutil create -volname walgit -srcfolder "$STAGE" -ov -format UDZO "$TMP_DMG" >/dev/null
 
 echo "== [6/8] sign DMG =="
