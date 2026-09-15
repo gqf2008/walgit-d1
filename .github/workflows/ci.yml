@@ -189,9 +189,25 @@ jobs:
             curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 1
           done
-          curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' \
-            --user 'walgit-dev:walgit-dev-secret' \
-            -X PUT http://127.0.0.1:9000/walgit-test
+          # rustfs can report /minio/health/live before its storage quorum is
+          # ready; a fresh bucket PUT then returns 503. Retry that, accept 409
+          # as an already-created bucket, and fail loudly on anything else.
+          for attempt in $(seq 1 30); do
+            code="$(curl -sS -o /tmp/walgit-mk-bucket.out -w '%{http_code}' \
+              --aws-sigv4 'aws:amz:us-east-1:s3' \
+              --user 'walgit-dev:walgit-dev-secret' \
+              -X PUT http://127.0.0.1:9000/walgit-test || true)"
+            case "$code" in
+              200|409) break ;;
+              503) sleep 1 ;;
+              *) cat /tmp/walgit-mk-bucket.out; exit 1 ;;
+            esac
+            if [ "$attempt" = 30 ]; then
+              echo "rustfs bucket never became ready (last HTTP $code)"
+              cat /tmp/walgit-mk-bucket.out
+              exit 1
+            fi
+          done
       - name: S3 store contract
         run: just test-s3
 

@@ -17,9 +17,12 @@
 //! ## Conditional PUT
 //!
 //! `PutMode::Create`    → `If-None-Match: *`  (object must not exist).
-//! `PutMode::Update(v)` → `If-Match: <etag>`  (CAS on current `ETag`).
+//! `PutMode::Update(v)` → `If-Match: <etag>`  (CAS on the current bare `ETag`).
 //! On failure the SDK returns a `PreconditionFailed` service error; we fill
-//! `current` via a follow-up HEAD when the SDK doesn't include it.
+//! `current` via a follow-up HEAD when the SDK doesn't include it. `Update`
+//! intentionally speaks the bare ETag: user metadata cannot participate in an
+//! S3 `If-Match`, so the full-incarnation guard lives on the delete path that
+//! GC actually needs.
 //!
 //! ## Conditional DELETE
 //!
@@ -395,6 +398,22 @@ fn classify_put_error(
     }
 }
 
+fn classify_delete_error(
+    key: &str,
+    err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::delete_object::DeleteObjectError>,
+) -> StoreError {
+    if let Some(e) = transport_retryable("delete", err) {
+        return e;
+    }
+    match err_code(err).unwrap_or("") {
+        "PreconditionFailed" | "ConditionalRequestConflict" => StoreError::PreconditionFailed {
+            key: key.into(),
+            current: None,
+        },
+        _ => StoreError::Other(anyhow::anyhow!("s3 delete error: {err}")),
+    }
+}
+
 fn classify_list_error(
     err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error>,
 ) -> StoreError {
@@ -563,8 +582,15 @@ impl ObjectStore for S3Store {
                         return Ok(());
                     }
                 }
-                Err(transport_retryable("delete", &err)
-                    .unwrap_or_else(|| StoreError::Other(anyhow::anyhow!("s3 delete error: {err}"))))
+                let mut err = classify_delete_error(key, &err);
+                if let StoreError::PreconditionFailed { current, .. } = &mut err {
+                    match self.head(key).await {
+                        Ok(Some(meta)) => *current = Some(meta.version),
+                        Ok(None) => return Err(StoreError::NotFound { key: key.into() }),
+                        Err(_) => {}
+                    }
+                }
+                Err(err)
             }
         }
     }
@@ -1304,6 +1330,61 @@ mod tests {
             .expect("full body survives");
         assert_eq!(bytes.len(), 8192, "all 8 chunks");
         assert!(started.elapsed() > Duration::from_secs(2), "test itself must stream longer than the idle bound — otherwise it proves nothing");
+    }
+
+    /// Regression: a DELETE `If-Match` race is a CAS failure, not an opaque
+    /// `Other`. GC relies on `PreconditionFailed` to keep the marker and retry
+    /// on a later pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conditional_delete_if_match_412_is_precondition_failed() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut s = stream;
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    if req.starts_with("HEAD ") {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\netag: \"etag1\"\r\nx-amz-meta-walgit-incarnation: inc1\r\nconnection: close\r\n\r\n",
+                        );
+                    } else if req.starts_with("DELETE ") {
+                        let body = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>PreconditionFailed</Code><Message>etag changed</Message><RequestId>req</RequestId><HostId>host</HostId></Error>";
+                        let head = format!(
+                            "HTTP/1.1 412 Precondition Failed\r\ncontent-type: application/xml\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = s.write_all(head.as_bytes());
+                        let _ = s.write_all(body);
+                    }
+                });
+            }
+        });
+
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "delete-412".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                ..Default::default()
+            },
+            connect_timeout: Duration::from_millis(500),
+            idle_timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        let store = S3Store::new(&cfg).unwrap();
+
+        let err = ObjectStore::delete(&store, "k", Some(Version::new("etag1@inc1")))
+            .await
+            .unwrap_err();
+        assert!(err.is_precondition_failed(), "{err:?}");
     }
 
     #[test]

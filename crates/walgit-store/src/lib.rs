@@ -227,6 +227,12 @@ pub trait ObjectStore: Send + Sync + 'static {
 
     /// Delete. `if_version` = CAS delete. Deleting an absent object is `Ok(())`
     /// when unconditional and `NotFound` when conditional.
+    ///
+    /// Backends without a native conditional delete compare the full store
+    /// version and then issue a guarded delete. The generic contract does not
+    /// promise atomicity across a same-ETag re-create landing between those
+    /// two steps; callers that need that window closed (today, pack GC) hold a
+    /// claim/fence across the comparison.
     async fn delete(&self, key: &str, if_version: Option<Version>) -> Result<()>;
 
     /// Lexicographically ordered listing of keys with `prefix`, starting after
