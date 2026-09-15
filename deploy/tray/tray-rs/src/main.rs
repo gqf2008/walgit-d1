@@ -379,9 +379,7 @@ fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<Str
     if code != 0 {
         return Err(format!("挂载 DMG 失败: {}", tail(&out, 200)));
     }
-    let detach = || {
-        let _ = run(None, "hdiutil", &["detach", &mount_text], &[]);
-    };
+    let mut mount_guard = MountGuard::new(mount_text.clone());
 
     let staged = mount.join("walgit-tray.app");
     let staged_text = staged.to_string_lossy().to_string();
@@ -416,15 +414,11 @@ fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<Str
         }
         Ok(())
     })();
-    if let Err(e) = verify {
-        detach();
-        return Err(e);
-    }
+    verify?;
 
     report("换装中…".into());
     let script = bundle.join("Contents/Resources/release-install.sh");
     if !script.is_file() {
-        detach();
         return Err("缺少 release-install.sh".into());
     }
     let _ = std::fs::create_dir_all(state_dir());
@@ -449,11 +443,42 @@ fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<Str
         .stderr(std::process::Stdio::from(log_err));
     cmd.spawn()
         .map_err(|e| format!("启动升级辅助脚本失败: {e}"))?;
+    // 换装脚本接管挂载点(它会 detach),从这里起不再由我们卸载。
+    mount_guard.disarm();
     log_line(&format!(
         "release: updater spawned for v{}",
         release.version
     ));
     Ok(format!("v{}", release.version))
+}
+
+/// attach 成功后,任何返回路径都必须 detach——用 RAII 而不是在每个 `?`/`return`
+/// 前手写一次(审查指出:`OpenOptions::open` / `spawn` 的失败分支漏了 detach)。
+/// 交棒给 `release-install.sh` 前 `disarm()`:换装脚本自己负责卸载。
+#[cfg(target_os = "macos")]
+struct MountGuard {
+    mount: String,
+    armed: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl MountGuard {
+    fn new(mount: String) -> Self {
+        Self { mount, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MountGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = run(None, "hdiutil", &["detach", &self.mount], &[]);
+        }
+    }
 }
 
 /// 错误串只带尾部若干字符:命令输出可能很长,菜单/日志只需要线索。
@@ -1203,6 +1228,13 @@ impl ApplicationHandler<Msg> for App {
                                 },
                                 release.as_ref(),
                             );
+                            // macOS Release 交棒成功:辅助脚本要替换正在运行的
+                            // bundle(它先等本 pid 消失),这里直接退场——不再
+                            // 做 healthz 探测/状态回灌,免得拖过它的等待窗口。
+                            if r.is_ok() && release.is_some() {
+                                log_line(&format!("upgrade -> {r:?}"));
+                                std::process::exit(0);
+                            }
                             let _ = proxy.send_event(Msg::Busy(0));
                             let _ = proxy.send_event(Msg::Note(String::new()));
                             let _ = proxy.send_event(Msg::UpdateState(if r.is_ok() {
@@ -1213,11 +1245,6 @@ impl ApplicationHandler<Msg> for App {
                             let _ = proxy
                                 .send_event(Msg::Status(healthz().is_some(), service_version()));
                             log_line(&format!("upgrade -> {r:?}"));
-                            if r.is_ok() && release.is_some() {
-                                // macOS Release:辅助脚本要替换正在运行的 bundle,
-                                // 托盘必须真的退场(它先等本 pid 消失再动手)。
-                                std::process::exit(0);
-                            }
                         });
                     }
                     _ => {}
