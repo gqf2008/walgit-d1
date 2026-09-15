@@ -1506,8 +1506,9 @@ impl RepoHandle {
         remove_own: &[String],
         recover: &[(String, String, String)],
         token: &str,
+        fence_until: Option<prost_types::Timestamp>,
     ) -> Result<Arc<Manifest>, WalError> {
-        crate::publish::update_reclaiming(self, add, remove_own, recover, token).await
+        crate::publish::update_reclaiming(self, add, remove_own, recover, token, fence_until).await
     }
 
     /// Publish an already built pack (`pack-<checksum>.pack` + `.idx`) as a

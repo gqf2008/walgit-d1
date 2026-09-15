@@ -193,6 +193,7 @@ pub struct FaultStore {
     /// Patterns from `panic_once_keys` already fired.
     fired_panics: Mutex<Vec<String>>,
     trace: Mutex<Option<Vec<String>>>,
+    before_put: Mutex<Option<PutHook>>,
 }
 
 enum Decision {
@@ -206,6 +207,10 @@ enum Decision {
     Denied,
 }
 
+/// Test-only hook invoked before a `put` is applied. Used to inject a
+/// concurrent writer between a LIST and a conditional PUT deterministically.
+pub type PutHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 impl FaultStore {
     pub fn new(inner: DynStore, name: impl Into<String>, seed: u64) -> Arc<Self> {
         Arc::new(FaultStore {
@@ -216,6 +221,7 @@ impl FaultStore {
             stats: Stats::default(),
             fired_panics: Mutex::new(Vec::new()),
             trace: Mutex::new(None),
+            before_put: Mutex::new(None),
         })
     }
     pub fn name(&self) -> &str {
@@ -241,6 +247,10 @@ impl FaultStore {
     }
     pub fn set_trace(&self, on: bool) {
         *self.trace.lock() = if on { Some(Vec::new()) } else { None };
+    }
+    /// Test-only: run `hook` immediately before each `put` is applied.
+    pub fn set_before_put(&self, hook: Option<PutHook>) {
+        *self.before_put.lock() = hook;
     }
     pub fn take_trace(&self) -> Vec<String> {
         self.trace
@@ -449,6 +459,9 @@ impl ObjectStore for FaultStore {
     }
 
     async fn put(&self, key: &str, body: PutBody, opts: PutOptions) -> Result<ObjectMeta> {
+        if let Some(hook) = self.before_put.lock().clone() {
+            hook(key);
+        }
         let conditional = !matches!(opts.mode, PutMode::Overwrite);
         match self.decide("put", key, true, conditional, false).await {
             Decision::Hang => hang_forever().await,

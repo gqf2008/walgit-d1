@@ -123,6 +123,7 @@ pub(crate) async fn update_reclaiming(
     remove_own: &[String],
     recover: &[(String, String, String)],
     token: &str,
+    fence_until: Option<prost_types::Timestamp>,
 ) -> Result<Arc<Manifest>, WalError> {
     let writer = crate::handle::instance_id();
     let max_retries = handle.cfg.wal.cas_max_retries;
@@ -161,6 +162,7 @@ pub(crate) async fn update_reclaiming(
                     since: Some(time::now()),
                     owner: writer.clone(),
                     token: token.to_string(),
+                    fence_until,
                 });
             }
         }

@@ -2240,7 +2240,7 @@ async fn publishing_a_reclaiming_checksum_is_refused() -> anyhow::Result<()> {
 
     step!(
         "list candidate",
-        h.update_reclaiming(std::slice::from_ref(&checksum), &[], &[], "t")
+        h.update_reclaiming(std::slice::from_ref(&checksum), &[], &[], "t", None)
     )?;
     assert!(
         h.manifest()
@@ -2296,7 +2296,7 @@ async fn pushing_a_reclaiming_checksum_is_refused() -> anyhow::Result<()> {
     let dead = "a".repeat(40);
     step!(
         "list candidate",
-        h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t")
+        h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t", None)
     )?;
     assert!(
         h.manifest().reclaiming.iter().any(|r| r.checksum == dead),
@@ -2377,7 +2377,7 @@ async fn reclaiming_list_never_contains_a_live_pack() -> anyhow::Result<()> {
     // A live pack must not become a GC candidate, even when asked directly.
     step!(
         "list live",
-        h.update_reclaiming(std::slice::from_ref(&live), &[], &[], "t")
+        h.update_reclaiming(std::slice::from_ref(&live), &[], &[], "t", None)
     )?;
     assert!(
         h.manifest().reclaiming.is_empty(),
@@ -2389,7 +2389,7 @@ async fn reclaiming_list_never_contains_a_live_pack() -> anyhow::Result<()> {
     let dead = "f".repeat(40);
     step!(
         "list dead",
-        h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t")
+        h.update_reclaiming(std::slice::from_ref(&dead), &[], &[], "t", None)
     )?;
     assert!(
         h.manifest().reclaiming.iter().any(|r| r.checksum == dead),
@@ -2397,7 +2397,7 @@ async fn reclaiming_list_never_contains_a_live_pack() -> anyhow::Result<()> {
     );
     step!(
         "clear dead",
-        h.update_reclaiming(&[], std::slice::from_ref(&dead), &[], "t")
+        h.update_reclaiming(&[], std::slice::from_ref(&dead), &[], "t", None)
     )?;
     assert!(
         h.manifest().reclaiming.is_empty(),
@@ -2833,6 +2833,7 @@ async fn gc_releases_a_claim_whose_marker_was_already_retired() -> anyhow::Resul
             since: Some(since),
             owner: "someone-else".into(),
             token: "their-token".into(),
+            fence_until: None,
         });
         m.revision += 1;
         step!(
@@ -2902,7 +2903,7 @@ async fn gc_leaves_a_fresh_claim_to_its_holder() -> anyhow::Result<()> {
     let fresh = "a".repeat(40);
     step!(
         "claim",
-        h.update_reclaiming(std::slice::from_ref(&fresh), &[], &[], "t")
+        h.update_reclaiming(std::slice::from_ref(&fresh), &[], &[], "t", None)
     )?;
     assert!(matches!(
         step!("plan", next_unit(&server.state, &id))?,
@@ -2990,6 +2991,7 @@ async fn gc_takes_over_a_stale_claim_whose_marker_still_exists() -> anyhow::Resu
             since: Some(since),
             owner: "dead-holder".into(),
             token: "their-token".into(),
+            fence_until: None,
         });
         m.revision += 1;
         step!(
@@ -3082,6 +3084,7 @@ async fn gc_releases_a_retired_claim_from_an_older_pass_of_the_same_instance() -
             since: Some(since),
             owner: walgit_store::coord::instance_id().to_string(),
             token: "token-of-a-previous-pass".into(),
+            fence_until: None,
         });
         m.revision += 1;
         step!(
