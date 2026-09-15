@@ -60,8 +60,9 @@ Bundle 启动服务 → 健康验证；失败恢复旧 App Bundle。`~/.walgit` 
   Windows/Linux 在安装目录或 `/usr/bin`。程序不再复制到用户状态目录。
 - **状态目录**:`~/.walgit`，只放 `walgit.toml`、`cache/`、`keys/`、
   `server.log`、`walgit.pid`、`.r2-credentials` 等用户状态。macOS 首次
-  启动只初始化缺失的 `walgit.toml`，并幂等建 `/usr/local/bin/walgit`
-  软链指向 App Bundle 内的程序（测试用 `WALGIT_CLI_LINK` 覆盖）。
+  启动只初始化缺失的 `walgit.toml`，并优先建 `/usr/local/bin/walgit` 软链
+  指向 App Bundle 内的程序；该位置不可写时回退到 `~/.local/bin/walgit`。
+  显式 `WALGIT_CLI_LINK` 仍是单目标覆盖，失败会明确记录。
 - **release 资产一个平台一件安装器(issue #108)**:
   macOS `walgit-<version>-arm64.dmg`(app 拖入 Applications,首次启动
   自动建部署骨架)、Windows `walgit-setup-<version>-x64.exe`

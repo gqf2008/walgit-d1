@@ -306,6 +306,55 @@ EOF
     return 0
 }
 
+# #193: an unwritable/disabled default CLI link must fall back to the user
+# entry instead of writing a spurious Permission denied error every launch.
+# Explicit WALGIT_CLI_LINK keeps the old fail-loud behavior.
+cli_link_fallback_fixture() {
+    local base="$TMP/cli-link-fallback"
+    local app="$base/app/walgit-tray.app"
+    local res="$app/Contents/Resources"
+    local state="$base/state"
+    local state_explicit="$base/state-explicit"
+    local home="$base/home"
+    local bad_parent="$base/not-a-dir"
+    local fallback="$home/.local/bin/walgit"
+    mkdir -p "$app/Contents/MacOS" "$res" "$home/.local/bin"
+    pkginfo "$app" 0.5.0
+    cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
+    cat >"$res/walgit" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "walgit v0.5.0" ;;
+  service) exit 0 ;;
+esac
+EOF
+    chmod +x "$res/walgit"
+    printf 'not a directory\n' >"$bad_parent"
+
+    HOME="$home" WALGIT_BOOTSTRAP_ONLY=1 WALGIT_STATE_DIR="$state" \
+        WALGIT_DEPLOY_DIR="$state" \
+        WALGIT_CLI_LINK_PRIMARY="$bad_parent/walgit" \
+        WALGIT_CLI_LINK_FALLBACK="$fallback" \
+        "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1 || {
+            echo "FAIL(cli-link-fallback): bootstrap exited non-zero" >&2
+            return 1
+        }
+    [ "$(readlink "$fallback")" = "$res/walgit" ] \
+        || { echo "FAIL(cli-link-fallback): user fallback link missing" >&2; return 1; }
+    if grep -q 'Permission denied' "$state/tray.log"; then
+        echo "FAIL(cli-link-fallback): spurious Permission denied log" >&2
+        return 1
+    fi
+
+    HOME="$home" WALGIT_BOOTSTRAP_ONLY=1 WALGIT_STATE_DIR="$state_explicit" \
+        WALGIT_DEPLOY_DIR="$state_explicit" \
+        WALGIT_CLI_LINK="$bad_parent/walgit" \
+        "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1 || true
+    grep -q 'CLI 软链失败' "$state_explicit/tray.log" \
+        || { echo "FAIL(cli-link-fallback): explicit failure must stay loud" >&2; return 1; }
+    return 0
+}
+
 # Legacy installs used ~/walgit for both program and state. The bridge must
 # migrate user state to ~/.walgit while leaving the old helper's version/config
 # paths intact until it finishes.
@@ -682,6 +731,7 @@ PYS
 bash_compat_smoke
 layout_fixture
 bootstrap_fixture
+cli_link_fallback_fixture
 legacy_migration_fixture
 manual_legacy_migration_fixture
 release_detect_fixture
