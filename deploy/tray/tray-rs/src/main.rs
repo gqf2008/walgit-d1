@@ -10,10 +10,17 @@
 //!          不复制进 ~/.walgit，状态、配置和日志才属于那里。
 //! 健康检查:内置裸 HTTP(loopback),零额外依赖。
 //! 打开 Web UI:直接开新页面(三平台一致)。
+//! macOS 升级:Release 感知(检测 GitHub latest release → 下载 DMG →
+//!          校验 sha256/签名/公证 → 交给 release-install.sh 换装回滚)。
+//!
+//! 版本比较、release 解析与菜单文本在 `release.rs`(纯函数 + 单测)。
 
 // Windows release 不带控制台:双击静默驻留托盘(debug 构建保留控制台便于排查)。
 // 注意 start 引号:cmd 只认双引号,`start "" "url"` 的 "" 是占位标题。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod bootstrap;
+mod release;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -21,20 +28,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use release::{
+    is_version_newer, parse_bundle_version, parse_latest_release, upgrade_line, ReleaseInfo,
+    ST_AVAILABLE, ST_CHECKING, ST_FAILED, ST_IDLE, ST_INSTALLING, ST_LATEST,
+};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
-
-// 升级状态机(abb app.slint 同款)
-const ST_IDLE: u8 = 0; // 未查:检查更新…
-const ST_CHECKING: u8 = 1; // 正在检查更新…
-const ST_LATEST: u8 = 2; // 已是最新 ✓(点击重查)
-const ST_AVAILABLE: u8 = 3; // ⬆️ 升级到新版本
-const ST_INSTALLING: u8 = 4; // 安装中…
-const ST_FAILED: u8 = 5; // 失败(点击重查)
+const DEFAULT_RELEASE_API: &str = "https://api.github.com/repos/gqf2008/walgit-d1/releases/latest";
 
 fn home() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -48,11 +52,20 @@ fn home() -> PathBuf {
 }
 
 fn state_dir() -> PathBuf {
-    let home = home();
-    if home.as_os_str().is_empty() {
-        return PathBuf::new();
-    }
-    home.join(".walgit")
+    // macOS:WALGIT_STATE_DIR / WALGIT_DEPLOY_DIR 优先(升级 helper 用
+    // `open --env WALGIT_DEPLOY_DIR=…` 把新 app 指回同一份状态)。
+    #[cfg(target_os = "macos")]
+    let dir = bootstrap::state_dir();
+    #[cfg(not(target_os = "macos"))]
+    let dir = {
+        let home = home();
+        if home.as_os_str().is_empty() {
+            PathBuf::new()
+        } else {
+            home.join(".walgit")
+        }
+    };
+    dir
 }
 
 /// Program location, never the state directory. In a macOS .app this is
@@ -87,13 +100,310 @@ fn repo_dir() -> PathBuf {
         .unwrap_or_else(|_| {
             #[cfg(target_os = "macos")]
             {
-                PathBuf::from("/Volumes/Workspace/GitHub/walgit")
+                PathBuf::from("/Volumes/DataExt/GitHub/walgit")
             }
             #[cfg(not(target_os = "macos"))]
             {
                 home().join("walgit-repo")
             }
         })
+}
+
+/// 运行中的 App Bundle(`…/walgit-tray.app`)。非 bundle 形态(开发机直接跑
+/// target/release/walgit-tray、Windows/Linux 安装目录)返回 None——Release
+/// 升级要替换的正是 bundle 本身。
+#[cfg(target_os = "macos")]
+fn app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let contents = exe.parent()?.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    if bundle.extension()? != "app" {
+        return None;
+    }
+    Some(bundle.to_path_buf())
+}
+
+/// 托盘/App 版本。macOS 取 bundle 的 `CFBundleShortVersionString`(升级判断
+/// 与菜单显示都以它为准,与服务进程版本分开);其他平台允许安装器用
+/// `WALGIT_APP_VERSION` 注入,未注入时回退服务版本(见 `App::current_version`)。
+fn app_version() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = app_bundle() {
+            if let Ok(plist) = std::fs::read_to_string(bundle.join("Contents/Info.plist")) {
+                if let Some(version) = parse_bundle_version(&plist) {
+                    return version;
+                }
+            }
+        }
+        String::new()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var("WALGIT_APP_VERSION").unwrap_or_default()
+    }
+}
+
+/// GitHub latest release(或 `WALGIT_RELEASE_FIXTURE` 指向的本地 JSON)。
+/// 只信 API 里的 sha256 digest:拿不到就当作「没有可用更新」而不是安装
+/// 一个未校验的包。
+fn latest_release() -> Option<ReleaseInfo> {
+    if let Ok(fixture) = std::env::var("WALGIT_RELEASE_FIXTURE") {
+        if !fixture.is_empty() {
+            let body = std::fs::read_to_string(&fixture).ok()?;
+            return parse_latest_release(&body, release::arch_slug()).ok();
+        }
+    }
+    let endpoint =
+        std::env::var("WALGIT_RELEASE_API").unwrap_or_else(|_| DEFAULT_RELEASE_API.to_string());
+    let (code, body) = run(
+        None,
+        "curl",
+        &[
+            "-fsSL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: walgit-tray",
+            &endpoint,
+        ],
+        &[],
+    );
+    if code != 0 {
+        log_line(&format!(
+            "release: latest lookup failed {}",
+            body.trim().chars().take(160).collect::<String>()
+        ));
+        return None;
+    }
+    match parse_latest_release(&body, release::arch_slug()) {
+        Ok(info) => Some(info),
+        Err(e) => {
+            log_line(&format!("release: {e}"));
+            None
+        }
+    }
+}
+
+/// 检测结果:菜单状态机据此选「下载并升级(Release)」还是「从源码升级」。
+enum Detected {
+    Nothing,
+    Source(String),
+    Release(ReleaseInfo),
+}
+
+/// 源码仓库是否可做源码升级。
+fn has_source_repo() -> bool {
+    repo_dir().join(".git").exists()
+}
+
+/// 检测可用更新。macOS 优先 Release(装好的 DMG 机器不需要源码仓库);
+/// Release 通道不可用(无网/无 bundle/资产缺失)且本机有源码仓库时退回源码检测。
+fn detected_update() -> Detected {
+    #[cfg(target_os = "macos")]
+    {
+        if app_bundle().is_some() {
+            if let Some(info) = latest_release() {
+                let current = app_version();
+                return if is_version_newer(&info.version, &current) {
+                    Detected::Release(info)
+                } else {
+                    Detected::Nothing
+                };
+            }
+        }
+    }
+    if !has_source_repo() {
+        return Detected::Nothing;
+    }
+    let repo = repo_dir();
+    let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
+    let (c1, lout) = run(Some(&repo), "git", &["rev-parse", "HEAD"], &[]);
+    let (c2, rout) = run(Some(&repo), "git", &["rev-parse", "origin/main"], &[]);
+    let local = lout.trim().to_string();
+    let remote = rout.trim().to_string();
+    if c1 != 0 || c2 != 0 || local.is_empty() || remote.is_empty() || local == remote {
+        return Detected::Nothing;
+    }
+    Detected::Source(remote[..7.min(remote.len())].to_string())
+}
+
+/// 把检测结果送进事件循环。
+fn publish_detected(proxy: &EventLoopProxy<Msg>, detected: Detected) {
+    match detected {
+        Detected::Nothing => {
+            let _ = proxy.send_event(Msg::UpdateState(ST_LATEST));
+        }
+        Detected::Source(sha) => {
+            let _ = proxy.send_event(Msg::Release(None));
+            let _ = proxy.send_event(Msg::Available(sha));
+            let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
+        }
+        Detected::Release(info) => {
+            let _ = proxy.send_event(Msg::Available(String::new()));
+            let _ = proxy.send_event(Msg::Release(Some(info.clone())));
+            let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
+        }
+    }
+}
+
+/// macOS Release 升级:下载 DMG → 校验 sha256 → 挂载 → 校验签名/公证/版本
+/// → 交给 `release-install.sh` 换装(它等托盘退出,失败回滚)。
+/// 成功返回后调用方立即退出托盘进程,把 bundle 让给辅助脚本。
+#[cfg(target_os = "macos")]
+fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<String, String> {
+    let bundle =
+        app_bundle().ok_or_else(|| "不是 App Bundle 安装,无法走 Release 升级".to_string())?;
+    let cache = home().join("Library/Caches/walgit");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("创建缓存目录失败: {e}"))?;
+    let dmg = cache.join(&release.asset.name);
+    let _ = std::fs::remove_file(&dmg);
+
+    report("下载安装包…".into());
+    let (code, out) = run(
+        None,
+        "curl",
+        &[
+            "-fL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "600",
+            "-o",
+            &dmg.to_string_lossy(),
+            &release.asset.url,
+        ],
+        &[],
+    );
+    if code != 0 {
+        return Err(format!("下载安装包失败: {}", tail(&out, 200)));
+    }
+
+    report("校验安装包…".into());
+    let (code, out) = run(None, "shasum", &["-a", "256", &dmg.to_string_lossy()], &[]);
+    let got = out
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if code != 0 || got != release.asset.sha256 {
+        return Err("SHA-256 校验失败".into());
+    }
+
+    let mount = cache.join(format!("mount-{}-{}", release.version, std::process::id()));
+    let _ = std::fs::remove_dir_all(&mount);
+    std::fs::create_dir_all(&mount).map_err(|e| format!("创建挂载点失败: {e}"))?;
+    let mount_text = mount.to_string_lossy().to_string();
+    let dmg_text = dmg.to_string_lossy().to_string();
+    let (code, out) = run(
+        None,
+        "hdiutil",
+        &[
+            "attach",
+            "-nobrowse",
+            "-readonly",
+            "-mountpoint",
+            &mount_text,
+            &dmg_text,
+        ],
+        &[],
+    );
+    if code != 0 {
+        return Err(format!("挂载 DMG 失败: {}", tail(&out, 200)));
+    }
+    let detach = || {
+        let _ = run(None, "hdiutil", &["detach", &mount_text], &[]);
+    };
+
+    let staged = mount.join("walgit-tray.app");
+    let staged_text = staged.to_string_lossy().to_string();
+    let verify = (|| -> Result<(), String> {
+        let plist = std::fs::read_to_string(staged.join("Contents/Info.plist"))
+            .map_err(|e| format!("DMG 内 app 版本不可读: {e}"))?;
+        let version =
+            parse_bundle_version(&plist).ok_or_else(|| "DMG 内 app 版本不可读".to_string())?;
+        if version != release::strip_version_prefix(&release.version) {
+            return Err(format!(
+                "DMG 内 app 版本不匹配(包内 {version},release {})",
+                release.version
+            ));
+        }
+        let (code, out) = run(
+            None,
+            "codesign",
+            &["--verify", "--deep", "--strict", &staged_text],
+            &[],
+        );
+        if code != 0 {
+            return Err(format!("DMG 内 app 签名校验失败: {}", tail(&out, 200)));
+        }
+        let (code, out) = run(
+            None,
+            "spctl",
+            &["--assess", "--type", "execute", &staged_text],
+            &[],
+        );
+        if code != 0 {
+            return Err(format!("DMG 内 app 公证校验失败: {}", tail(&out, 200)));
+        }
+        Ok(())
+    })();
+    if let Err(e) = verify {
+        detach();
+        return Err(e);
+    }
+
+    report("换装中…".into());
+    let script = bundle.join("Contents/Resources/release-install.sh");
+    if !script.is_file() {
+        detach();
+        return Err("缺少 release-install.sh".into());
+    }
+    let _ = std::fs::create_dir_all(state_dir());
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir().join("tray.log"))
+        .map_err(|e| format!("打开升级日志失败: {e}"))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| format!("打开升级日志失败: {e}"))?;
+    let mut cmd = std::process::Command::new("/bin/bash");
+    cmd.arg(&script)
+        .arg(&dmg)
+        .arg(&mount)
+        .arg(&bundle)
+        .arg(&release.version)
+        .arg(std::process::id().to_string())
+        .env("WALGIT_DEPLOY_DIR", state_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err));
+    cmd.spawn()
+        .map_err(|e| format!("启动升级辅助脚本失败: {e}"))?;
+    log_line(&format!(
+        "release: updater spawned for v{}",
+        release.version
+    ));
+    Ok(format!("v{}", release.version))
+}
+
+/// 错误串只带尾部若干字符:命令输出可能很长,菜单/日志只需要线索。
+fn tail(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    let skip = trimmed.chars().count().saturating_sub(max);
+    trimmed.chars().skip(skip).collect()
 }
 
 fn exe_name() -> &'static str {
@@ -186,12 +496,17 @@ fn healthz() -> Option<String> {
     body.contains("ok").then(|| body.trim().to_string())
 }
 
-/// 从 healthz 响应体提取版本串(short sha)。
-#[allow(dead_code)] // 供状态行显示;macOS 上由 Swift 版承担
+/// 从 healthz 响应体提取 `version` 字段(与 release-install.sh 的
+/// `health_version` 同口径)。用 JSON 解析而不是字符串包含:v0.5.1 不能匹配
+/// v0.5.10,排版带空格(手写/再序列化过的 JSON)也要能读。
 fn version_of(body: &str) -> String {
-    body.split("\"version\":\"")
-        .nth(1)
-        .map(|rest| rest.split('"').next().unwrap_or("").to_string())
+    serde_json::from_str::<serde_json::Value>(body.trim())
+        .ok()
+        .and_then(|v| {
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -403,6 +718,24 @@ fn service_stop() -> Result<(), String> {
     }
 }
 
+/// 当前服务进程版本(healthz 的 version 字段);服务不在时为空。
+fn service_version() -> String {
+    healthz().map(|body| version_of(&body)).unwrap_or_default()
+}
+
+/// 升级入口:选择了 Release(macOS App Bundle)走 DMG 管线,否则走源码管线。
+fn run_upgrade(report: &dyn Fn(String), release: Option<&ReleaseInfo>) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(release) = release {
+            return release_upgrade(report, release);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = release;
+    upgrade_pipeline(report)
+}
+
 /// 升级管线(仅由用户点击触发):fetch → ff-merge → 构建 → 备份 → 停 → 换 → 起 → 验证。
 /// 换装阶段任何一步失败都走同一条回滚路径(还原备份 → 重启服务),并把回滚
 /// 本身的结果如实写进错误串——不谎报「已回滚」。
@@ -610,9 +943,10 @@ fn icon_rgba(size: usize, color: [u8; 3]) -> Vec<u8> {
 
 #[derive(Debug, Clone)]
 enum Msg {
-    Status(bool),
+    Status(bool, String),
     UpdateState(u8),
     Available(String),
+    Release(Option<ReleaseInfo>),
     Note(String),
     Busy(u8),
 }
@@ -629,20 +963,37 @@ struct App {
     items: Option<MenuHandles>,
     proxy: Option<Arc<EventLoopProxy<Msg>>>,
     running: bool,
-    busy: u8,  // 0 idle, 1 switching, 2 upgrading
-    state: u8, // 升级状态机(ST_*)
-    version: String,
-    available_sha: String,
+    busy: u8,                // 0 idle, 1 switching, 2 upgrading
+    state: u8,               // 升级状态机(ST_*)
+    version: String,         // 托盘/App 版本(#183:升级判断的唯一依据)
+    service_version: String, // healthz 报的服务进程版本,只作展示
+    available_sha: String,   // 源码升级目标
+    release: Option<ReleaseInfo>,
     note: String,
 }
 
 impl App {
+    /// 菜单里的「当前版本」:App 版本优先;没有 App 版本(Windows/Linux
+    /// 安装目录形态)时用服务版本兜底,避免状态行印一个空版本。
     fn current_version(&self) -> String {
-        let v = self.version.clone();
-        if v.is_empty() {
-            "…".to_string()
+        let app = release::strip_version_prefix(&self.version);
+        if !app.is_empty() {
+            return app;
+        }
+        let service = release::strip_version_prefix(&self.service_version);
+        if !service.is_empty() {
+            return service;
+        }
+        "…".to_string()
+    }
+
+    /// 与服务版本不同才单独展示(#170:别在「已是最新」旁印一个更旧的服务版本)。
+    fn service_line(&self) -> String {
+        let service = release::strip_version_prefix(&self.service_version);
+        if service.is_empty() || service == self.current_version() {
+            String::new()
         } else {
-            v[..7.min(v.len())].to_string()
+            service
         }
     }
 
@@ -679,39 +1030,31 @@ impl App {
         } else {
             format!("walgit 服务:已停止{}", backend_note)
         });
-        h.toggle.set_text(
-            if self.busy == 1 {
-                "切换中…"
-            } else if running {
-                "停止服务"
-            } else {
-                "启动服务"
-            }
-            .to_string(),
-        );
+        h.toggle.set_text(if self.busy == 1 {
+            "切换中…"
+        } else if running {
+            "停止服务"
+        } else {
+            "启动服务"
+        });
         h.toggle.set_enabled(self.busy == 0);
-        let cur = self.current_version();
-        // 无源码仓库(经安装器部署的机器):升级菜单禁点并指路(#73)——检测
-        // 管线需要 git 仓库,恒失败只会误导。
-        let has_repo = repo_dir().join(".git").exists();
-        if !has_repo {
-            h.upgrade.set_text(format!("版本 {cur}(经安装器升级)"));
+        // 升级通道:macOS 装好的 DMG 走 Release(不需要源码仓库);开发机
+        // 与 Windows/Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
+        let release_channel = cfg!(target_os = "macos") && app_bundle().is_some();
+        let can_upgrade = release_channel || has_source_repo() || self.release.is_some();
+        if !can_upgrade {
+            h.upgrade
+                .set_text(format!("版本 {}(经安装器升级)", self.current_version()));
             h.upgrade.set_enabled(false);
         } else {
-            h.upgrade.set_text(match self.state {
-                ST_CHECKING => format!("版本 {cur} · 正在检查更新…"),
-                ST_LATEST => format!("版本 {cur} · 已是最新 ✓(点击重查)"),
-                ST_AVAILABLE => format!("⬆️ 升级到新版本 {}(当前 {cur})", self.available_sha),
-                ST_INSTALLING => {
-                    if self.note.is_empty() {
-                        "升级中…".into()
-                    } else {
-                        format!("升级中… · {}", self.note)
-                    }
-                }
-                ST_FAILED => "上次升级失败(点击重查)".into(),
-                _ => format!("版本 {cur} · 检查更新…"),
-            });
+            h.upgrade.set_text(upgrade_line(
+                self.state,
+                &self.current_version(),
+                &self.service_line(),
+                self.release.as_ref(),
+                &self.available_sha,
+                &self.note,
+            ));
             h.upgrade.set_enabled(
                 self.busy == 0 && self.state != ST_CHECKING && self.state != ST_INSTALLING,
             );
@@ -735,10 +1078,10 @@ impl ApplicationHandler<Msg> for App {
 
     fn user_event(&mut self, _loop: &ActiveEventLoop, msg: Msg) {
         match msg {
-            Msg::Status(up) => {
+            Msg::Status(up, service_version) => {
                 self.running = up;
                 if up {
-                    // 版本串从 healthz 取——轮询线程已带;此处只做占位
+                    self.service_version = service_version;
                 }
             }
             // 升级进行中(busy==2)不接受状态翻转:30 分钟检测线程可能在
@@ -749,6 +1092,7 @@ impl ApplicationHandler<Msg> for App {
                 }
             }
             Msg::Available(sha) => self.available_sha = sha,
+            Msg::Release(info) => self.release = info,
             Msg::Note(n) => self.note = n,
             Msg::Busy(b) => self.busy = b,
         }
@@ -775,7 +1119,8 @@ impl ApplicationHandler<Msg> for App {
                             };
                             log_line(&format!("{id} -> {r:?}"));
                             let _ = proxy.send_event(Msg::Busy(0));
-                            let _ = proxy.send_event(Msg::Status(healthz().is_some()));
+                            let _ = proxy
+                                .send_event(Msg::Status(healthz().is_some(), service_version()));
                         });
                     }
                 }
@@ -784,24 +1129,8 @@ impl ApplicationHandler<Msg> for App {
                         self.state = ST_CHECKING;
                         self.rebuild_menu();
                         std::thread::spawn(move || {
-                            let repo = repo_dir();
-                            let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
-                            let (c1, lout) = run(Some(&repo), "git", &["rev-parse", "HEAD"], &[]);
-                            let (c2, rout) =
-                                run(Some(&repo), "git", &["rev-parse", "origin/main"], &[]);
-                            let local = lout.trim().to_string();
-                            let remote = rout.trim().to_string();
-                            if c1 != 0 || c2 != 0 || local.is_empty() || remote.is_empty() {
-                                let _ = proxy.send_event(Msg::UpdateState(ST_FAILED));
-                            } else if local != remote {
-                                let _ = proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
-                                let _ = proxy.send_event(Msg::Available(
-                                    remote[..7.min(remote.len())].to_string(),
-                                ));
-                            } else {
-                                let _ = proxy.send_event(Msg::UpdateState(ST_LATEST));
-                            }
-                            log_line(&format!("detect: local={:.7} remote={:.7}", local, remote));
+                            let detected = detected_update();
+                            publish_detected(&proxy, detected);
                         });
                     }
                     ST_AVAILABLE => {
@@ -809,18 +1138,29 @@ impl ApplicationHandler<Msg> for App {
                         self.state = ST_INSTALLING;
                         self.busy = 2;
                         self.rebuild_menu();
+                        let release = self.release.clone();
                         std::thread::spawn(move || {
-                            let r = upgrade_pipeline(&|m| {
-                                let _ = proxy.send_event(Msg::Note(m));
-                            });
+                            let r = run_upgrade(
+                                &|m| {
+                                    let _ = proxy.send_event(Msg::Note(m));
+                                },
+                                release.as_ref(),
+                            );
                             let _ = proxy.send_event(Msg::Busy(0));
                             let _ = proxy.send_event(Msg::Note(String::new()));
-                            let _ = proxy.send_event(Msg::UpdateState(match &r {
-                                Ok(_) => ST_LATEST,
-                                Err(_) => ST_FAILED,
+                            let _ = proxy.send_event(Msg::UpdateState(if r.is_ok() {
+                                ST_LATEST
+                            } else {
+                                ST_FAILED
                             }));
-                            let _ = proxy.send_event(Msg::Status(healthz().is_some()));
+                            let _ = proxy
+                                .send_event(Msg::Status(healthz().is_some(), service_version()));
                             log_line(&format!("upgrade -> {r:?}"));
+                            if r.is_ok() && release.is_some() {
+                                // macOS Release:辅助脚本要替换正在运行的 bundle,
+                                // 托盘必须真的退场(它先等本 pid 消失再动手)。
+                                std::process::exit(0);
+                            }
                         });
                     }
                     _ => {}
@@ -875,6 +1215,13 @@ fn main() {
     }));
     log_line("tray-rs launched");
 
+    // macOS 首次启动:状态目录初始化、旧布局迁移、CLI 软链。测试用它单独
+    // 跑一遍 bootstrap 后立即退出(WALGIT_BOOTSTRAP_ONLY=1)。
+    bootstrap::bootstrap_deploy();
+    if std::env::var("WALGIT_BOOTSTRAP_ONLY").as_deref() == Ok("1") {
+        return;
+    }
+
     // 安装器自启标记(Windows 安装器勾选「开机自动启动」时写):自启的托盘
     // 把服务一并拉起——勾选框承诺的是「部署开机可用」,不是只把托盘拉起来。
     // 仅在服务未运行时尝试一次;失败不重试,留给菜单「启动服务」。
@@ -924,25 +1271,29 @@ fn main() {
         running: healthz().is_some(),
         busy: 0,
         state: ST_IDLE,
-        version: String::new(),
+        version: app_version(),
+        service_version: service_version(),
         available_sha: String::new(),
+        release: None,
         note: String::new(),
     };
     app.rebuild_menu();
 
-    // 状态轮询线程(5s):status + version
+    // 状态轮询线程(5s):status + 服务版本
     let poll_proxy = proxy;
     std::thread::spawn(move || loop {
         let body = healthz();
         let up = body.is_some();
-        let _ = poll_proxy.send_event(Msg::Status(up));
+        let version = body.as_deref().map(version_of).unwrap_or_default();
+        let _ = poll_proxy.send_event(Msg::Status(up, version));
         std::thread::sleep(Duration::from_secs(5));
     });
     // 自动检测线程(启动 30 秒一次,此后每 30 分钟;静默,失败不打扰)。
-    // 本机没有源码仓库(安装器部署的机器)就整条停用:检测/升级都依赖
-    // WALGIT_REPO 指向的 checkout + rustup/cargo,没有它只会每 30 分钟
-    // 往 tray.log 写一条 skip 噪音。升级走新 setup.exe。
-    if !repo_dir().join(".git").exists() {
+    // 两条通道:macOS App Bundle 走 GitHub Release(机器上不需要源码仓库);
+    // 开发机与 Windows/Linux 走 WALGIT_REPO 指向的 checkout + rustup/cargo。
+    // 两条都没有时整条停用——否则只会每 30 分钟往 tray.log 写一条 skip 噪音。
+    let release_channel = cfg!(target_os = "macos") && app_bundle().is_some();
+    if !release_channel && !has_source_repo() {
         log_line(&format!(
             "detect: no repo at {} — update checks disabled (set WALGIT_REPO to enable)",
             repo_dir().display()
@@ -952,22 +1303,7 @@ fn main() {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(30));
             loop {
-                let repo = repo_dir();
-                let _ = run(Some(&repo), "git", &["fetch", "origin", "main"], &[]);
-                let (c1, lout) = run(Some(&repo), "git", &["rev-parse", "HEAD"], &[]);
-                let (c2, rout) = run(Some(&repo), "git", &["rev-parse", "origin/main"], &[]);
-                let local = lout.trim().to_string();
-                let remote = rout.trim().to_string();
-                if c1 == 0 && c2 == 0 && !local.is_empty() && !remote.is_empty() {
-                    if local != remote {
-                        let _ = detect_proxy.send_event(Msg::UpdateState(ST_AVAILABLE));
-                        let _ = detect_proxy
-                            .send_event(Msg::Available(remote[..7.min(remote.len())].to_string()));
-                    }
-                    log_line(&format!("detect: local={:.7} remote={:.7}", local, remote));
-                } else {
-                    log_line("detect: skip (git failed)");
-                }
+                publish_detected(&detect_proxy, detected_update());
                 std::thread::sleep(Duration::from_secs(1800));
             }
         });

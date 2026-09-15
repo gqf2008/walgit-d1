@@ -146,12 +146,16 @@ jobs:
       # Build before any Apple secret enters the environment: cargo build scripts
       # and pnpm lifecycle hooks must never see the signing keychain or notary
       # password. The signing step below consumes this binary as-is.
-      - name: Build the SPA and release binary (no signing secrets)
+      - name: Build the SPA and release binaries (no signing secrets)
         run: |
           set -euo pipefail
           just web-build
           WALGIT_BUILD_SHA="v${RELEASE_VERSION#v}" \
             cargo build --release --bin walgit
+          # macOS 托盘 = 跨平台 tray-rs(#183);build-dmg.sh 以
+          # WALGIT_SKIP_BUILD=1 消费这个预构建产物。
+          cargo build --release --target-dir target \
+            --manifest-path deploy/tray/tray-rs/Cargo.toml
 
       - name: Import Developer ID certificate (temporary keychain)
         id: signing
