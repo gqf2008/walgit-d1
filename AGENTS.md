@@ -303,7 +303,10 @@ decision in §4 — or the PR is; never "fix later".
   is a frozen snapshot (`frozen_pack_source`). Reproducer: `walgit-git/tests/upload_gix_scale.rs`.
 - **D3** `ObjectStore` trait with CAS version tokens, conditional GET, range, compose; gcs/s3/memory backends.
   `compose` is native on GCS and a multipart `UploadPartCopy` on S3 (`compose_is_native` tells callers which);
-  `accel_target` gives an edge a URL (+ bearer on GCS, presigned on S3) to fetch an object itself.
+  `accel_target` gives an edge a URL (+ bearer on GCS, presigned on S3) to fetch an object itself. Above
+  `store.multipart_threshold` an S3/R2 `Create` PUT (packs and their side files) is a HEAD pre-check plus
+  multipart — `CreateMultipartUpload` has no `If-None-Match`, so large-create atomicity is best effort; the keys
+  are content-addressed, so racing writers upload the same bytes (`s3.rs` module docs).
 - **D4** protobuf on the wire and in the bucket; schema versioned, append-only.
 - **D5** Repo identity `<owner>/<repo>[.git]`, prefix `repos/<o>/<r>/`, creation = CAS create of the manifest.
 - **D6** Manifest CAS is the only commit point. **D7** No node identity, no elections; leases for exclusivity.

@@ -14,7 +14,7 @@
 //! trait: CAS create/update semantics, conditional GET (304 / 412), range
 //! reads, head, delete (conditional + idempotent), list ordering and prefix
 //! isolation, large streamed put/get roundtrip with checksum, and the
-//! multipart upload path.
+//! multipart upload paths (Overwrite and large `Create`).
 //!
 //! The suite is executed against `MemoryStore` always, and against `S3Store`
 //! when `WALGIT_TEST_S3_ENDPOINT` is set. `GcsStore` is tested when
@@ -54,6 +54,7 @@ pub async fn run_contract(store: DynStore, prefix: &str) {
     test_list(&store, &p("list")).await;
     test_large_streamed_roundtrip(&store, &p("large")).await;
     test_multipart_path(&store, &p("multi")).await;
+    test_multipart_create_path(&store, &p("multi-create")).await;
     test_compose(&store, &p("compose")).await;
 }
 
@@ -169,7 +170,11 @@ async fn put_bytes(
 
 // ---- individual tests --------------------------------------------------
 
-/// 32 concurrent `PutMode::Create` tasks: exactly one wins.
+/// 32 concurrent `PutMode::Create` tasks: exactly one wins. This pins the
+/// atomic single-shot path; above a backend's multipart threshold S3/R2
+/// degrades create to a documented best-effort pre-check (see `PutMode`), so
+/// the large-object case is covered by `test_multipart_create_path` and the
+/// per-backend tests instead of a race assertion.
 async fn test_put_create_wins_once(store: &DynStore, key: &str) {
     // Clean slate.
     let _ = store.delete(key, None).await;
@@ -768,12 +773,224 @@ async fn test_multipart_path(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 }
 
+/// `PutMode::Create` above the multipart threshold: the object must land
+/// byte-exact, and a second large `Create` on the same key must still answer
+/// `PreconditionFailed` (on S3 that answer comes from the documented `HEAD`
+/// pre-check; the check-to-upload race is called out on `PutMode::Create`).
+/// For `MemoryStore` there is no threshold — the case still pins the
+/// create-once behaviour for a large body.
+async fn test_multipart_create_path(store: &DynStore, key: &str) {
+    let _ = store.delete(key, None).await;
+
+    // 6 MiB — above the 5 MiB S3 test threshold (parts must be >= 5 MiB except
+    // the last), so S3Store takes the multipart branch with 2 parts.
+    let size: usize = 6 * 1024 * 1024;
+    let mut data = Vec::with_capacity(size);
+    let mut state: u32 = 0x1357_9BDF;
+    for _ in 0..size {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        data.push((state & 0xFF) as u8);
+    }
+    let data = Bytes::from(data);
+    let len = data.len() as u64;
+
+    let put_meta = store
+        .put(
+            key,
+            PutBody::Stream {
+                len,
+                stream: walgit_store::util::once(data.clone()),
+            },
+            PutOptions {
+                mode: PutMode::Create,
+                immutable: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("multipart Create put");
+    let head = store.head(key).await.expect("head").expect("object");
+    assert_eq!(
+        head.version, put_meta.version,
+        "multipart Create PUT/HEAD version mismatch"
+    );
+
+    let r = store
+        .get(key, GetOptions::default())
+        .await
+        .expect("multipart Create get");
+    let (_, body) = collect_body(r).await;
+    assert_eq!(&body[..], &data[..], "multipart Create roundtrip mismatch");
+
+    // A second large Create must not overwrite: the pre-check sees the object.
+    let again = store
+        .put(
+            key,
+            PutBody::Stream {
+                len,
+                stream: walgit_store::util::once(data.clone()),
+            },
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(again, Err(StoreError::PreconditionFailed { .. })),
+        "large Create on an existing object must be PreconditionFailed, got {again:?}"
+    );
+
+    let _ = store.delete(key, None).await;
+}
+
 // ---- test wrappers -----------------------------------------------------
 
 #[tokio::test]
 async fn memory_contract() {
     let store: DynStore = Arc::new(MemoryStore::new());
     run_contract(store, "").await;
+}
+
+/// On-demand real-backend check for issue #218: a large `PutMode::Create`
+/// must take the multipart path and finish. Production R2 failed the same
+/// 135 MiB pack 14 times in a row as a single-shot `PutObject` (the SDK's
+/// request timeout, and S3's own 5 GiB single-PUT cap, make single-shot the
+/// wrong path above `multipart_threshold`). Run with
+/// `WALGIT_TEST_S3_ENDPOINT`, `WALGIT_TEST_BUCKET`, the usual credentials and
+/// `WALGIT_TEST_S3_LARGE_CREATE_MIB=136`; the object goes under a unique
+/// `contract-large-create-<uuid>/` prefix and is deleted again.
+#[cfg(feature = "s3")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_large_create_real_backend() {
+    use std::io::Write as _;
+    use walgit_store::ObjectStore as _;
+
+    let (Ok(endpoint), Ok(mib)) = (
+        std::env::var("WALGIT_TEST_S3_ENDPOINT"),
+        std::env::var("WALGIT_TEST_S3_LARGE_CREATE_MIB"),
+    ) else {
+        eprintln!(
+            "skipping s3_large_create_real_backend: set WALGIT_TEST_S3_ENDPOINT and \
+             WALGIT_TEST_S3_LARGE_CREATE_MIB (e.g. 136)"
+        );
+        return;
+    };
+    let mib: u64 = mib
+        .parse()
+        .expect("WALGIT_TEST_S3_LARGE_CREATE_MIB must be a number");
+    let bucket = std::env::var("WALGIT_TEST_BUCKET").unwrap_or_else(|_| "walgit-test".into());
+    let _access_key =
+        std::env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID required for S3 tests");
+    let _secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+        .expect("AWS_SECRET_ACCESS_KEY required for S3 tests");
+
+    let cfg = walgit_config::StoreConfig {
+        backend: walgit_config::StoreBackend::S3,
+        bucket,
+        prefix: String::new(),
+        s3: walgit_config::S3Config {
+            endpoint,
+            region: "auto".into(),
+            access_key_env: "AWS_ACCESS_KEY_ID".into(),
+            secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
+            access_key: None,
+            secret_key: None,
+            force_path_style: std::env::var("WALGIT_TEST_S3_FORCE_PATH_STYLE").is_ok(),
+        },
+        // The production shape: 64 MiB threshold, 32 MiB parts.
+        multipart_threshold: bytesize::ByteSize::mib(64),
+        multipart_part_size: bytesize::ByteSize::mib(32),
+        ..Default::default()
+    };
+    let store = walgit_store::s3::S3Store::new(&cfg).expect("S3Store::new");
+
+    let len = mib * 1024 * 1024;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pack.pack");
+    let mut file = std::fs::File::create(&path).expect("create file");
+    let block: Vec<u8> = (0..1024 * 1024)
+        .map(|i| u8::try_from(i % 251).expect("i % 251 is in 0..=250"))
+        .collect();
+    for _ in 0..mib {
+        file.write_all(&block).expect("write block");
+    }
+    drop(file);
+
+    let key = format!(
+        "contract-large-create-{}/pack.pack",
+        uuid::Uuid::new_v4().simple()
+    );
+    let started = std::time::Instant::now();
+    let meta = store
+        .put(
+            &key,
+            PutBody::File(path.clone()),
+            PutOptions {
+                mode: PutMode::Create,
+                immutable: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("large Create must finish against the real backend");
+    eprintln!(
+        "[s3_large_create] {mib} MiB uploaded in {:?}",
+        started.elapsed()
+    );
+    assert_eq!(meta.size, len, "uploaded size");
+
+    // Byte-exact at both ends (a full 136 MiB download would only re-measure
+    // the uplink; the parts are what the fix changes).
+    let head = store.get(&key, GetOptions::default()).await.expect("get");
+    let (head_meta, head_body) = collect_body(head).await;
+    assert_eq!(head_meta.size, len);
+    let _ = head_body;
+
+    let first = store
+        .get(
+            &key,
+            GetOptions {
+                range: Some(0..4096),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("range get head");
+    let (_, first) = collect_body(first).await;
+    assert_eq!(&first[..], &block[..4096], "first 4 KiB");
+
+    let tail_start = len - 4096;
+    let tail = store
+        .get(
+            &key,
+            GetOptions {
+                range: Some(tail_start..len),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("range get tail");
+    let (_, tail) = collect_body(tail).await;
+    assert_eq!(
+        &tail[..],
+        &block[(block.len() - 4096)..],
+        "tail must be the last 4 KiB"
+    );
+
+    // The HEAD pre-check must refuse a second large Create without uploading.
+    let again = store
+        .put(&key, PutBody::File(path), PutOptions::from(PutMode::Create))
+        .await;
+    assert!(
+        matches!(again, Err(StoreError::PreconditionFailed { .. })),
+        "second large Create must be PreconditionFailed, got {again:?}"
+    );
+
+    let _ = store.delete(&key, None).await;
+    eprintln!("[s3_large_create] {key} rejected a second Create; cleaned up");
 }
 
 #[cfg(feature = "s3")]

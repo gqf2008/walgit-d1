@@ -84,7 +84,9 @@ idle_timeout = "120s"             # #130: fail a bucket read once NO byte has ar
                                   # range read may legitimately stream for many minutes (the 24-min
                                   # clone, §2.3) — bytes keep flowing, nothing is cut off. Also caps
                                   # one S3 SDK request (HEAD/PUT/multipart part) until its response.
-multipart_threshold = "64MiB"     # PUTs above this use multipart/resumable uploads
+multipart_threshold = "64MiB"     # object PUTs above this use multipart. Applies to Overwrite and to large
+                                  # Create (packs/idx); a Create above the threshold pays one HEAD pre-check
+                                  # because S3 multipart has no If-None-Match. Small CAS `Update` puts stay single-shot.
 multipart_part_size = "32MiB"
 
 [store.s3]
