@@ -17,6 +17,23 @@ it was built against is a 57 GiB / 73 M-object / 1.4 M-commit / 466 k-ref monore
 machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositories. The design follows Cursor's
 *Git at any scale* (Continuity); `README.md` tells the story, this file keeps the rules.
 
+## Where this repository lives
+
+- **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
+  board are signed entries in the D1 collaboration layer (`refs/collab/*`, `walgit collab ...`), not GitHub.
+- **GitHub is a mirror plus the release pipeline** — `github = gqf2008/walgit-d1`. The `walgit-sync-github`
+  screen loop mirrors `heads` + `tags` every 60 s and never pushes `refs/collab/*`, so a `v*` tag pushed in
+  walgit reaches GitHub through the mirror and triggers `.github/workflows/release.yml`. Never push branches
+  to the GitHub remote by hand and never double-push.
+- The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
+  code and the collaboration history. `fork` (`gqf2008/walgit-1`) and `upstream` (`tobi/walgit`) are
+  historical references — never push to them.
+- The mirror loop lives in `~/.walgit/sync-to-github.sh` (screen `walgit-sync-github`, 60 s). A walgit
+  service restart kills that screen, so restart it after restarts (first check `screen -ls | grep walgit`
+  so you do not run a second copy — two loops racing push the same refs):
+  `screen -dmS walgit-sync-github bash -c 'cd ~/.walgit && exec ./sync-to-github.sh >> sync-to-github.log 2>&1'`.
+  It mirrors **every** `refs/heads/*` too, so a pushed feature branch shows up on the GitHub mirror as well.
+
 ## 0. Document map (one home per fact — link, don't duplicate)
 
 | Doc | Who / when to read it |
@@ -580,10 +597,16 @@ Decision identifiers are stable; gaps in the numbering are intentional.
 
 ## §6 Agent collaboration protocol
 
-How this repository works as an agent-native collaboration platform: GitHub is the
-coordination layer — work units (issues) carry a machine-readable lifecycle, CI reports
-its own expected-red noise, and every state change an agent makes is a label, a comment
-or a PR. **This section is the contract agents follow; humans use the same protocol.**
+> **Superseded 2026-09-16 (coordination layer).** Work units, PRs, reviews and the board now live in
+> walgit's D1 collaboration layer (`refs/collab/*`, `walgit collab ...`) — see "Where this repository
+> lives" above and the `walgit` skill. The GitHub claim/ship samples in §6.2 below are historical. What
+> still applies: §6.3 (reading the CI signals that run on the GitHub mirror) and §6.4's ruleset/release
+> facts (a `v*` tag reaches GitHub through the mirror, where `release.yml` publishes).
+
+How this repository works as an agent-native collaboration platform: work units carry a
+machine-readable lifecycle, CI reports its own expected-red noise, and every state change an
+agent makes is a signed collab entry (historically: a label, a comment or a PR). **This section
+is the contract agents follow; humans use the same protocol.**
 
 ### 6.1 Work-unit lifecycle
 
@@ -603,7 +626,11 @@ Priority: `P0` (immediate) / `P1` (this batch) / `P2` (queued) / `P3` (spare).
 Kind: `batch` (checklist-driven), `bug`, `enhancement` (task). Batches own the
 `batch` label and a checklist; single units use the task/bug forms.
 
-### 6.2 Claim protocol (agents)
+### 6.2 Claim protocol (agents) — historical GitHub flow, superseded 2026-09-16
+
+The five steps and `gh` samples below describe the pre-migration GitHub flow; the
+coordination layer is now walgit collab (see the note above). The *state vocabulary*
+(claim → in-progress → needs-review → blocked → done) still names the same lifecycle.
 
 1. **Claim**: pick a `ready` issue → add `in-progress`, remove `ready`, and comment
    `🔄 [处理中][wt-<worktree>] <one-line plan>`. One issue, one worktree at a time.
@@ -627,8 +654,7 @@ gh issue edit <n> --add-label needs-review --remove-label in-progress
 # check CI for a PR (conclusion per job + failing steps)
 gh pr checks <pr> --repo gqf2008/walgit-d1
 gh run view <run> --repo gqf2008/walgit-d1 --json jobs --jq '.jobs[]|{n:.name,c:.conclusion,f:[.steps[]|select(.conclusion=="failure")|.name]}'
-# release (see 6.4)
-gh release create v0.1.0 --generate-notes
+# releases: push the tag to walgit; the mirror puts it on GitHub and release.yml publishes it
 ```
 
 ### 6.3 Reading CI signals
@@ -649,9 +675,10 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
 
 ### 6.4 Governance and releases
 
-- `main` is protected by a ruleset: PR required, required checks
-  (`warnings + test`, `e2e`, `windows fast tier`; clippy excluded), linear history.
-  Push to main directly is rejected.
+- The **GitHub mirror's** `main` is protected by a ruleset: PR required, required checks
+  (`warnings + test`, `e2e`, `windows fast tier`; clippy excluded), linear history. The
+  canonical `main` lives in walgit and is moved by a signed collab `merge_result` plus a
+  direct push to `origin`.
 - Design decisions and Q&A live in **Discussions** (Announcements/General/Ideas/Polls/
   Q&A/Show and tell); issues stay for work units, discussions for "why".
 - Vulnerabilities: private reporting (SECURITY.md) + Dependabot security updates +

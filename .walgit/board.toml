@@ -1,0 +1,58 @@
+# walgit 看板定义（.walgit/board.toml）——walgit 是主仓，看板/issue/PR 都在 refs/collab/*
+# 看板是线程集合在声明式列定义下的确定性投影：卡片进入【第一个】满足谓词的列；
+# 字段留空 = 匹配任意。未命中任何列的线程不出现在看板上。
+# 移动卡片 = 追加一条签名 `status` 条目，不是改这个文件。
+
+version = 1
+
+[sort]
+by = "ts"          # ts(默认,按最后活动) | id(按线程 id)
+direction = "desc" # desc(默认,新在前) | asc
+
+# 一列一个谓词；只声明你真正想看到的列。
+# 字段：name(必填)、kind、status、merge、unverified
+#   kind       —— 线程必须包含该 kind 的条目
+#   status     —— 卡片有效状态(card_status)必须等于它
+#   merge      —— "allowed" | "blocked"：patch 的合并规则判定（无 patch 的线程不匹配）
+#   unverified —— true 时只收"至少含 1 条未验签条目"的卡片
+[[column]]
+name = "open"
+status = "open"
+
+[[column]]
+name = "in-progress"
+status = "in-progress"
+
+[[column]]
+name = "needs-review"
+status = "needs-review"
+
+[[column]]
+name = "blocked"
+status = "blocked"
+
+[[column]]
+name = "needs-human"
+status = "needs-human"
+
+# 终态有三种合法的 card_status，都要有列，否则卡片会在合并/结项后消失：
+#   merged  —— merge_result {"merged": true} 置位（本仓库新流程用它）
+#   done    —— status {"status":"done"}（门禁要求 needs-review + 已验签 approve；web/SKILL.md 与
+#              docs/USER_GUIDE.md 教这个值）
+#   closed  —— status {"status":"closed"}（结项归档，可在 merged/done 之后追加）
+[[column]]
+name = "merged"
+status = "merged"
+
+[[column]]
+name = "done"
+status = "done"
+
+[[column]]
+name = "closed"
+status = "closed"
+
+# 只列"被规则判为不可合并"的 PR 时用 merge 谓词（与上面的 status 列不同）：
+# [[column]]
+# name = "unmergeable"
+# merge = "blocked"

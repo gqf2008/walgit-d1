@@ -9,12 +9,15 @@ outrank any generic convention.
 
 ## Working here
 
-- **Work units are issues.** Batches (`batch` label) own a checklist; bugs and tasks
-  use the forms. Claim an issue (label `in-progress` + comment naming your worktree)
-  before starting; one worktree per issue.
-- **Never push to `main` directly** — the ruleset rejects it. Work in a worktree,
-  open a PR with the template (Verification / Model Used / reviewer), and let
-  auto-merge finish after CI.
+- **The canonical repository is walgit** (`origin = http://127.0.0.1:8081/gqf2008/walgit.git`);
+  GitHub is a read-only mirror plus the release pipeline. Work units, PRs, reviews and the
+  board are signed entries in walgit's D1 collaboration layer (`refs/collab/*`): follow the
+  `walgit` skill's flow (`walgit collab entry --kind issue|status|patch|review|merge_result`),
+  not GitHub labels/PRs. Never push branches to the GitHub remote by hand; never double-push.
+- Work in a worktree off `origin/main` (walgit), one worktree per issue, and run the merge
+  locally after the signed review approves: merge into `main`, push `origin`, then record
+  `merge_result {"merged": true}` (card → `merged`; `status done` is the gated equivalent,
+  `status closed` archives) in the thread.
 - **Commits are Conventional Commits** (`fix(git): …`, one logical change each,
   message says why).
 - **`just ci`** = warnings + clippy + test + test-cli + e2e + sim — everything a merge
@@ -23,10 +26,11 @@ outrank any generic convention.
 
 ## Reading CI
 
-The CI workflow comments a summary on every PR. `clippy (known-red debt)` is
-expected-red (~1300 pre-existing hits, issue #1; keep your increment at zero).
-Tests on the known-flaky list (§5) auto-rerun once. Anything else red is a
-regression — investigate.
+The deep matrix runs on the GitHub mirror's Actions and comments a summary on every PR
+there. `clippy (known-red debt)` is expected-red (~1300 pre-existing hits, issue #1; keep
+your increment at zero). Tests on the known-flaky list (§5) auto-rerun once. Anything else
+red is a regression — investigate. (walgit's own decentralized CI, if configured for a repo,
+reports through `ci-*` collab threads instead.)
 
 ## Safety
 
