@@ -3726,6 +3726,14 @@ async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
         .unwrap_or_default();
     assert!(live_cp > base_seq, "the fold must move past the base");
 
+    // Self-isolating control: with the witness still present the planner is on
+    // the bundle path; only deleting it may flip the decision to BaseRebuild.
+    let before = step!("plan before witness removal", next_unit(&server.state, &id))?;
+    assert!(
+        matches!(before, Unit::BundleSlot(ref s, _) if s == "weekly"),
+        "control state must be BundleSlot, got {before:?}"
+    );
+
     // Simulate the #214 production state: the old base's witness pair is gone,
     // while the base itself is still the one live bitmap'd base and no ref
     // change happened before the weekly window start.
