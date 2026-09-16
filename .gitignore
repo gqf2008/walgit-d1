@@ -36,6 +36,9 @@ result-*
 server-integration.log
 cli-integration.log
 
+# agent worktrees live inside the checkout (.worktrees/<unit>) — never in the repo
+.worktrees/
+
 # Python bytecode caches (agent scripts/tests)
 __pycache__/
 *.pyc

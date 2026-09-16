@@ -175,7 +175,7 @@ everyone re-derives the same view from the refs.
 ### 2. Tree changes (when the unit changes code/content)
 
 - Never edit a shared checkout. Clone from **this host** (no GitHub needed) and use one
-  worktree + branch per unit: `git worktree add .claude/worktrees/<unit> -b <unit> <base>`.
+  worktree + branch per unit: `git worktree add .worktrees/<unit> -b <unit> <base>`.
 - Commit locally, then push the branch to this host: `git push <remote> <unit>`.
 - Attach it to the thread as a `patch` entry with `--base` / `--head`; carry files
   with `--attach <file>` (`{filename, sha256, content_b64}` in the body); CI (if declared) runs on

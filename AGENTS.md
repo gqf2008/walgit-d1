@@ -639,7 +639,7 @@ coordination layer is now walgit collab (see the note above). The *state vocabul
 1. **Claim**: pick a `ready` issue → add `in-progress`, remove `ready`, and comment
    `🔄 [处理中][wt-<worktree>] <one-line plan>`. One issue, one worktree at a time.
    Never start work on an issue another agent marked in-progress.
-2. **Work**: in a worktree off `main` (`.claude/worktrees/<name>`, branch
+2. **Work**: in a worktree off `main` (`.worktrees/<name>`, branch
    `worktree-<name>`), following §5 rules and CONTRIBUTING (batches ≥3 similar units,
    Conventional Commits, one logical change per commit).
 3. **Ship**: open the PR (template: Closes/Relates, Verification, Model Used, reviewer),
