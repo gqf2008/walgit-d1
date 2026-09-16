@@ -996,6 +996,141 @@ async fn s3_large_create_real_backend() {
     eprintln!("[s3_large_create] {key} rejected a second Create; cleaned up");
 }
 
+/// On-demand real-backend compose check for issue #221: a small git-bundle
+/// header composed with a body big enough to need `UploadPartCopy` (the weekly
+/// full-bundle shape). Run with the usual S3/R2 env plus
+/// `WALGIT_TEST_S3_COMPOSE_MIB=60`; objects live under a unique
+/// `contract-compose-<uuid>/` prefix and are deleted again. Prints the full
+/// service error detail on failure — the production failure
+/// (`s3 complete multipart: service error`) hid the actionable code.
+#[cfg(feature = "s3")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_compose_real_backend() {
+    use std::io::Write as _;
+    use walgit_store::ObjectStore as _;
+
+    let (Ok(endpoint), Ok(mib)) = (
+        std::env::var("WALGIT_TEST_S3_ENDPOINT"),
+        std::env::var("WALGIT_TEST_S3_COMPOSE_MIB"),
+    ) else {
+        eprintln!(
+            "skipping s3_compose_real_backend: set WALGIT_TEST_S3_ENDPOINT and \
+             WALGIT_TEST_S3_COMPOSE_MIB (e.g. 60)"
+        );
+        return;
+    };
+    let mib: u64 = mib
+        .parse()
+        .expect("WALGIT_TEST_S3_COMPOSE_MIB must be a number");
+    let bucket = std::env::var("WALGIT_TEST_BUCKET").unwrap_or_else(|_| "walgit-test".into());
+    let _access_key =
+        std::env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID required for S3 tests");
+    let _secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+        .expect("AWS_SECRET_ACCESS_KEY required for S3 tests");
+
+    let cfg = walgit_config::StoreConfig {
+        backend: walgit_config::StoreBackend::S3,
+        bucket,
+        prefix: String::new(),
+        s3: walgit_config::S3Config {
+            endpoint,
+            region: "auto".into(),
+            access_key_env: "AWS_ACCESS_KEY_ID".into(),
+            secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
+            access_key: None,
+            secret_key: None,
+            force_path_style: std::env::var("WALGIT_TEST_S3_FORCE_PATH_STYLE").is_ok(),
+        },
+        multipart_threshold: bytesize::ByteSize::mib(64),
+        multipart_part_size: bytesize::ByteSize::mib(16),
+        ..Default::default()
+    };
+    let store = walgit_store::s3::S3Store::new(&cfg).expect("S3Store::new");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let body_path = dir.path().join("pack.pack");
+    let mut file = std::fs::File::create(&body_path).expect("create body");
+    let block: Vec<u8> = (0..1024 * 1024)
+        .map(|i| u8::try_from(i % 251).expect("i % 251 is in 0..=250"))
+        .collect();
+    for _ in 0..mib {
+        file.write_all(&block).expect("write block");
+    }
+    drop(file);
+
+    let prefix = format!("contract-compose-{}", uuid::Uuid::new_v4().simple());
+    let hdr_key = format!("{prefix}/bundle.hdr");
+    let body_key = format!("{prefix}/bundle.body");
+    let dest = format!("{prefix}/full.bundle");
+    let header = b"# v3 git bundle\n@object-format=sha1\n\n";
+
+    store
+        .put(
+            &hdr_key,
+            PutBody::Bytes(Bytes::from_static(header)),
+            PutOptions::from(PutMode::Create),
+        )
+        .await
+        .expect("put header");
+    store
+        .put(
+            &body_key,
+            PutBody::File(body_path),
+            PutOptions {
+                mode: PutMode::Create,
+                immutable: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("put body");
+
+    let meta = store
+        .compose(
+            &dest,
+            &[hdr_key.clone(), body_key.clone()],
+            PutOptions {
+                mode: PutMode::Create,
+                immutable: true,
+                content_type: Some("application/x-git-bundle"),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("compose {mib} MiB failed: {e:?}"));
+
+    let len = header.len() as u64 + mib * 1024 * 1024;
+    assert_eq!(meta.size, len, "composed size");
+    let first = store
+        .get(
+            &dest,
+            GetOptions {
+                range: Some(0..header.len() as u64),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("range head");
+    let (_, first) = collect_body(first).await;
+    assert_eq!(&first[..], &header[..], "composed header");
+    let tail = store
+        .get(
+            &dest,
+            GetOptions {
+                range: Some(len - 4096..len),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("range tail");
+    let (_, tail) = collect_body(tail).await;
+    assert_eq!(&tail[..], &block[(block.len() - 4096)..], "composed tail");
+    eprintln!("[s3_compose] {mib} MiB composed ok into {dest}");
+
+    for k in [dest.as_str(), hdr_key.as_str(), body_key.as_str()] {
+        let _ = store.delete(k, None).await;
+    }
+}
+
 #[cfg(feature = "s3")]
 #[tokio::test]
 async fn s3_contract() {
