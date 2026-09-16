@@ -181,34 +181,7 @@ impl Registry {
         if local_dir.exists() {
             #[cfg(windows)]
             crate::platform::clear_readonly_recursive(&local_dir);
-            // Windows: git's READ_ONLY pack attribute was cleared above, but a
-            // still-open handle (this process's pack-index mmap, a real-time
-            // scanner) reports SHARING_VIOLATION (32) / ACCESS_DENIED (5) for
-            // a moment, and a concurrent writer (pack prefetch, commit-graph
-            // update, a git child just flushing) can recreate a file inside
-            // the tree mid-teardown, which the final RemoveDirectory reports
-            // as DIR_NOT_EMPTY (145) — give the teardown the same bounded
-            // window the supersede deletes get, and clear the attribute again
-            // in case the first pass raced a just-written file.
-            let mut attempt: u64 = 0;
-            loop {
-                match tokio::fs::remove_dir_all(&local_dir).await {
-                    Ok(()) => break,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-                    Err(e)
-                        if cfg!(windows)
-                            && e.raw_os_error()
-                                .is_some_and(|c| matches!(c, 5 | 32 | 33 | 145 | 1224))
-                            && attempt < 3 =>
-                    {
-                        attempt += 1;
-                        #[cfg(windows)]
-                        crate::platform::clear_readonly_recursive(&local_dir);
-                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
-                    }
-                    Err(e) => return Err(WalError::Io(e)),
-                }
-            }
+            remove_dir_all_with_retry(&local_dir).await?;
         }
         Ok(())
     }
@@ -545,4 +518,135 @@ fn dir_size(path: &std::path::Path) -> u64 {
 /// what "used" means per OS and why it is the caller's free bytes either way.
 fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
     crate::platform::capacity(path).map(|(free, total)| (total.saturating_sub(free), total))
+}
+
+/// Is this error the "a writer recreated something / a handle is still open"
+/// shape that a bounded teardown retry is for?
+///
+/// `ErrorKind` carries the portable semantics; the raw codes cover platforms
+/// whose `ErrorKind` mapping predates `DirectoryNotEmpty` and the Windows
+/// sharing/access violations that have no portable kind.
+fn is_retryable_teardown_error(e: &std::io::Error) -> bool {
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::AlreadyExists
+    ) {
+        return true;
+    }
+    if cfg!(windows) {
+        e.raw_os_error()
+            .is_some_and(|c| matches!(c, 5 | 32 | 33 | 145 | 1224))
+    } else {
+        // EEXIST = 17; ENOTEMPTY = 39 on Linux, 66 on macOS.
+        e.raw_os_error().is_some_and(|c| matches!(c, 17 | 39 | 66))
+    }
+}
+
+/// How many extra attempts a local-cache teardown gets after the first one.
+const TEARDOWN_RETRIES: u64 = 3;
+
+/// Run `remove`, retrying the transient teardown shapes with a bounded
+/// 100/200/300 ms backoff. Extracted so the policy is testable without racing a
+/// real writer (issue #220: the retry set was Windows-only, so a loaded
+/// macOS/Linux instance answered `DELETE /<owner>/<repo>` with
+/// `Directory not empty (os error 66)`).
+async fn retry_teardown<F, Fut>(mut remove: F) -> std::io::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<()>>,
+{
+    let mut attempt: u64 = 0;
+    loop {
+        match remove().await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if is_retryable_teardown_error(&e) && attempt < TEARDOWN_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// [`retry_teardown`] around the real directory removal: clears git's `READ_ONLY`
+/// attribute again on Windows in case the previous pass raced a just-written
+/// file.
+async fn remove_dir_all_with_retry(local_dir: &std::path::Path) -> Result<(), WalError> {
+    let dir = local_dir.to_path_buf();
+    retry_teardown(move || {
+        let dir = dir.clone();
+        async move {
+            #[cfg(windows)]
+            crate::platform::clear_readonly_recursive(&dir);
+            tokio::fs::remove_dir_all(dir).await
+        }
+    })
+    .await
+    .map_err(WalError::Io)
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn not_empty() -> std::io::Error {
+        #[cfg(windows)]
+        let raw = 145;
+        #[cfg(target_os = "linux")]
+        let raw = 39;
+        #[cfg(target_os = "macos")]
+        let raw = 66;
+        std::io::Error::from_raw_os_error(raw)
+    }
+
+    /// The unix half of #49/#220: ENOTEMPTY (macOS 66 / Linux 39) must get the
+    /// same bounded retry Windows' 145 gets, and give up after it.
+    #[test]
+    fn retry_predicate_covers_both_platform_error_sets() {
+        assert!(is_retryable_teardown_error(&not_empty()));
+        assert!(is_retryable_teardown_error(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+        assert!(!is_retryable_teardown_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[tokio::test]
+    async fn retry_teardown_succeeds_after_a_transient_writer_race() {
+        let calls = AtomicU64::new(0);
+        let result = retry_teardown(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move { if n < 2 { Err(not_empty()) } else { Ok(()) } }
+        })
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "first failure + 2 retries");
+    }
+
+    #[tokio::test]
+    async fn retry_teardown_gives_up_after_the_bound() {
+        let calls = AtomicU64::new(0);
+        let result = retry_teardown(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move { Err(not_empty()) }
+        })
+        .await;
+        assert!(result.is_err(), "a permanently busy tree must surface");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            TEARDOWN_RETRIES + 1,
+            "one first attempt plus the bounded retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_teardown_treats_a_vanished_tree_as_success() {
+        let result =
+            retry_teardown(|| async { Err(std::io::Error::from(std::io::ErrorKind::NotFound)) })
+                .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
 }
