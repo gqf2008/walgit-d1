@@ -43,7 +43,7 @@ impl Version {
 
     /// The bare entity tag used on the HTTP/S3 wire. A store version may be
     /// composite (`<etag>@<incarnation>` on S3/R2); conditional HTTP clients
-    /// and S3 `If-Match`/`If-None-Match` still speak only the ETag part.
+    /// and S3 `If-Match`/`If-None-Match` still speak only the `ETag` part.
     pub fn http_etag(&self) -> &str {
         self.0.split_once('@').map_or(&self.0, |(etag, _)| etag)
     }
@@ -124,6 +124,15 @@ pub enum PutMode {
     #[default]
     Overwrite,
     /// Only if the object does not exist (if-generation-match: 0 / If-None-Match: *).
+    ///
+    /// Atomic on every backend while the object stays on the single-shot path.
+    /// Above the backend's multipart threshold S3/R2 cannot express this
+    /// condition (its `CreateMultipartUpload` has no `If-None-Match`), so there
+    /// it degrades to a best-effort `HEAD` pre-check plus multipart: concurrent
+    /// creates may race and the last one wins. Callers that use large `Create`
+    /// objects must therefore be content-addressed (walgit's packs and their
+    /// side files are: the key is the checksum, so racing writers upload the
+    /// same bytes).
     Create,
     /// Only if the current version equals the given one (CAS).
     Update(Version),

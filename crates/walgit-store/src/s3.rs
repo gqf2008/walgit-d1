@@ -20,7 +20,7 @@
 //! `PutMode::Update(v)` → `If-Match: <etag>`  (CAS on the current bare `ETag`).
 //! On failure the SDK returns a `PreconditionFailed` service error; we fill
 //! `current` via a follow-up HEAD when the SDK doesn't include it. `Update`
-//! intentionally speaks the bare ETag: user metadata cannot participate in an
+//! intentionally speaks the bare `ETag`: user metadata cannot participate in an
 //! S3 `If-Match`, so the full-incarnation guard lives on the delete path that
 //! GC actually needs.
 //!
@@ -36,12 +36,25 @@
 //!
 //! Objects above `cfg.multipart_threshold` use `CreateMultipartUpload` +
 //! `UploadPart` + `CompleteMultipartUpload`. `CreateMultipartUpload` does NOT
-//! support `If-None-Match`/`If-Match` in the S3 API, so multipart is only
-//! used for `PutMode::Overwrite`. For walgit's immutable pack objects
-//! (`PutMode::Create`) we use single-shot PUT when the object is large,
-//! accepting the (tiny) risk of concurrent create races. CAS-rewritten
-//! objects (manifests, leases, bundle lists) are always small → single-shot
-//! PUT with conditional headers.
+//! support `If-None-Match`/`If-Match` in the S3 API:
+//!
+//! * `PutMode::Overwrite` (bundle lists, caches) gets plain multipart.
+//! * `PutMode::Create` gets a `HEAD` pre-check plus multipart. The pre-check
+//!   keeps the common "already exists" answer, but the check and the upload
+//!   are not atomic, so a concurrent create can win the key. That is safe for
+//!   walgit's large immutable objects — packs, `.idx`/`.rev`/`.bitmap`/
+//!   `.commit-graph` side files are content-addressed, so racing writers put
+//!   identical bytes. Single-shot PUT cannot be the answer above the
+//!   threshold: S3 caps one `PutObject` at 5 GiB while a tier-2 base may be
+//!   tens of GiB, and a slow uplink exceeds the request timeout long before
+//!   that.
+//! * `PutMode::Update` (CAS) stays single-shot and conditional; every
+//!   CAS-rewritten object (manifests, leases) is small.
+//!
+//! A multipart upload whose future is dropped (task abort, drain) is aborted
+//! best-effort by a drop guard. A hard kill cannot run it, so buckets should
+//! also carry an `AbortIncompleteMultipartUpload` lifecycle rule (a few days)
+//! to reclaim the parts of an interrupted large pack upload.
 //!
 //! ## rustfs compatibility (tested with rustfs/rustfs:latest)
 //!
@@ -478,13 +491,23 @@ impl ObjectStore for S3Store {
     async fn put(&self, key: &str, body: PutBody, opts: PutOptions) -> Result<ObjectMeta> {
         let (s3_body, len) = body_to_s3(body).await?;
 
-        // Multipart only for Overwrite (CreateMultipartUpload has no
-        // conditional header support in the S3 API). Create/Update always
-        // use single-shot PUT.
-        let use_multipart =
-            len > self.multipart_threshold && matches!(opts.mode, PutMode::Overwrite);
+        // Above the threshold, Overwrite and Create both go multipart;
+        // `CreateMultipartUpload` has no conditional header support in the S3
+        // API, so Create keeps its no-overwrite intent with a HEAD pre-check
+        // (best effort — see the module docs). Update stays single-shot, and
+        // every CAS-rewritten object is small.
+        let use_multipart = len > self.multipart_threshold
+            && matches!(opts.mode, PutMode::Overwrite | PutMode::Create);
 
         if use_multipart {
+            if matches!(opts.mode, PutMode::Create)
+                && let Some(current) = self.head(key).await?
+            {
+                return Err(StoreError::PreconditionFailed {
+                    key: key.into(),
+                    current: Some(current.version),
+                });
+            }
             return self.multipart_put(key, s3_body, len, &opts).await;
         }
 
@@ -1038,6 +1061,16 @@ impl S3Store {
             })?
             .to_owned();
 
+        // Cancellation (task abort/drain) drops this future without running any
+        // `abort_multipart` below; the guard fires best-effort on drop. A hard
+        // process kill cannot be covered in-process — see the module docs.
+        let mut abort_guard = MultipartAbortGuard::new(
+            self.client.clone(),
+            self.bucket.clone(),
+            key.to_owned(),
+            upload_id.clone(),
+        );
+
         let part_size = self.multipart_part_size;
         let mut part_number = 1i32;
         let mut uploaded_parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
@@ -1065,7 +1098,8 @@ impl S3Store {
                 let n = match reader.read(&mut buf[read_total..]).await {
                     Ok(n) => n,
                     Err(e) => {
-                        let _ = self.abort_multipart(key, &upload_id).await;
+                        self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                            .await;
                         return Err(StoreError::other(anyhow::anyhow!("multipart read: {e}")));
                     }
                 };
@@ -1075,8 +1109,16 @@ impl S3Store {
                 read_total += n;
             }
 
-            if read_total == 0 {
-                break;
+            if read_total < to_read {
+                // A body shorter than the declared length must never Complete:
+                // the object would keep the content-addressed key while holding
+                // fewer bytes than the key names.
+                self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                    .await;
+                return Err(StoreError::InvalidArgument(format!(
+                    "put body for {key} ended after {read_total} bytes of part {part_number} \
+                     (declared length {len}); refusing to complete a truncated object"
+                )));
             }
             buf.truncate(read_total);
             let actual = read_total as u64;
@@ -1100,7 +1142,8 @@ impl S3Store {
             {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = self.abort_multipart(key, &upload_id).await;
+                    self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                        .await;
                     return Err(transport_retryable("upload part", &e)
                         .unwrap_or_else(|| StoreError::Other(anyhow::anyhow!("s3 upload part: {e}"))));
                 }
@@ -1134,18 +1177,34 @@ impl S3Store {
         {
             Ok(r) => r,
             Err(e) => {
-                let _ = self.abort_multipart(key, &upload_id).await;
+                self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                    .await;
                 return Err(transport_retryable("complete multipart", &e)
                     .unwrap_or_else(|| StoreError::Other(anyhow::anyhow!("s3 complete multipart: {e}"))));
             }
         };
 
+        abort_guard.disarm();
         let etag = resp.e_tag().map(|s| s.trim_matches('"').to_owned());
         Ok(ObjectMeta {
             key: key.into(),
             size: len,
             version: version_from_parts(etag.as_deref(), Some(&incarnation), None),
         })
+    }
+
+    /// Explicit abort on an error path. Disarms the drop guard only when the
+    /// abort actually landed: a transient abort failure keeps the guard armed
+    /// so dropping the future retries it best-effort.
+    async fn abort_upload_or_keep_guard(
+        &self,
+        key: &str,
+        upload_id: &str,
+        guard: &mut MultipartAbortGuard,
+    ) {
+        if self.abort_multipart(key, upload_id).await.is_ok() {
+            guard.disarm();
+        }
     }
 
     async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<()> {
@@ -1158,6 +1217,59 @@ impl S3Store {
             .await
             .map_err(|e| StoreError::other(anyhow::anyhow!("abort multipart: {e}")))?;
         Ok(())
+    }
+}
+
+/// Best-effort `AbortMultipartUpload` for a multipart upload whose future is
+/// dropped before completion (task abort, drain, early return). Spawning needs
+/// a runtime: outside one there is nothing to abort with, and the bucket's
+/// lifecycle rule is the only backstop left.
+struct MultipartAbortGuard {
+    client: S3Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    armed: bool,
+}
+
+impl MultipartAbortGuard {
+    fn new(client: S3Client, bucket: String, key: String, upload_id: String) -> Self {
+        Self {
+            client,
+            bucket,
+            key,
+            upload_id,
+            armed: true,
+        }
+    }
+
+    /// The upload completed (or was aborted explicitly): never abort on drop.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MultipartAbortGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        let bucket = std::mem::take(&mut self.bucket);
+        let key = std::mem::take(&mut self.key);
+        let upload_id = std::mem::take(&mut self.upload_id);
+        runtime.spawn(async move {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .send()
+                .await;
+        });
     }
 }
 
@@ -1258,6 +1370,394 @@ mod tests {
         };
         assert!(err.is_retryable(), "get: {err:?}");
         assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
+    /// A `PutMode::Create` above the threshold must use the multipart path
+    /// (issue #218: 135 MiB immutable packs used to go out as one `PutObject`
+    /// and time out past `store.idle_timeout`; single-shot is also capped at
+    /// 5 GiB, below a tier-2 base). The fake S3 here *only* implements the
+    /// multipart protocol and answers 501 to a plain `PUT`, so a regression to
+    /// single-shot cannot pass. The pre-check half pins the documented
+    /// best-effort create: an existing key answers `PreconditionFailed`
+    /// without starting an upload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn large_create_uses_multipart_and_prechecks_existence() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let existing = Arc::new(Mutex::new(false));
+        {
+            let seen = seen.clone();
+            let existing = existing.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let seen = seen.clone();
+                    let existing = existing.clone();
+                    std::thread::spawn(move || {
+                        fake_s3_multipart_only(stream, &seen, &existing);
+                    });
+                }
+            });
+        }
+
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "multi-create".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            multipart_threshold: bytesize::ByteSize::b(1024),
+            multipart_part_size: bytesize::ByteSize::b(2048),
+            ..Default::default()
+        };
+        let store = S3Store::new(&cfg).unwrap();
+
+        // 4 KiB with a 2 KiB part size: two UploadPart requests.
+        let body = Bytes::from(vec![7u8; 4096]);
+        let meta = store
+            .put(
+                "repos/o/r/wal/pack.pack",
+                PutBody::Bytes(body.clone()),
+                PutOptions {
+                    mode: PutMode::Create,
+                    immutable: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("large Create must take the multipart path");
+        assert_eq!(meta.size, 4096);
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            requests
+                .first()
+                .is_some_and(|r| r.starts_with("HEAD ") && r.ends_with("pack.pack HTTP/1.1")),
+            "a large Create must HEAD the key first: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploads")),
+            "CreateMultipartUpload missing: {requests:?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.starts_with("PUT ") && r.contains("partNumber="))
+                .count(),
+            2,
+            "every part must be uploaded separately: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploadId=")),
+            "CompleteMultipartUpload missing: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.starts_with("PUT ") && !r.contains("partNumber=")),
+            "no single-shot PUT may be attempted: {requests:?}"
+        );
+        assert!(
+            !requests.iter().any(|r| r.starts_with("DELETE ")),
+            "a completed upload must not abort: {requests:?}"
+        );
+        // The documented budget: HEAD + CreateMultipartUpload + Complete + one
+        // request per part (see docs/ROUNDTRIPS.md).
+        assert_eq!(
+            requests.len(),
+            3 + 2,
+            "HEAD + initiate + complete + 2 parts: {requests:?}"
+        );
+
+        // The key now exists in the fake bucket: the pre-check must answer
+        // PreconditionFailed and issue no multipart requests at all.
+        *existing.lock().unwrap() = true;
+        let before = seen.lock().unwrap().len();
+        let again = store
+            .put(
+                "repos/o/r/wal/pack.pack",
+                PutBody::Bytes(body),
+                PutOptions::from(PutMode::Create),
+            )
+            .await;
+        assert!(
+            matches!(again, Err(StoreError::PreconditionFailed { .. })),
+            "existing large Create must be PreconditionFailed, got {again:?}"
+        );
+        let after = seen.lock().unwrap().clone();
+        assert_eq!(
+            after.len(),
+            before + 1,
+            "only the HEAD pre-check may run once the key exists: {:?}",
+            &after[before..]
+        );
+        assert!(after.last().is_some_and(|r| r.starts_with("HEAD ")));
+    }
+
+    /// Minimal S3 stub for [`large_create_uses_multipart_and_prechecks_existence`]:
+    /// HEAD (404 absent / 200 present), `CreateMultipartUpload`, `UploadPart` and
+    /// `CompleteMultipartUpload`. Any other request — in particular a single-shot
+    /// `PUT` without a part number — is 501.
+    fn fake_s3_multipart_only(
+        mut stream: std::net::TcpStream,
+        seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        existing: &std::sync::Arc<std::sync::Mutex<bool>>,
+    ) {
+        use std::io::{BufRead, BufReader, Read as _, Write as _};
+
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut reader = BufReader::new(clone);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+            return;
+        }
+        let mut content_length = 0usize;
+        let mut expect_continue = false;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if let Some(v) = lower.strip_prefix("content-length:") {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+            if lower.starts_with("expect:") && lower.contains("100-continue") {
+                expect_continue = true;
+            }
+        }
+        if expect_continue {
+            let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            let _ = stream.flush();
+        }
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 && reader.read_exact(&mut body).is_err() {
+            return;
+        }
+
+        let line = request_line.trim_end().to_owned();
+        seen.lock().unwrap().push(line.clone());
+        let (method, target) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+        let present = *existing.lock().unwrap();
+
+        let (status, headers, body): (&str, String, Vec<u8>) = if method == "HEAD" {
+            if present {
+                (
+                    "200 OK",
+                    "etag: \"stub\"\r\ncontent-length: 0\r\n".to_owned(),
+                    Vec::new(),
+                )
+            } else {
+                (
+                    "404 Not Found",
+                    "content-length: 0\r\n".to_owned(),
+                    Vec::new(),
+                )
+            }
+        } else if method == "POST" && target.contains("uploads") {
+            let xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult><Bucket>b</Bucket><Key>k</Key><UploadId>stub-upload</UploadId></InitiateMultipartUploadResult>";
+            (
+                "200 OK",
+                format!(
+                    "content-type: application/xml\r\ncontent-length: {}\r\n",
+                    xml.len()
+                ),
+                xml.to_vec(),
+            )
+        } else if method == "PUT" && target.contains("partNumber=") {
+            (
+                "200 OK",
+                "etag: \"stub-part\"\r\ncontent-length: 0\r\n".to_owned(),
+                Vec::new(),
+            )
+        } else if method == "DELETE" && target.contains("uploadId=") {
+            (
+                "204 No Content",
+                "content-length: 0\r\n".to_owned(),
+                Vec::new(),
+            )
+        } else if method == "POST" && target.contains("uploadId=") {
+            let xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Location>http://stub/b/k</Location><Bucket>b</Bucket><Key>k</Key><ETag>\"stub-complete\"</ETag></CompleteMultipartUploadResult>";
+            (
+                "200 OK",
+                format!(
+                    "content-type: application/xml\r\ncontent-length: {}\r\n",
+                    xml.len()
+                ),
+                xml.to_vec(),
+            )
+        } else {
+            (
+                "501 Not Implemented",
+                "content-length: 0\r\n".to_owned(),
+                Vec::new(),
+            )
+        };
+
+        let head = format!("HTTP/1.1 {status}\r\n{headers}connection: close\r\n\r\n");
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+    }
+
+    /// A body shorter than its declared length must abort, never Complete: the
+    /// object would otherwise keep a content-addressed key while holding fewer
+    /// bytes than the key names (review finding on #218).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn short_multipart_body_aborts_instead_of_completing() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let existing = Arc::new(Mutex::new(false));
+        {
+            let seen = seen.clone();
+            let existing = existing.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let seen = seen.clone();
+                    let existing = existing.clone();
+                    std::thread::spawn(move || {
+                        fake_s3_multipart_only(stream, &seen, &existing);
+                    });
+                }
+            });
+        }
+
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "short-body".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            multipart_threshold: bytesize::ByteSize::b(1024),
+            multipart_part_size: bytesize::ByteSize::b(2048),
+            ..Default::default()
+        };
+        let store = S3Store::new(&cfg).unwrap();
+
+        // Declared 4097 bytes, the stream holds 4096: the second part is short.
+        let body = Bytes::from(vec![1u8; 4096]);
+        let err = store
+            .put(
+                "repos/o/r/wal/short.pack",
+                PutBody::Stream {
+                    len: 4097,
+                    stream: crate::util::once(body),
+                },
+                PutOptions {
+                    mode: PutMode::Create,
+                    immutable: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a short body must not succeed");
+        assert!(
+            matches!(err, StoreError::InvalidArgument(_)),
+            "short body must be InvalidArgument, got {err:?}"
+        );
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploadId=")),
+            "a short body must never Complete: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.starts_with("DELETE ") && r.contains("uploadId=")),
+            "a short body must abort its upload: {requests:?}"
+        );
+    }
+
+    /// Dropping the upload future (task abort/drain) must fire the drop guard's
+    /// best-effort abort; a hard kill needs the bucket lifecycle rule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_upload_guard_aborts_the_multipart_upload() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let existing = Arc::new(Mutex::new(false));
+        {
+            let seen = seen.clone();
+            let existing = existing.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let seen = seen.clone();
+                    let existing = existing.clone();
+                    std::thread::spawn(move || {
+                        fake_s3_multipart_only(stream, &seen, &existing);
+                    });
+                }
+            });
+        }
+
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "drop-abort".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            multipart_threshold: bytesize::ByteSize::b(1024),
+            multipart_part_size: bytesize::ByteSize::b(2048),
+            ..Default::default()
+        };
+        let store = S3Store::new(&cfg).unwrap();
+
+        drop(MultipartAbortGuard::new(
+            store.client.clone(),
+            store.bucket.clone(),
+            "repos/o/r/wal/dropped.pack".to_owned(),
+            "stub-upload".to_owned(),
+        ));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let requests = seen.lock().unwrap().clone();
+            if requests
+                .iter()
+                .any(|r| r.starts_with("DELETE ") && r.contains("uploadId="))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "drop guard never aborted: {requests:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// The idle bound must measure **silence**, not total time: a response
