@@ -5,8 +5,8 @@
 We are open-sourcing **walgit**, a git server whose only durable state is an object-store bucket.
 
 You run one binary. You point it at S3 or GCS. You get smart HTTP fetch and push, clones served as static files
-through git's `bundle-uri`, Git LFS, a browsing web UI, a JSON API with a drop-in SDK, per-repository push policy
-and webhooks. Run a second copy against the same bucket and it serves the same repositories, consistently, with
+through git's `bundle-uri`, Git LFS, a browsing web UI, a JSON API with a drop-in SDK, per-repository push policy.
+Run a second copy against the same bucket and it serves the same repositories, consistently, with
 nothing to coordinate. Kill every copy and you have lost warmth — nothing else.
 
 ```sh
@@ -55,7 +55,7 @@ repository**:
 ## What it is not
 
 walgit is a git host, not a forge. There is no code review, no issues, no CI, no merge queue — those live
-elsewhere and can build on the API and the webhook. It does not fork git: upstream `git` does upload-pack,
+elsewhere and can build on the API. It does not fork git: upstream `git` does upload-pack,
 repack, bitmaps and bundles; walgit does receive-pack, the WAL and the plumbing around them.
 
 ## Running it

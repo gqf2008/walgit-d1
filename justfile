@@ -24,7 +24,7 @@ web-test:
 tray-macos-test:
     deploy/tray/macos/test.sh
 
-# Local dev = standalone: the server with every role (serve, maintain, events) at
+# Local dev = standalone: the server with every role (serve, maintain) at
 # https://walgit.localhost:$PORT (default 8080) against local rustfs. Self-contained: starts rustfs (+ bucket) if
 # it is not answering on :9000 and builds the SPA if web/dist is missing, then runs the server.
 # `config` defaults to walgit.standalone.toml; point it at a real bucket by editing [store] there. The rustfs
@@ -100,7 +100,7 @@ dev-store-stop:
 # api_cli, follow, policy, policy_inbox — 21 tests, ~6 s on ubuntu) were evaluated
 # platform-clean for windows in #137 (no cfg/shell/signal/file-mode seams; the
 # same hermetic harness the windows-approved suites use since issue #2).
-SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test events --test budgets --test setup_wizard --test api_cli --test follow --test policy --test policy_inbox"
+SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test budgets --test setup_wizard --test api_cli --test follow --test policy --test policy_inbox"
 
 # tests/ files that are not suites: harness.rs is the shared module the suites
 # `mod` in (it has no #[test] of its own); e2e/sim are separate tiers with their

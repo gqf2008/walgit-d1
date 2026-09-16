@@ -83,8 +83,8 @@ pub async fn request_id(
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Honor a caller-supplied id (front → broker; tests) so events correlate
-    // with the user-visible request, not an internal hop (docs/EVENTS.md).
+    // Honor a caller-supplied id (front → broker; tests) so the work stays
+    // correlated with the user-visible request, not an internal hop.
     let id = req
         .headers()
         .get(REQUEST_ID_HEADER)

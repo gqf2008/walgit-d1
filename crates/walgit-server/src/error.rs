@@ -11,7 +11,7 @@ pub enum ApiError {
     NotFound(String),
     BadRequest(String),
     /// 401 on a browser-reachable lane (web api/v1/ui, settings, policy,
-    /// admin, bridge, login): challenges `Bearer` only. A `Basic` challenge
+    /// admin, login): challenges `Bearer` only. A `Basic` challenge
     /// pops the browser's native password dialog on navigations and
     /// credentialed fetch/XHR (the SDK sign-in popup navigates to
     /// `/api-browser/v1/authenticate`) — `Basic` must never reach a surface

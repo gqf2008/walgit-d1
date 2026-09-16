@@ -4,10 +4,10 @@
 > schema、运行状态机、竞争收敛规则、TTL 重认领、去重、失败重试、产物引用与秘密边界，
 > 全部写成可实现的规范。可执行形式：`crates/walgit-wal/src/ci.rs`（聚合核心）与
 > `crates/walgit-cli/src/ci_cmd.rs`（`walgit ci validate|run|status`），测试即其黄金用例
-> （与 `docs/POLICY.md`、`docs/EVENTS.md` 同一纪律）。
+> （与 `docs/POLICY.md` 同一纪律）。
 >
 > 与 walgit 的关系：**服务端零 CI 逻辑**（原则 X）。walgit 只提供两样东西——事实源（桶：
-> 代码对象与 `refs/collab/*`）与事件源（ref 事实，D32 events 桥是其 push 形态）。
+> 代码对象与 `refs/collab/*`）与事件源（ref 事实：refs 级轮询 / `ls-remote` 的 tip diff）。
 > 跑任务的算力来自**持有凭据的客户端 runner**（人的机器 / agent 的机器），它以普通
 > git 客户端的身份 fetch 代码、认领、执行、签名回传结果。walgit 进程内没有任何
 > "CI"代码；`GOAL.md §4` 的边界不变。
@@ -97,22 +97,18 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
 - **声明的权威版本 = 被测提交里的版本**：ref `R` 的 tip 是 `C`，就用 `C` 的 ci.toml 决定
   跑什么。其他 ref 的 ci.toml 对 `R` 无发言权。
 
-## 4. 触发（trigger）：ref 事实与两种传输
+## 4. 触发（trigger）：ref 事实与 refs 级轮询
 
 **触发面是事实，不是消息**："`ref R 的 tip 变成了 X`"。事实由 WAL 的 PUSH/REF_UPDATE
-条目产生（D32），消费端可以从两条传输观察到同一事实：
+条目产生（D32），消费端从 refs 级轮询观察到这一事实：
 
 1. **refs 级轮询（normative 默认，本批次实现）**：`git ls-remote` 每 `interval` 秒一次
    （一个往返，无 pack），与本地状态文件对比得"变化过的 ref"。对离线一段时间后回来的
    runner，对比自然**合并（coalesce）**为"处理当前 tip"——中间的多次推送折叠成最后一次。
-   这与 events 桥的 backfill 契约同一哲学：正确性不依赖推送，只依赖事实。
-2. **events 桥 webhook（push 唤醒，issue #161 已实现）**：常驻托管 runner 用
-   `walgit ci run --listen <addr>` 挂载唤醒端点，并可通过
-   `WALGIT_CI_WEBHOOK_SECRET`（或 `--webhook-secret`）配置与 `docs/EVENTS.md` 相同的
-   HMAC-SHA256 密钥。端点按 `X-Walgit-Signature` 验签、按 `X-Walgit-Delivery` 去重；
-   只对 `refs/heads/*`、`refs/tags/*` 事件返回唤醒提示。唤醒只缩短本轮轮询间隔，
-   runner 仍用 `ls-remote` 的 tip diff 决定触发——事件丢失/重放/伪造都不会改写运行事实，
-   也不改变本协议的任何对象或状态机。
+   正确性不依赖推送，只依赖事实。
+2. **push 唤醒（曾存在，2026-09-16 随 events 桥移除）**：`walgit ci run --listen <addr>` 的
+   唤醒端点（HMAC 验签 + `X-Walgit-Delivery` 去重）随 events 桥一并删除。今天只有 refs 级
+   轮询一条传输——轮询间隔就是最坏情况的触发延迟；触发仍以 `ls-remote` 的 tip diff 为准。
 
 **状态与去重（runner 侧）**：状态文件 `<gitdir>/ci-run.json` 记录 `{"processed": {ref: oid}}`。
 一次 pass 里：当前 tip ≠ 已处理 oid 的 ref 是**待处理**；对该 ref 的**全部**任务到达终态
@@ -410,7 +406,6 @@ done    : effective 存在                               → Settled(conclusion)
 | 层 | 键 | 规则 |
 |---|---|---|
 | 触发（轮询） | `(ref, tip oid)` | 状态文件 processed；tip 相同不重触发；coalesce 到当前 tip |
-| 触发（webhook 唤醒） | `X-Walgit-Delivery`；实际触发仍由 tip diff 决定 | 按 docs/EVENTS.md |
 | claim | `(id, attempt, actor)` | 同 principal 的重复认领无害：胜者规则全序，min 唯一 |
 | result | `(id, attempt)` | `effective` 全序唯一；重复结果记录但不生效 |
 | 事件重放 | 条目 oid（内容寻址） | 重放/重投递产生同一 oid，聚合幂等 |
@@ -440,6 +435,6 @@ done    : effective 存在                               → Settled(conclusion)
   （`refs/collab/ci-artifacts/<actor>/<sha256>` 桶内 blob 通道 + V11 + `walgit ci log`/
   `walgit ci artifacts` + HTTP `GET …/api/collab/ci-artifacts/<sha256>` + SDK
   `repo.ci.artifact`，e2e 用例 `artifacts_and_the_full_log_round_trip_through_git_objects`，
-  server 集成 `collab_ci_artifact_serves_verified_bytes`）；§4.2 events 桥 webhook 唤醒
-  （`walgit ci run --listen` + HMAC 验签 + delivery 去重）。
+  server 集成 `collab_ci_artifact_serves_verified_bytes`）。§4 的 push 唤醒传输
+  （`walgit ci run --listen` + HMAC 验签 + delivery 去重）已于 2026-09-16 随 events 桥删除。
 - **开放项**：无（issue #161 范围已全部落地）。

@@ -221,9 +221,6 @@ impl Server {
 
         let registry = state.registry.clone();
         let bundles = state.bundles.clone();
-        // Events bridge sweep timer (no-op unless the bridge is enabled).
-        walgit_server::bridge::spawn_sweeper(&state);
-
         let app = router(state.clone());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {

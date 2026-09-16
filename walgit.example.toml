@@ -17,7 +17,7 @@ drain_timeout = "20s"             # after SIGTERM, phase 2: how long in-flight r
                                   # is interrupted at once in phase 1 while serving continues.
 max_push_bytes = "64GiB"          # largest accepted push
 # Roles this instance performs: "serve" (git, API, UI, bundles, LFS), "maintain" (checkpoints,
-# bundles, compaction, fsck/repair — implies compact + bundle), "events" (the webhook bridge).
+# bundles, compaction, fsck/repair — implies compact + bundle).
 # Empty = all of them: the one-box shape.
 roles = []
 auto_create_on_push = false       # create a repo on first push if missing
@@ -312,8 +312,3 @@ metrics = true                    # Prometheus on /metrics
 # trace_project = ""              # GCP project for trace-id correlation in JSON logs (optional)
 lock_wait_warn = "1s"             # WARN "lock wait" (lock, repo, wait_ms, request_id) when a request waits longer than this on
                                   # rw/sync_mutex/pack_mutex/bulk permits; histogram walgit_lock_wait_seconds{lock}
-
-[events]                          # docs/EVENTS.md — read only by the bridge (roles ∋ "events"); never gates a push
-# webhook_url = "https://hooks.example.com/walgit"   # each batch of ref events is POSTed as a JSON array
-# webhook_secret = ""             # X-Walgit-Signature: sha256=<HMAC-SHA256 of the body>; unset = unsigned
-# sweep_interval = "5m"           # backstop + health check (warns when a sweep finds unpublished entries); 0 = off

@@ -96,16 +96,6 @@ pub enum CiAction {
         /// State file (default `<gitdir>/ci-run.json`, §4).
         #[arg(long)]
         state: Option<PathBuf>,
-        /// Hosted mode (§4.2): also serve the events-bridge webhook on this
-        /// address — each verified batch is a hint to evaluate now (the
-        /// trigger truth stays the poll diff).
-        #[arg(long, conflicts_with = "once")]
-        listen: Option<std::net::SocketAddr>,
-        /// Events-bridge webhook secret (HMAC-SHA256, docs/EVENTS.md);
-        /// env `WALGIT_CI_WEBHOOK_SECRET`. Client-side only — it never
-        /// enters a bucket object, a ref, or a result entry (§9 red line).
-        #[arg(long, env = "WALGIT_CI_WEBHOOK_SECRET", requires = "listen")]
-        webhook_secret: Option<String>,
     },
     /// Every run in the checkout's collab log, aggregated (§8.3).
     Status {
@@ -184,8 +174,6 @@ pub async fn run(action: CiAction) -> Result<()> {
             claim_ttl,
             task,
             state,
-            listen,
-            webhook_secret,
         } => {
             crate::collab_cmd::ref_segment("ci.actor", &actor)?;
             let signing = crate::collab_cmd::read_signing_key(&key)?;
@@ -217,38 +205,11 @@ pub async fn run(action: CiAction) -> Result<()> {
                 }
                 return Ok(());
             }
-            // §4.2 hosted mode: the wake endpoint is an events-bridge
-            // consumer; a verified batch only cuts the nap short — the pass
-            // itself still re-reads the remote's tips (trigger = ref facts).
-            let wake = match listen {
-                Some(addr) => {
-                    let (bound, rx) = crate::ci_wake::spawn_wake_listener(
-                        addr,
-                        webhook_secret.map(String::into_bytes),
-                    )?;
-                    println!("ci: wake endpoint on http://{bound} (point events.webhook_url here)");
-                    Some(rx)
-                }
-                None => None,
-            };
+            // Pull only: every pass re-reads the remote's tips, so the poll
+            // interval is the worst-case notification latency.
             loop {
                 let _ = runner.run_pass(claim_ttl)?;
-                let nap = Duration::from_secs(interval.max(1));
-                match &wake {
-                    // A wake hint cuts the nap; a hint while a pass ran (or
-                    // while one was already pending) folds away (coalesce).
-                    Some(rx) => {
-                        match rx.recv_timeout(nap) {
-                            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                            // A dead listener must not turn the poll loop into
-                            // a hot spin; fall back to the normal interval.
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                std::thread::sleep(nap);
-                            }
-                        }
-                    }
-                    None => std::thread::sleep(nap),
-                }
+                std::thread::sleep(Duration::from_secs(interval.max(1)));
             }
         }
         CiAction::Status { repo, format } => {

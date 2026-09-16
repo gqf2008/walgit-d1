@@ -50,7 +50,6 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
-| `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `walgit ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation (`walgit-wal/src/ci.rs`). Normative rule language. |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
@@ -175,7 +174,6 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all. |
 | `fsck.pb` | Last connectivity audit (`FsckReport`), written by the maintainer's `fsck` unit, consumed by `repair` (`docs/INTEGRITY.md`). |
 | `gc.pb` | Last bucket-GC pass (`GcReport`: when, how many packs, how many bytes) — the maintainer's plan reads it to decide whether the `gc` unit is due (`maintenance.gc_interval`). |
-| `events/cursor.json` | Durable acknowledged WAL sequence of the events bridge; advanced only after the webhook acknowledged (D32). |
 | `lfs/objects/<aa>/<bb>/<oid>` | LFS objects (sha256-addressed, immutable). Missing ones can be read through from `upstream.lfs` and persisted (`docs/LFS.md`). |
 Schema `crates/walgit-proto/proto/walgit/v1/wal.proto`; GCS (REST/JSON API data, gRPC metadata —
 the "gRPC" blanket label was the #133 audit's issue #135 fix), S3 (AWS SDK) and in-memory stores share
@@ -299,8 +297,8 @@ decision in §4 — or the PR is; never "fix later".
 | # | Principle | The tell in a PR | The question to answer |
 |---|---|---|---|
 | **I** | **No state outside the object store.** Disk and memory are caches. | A database, Redis, SQLite, a file that must survive a restart, an env var that encodes data. | "If every instance is wiped now, what is lost?" — must be "warmth". |
-| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, gc.pb, events/cursor, maintainer heartbeats, render cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
-| **III** | **Side effects are readers of the WAL, never steps of a write.** Events, mirrors, notifications tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
+| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, gc.pb, maintainer heartbeats, render cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
+| **III** | **Side effects are readers of the WAL, never steps of a write.** Mirrors, notifications and other side effects tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
 | **IV** | **Every read revalidates; there is no eventually.** | A cache that outlives the manifest's generation, a TTL invented for a repo-scoped answer, a read that skips `sync_*`. | "After `push` returns `ok`, can any instance serve the old state?" (`cargo test -p walgit-server --test sim`). |
 | **V** | **Serve from the parts that fit; never a bigger box, never a hard-coded host.** | "Just download the pack", a path that assumes the full pack set is local, a hostname in `crates/` or `web/`. | "What happens to this code on a 20 GiB tmpfs with a 32 GB base pack? Which sync level does it need?" |
 | **VI** | **Never block the async runtime; bulk bytes never share a lane with the control plane.** | `Command::new(...).output()` or `std::fs` big reads in an `async fn` outside `spawn_blocking`/the bulk runtime; a queued writer on `RepoHandle::rw` from an install path. | "On which thread does this run, and what holds `sync_mutex`/`rw` while it does?" (e2e `blocking_work_in_the_install_path_does_not_stall_requests`). |
@@ -330,7 +328,7 @@ decision in §4 — or the PR is; never "fix later".
 - **D5** Repo identity `<owner>/<repo>[.git]`, prefix `repos/<o>/<r>/`, creation = CAS create of the manifest.
 - **D6** Manifest CAS is the only commit point. **D7** No node identity, no elections; leases for exclusivity.
 - **D8** `walgit.toml` only (+ `WALGIT__` env overrides). **D9** One binary, roles by config (`serve`,
-  `maintain`, `events`; `maintain` includes compaction and bundles).
+  `maintain`; `maintain` includes compaction and bundles).
 - **D10** One static-serving code path for every immutable byte (ETag/304/If-Range/Range/416/HEAD/immutable;
   UI assets precompressed at build; store objects never compressed at request time).
 - **D11** Too-large repos are served, not refused: remote reader for the web API; clones via bundle-uri; refs from
@@ -419,7 +417,8 @@ decision in §4 — or the PR is; never "fix later".
   `BaseRebuild`) while the instance serves everything normally, `/readyz` 200; bounded 30 s. *Phase 2*:
   `/readyz` 503 + Retry-After, new fetch/push/LFS refused with 503 before any work, in-flight requests get
   `server.drain_timeout`, exit. Test `tests/drain.rs`.
-- **D32** **Events are produced from the WAL by one small service, never by the push path** (`docs/EVENTS.md`).
+- **D32** *(Superseded 2026-09-16 by D46: the events bridge, its `events` role, `[events]` config and `docs/EVENTS.md` were removed. The text below is kept as history.)*
+  **Events are produced from the WAL by one small service, never by the push path** (`docs/EVENTS.md`).
   The **events bridge** (`roles=["events"]`) tails each repo's log from a durable per-repo cursor
   (`events/cursor.json`), converts committed PUSH/REF_UPDATE entries to `ref` events, POSTs each batch to
   `events.webhook_url` (JSON array; `X-Walgit-Delivery` = sha1 of the body; `X-Walgit-Signature: sha256=<HMAC>`
@@ -519,6 +518,21 @@ decision in §4 — or the PR is; never "fix later".
   `walgit-wal::collab` code; the server rejects a snapshot over 64 MiB before
   materializing its body on both local and remote paths, and counts only the
   unfolded tail against the 20k budget.
+
+- **D46** **The events bridge is removed; refs-level watching is the only way to observe the WAL
+  (2026-09-16).** D32's bridge is deleted in full: the `events` role, the `[events]` section
+  (`webhook_url` / `webhook_secret` / `sweep_interval`), the per-repo cursor `events/cursor.json`,
+  the `POST /_events/notify` wake route and its sweeper, `docs/EVENTS.md`, `deploy/events/*`, the
+  `walgit-ci` wake listener (`ci_wake.rs`, `walgit ci run --listen` / `--webhook-secret`), and the
+  `--test events` suite. Nothing took its place in-process: the server no longer pushes ref events
+  anywhere. Consumers observe the facts they need directly and cheaply — refs-level polling
+  (`git ls-remote`, O(1), no pack), `walgit collab watch`, or the SSE envelope the web API streams
+  to any endpoint that accepts `text/event-stream`. Every one of them revalidates against the WAL,
+  so correctness still depends on the facts, never on a push: the WAL remains the sole event source
+  (principle III), and this only removes one *consumer* that happened to ship inside the same
+  binary. Breaking, pre-1.0 ("no backwards compatibility"): a `walgit.toml` still carrying `[events]`
+  or `roles = ["events"]` is now a hard parse error (`deny_unknown_fields` / unknown enum variant) —
+  delete the section and the role. Supersedes D32.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

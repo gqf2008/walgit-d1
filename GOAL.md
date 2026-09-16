@@ -28,7 +28,7 @@ anyone can run against a bucket, and predictable enough that tooling can build o
    **Fast clone + fast catch-up through bundles is the north star** (`docs/BUNDLE_URI_DESIGN.md`).
 4. **All the features a git host needs, and only those**: smart HTTP v0/v2 (ls-refs, fetch with
    filter/shallow/deepen, receive-pack atomic/delete/tags/push-options/report-status-v2), bundle-uri, LFS,
-   `<owner>/<repo>` namespaces, per-repo push policy and settings, ref events, a browsing web UI + one JSON API +
+   `<owner>/<repo>` namespaces, per-repo push policy and settings, a browsing web UI + one JSON API +
    one SDK (`repos.js`), tasks/narration so nothing ever waits silently. Not in scope: code review, merge
    queues, CI, issues — those live elsewhere and build on this.
 5. **Works great for developers and their laptops.** One auth story (browser sign-in through your identity

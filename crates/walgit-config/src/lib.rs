@@ -27,7 +27,6 @@ pub struct Config {
     /// Links to the systems around a repository (per repo via settings).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-    pub events: EventsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,11 +127,6 @@ pub enum Role {
     /// due, geometric compaction for repos whose pack set fits. Implies
     /// `Compact` + `Bundle`.
     Maintain,
-    /// The events bridge (`docs/EVENTS.md`): tails every repo's WAL from a
-    /// per-repo cursor and publishes `ref` events to the bus sinks (webhook,
-    /// pubsub). Woken by `POST /_events/notify` (GCS notifications via Pub/Sub
-    /// push) and a periodic sweep. A small separate service in production.
-    Events,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -808,34 +802,6 @@ pub enum ObjectFormat {
     #[default]
     Sha1,
     Sha256,
-}
-
-/// Events (`docs/EVENTS.md`): the bridge (`Role::Events`) tails every repo's
-/// WAL from a durable cursor and publishes `ref` events to the webhook. Only the
-/// bridge reads this section; nothing on the push path does.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct EventsConfig {
-    /// Where ref events go: each batch is `POST`ed as a JSON array (`docs/EVENTS.md`).
-    /// Unset = the events role has nothing to do.
-    pub webhook_url: Option<String>,
-    /// Shared secret for `X-Walgit-Signature: sha256=<HMAC-SHA256 of the body>`. Unset = unsigned.
-    pub webhook_secret: Option<String>,
-    /// Catch-all sweep over every repo (a `list` + one conditional manifest
-    /// GET per repo), the backstop behind store notifications; the bridge
-    /// warns when a sweep finds unpublished entries. `0` = off.
-    #[serde(with = "humantime_serde")]
-    pub sweep_interval: Duration,
-}
-
-impl Default for EventsConfig {
-    fn default() -> Self {
-        EventsConfig {
-            webhook_url: None,
-            webhook_secret: None,
-            sweep_interval: Duration::from_secs(300),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1690,12 +1656,6 @@ impl Config {
                 );
             }
         }
-        if let Some(u) = &self.events.webhook_url {
-            anyhow::ensure!(
-                u.starts_with("http://") || u.starts_with("https://"),
-                "events.webhook_url must be an http(s) URL"
-            );
-        }
         Ok(())
     }
 
@@ -2098,23 +2058,6 @@ audiences = ["walgit-cli", "https://git.example.com"]
         )
         .unwrap_err();
         assert!(err.to_string().contains("loopback-only"), "{err}");
-    }
-
-    #[test]
-    fn events_section_parses_and_validates() {
-        let c = Config::parse(
-            r#"
-[events]
-sweep_interval = "1m"
-webhook_url = "https://hooks.example.com/walgit"
-webhook_secret = "s"
-"#,
-        )
-        .unwrap();
-        assert_eq!(c.events.sweep_interval, Duration::from_secs(60));
-        assert_eq!(c.events.webhook_secret.as_deref(), Some("s"));
-        let err = Config::parse("[events]\nwebhook_url = \"ftp://x\"\n").unwrap_err();
-        assert!(err.to_string().contains("webhook_url"), "{err}");
     }
 
     #[test]

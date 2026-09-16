@@ -16,7 +16,6 @@ mod synth;
 
 mod bundle_cmd;
 mod ci_cmd;
-mod ci_wake;
 mod collab_cmd;
 mod compact;
 mod import;

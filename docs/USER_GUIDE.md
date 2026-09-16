@@ -15,13 +15,12 @@
 6. [协作：issue / PR / 看板](#6-协作issue--pr--看板)
 7. [身份与密钥](#7-身份与密钥)
 8. [CI](#8-ci)
-9. [事件通知](#9-事件通知)
-10. [权限与保护](#10-权限与保护)
-11. [镜像到 GitHub](#11-镜像到-github)
-12. [多 agent 协作最佳实践](#12-多-agent-协作最佳实践)
-13. [运维](#13-运维)
-14. [排障与 FAQ](#14-排障与-faq)
-15. [术语表](#15-术语表)
+9. [权限与保护](#9-权限与保护)
+10. [镜像到 GitHub](#10-镜像到-github)
+11. [多 agent 协作最佳实践](#11-多-agent-协作最佳实践)
+12. [运维](#12-运维)
+13. [排障与 FAQ](#13-排障与-faq)
+14. [术语表](#14-术语表)
 
 ---
 
@@ -31,7 +30,6 @@
 - **仓库存对象存储**：真正的数据在 S3/GCS（R2 等）里，主机只是无状态缓存，可以随时抹掉重建。
 - **协作在仓库里**：issue/PR/评审/看板不是数据库，而是 `refs/collab/*` 下的**签名条目**；任何客户端都能离线重放、验签、算出同一视图。
 - **无中心 CI**：任务声明写在代码里的 `.walgit/ci.toml`，由任意持有凭据的 runner 认领执行、签名回传结果。
-- **事件桥**：把 WAL 里的 ref 变更推送到你的 webhook，驱动通知/自动化。
 
 一句话：**Git 的事实源 + 可验证协作 + 去中心化 CI**。
 
@@ -122,7 +120,7 @@ git push origin --delete feature/x
 ```bash
 git clone -c transfer.bundleURI=true http://host/<owner>/<repo>.git
 ```
-受保护分支（见 §10）会拒绝非白名单的 push。
+受保护分支（见 §9）会拒绝非白名单的 push。
 
 ---
 
@@ -216,8 +214,7 @@ artifacts = ["out.bin"]    # 可选：任务结束后收集的产物（相对路
 ```bash
 walgit ci validate --repo <checkout>
 walgit ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile> --once
-walgit ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile> \
-  --listen 127.0.0.1:8099          # 常驻模式：events webhook 可立即唤醒一次 pass
+walgit ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile>   # 常驻：轮询 loop
 walgit ci status --repo <checkout>
 walgit ci log --repo <checkout> [<run-id>]              # 打印该 run 所存日志（超限时告警）
 walgit ci artifacts --repo <checkout> [<run-id>] --out out/  # 逐个 sha256 校验下载产物
@@ -227,9 +224,6 @@ walgit ci artifacts --repo <checkout> [<run-id>] --out out/  # 逐个 sha256 校
 - `schedule` = 对不动的 ref 周期性评估：runner 每个 pass 顺带做 cron 扫描，错过的
   槽位合并为最新一个（不补跑）；`--once` 配外部调度器（crontab / systemd timer）
   即可当定时 CI 用。定时运行与 ref 触发运行是两个并行线程，各自收敛。
-- `--listen` = events 桥 webhook 唤醒；若服务端配了 `events.webhook_secret`，runner
-  同时设置同名环境变量 `WALGIT_CI_WEBHOOK_SECRET`（或传 `--webhook-secret`）。秘钥只
-  留在 runner 进程，不进入仓库；唤醒只是提示，真正触发仍以 `ls-remote` 的 tip diff 为准。
 - 日志与产物存放在仓库自身的 git 对象里（`refs/collab/ci-artifacts/<actor>/<sha256>`，
   按内容寻址）：普通 clone/fetch 不会带上它们，`ci log`/`ci artifacts` 先通过 HTTP
   大小预检（认证沿用 Git 对该 remote 的 credential helper），再按需拉取并验哈希；无 size 通道的 Git/SSH
@@ -239,26 +233,7 @@ walgit ci artifacts --repo <checkout> [<run-id>] --out out/  # 逐个 sha256 校
 
 ---
 
-## 9. 事件通知
-
-配置服务端（walgit.toml）：
-```toml
-[events]
-webhook_url = "http://127.0.0.1:8099/walgit"
-webhook_secret = "***"
-sweep_interval = "2s"
-```
-参考接收器（零依赖，校验签名 + 批级去重 + 落盘 JSONL）：
-```bash
-WALGIT_EVENTS_SECRET=*** python3 deploy/events/agent-receiver.py --port 8099
-```
-- 每笔 ref 变更会推送 `ref` 事件（repo / ref_name / old / new / seq）；
-- 语义：at-least-once，去重键 `(repo, seq, ref_name)`；webhook 只是加速，正确性永远以 WAL 回放为准；
-- 收事件后按需 `fetch` 再读条目正文。
-
----
-
-## 10. 权限与保护
+## 9. 权限与保护
 
 仓库级 `policy.json`（bucket 直读维护）：
 ```bash
@@ -284,7 +259,7 @@ walgit repo policy clear <owner>/<repo>
 
 ---
 
-## 11. 镜像到 GitHub
+## 10. 镜像到 GitHub
 
 walgit 是事实源，GitHub 只是镜像（可选）：
 ```bash
@@ -298,18 +273,18 @@ walgit mirror --from http://host/<owner>/<repo>.git \
 
 ---
 
-## 12. 多 agent 协作最佳实践
+## 11. 多 agent 协作最佳实践
 
 - **一个线程 = 一个工作单元**；复杂任务拆子线程并用 oid 互引（`--related` / `--depends-on`）。
 - **先读后写**：每次发言前 `collab thread` 取最后 oid 作 `--parent`，绝不凭记忆追加。
 - **状态用 kind 不用口语**：`status` / `review` / `merge_result`。
 - **自闭环**：issue → 认领(status in-progress) → 交付(status needs-review) → 评审(approve) → done。
-- **触发**：低延迟用 events 桥唤醒，权威判定用线程读 + 验签；也可以 `collab watch --exec` 做本地自动化。
+- **触发**：用 `collab watch --exec`（或 refs 级轮询）做本地自动化；权威判定用线程读 + 验签。
 - **隔离**：每个 agent 一个 principal，只写自己收件箱；review 由独立 agent 完成，结论写全。
 
 ---
 
-## 13. 运维
+## 12. 运维
 
 ```bash
 # 服务
@@ -327,20 +302,19 @@ walgit wal show <owner>/<repo> <seq>
 
 ---
 
-## 14. 排障与 FAQ
+## 13. 排障与 FAQ
 
 | 现象 | 处理 |
 |---|---|
 | push 被拒 `rejected by rule 'x'` | 命中 policy，检查 bypass / 用允许的分支 |
 | 协作条目 `unverified` | 该 principal 未在**本仓库**注册；注册后读时重算转绿 |
 | clone 很慢 | 用 `-c transfer.bundleURI=true`；或 `--filter=blob:none` |
-| 事件收不到 | 查 `[events]` 配置、webhook 可达、接收器日志、`server.log` 的 bridge sweep |
 | 多个主机同时写 | 允许；CAS 收敛，失败方重试 |
 | `config file not found` | 显式 `--config /dev/null` 用于纯 HTTP 读命令；其余需正确配置 |
 
 ---
 
-## 15. 术语表
+## 14. 术语表
 
 - **WAL**：write-ahead log（append-only 事实日志）
 - **manifest**：仓库 refs/pack 集的一次 CAS 快照
@@ -348,9 +322,8 @@ walgit wal show <owner>/<repo> <seq>
 - **entry**：`refs/collab/inbox/<principal>/<uuid>` 指向的签名 JSON 对象
 - **thread**：相同 `id` 的条目集合，按 `(parent, ts)` 排序
 - **board**：线程集合按 `.walgit/board.toml` 列定义的投影
-- **bridge**：读 WAL 推送事件的内部循环
 - **runner**：`walgit ci run` 的客户端算力
 
 ---
 
-> 更多协议级细节见仓库 docs：`D1_COLLAB_DESIGN.md`、`D1_CI_PROTOCOL.md`、`EVENTS.md`、`POLICY.md`、`BUNDLE_URI_DESIGN.md`。
+> 更多协议级细节见仓库 docs：`D1_COLLAB_DESIGN.md`、`D1_CI_PROTOCOL.md`、`POLICY.md`、`BUNDLE_URI_DESIGN.md`。

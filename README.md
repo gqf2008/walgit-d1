@@ -6,9 +6,9 @@
 
 walgit hosts git repositories with **no database, no leader and no local state that matters**. You run a
 single binary, point it at an S3 or GCS bucket, and you have: smart HTTP (v0/v2) fetch and push, `bundle-uri`
-clones served as static files, Git LFS, a browsing web UI, a JSON API with an SDK, per-repository push policy,
-webhooks — and a server that scales to repositories **larger than the machine it runs on**. Every machine that
-runs walgit is a disposable cache; the bucket is the repository.
+clones served as static files, Git LFS, a browsing web UI, a JSON API with an SDK, per-repository push policy
+and a server that scales to repositories **larger than the machine it runs on**. Every machine that runs
+walgit is a disposable cache; the bucket is the repository.
 
 ```sh
 # 1. a bucket (any S3-compatible store or GCS) and a config
@@ -104,8 +104,6 @@ git fetch origin '+refs/collab/*:refs/collab/*'
   签名回传；收敛靠对条目日志的确定性规则，不靠互斥。规范见 `docs/D1_CI_PROTOCOL.md`。
 - **Web UI**：协作页、线程/PR 页、看板页、以及面向人类的「了解 D1 协作」讲解页
   （`/{owner}/{repo}/collab/guide`）。
-- **事件**：ref 事件桥（`events` 角色 + webhook 接收器），至少一次、可回放，
-  有持久游标（`docs/EVENTS.md`）。
 
 **首次运行的部署向导** — `walgit-server` 的 setup wizard：新部署不再要求手写完整
 `walgit.toml` 才能起服务，走 `/setup` 向导配置 store 与认证。
@@ -129,7 +127,7 @@ runbook（`docs/WINDOWS.md`）等。
 
 - `docs/USER_GUIDE.md` — 面向人类的完整使用手册（协作层怎么用）。
 - `docs/D1_COLLAB_DESIGN.md`、`docs/D1_CI_PROTOCOL.md` — D1 协作层与 CI 的规范。
-- `docs/BOARD.md`、`docs/EVENTS.md`、`docs/POLICY.md` — 看板 / 事件 / 推送策略。
+- `docs/BOARD.md`、`docs/POLICY.md` — 看板 / 推送策略。
 - `AGENTS.md` — 架构、所有设计决策、以及 agent 协作协议。
 - `GOAL.md` — 上游的验收目标（本分叉保持其内核语义不变）。
 
@@ -175,7 +173,6 @@ server entirely (**bundle-uri**: fresh clones and catch-ups are static files the
 | **collab** | A decentralized collaboration layer on `refs/collab/*`: signed issue/comment/review/status/patch entries, per-principal Ed25519 keys self-registered via the thin API, and a deterministic aggregation (threads, PR merge rules, verification health, and a work-unit board projected from declarative column rules in `.walgit/board.toml` — moving a card is just a signed `status` entry) shared by the `walgit collab` CLI, the JSON API and the web UI's Collab tab — one S3 token per participant, no server-side collaboration state. `docs/D1_COLLAB_DESIGN.md`. **CI** rides the same refs: `.walgit/ci.toml` in the tested commit declares tasks; `walgit ci run` clients subscribe to ref tips, claim runs with signed `ci_claim` entries (deterministic earliest-claimant convergence, TTL re-claim), execute the command under an env allowlist and publish signed `ci_result` entries — a scheduler-free CI with zero server-side logic. `docs/D1_CI_PROTOCOL.md`. |
 | **policy** | Per-repository push rules (`policy.json`): protected refs, groups, fast-forward only, bypass lists. `docs/POLICY.md`. |
 | **settings** | Per-repository config (bundle schedules, compaction, upstream follow) published into the WAL with history. |
-| **events** | A small bridge tails the WAL and POSTs ref events to a webhook, exactly-once per (repo, seq, ref) with a durable cursor. `docs/EVENTS.md`. |
 | **maintenance** | Checkpoints, bundle builds, geometric compaction, base rebuilds, connectivity audits and repairs — one loop that computes the desired state from (config, WAL) every pass and does one bounded unit of the most important missing work. Self-healing by construction: an outage leaves no holes; a deleted artefact is "missing" and rebuilt identically. |
 | **auth** | `none` (loopback), `token` (static tokens), `oidc` (any OpenID Connect issuer: browser sign-in, ID tokens, and walgit-issued access tokens for git). `/services/public/install.sh` sets a developer's machine up in one idempotent command. |
 | **stores** | S3 and S3-compatible (AWS, MinIO, rustfs, R2, Ceph, …) and GCS, first class; an in-memory store for tests. |
@@ -187,7 +184,7 @@ head sequence, the live pack set, checkpoint pointer, settings — *the lineariz
 (immutable entries: PUSH, COMPACT, CHECKPOINT, SETTINGS), `wal/<checksum>.pack|.idx|.rev|.bitmap|.commit-graph`
 (immutable, content-addressed packs with their side-files), `checkpoints/<seq>/` (folded ref snapshot + pack
 inventory so a cold start is snapshot + tail), `bundles/`, `leases/` (CAS with TTL — the only cross-instance
-mutex), `policy.json`, `lfs/objects/`, `events/cursor.json`.
+mutex), `policy.json`, `lfs/objects/`.
 
 **A push**: our receive-pack indexes the pack (`git index-pack --fix-thin --rev-index` in a scratch dir), checks
 connectivity and policy, uploads `pack ∥ idx ∥ log entry`, then CASes the manifest. On a 412 it re-reads,
@@ -250,7 +247,7 @@ multi-instance deployment** (containers, the Nix OCI image, tmpfs hosts, object-
 fleets), not the binary's ability to run on a Mac.
 
 Roles (`server.roles`): `serve` (git, API, UI, bundles, LFS), `maintain` (checkpoints, bundles, compaction,
-fsck/repair), `events` (the webhook bridge). Empty = all. Any number of `serve` hosts may point at one bucket; give
+fsck/repair). Empty = all. Any number of `serve` hosts may point at one bucket; give
 each repository one maintainer (placement globs) and you are done.
 
 ### Authentication
@@ -288,11 +285,11 @@ crates/
   walgit-wal      RepoHandle: sync levels, publish (group commit + CAS), checkpoints, log reader, remote reader, tasks
   walgit-bundle   bundle-uri: slots and chains, building, header ∘ pack composition, lists, retention
   walgit-server   axum: smart HTTP, LFS, bundles, auth (none/token/oidc), the maintainer loop, upstream follow,
-                  web/ (API, UI, SDK routes, SSE), setup.rs (installer + recipes), events bridge
+                  web/ (API, UI, SDK routes, SSE), setup.rs (installer + recipes)
   walgit-config   walgit.toml (+ WALGIT__ env overrides), per-repo settings merge, fail-closed validation
   walgit-cli      `walgit serve|import|compact|bundle|wal|mirror|synth|config|repo|collab|ci`; `walgit-server` = `walgit serve`
 web/              React SPA (Vite) + sdk/repos.ts, built into the binary; the wire contract is web/API.md
-docs/             USER_GUIDE (面向人类的使用手册), BUNDLE_URI_DESIGN, ROUNDTRIPS (the cost model), POLICY, LFS, INTEGRITY, EVENTS, D1_COLLAB_DESIGN, D1_CI_PROTOCOL, CONTRACT, WINDOWS (dev runbook), patches/
+docs/             USER_GUIDE (面向人类的使用手册), BUNDLE_URI_DESIGN, ROUNDTRIPS (the cost model), POLICY, LFS, INTEGRITY, D1_COLLAB_DESIGN, D1_CI_PROTOCOL, CONTRACT, WINDOWS (dev runbook), patches/
 ```
 
 ## Invariants worth memorising

@@ -1289,8 +1289,8 @@ pub async fn receive_pack(
         return Ok(receive_response(report));
     }
 
-    // Correlates the event with the user-visible request (docs/EVENTS.md);
-    // the front forwards it to the broker.
+    // Correlates the pushed work with the user-visible request; the front
+    // forwards it to the broker.
     let request_id = headers
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())

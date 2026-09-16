@@ -12,7 +12,7 @@
 # 托盘按 8081 轮询 /healthz 并打开 Web UI —— 改端口要同时改托盘。
 listen = "127.0.0.1:8081"
 auto_create_on_push = true     # git push 到不存在的仓库即创建
-roles = []                     # 空 = 全部角色:serve / maintain / events
+roles = []                     # 空 = 全部角色:serve / maintain
 
 [server.auth]
 # 本机回环部署:无凭据,anon 拥有全部权限(非 loopback 监听时此模式被拒绝)。

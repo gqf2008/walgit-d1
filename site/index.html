@@ -116,7 +116,6 @@ git push https://git.example.com/acme/app.git main</code></pre>
     <li><b>Git LFS</b> batch + basic transfer into the bucket; optional read-through from an upstream LFS server for imported history.</li>
     <li><b>Web UI + API + SDK</b> tree, blob, commits, diffs, the WAL's own health page; sha-addressed answers are immutable and cached everywhere; <code>repos.js</code> for pages, agents and scripts.</li>
     <li><b>Push policy</b> protected refs, groups, fast-forward only, bypass lists — a small rule language per repository.</li>
-    <li><b>Webhooks</b> a bridge tails the WAL and POSTs ref events with a durable cursor; exactly once per <code>(repo, seq, ref)</code>, signed.</li>
     <li><b>Per-repo settings</b> bundle schedules, compaction, upstream follow — published into the WAL with history.</li>
     <li><b>S3 and GCS, first class</b> AWS, MinIO, Ceph, R2, rustfs or GCS; server-side compose for the weekly bundle on both.</li>
   </ul>
@@ -140,7 +139,7 @@ open https://walgit.localhost:8080/</code></pre>
 podman build -t walgit -f Containerfile . &amp;&amp; podman run -p 8080:8080 walgit
 <span class="c"># or</span>
 cargo build --release -p walgit-cli      <span class="c"># after `just web-build`</span></code></pre>
-      <p>Roles (<code>server.roles</code>): <code>serve</code>, <code>maintain</code>, <code>events</code>. Empty = all.
+      <p>Roles (<code>server.roles</code>): <code>serve</code>, <code>maintain</code>. Empty = all.
       Any number of hosts may point at one bucket; give each repository one maintainer with placement globs.</p>
     </div>
   </div>

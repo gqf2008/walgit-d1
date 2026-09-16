@@ -3,11 +3,9 @@
 
 pub mod admin;
 pub mod auth;
-pub mod bridge;
 pub mod bundles;
 pub mod cache;
 pub mod error;
-pub mod events;
 pub mod follow;
 pub mod forward;
 pub mod health;
@@ -68,10 +66,6 @@ pub struct AppState {
     pub lfs_upstream: lfs_upstream::Upstream,
     /// Startup prewarm state (gates /readyz when configured).
     pub readiness: Arc<prewarm::Readiness>,
-    /// The events bridge (`events` role, docs/EVENTS.md): WAL → bus
-    /// (`webhook`) from a per-repo cursor. None unless in role with a
-    /// bus sink configured.
-    pub bridge: Option<Arc<bridge::Bridge>>,
     /// Last upstream-follow round per repository on this instance (`[upstream] follow`).
     pub follow: follow::FollowStatuses,
     /// In-process TLS (standalone, D39); `None` behind an edge (h2c).
@@ -105,7 +99,6 @@ impl AppState {
         store: DynStore,
     ) -> anyhow::Result<Arc<Self>> {
         let registry = walgit_wal::Registry::new(store.clone(), cfg.clone());
-        let bridge = bridge::Bridge::new(&cfg, registry.clone());
         let bundle_source: Arc<dyn walgit_bundle::BundleSource> =
             Arc::new(RegistryBundleSource(registry.clone()));
         let bundles = walgit_bundle::Bundler::new_with_source(bundle_source, cfg.clone());
@@ -127,7 +120,6 @@ impl AppState {
             lfs_upstream: lfs_upstream::Upstream::new()
                 .map_err(|e| anyhow::anyhow!("lfs upstream client: {e}"))?,
             readiness: prewarm::Readiness::new(),
-            bridge,
             follow: follow::FollowStatuses::default(),
             tls,
             needs_setup: cfg.needs_setup(),
@@ -201,21 +193,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         // the instance.
         .merge(store_settings::router(state.clone()).with_state(()))
         .merge(web::login::router(state.clone()).with_state(()))
-        // Events bridge wake-up (docs/EVENTS.md): the Pub/Sub push envelope of
-        // a GCS notification. Authenticated (the push SA's ID token); 404 when
-        // this instance is not a bridge.
-        .route(
-            "/_events/notify",
-            axum::routing::post(
-                |axum::extract::State(st): axum::extract::State<Arc<AppState>>,
-                 headers: axum::http::HeaderMap,
-                 body: Body| async move {
-                    bridge::http_notify(&st, &headers, body)
-                        .await
-                        .unwrap_or_else(axum::response::IntoResponse::into_response)
-                },
-            ),
-        )
         .fallback(dispatch)
         // Sliding browser sessions: re-issue a session cookie older than ttl/4.
         .layer(axum::middleware::from_fn_with_state(
@@ -583,7 +560,6 @@ pub async fn serve(
     let addr = state.cfg.server.listen;
     let state_for_shutdown = state.clone();
     prewarm::spawn(state.clone());
-    bridge::spawn_sweeper(&state);
     spawn_runtime_watchdog(state.registry.tasks().clone(), state.inflight.clone());
     let app = router(state);
     let listener = TcpAccept::bind(addr).await?;

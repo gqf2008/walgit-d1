@@ -32,11 +32,10 @@
 ```
                  S3 / GCS bucket（唯一事实源：WAL + packs + collab refs）
                                    ▲
-        读写都经 walgit（serve / maintain / events 角色）
+        读写都经 walgit（serve / maintain 角色）
         ┌──────────────────────────┴───────────────────────────┐
         │                    walgit（smart HTTP）               │
         │   receive-pack（push 唯一写口） / upload-pack / API    │
-        │   events 桥：ref 事件 webhook（at-least-once, 可回放）   │
         └───────┬───────────────────┬─────────────────┬────────┘
                 │                   │                 │
         ┌───────▼──────┐   ┌───────▼──────┐   ┌───────▼───────┐
@@ -51,8 +50,8 @@
 - **写协作**：客户端构造签名条目 → `git push` walgit 的 `refs/collab/inbox/<principal>/<uuid>`
   → walgit 校验 policy + manifest CAS 入 WAL → 全局可见。
 - **读协作**：refs 级同步（O(1)，无 pack）→ 本地验签 → 确定性聚合出线程/PR 视图。
-- **git 事件 → 协作**：push 进 WAL → events 桥发 ref 事件（去重键 `(repo, seq, ref)`，可回放）
-  → agent / CI / dashboard 订阅。
+- **git 事件 → 协作**：push 进 WAL 成为 ref 事实（去重键 `(repo, seq, ref)`，可回放）
+  → agent / CI / dashboard 用 refs 级轮询（`ls-remote` / `collab watch`）消费。
 - **合并**：聚合视图判定规则满足（如 ≥1 个人类 approve）→ 合并方 `git push` 结果到 walgit
   → `policy.json` 兜底。
 
@@ -166,8 +165,8 @@
 
 ## 7. Agent 协议
 
-1. **触发**：订阅 walgit events 桥的 ref 事件（`(repo, seq, ref)` 去重、at-least-once、可回放），
-   或对 `refs/collab/*` 做 refs 级轮询（便宜，O(1)，无 pack）。
+1. **触发**：对 `refs/collab/*` 做 refs 级轮询（便宜，O(1)，无 pack；`(repo, seq, ref)` 去重、
+   at-least-once、可回放）；`walgit collab watch` 把它变成事件循环。
 2. **行动**：构造签名条目（review / patch / comment / status）→ push 自己的收件箱。
    幂等：条目内容寻址 + `(id, kind, actor, parent)` 去重；事件按 seq 去重。
 3. **上下文**：walgit API（tree/blob/commits/resolve）+ blobless bundle（全量上下文、字节走桶）。
@@ -186,7 +185,7 @@
   closed/other 兜底板；定义非法 fail-closed（见 §9 进度与 web/API.md）。
 - **指标来源**：walgit `/metrics/prometheus`、`/healthz`、`/readyz`、`/api/*`（SSE 实时流），
   加上聚合视图。
-- **实时**：订阅 events 桥 / SSE 信封，dashboard 与数据同步无轮询竞态。
+- **实时**：SSE 信封 / `collab watch` 在 ref 变化时立即通告，dashboard 与数据同步无轮询竞态。
 
 ## 9. walgit 缺口清单（需要补的能力）
 
@@ -195,7 +194,7 @@
 | 1 | **通用 refs 读取 API** | API 现只有 `refs/{branches|tags}`；补 `refs/collab/*` 的列出/读取（git 协议层已通告任意 ref） | 纯读、可缓存 |
 | 2 | **评审原语端点** | `diff`、`merge-base`、`patch`、`blame`、`archive`（PR review 的 UI 和 agent 都要） | 纯函数、immutable、可缓存，符合 API 缓存规则 |
 | 3 | **token↔公钥注册** | 签发 `wgt_` 时可选注册 Ed25519 公钥到 principals 注册表（或由协作层负责） | "一个 token 走天下"的前提 |
-| 4 | **events 桥对任意 ref** | 验证 collab refs 的 ref 事件完整送达（理论上是，需 golden 测试） | 复用现有桥 |
+| 4 | ~~**events 桥对任意 ref**~~（2026-09-16 已删除） | events 桥随其 webhook、角色与配置一起移除；collab refs 的变更改由 refs 级轮询 / `collab watch` 观察（`tests/events.rs` 已删） | — |
 | 5 | **SDK 扩展** | `repos.js` 增加 collab lane（读聚合、写条目） | dogfood 规则：不另起 SDK |
 
 > 进度：缺口 1 由 issue #8（历史 GitHub issue；Issues 已随主仓迁移禁用） 批次落地——
@@ -224,8 +223,8 @@
 > 改内容型 rename（相似度检测需读候选 blob）仍不跟随，需本地 packs/bundle。
 >
 > 缺口 3-5 由 issue #10（历史 GitHub issue；Issues 已随主仓迁移禁用） 批次落地：
-> 缺口 4（events 桥任意 ref）golden 测试已落地（`tests/events.rs`：
-> `refs/collab/*` 的 create/delete 事件与 heads 同一套 cursor/去重/回放契约）；
+> 缺口 4（events 桥任意 ref）曾由 `tests/events.rs` 的 golden 测试覆盖，该桥与测试已于
+> 2026-09-16 一并删除；collab refs 的变更现由 refs 级轮询 / `collab watch` 观察；
 > 缺口 5（SDK）`repos.js` 已加 collab lane：`refsAll`/`refsCollab`/`refByName`、
 > `mergeBase`/`diff`/`blame`/`archive`，以及 `collab.entry`/`collab.principal`/
 > `collab.revokePrincipal`（构造+签名条目并产出 git push 指令，经 receive-pack
@@ -310,7 +309,7 @@
    聚合读单请求预算 20k refs，超限 503 指向 CLI 离线聚合（条目对象一次
    `cat-file --batch` 读完，无逐条目子进程）。
     ⑤ CI 外挂协议（issue #31）：`docs/D1_CI_PROTOCOL.md`（规范）——触发 = ref 事实
-   （refs 级轮询，events 桥为 push 形态扩展点）、`ci_claim`/`ci_result` 签名条目、
+   （refs 级轮询）、`ci_claim`/`ci_result` 签名条目、
    确定性竞争收敛 + TTL 重认领、产物引用 + 哈希、秘密只在客户端 env；落地为
    `walgit-wal/src/ci.rs`（聚合核心）与 `walgit ci validate|run|status`。服务端零 CI
    逻辑（原则 X）。
@@ -327,7 +326,7 @@
 5. 原型顺序建议：
    ① walgit 侧：通用 refs API + 评审原语端点；
    ② 协作条目协议 + CLI 验证（先于 UI）；
-   ③ agent 接入（events 订阅 + 签名条目）；
+   ③ agent 接入（refs 级轮询 / `collab watch` + 签名条目）；
    ④ dashboard（只读渲染端）。
 
 ## 11.4 协作条目折叠：聚合状态快照（snapshot ∪ tail，issue #160 / walgit D45）
@@ -425,8 +424,8 @@ receive-pack，manifest CAS 是唯一提交点）；任何客户端都能跑，�
 
 **与 20k 预算 / 通告体积的关系**。折叠后 `refs/collab/*` = 1 个快照 ref +
 principals/rules 单例 + 未折叠尾部：info/refs 通告行数与聚合读的 fan-out 都不再随
-历史总量增长；一次 gc 把 N 条 ref 收成 1 条 ref + 1 个有界 blob。events 桥视角：
-一次 gc = 1 条 snapshot 更新事件 + N 条删除事件（`(repo, seq, ref)` 去重、可回放，
+历史总量增长；一次 gc 把 N 条 ref 收成 1 条 ref + 1 个有界 blob。轮询 / `collab watch` 视角：
+一次 gc = 1 条 snapshot 更新 + N 条删除（`(repo, seq, ref)` 去重、可回放，
 既有契约不变）；`collab watch` 把快照 ref 的变化以 `kind=snapshot` 通告
 （verified = 快照签名对 actor 注册 key 的验证结果）。**获取字节换通告行数**：
 fetch 该命名空间的客户端会拉取快照 blob（≈ 折叠历史的体积），这是设计取向——

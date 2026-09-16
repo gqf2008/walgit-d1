@@ -35,7 +35,7 @@ pub struct Registry {
 }
 
 /// How long a repository listing is served from memory before the bucket is asked again.
-/// Owner/repo pages, the maintainer's pass and the bridge all call `list()`; a new repository
+/// Owner/repo pages and the maintainer's pass both call `list()`; a new repository
 /// created on another host appears within this on every instance (on this one immediately).
 const LIST_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 

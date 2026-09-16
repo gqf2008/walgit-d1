@@ -887,14 +887,6 @@ kind, slot, status: built|missing|pending|blocked|unavailable|too-small|skipped|
 upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, passes, last_unit}], orphaned}`,
 `compactions[]`, `node{…counters}`. Arrays `[]` when empty.
 
-### Service routes (not for the browser)
-
-`POST /_events/notify` is the events bridge's wake-up (`docs/EVENTS.md`): the
-Pub/Sub push envelope of a GCS notification; ID-token authenticated
-(`require_read`), `404` on instances without the `events` role, `200` (+ a
-JSON report for a manifest finalize), `503` when the sink failed (so Pub/Sub
-redelivers). Never cached, never served to the SPA.
-
 ## 5. Consistency and cost expectations
 
 - **Every screen is O(1) requests** — exactly two: `resolve` (tiny, SWR +

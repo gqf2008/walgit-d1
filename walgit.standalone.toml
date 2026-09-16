@@ -18,7 +18,7 @@
 listen = "127.0.0.1:8080"                      # PORT env wins; also binds the ::1 twin
 public_url = "https://walgit.localhost:8080"   # browser origin; PORT rewrites the port
 auto_create_on_push = true                     # `git push` to a repository that does not exist yet creates it
-roles = []                                     # empty = every role: serve, maintain (checkpoints, bundles, compaction), events
+roles = []                                     # empty = every role: serve, maintain (checkpoints, bundles, compaction)
 
 [server.tls]
 mode = "self_signed"              # generated once under <cache.dir>/tls/, published at /services/public/ca.pem.
