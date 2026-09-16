@@ -51,6 +51,11 @@
 //! * `PutMode::Update` (CAS) stays single-shot and conditional; every
 //!   CAS-rewritten object (manifests, leases) is small.
 //!
+//! A multipart upload whose future is dropped (task abort, drain) is aborted
+//! best-effort by a drop guard. A hard kill cannot run it, so buckets should
+//! also carry an `AbortIncompleteMultipartUpload` lifecycle rule (a few days)
+//! to reclaim the parts of an interrupted large pack upload.
+//!
 //! ## rustfs compatibility (tested with rustfs/rustfs:latest)
 //!
 //! See the compatibility notes at the bottom of this file.
@@ -1056,6 +1061,16 @@ impl S3Store {
             })?
             .to_owned();
 
+        // Cancellation (task abort/drain) drops this future without running any
+        // `abort_multipart` below; the guard fires best-effort on drop. A hard
+        // process kill cannot be covered in-process — see the module docs.
+        let mut abort_guard = MultipartAbortGuard::new(
+            self.client.clone(),
+            self.bucket.clone(),
+            key.to_owned(),
+            upload_id.clone(),
+        );
+
         let part_size = self.multipart_part_size;
         let mut part_number = 1i32;
         let mut uploaded_parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
@@ -1093,8 +1108,16 @@ impl S3Store {
                 read_total += n;
             }
 
-            if read_total == 0 {
-                break;
+            if read_total < to_read {
+                // A body shorter than the declared length must never Complete:
+                // the object would keep the content-addressed key while holding
+                // fewer bytes than the key names.
+                let _ = self.abort_multipart(key, &upload_id).await;
+                abort_guard.disarm();
+                return Err(StoreError::InvalidArgument(format!(
+                    "put body for {key} ended after {read_total} bytes of part {part_number} \
+                     (declared length {len}); refusing to complete a truncated object"
+                )));
             }
             buf.truncate(read_total);
             let actual = read_total as u64;
@@ -1158,6 +1181,7 @@ impl S3Store {
             }
         };
 
+        abort_guard.disarm();
         let etag = resp.e_tag().map(|s| s.trim_matches('"').to_owned());
         Ok(ObjectMeta {
             key: key.into(),
@@ -1176,6 +1200,59 @@ impl S3Store {
             .await
             .map_err(|e| StoreError::other(anyhow::anyhow!("abort multipart: {e}")))?;
         Ok(())
+    }
+}
+
+/// Best-effort `AbortMultipartUpload` for a multipart upload whose future is
+/// dropped before completion (task abort, drain, early return). Spawning needs
+/// a runtime: outside one there is nothing to abort with, and the bucket's
+/// lifecycle rule is the only backstop left.
+struct MultipartAbortGuard {
+    client: S3Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    armed: bool,
+}
+
+impl MultipartAbortGuard {
+    fn new(client: S3Client, bucket: String, key: String, upload_id: String) -> Self {
+        Self {
+            client,
+            bucket,
+            key,
+            upload_id,
+            armed: true,
+        }
+    }
+
+    /// The upload completed (or was aborted explicitly): never abort on drop.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MultipartAbortGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        let bucket = std::mem::take(&mut self.bucket);
+        let key = std::mem::take(&mut self.key);
+        let upload_id = std::mem::take(&mut self.upload_id);
+        runtime.spawn(async move {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .send()
+                .await;
+        });
     }
 }
 
@@ -1374,6 +1451,17 @@ mod tests {
                 .any(|r| r.starts_with("PUT ") && !r.contains("partNumber=")),
             "no single-shot PUT may be attempted: {requests:?}"
         );
+        assert!(
+            !requests.iter().any(|r| r.starts_with("DELETE ")),
+            "a completed upload must not abort: {requests:?}"
+        );
+        // The documented budget: HEAD + CreateMultipartUpload + Complete + one
+        // request per part (see docs/ROUNDTRIPS.md).
+        assert_eq!(
+            requests.len(),
+            3 + 2,
+            "HEAD + initiate + complete + 2 parts: {requests:?}"
+        );
 
         // The key now exists in the fake bucket: the pre-check must answer
         // PreconditionFailed and issue no multipart requests at all.
@@ -1481,6 +1569,12 @@ mod tests {
                 "etag: \"stub-part\"\r\ncontent-length: 0\r\n".to_owned(),
                 Vec::new(),
             )
+        } else if method == "DELETE" && target.contains("uploadId=") {
+            (
+                "204 No Content",
+                "content-length: 0\r\n".to_owned(),
+                Vec::new(),
+            )
         } else if method == "POST" && target.contains("uploadId=") {
             let xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Location>http://stub/b/k</Location><Bucket>b</Bucket><Key>k</Key><ETag>\"stub-complete\"</ETag></CompleteMultipartUploadResult>";
             (
@@ -1503,6 +1597,150 @@ mod tests {
         let _ = stream.write_all(head.as_bytes());
         let _ = stream.write_all(&body);
         let _ = stream.flush();
+    }
+
+    /// A body shorter than its declared length must abort, never Complete: the
+    /// object would otherwise keep a content-addressed key while holding fewer
+    /// bytes than the key names (review finding on #218).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn short_multipart_body_aborts_instead_of_completing() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let existing = Arc::new(Mutex::new(false));
+        {
+            let seen = seen.clone();
+            let existing = existing.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let seen = seen.clone();
+                    let existing = existing.clone();
+                    std::thread::spawn(move || {
+                        fake_s3_multipart_only(stream, &seen, &existing);
+                    });
+                }
+            });
+        }
+
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "short-body".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            multipart_threshold: bytesize::ByteSize::b(1024),
+            multipart_part_size: bytesize::ByteSize::b(2048),
+            ..Default::default()
+        };
+        let store = S3Store::new(&cfg).unwrap();
+
+        // Declared 4097 bytes, the stream holds 4096: the second part is short.
+        let body = Bytes::from(vec![1u8; 4096]);
+        let err = store
+            .put(
+                "repos/o/r/wal/short.pack",
+                PutBody::Stream {
+                    len: 4097,
+                    stream: crate::util::once(body),
+                },
+                PutOptions {
+                    mode: PutMode::Create,
+                    immutable: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a short body must not succeed");
+        assert!(
+            matches!(err, StoreError::InvalidArgument(_)),
+            "short body must be InvalidArgument, got {err:?}"
+        );
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploadId=")),
+            "a short body must never Complete: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.starts_with("DELETE ") && r.contains("uploadId=")),
+            "a short body must abort its upload: {requests:?}"
+        );
+    }
+
+    /// Dropping the upload future (task abort/drain) must fire the drop guard's
+    /// best-effort abort; a hard kill needs the bucket lifecycle rule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_upload_guard_aborts_the_multipart_upload() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let existing = Arc::new(Mutex::new(false));
+        {
+            let seen = seen.clone();
+            let existing = existing.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let seen = seen.clone();
+                    let existing = existing.clone();
+                    std::thread::spawn(move || {
+                        fake_s3_multipart_only(stream, &seen, &existing);
+                    });
+                }
+            });
+        }
+
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "drop-abort".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            multipart_threshold: bytesize::ByteSize::b(1024),
+            multipart_part_size: bytesize::ByteSize::b(2048),
+            ..Default::default()
+        };
+        let store = S3Store::new(&cfg).unwrap();
+
+        drop(MultipartAbortGuard::new(
+            store.client.clone(),
+            store.bucket.clone(),
+            "repos/o/r/wal/dropped.pack".to_owned(),
+            "stub-upload".to_owned(),
+        ));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let requests = seen.lock().unwrap().clone();
+            if requests
+                .iter()
+                .any(|r| r.starts_with("DELETE ") && r.contains("uploadId="))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "drop guard never aborted: {requests:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// The idle bound must measure **silence**, not total time: a response

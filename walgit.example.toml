@@ -87,6 +87,8 @@ idle_timeout = "120s"             # #130: fail a bucket read once NO byte has ar
 multipart_threshold = "64MiB"     # object PUTs above this use multipart. Applies to Overwrite and to large
                                   # Create (packs/idx); a Create above the threshold pays one HEAD pre-check
                                   # because S3 multipart has no If-None-Match. Small CAS `Update` puts stay single-shot.
+                                  # Buckets should also set an AbortIncompleteMultipartUpload lifecycle rule
+                                  # (e.g. 7 days): in-process cancellation aborts best-effort, a hard kill cannot.
 multipart_part_size = "32MiB"
 
 [store.s3]

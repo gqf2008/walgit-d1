@@ -942,12 +942,15 @@ async fn s3_large_create_real_backend() {
     );
     assert_eq!(meta.size, len, "uploaded size");
 
-    // Byte-exact at both ends (a full 136 MiB download would only re-measure
-    // the uplink; the parts are what the fix changes).
-    let head = store.get(&key, GetOptions::default()).await.expect("get");
-    let (head_meta, head_body) = collect_body(head).await;
+    // Byte-exact at both ends; a full 136 MiB download would only re-measure
+    // the downlink, and the parts are what the fix changes. `head` pins the
+    // object's stored size without moving the bytes.
+    let head_meta = store
+        .head(&key)
+        .await
+        .expect("head")
+        .expect("object must exist");
     assert_eq!(head_meta.size, len);
-    let _ = head_body;
 
     let first = store
         .get(
