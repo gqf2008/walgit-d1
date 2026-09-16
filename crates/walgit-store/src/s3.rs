@@ -857,8 +857,8 @@ impl ObjectStore for S3Store {
                 StoreError::other(anyhow::anyhow!("no upload_id from CreateMultipartUpload"))
             })?
             .to_owned();
-        // S3-compatible stores disagree about part sizes: AWS only requires each
-        // non-trailing part to be >= MIN_PART, while R2/MinIO also require all
+        // Stores disagree about part sizes: AWS only requires each non-trailing
+        // part to be >= MIN_PART, while R2 additionally requires all
         // non-trailing parts to have the *same* length
         // (`InvalidPart: All non-trailing parts must have the same length.`,
         // issue #221). One uniform part size satisfies both. The size is bounded
@@ -867,6 +867,20 @@ impl ObjectStore for S3Store {
         // bounding it keeps that buffer small — and by MAX_PARTS so a huge
         // compose does not turn into tens of thousands of sequential requests.
         let part_size = total.div_ceil(MAX_PARTS).clamp(MIN_PART, MAX_GATHER_PART);
+        // `MAX_PARTS` is a request-budget soft target: above
+        // `MAX_PARTS * MAX_GATHER_PART` (32 GiB) the gather bound wins and the
+        // part count grows. Refuse before S3's own 10 000-part cap turns into a
+        // confusing Complete failure.
+        let parts_needed = total.div_ceil(part_size);
+        if parts_needed > 10_000 {
+            return Err(StoreError::InvalidArgument(format!(
+                "compose of {total} bytes needs {parts_needed} parts, above the 10 000-part S3 cap"
+            )));
+        }
+        if total == 0 {
+            // No parts to make: a zero-byte object, honouring `opts.mode`.
+            return self.put(dest, PutBody::Bytes(Bytes::new()), opts).await;
+        }
         let mut parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
         let mut part_number = 1i32;
         let mut pos: u64 = 0; // absolute offset into the concatenation
@@ -918,6 +932,7 @@ impl ObjectStore for S3Store {
                     let etag = part
                         .copy_part_result()
                         .and_then(|r| r.e_tag())
+                        .filter(|e| !e.trim().is_empty())
                         .ok_or_else(|| {
                             StoreError::Other(anyhow::anyhow!(
                                 "s3 upload part copy returned no ETag for {dest} part {part_number} \
@@ -955,7 +970,14 @@ impl ObjectStore for S3Store {
                             })?;
                         let take_from = p - offset_of(j);
                         let take = (sizes[j] - take_from).min(len - buf.len() as u64);
-                        let (_, bytes) = self
+                        // Do NOT go through `GetResult::bytes()`: a ranged
+                        // response carries the *whole* object size in
+                        // `ObjectMeta.size` (from `Content-Range`), and
+                        // `bytes()` hands that to `util::collect` as the
+                        // allocation hint — gathering 32 MiB from a 32 GiB base
+                        // pack would reserve 32 GiB (review finding on #221).
+                        // The hint here is the range we asked for.
+                        let result = self
                             .get(
                                 &sources[j],
                                 GetOptions {
@@ -963,12 +985,28 @@ impl ObjectStore for S3Store {
                                     ..GetOptions::default()
                                 },
                             )
-                            .await?
-                            .bytes()
-                            .await?
-                            .ok_or_else(|| StoreError::NotFound {
-                                key: sources[j].clone(),
-                            })?;
+                            .await?;
+                        let GetResult::Object { body, .. } = result else {
+                            return Err(StoreError::Other(anyhow::anyhow!(
+                                "compose gather: {} answered NotModified for range {take_from}..{}",
+                                sources[j],
+                                take_from + take
+                            )));
+                        };
+                        let take_usize = usize::try_from(take).map_err(|_| {
+                            StoreError::InvalidArgument(
+                                "compose gather range exceeds this host's usize".into(),
+                            )
+                        })?;
+                        let bytes = crate::util::collect(body, take_usize).await?;
+                        if bytes.len() as u64 != take {
+                            return Err(StoreError::Other(anyhow::anyhow!(
+                                "compose gather: {} returned {} bytes for range {take_from}..{} ({take} wanted)",
+                                sources[j],
+                                bytes.len(),
+                                take_from + take
+                            )));
+                        }
                         buf.extend_from_slice(&bytes);
                         p += take;
                     }
@@ -1905,6 +1943,110 @@ mod tests {
         );
     }
 
+    /// `compose` must refuse before S3's 10 000-part cap turns into an opaque
+    /// Complete failure. The stub only answers HEADs, so a 400 GiB source is
+    /// rejected without moving a byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compose_rejects_more_than_the_s3_part_cap() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let parts: Arc<Mutex<Vec<(i32, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let parts = parts.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let parts = parts.clone();
+                    // 400 GiB body: with the 32 MiB gather bound that is 12 800
+                    // parts, above S3's 10 000 cap.
+                    std::thread::spawn(move || {
+                        fake_s3_compose_eq_parts(stream, &parts, 120, 400 * 1024 * 1024 * 1024);
+                    });
+                }
+            });
+        }
+        let store = S3Store::new(&walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "compose-cap".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+
+        let err = store
+            .compose(
+                "repos/o/r/bundles/weekly/huge.bundle",
+                &[
+                    "repos/o/r/bundles/weekly/huge.bundle.hdr".to_owned(),
+                    "repos/o/r/wal/huge.pack".to_owned(),
+                ],
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .expect_err("more parts than S3 allows must be refused");
+        assert!(
+            matches!(err, StoreError::InvalidArgument(_)),
+            "part-cap refusal must be InvalidArgument, got {err:?}"
+        );
+        assert!(parts.lock().unwrap().is_empty(), "nothing may be uploaded");
+    }
+
+    /// All sources empty: `compose` must write a zero-byte object instead of
+    /// calling `CompleteMultipartUpload` with no parts (which some stores reject).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compose_of_empty_sources_writes_an_empty_object() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let parts: Arc<Mutex<Vec<(i32, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let parts = parts.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let parts = parts.clone();
+                    std::thread::spawn(move || fake_s3_compose_eq_parts(stream, &parts, 0, 0));
+                }
+            });
+        }
+        let store = S3Store::new(&walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "compose-empty".into(),
+            s3: walgit_config::S3Config {
+                endpoint: format!("http://{addr}"),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+
+        let meta = store
+            .compose(
+                "repos/o/r/bundles/weekly/empty.bundle",
+                &[
+                    "repos/o/r/bundles/weekly/empty.bundle.hdr".to_owned(),
+                    "repos/o/r/wal/empty.pack".to_owned(),
+                ],
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .expect("empty compose");
+        assert_eq!(meta.size, 0);
+        assert!(parts.lock().unwrap().is_empty(), "no multipart parts");
+    }
+
     /// Minimal S3 stub for [`compose_uses_equal_length_parts`]: HEAD reports the
     /// two source sizes, ranged GETs return zeros, UploadPart/UploadPartCopy
     /// record their part lengths, and Complete succeeds.
@@ -1953,10 +2095,10 @@ mod tests {
 
         let line = request_line.trim_end().to_owned();
         let (method, target) = line.split_once(' ').unwrap_or((line.as_str(), ""));
-        // Only the two sources exist; the destination must answer 404 so
-        // `PutMode::Create` proceeds.
-        let is_body = target.contains("base.pack");
-        let is_header = target.contains("full.bundle.hdr");
+        // Only the two sources exist; the destination (a `.bundle`) must answer
+        // 404 so `PutMode::Create` proceeds.
+        let is_body = target.contains(".pack");
+        let is_header = target.contains(".hdr");
         let (status, headers, body): (&str, String, Vec<u8>) = if method == "HEAD" {
             if is_body || is_header {
                 let size = if is_body { body_len } else { header_len };
@@ -1974,10 +2116,15 @@ mod tests {
             }
         } else if method == "GET" {
             // Presigned ranged GET of the gathered bytes (header + pack prefix).
+            // The response carries the *whole* source size in `Content-Range`,
+            // exactly like S3: the gather must size its buffer from the range,
+            // not from this total (review finding on #221).
             let len = parse_http_range_len(&range_header).unwrap_or(0);
+            let (start, end) = parse_http_range_bounds(&range_header).unwrap_or((0, 0));
+            let total = if is_body { body_len } else { header_len };
             (
                 "206 Partial Content",
-                format!("content-length: {len}\r\n"),
+                format!("content-range: bytes {start}-{end}/{total}\r\ncontent-length: {len}\r\n"),
                 vec![0u8; usize::try_from(len).unwrap_or(0)],
             )
         } else if method == "POST" && target.contains("uploads") {
@@ -1989,6 +2136,13 @@ mod tests {
                     xml.len()
                 ),
                 xml.to_vec(),
+            )
+        } else if method == "PUT" && !target.contains("partNumber=") {
+            // The zero-byte object `compose` writes when every source is empty.
+            (
+                "200 OK",
+                "etag: \"stub-empty\"\r\ncontent-length: 0\r\n".to_owned(),
+                Vec::new(),
             )
         } else if method == "PUT" && target.contains("partNumber=") {
             let number = target
@@ -2042,6 +2196,13 @@ mod tests {
         let _ = stream.write_all(head.as_bytes());
         let _ = stream.write_all(&body);
         let _ = stream.flush();
+    }
+
+    /// `bytes=<start>-<end>` -> `(start, end)`, both inclusive.
+    fn parse_http_range_bounds(value: &str) -> Option<(u64, u64)> {
+        let range = value.trim().strip_prefix("bytes=")?;
+        let (start, end) = range.split_once('-')?;
+        Some((start.parse().ok()?, end.parse().ok()?))
     }
 
     /// `bytes=<start>-<end>` -> inclusive length.
