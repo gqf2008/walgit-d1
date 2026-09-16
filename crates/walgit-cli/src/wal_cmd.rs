@@ -202,18 +202,17 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
     Ok(())
 }
 
-/// Rebuild `id` as it was at `at_seq` into `out`: refs from the newest
-/// checkpoint ≤ `at_seq` (or from seq 0) + replayed log entries, packs from the
-/// local serving copy when present (copied, never moved) or fetched from the
-/// store. Works on any machine with bucket access (cold rewind).
 /// Apply one log entry's pack transition to the replay set.
 ///
 /// A same-checksum COMPACT republish (the `rebuild.rs` #216 recovery path)
 /// intentionally has an empty `supersedes` list: the pack is immutable and the
-/// manifest replaces the old PackRef by checksum. Replay must treat the new
+/// manifest replaces the old `PackRef` by checksum. Replay must treat the new
 /// `entry.pack` as that replacement too; otherwise the old and new seq both
 /// survive and `materialize` installs the same pack twice.
-fn apply_pack_entry(pack_set: &mut Vec<walgit_proto::v1::PackRef>, entry: &walgit_proto::v1::LogEntry) {
+fn apply_pack_entry(
+    pack_set: &mut Vec<walgit_proto::v1::PackRef>,
+    entry: &walgit_proto::v1::LogEntry,
+) {
     if let Some(pack) = &entry.pack {
         pack_set.retain(|p| {
             p.checksum != pack.checksum && !entry.supersedes.contains(&p.checksum)
@@ -224,6 +223,10 @@ fn apply_pack_entry(pack_set: &mut Vec<walgit_proto::v1::PackRef>, entry: &walgi
     }
 }
 
+/// Rebuild `id` as it was at `at_seq` into `out`: refs from the newest
+/// checkpoint ≤ `at_seq` (or from seq 0) + replayed log entries, packs from the
+/// local serving copy when present (copied, never moved) or fetched from the
+/// store. Works on any machine with bucket access (cold rewind).
 pub async fn materialize_at(
     registry: &Registry,
     id: &walgit_git::RepoId,
