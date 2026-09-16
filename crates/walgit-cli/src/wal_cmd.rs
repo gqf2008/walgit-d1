@@ -206,6 +206,24 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
 /// checkpoint ≤ `at_seq` (or from seq 0) + replayed log entries, packs from the
 /// local serving copy when present (copied, never moved) or fetched from the
 /// store. Works on any machine with bucket access (cold rewind).
+/// Apply one log entry's pack transition to the replay set.
+///
+/// A same-checksum COMPACT republish (the `rebuild.rs` #216 recovery path)
+/// intentionally has an empty `supersedes` list: the pack is immutable and the
+/// manifest replaces the old PackRef by checksum. Replay must treat the new
+/// `entry.pack` as that replacement too; otherwise the old and new seq both
+/// survive and `materialize` installs the same pack twice.
+fn apply_pack_entry(pack_set: &mut Vec<walgit_proto::v1::PackRef>, entry: &walgit_proto::v1::LogEntry) {
+    if let Some(pack) = &entry.pack {
+        pack_set.retain(|p| {
+            p.checksum != pack.checksum && !entry.supersedes.contains(&p.checksum)
+        });
+        pack_set.push(pack.clone());
+    } else {
+        pack_set.retain(|p| !entry.supersedes.contains(&p.checksum));
+    }
+}
+
 pub async fn materialize_at(
     registry: &Registry,
     id: &walgit_git::RepoId,
@@ -298,10 +316,7 @@ pub async fn materialize_at(
         if entry.seq <= start_seq || entry.seq > at_seq {
             continue;
         }
-        if let Some(pack) = &entry.pack {
-            pack_set.push(pack.clone());
-        }
-        pack_set.retain(|p| !entry.supersedes.contains(&p.checksum));
+        apply_pack_entry(&mut pack_set, entry);
     }
 
     // Packs live at `at_seq`: copy from the local serving copy when it
@@ -386,6 +401,39 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn pack(checksum: &str, seq: u64) -> walgit_proto::v1::PackRef {
+        walgit_proto::v1::PackRef {
+            checksum: checksum.into(),
+            seq,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replay_replaces_a_same_checksum_republish_instead_of_duplicating_it() {
+        let mut set = vec![pack("aa", 4)];
+        let entry = walgit_proto::v1::LogEntry {
+            seq: 5,
+            pack: Some(pack("aa", 5)),
+            ..Default::default()
+        };
+        apply_pack_entry(&mut set, &entry);
+        assert_eq!(set.len(), 1, "the old seq must not survive beside the new seq");
+        assert_eq!(set[0].seq, 5);
+
+        let mut set = vec![pack("old", 4), pack("keep", 4)];
+        let entry = walgit_proto::v1::LogEntry {
+            seq: 6,
+            pack: Some(pack("new", 6)),
+            supersedes: vec!["old".into()],
+            ..Default::default()
+        };
+        apply_pack_entry(&mut set, &entry);
+        let mut checksums: Vec<&str> = set.iter().map(|p| p.checksum.as_str()).collect();
+        checksums.sort_unstable();
+        assert_eq!(checksums, vec!["keep", "new"]);
     }
 
     /// Cold rewind: a registry with an empty cache materializes seq 2 (before

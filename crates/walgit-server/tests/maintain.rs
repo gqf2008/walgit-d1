@@ -3691,10 +3691,11 @@ async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
         "the base rebuild must succeed"
     );
     step!("sync after rebuild", h.sync())?;
-    let base_seq = walgit_wal::base_pack(&h.manifest())
+    let old_base = walgit_wal::base_pack(&h.manifest())
         .cloned()
-        .expect("a live tier-2 base")
-        .seq;
+        .expect("a live tier-2 base");
+    let base_seq = old_base.seq;
+    let base_checksum = old_base.checksum.clone();
     assert!(
         h.store()
             .head(&walgit_proto::keys::checkpoint_key(base_seq))
@@ -3703,11 +3704,16 @@ async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
         "the rebuild must leave an exact witness"
     );
 
-    std::fs::write(src.path().join("b.txt"), "two\n")?;
-    git_in(src.path(), &["add", "."])?;
-    git_in(src.path(), &["commit", "-q", "-m", "two"])?;
+    // Advance the WAL without changing the object set: a ref-only push to a new
+    // branch leaves the base pack's checksum identical, which is the production
+    // same-checksum case this regression must exercise.
     git(
-        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        &[
+            "push",
+            "-q",
+            &server.repo_url("o", "r"),
+            "HEAD:refs/heads/two",
+        ],
         src.path(),
     )?;
     step!("sync after push", h.sync())?;
@@ -3754,24 +3760,25 @@ async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
         "planner must rebuild the base, got {unit:?}"
     );
 
-    // The rebuild itself must survive the same-checksum case: for these tiny
-    // repos repack can reproduce the old pack checksum, so the old live-seq
-    // witness path would fail forever. The rebuild must republish that
-    // immutable pack at a fresh COMPACT seq and write its witness there.
-    let mut repair = HashMap::new();
-    repair.insert("base".to_string(), "1".to_string());
-    repair.insert("force".to_string(), "1".to_string());
-    assert!(
-        step!(
-            "repair",
-            walgit_server::maintain::run_op(&server.state, &id, "compact", repair)
-        ),
-        "BaseRebuild must recover an already-live same-checksum base"
-    );
+    // Drive the production dispatch, not just the planner: repack reproduces
+    // the old checksum, so the old live-seq witness path would fail forever.
+    // BaseRebuild must republish that immutable pack at a fresh COMPACT seq
+    // and write its witness there.
+    let report = step!("repair pass", walgit_server::maintain::run_pass(&server.state))?;
+    assert!(report.compactions >= 1, "repair pass: {report:?}");
     step!("sync after repair", h.sync())?;
     let repaired = walgit_wal::base_pack(&h.manifest())
         .cloned()
         .expect("repaired base");
+    assert_eq!(
+        repaired.checksum, base_checksum,
+        "the test must hit the same-checksum republish path"
+    );
+    assert!(
+        repaired.seq > base_seq,
+        "the same checksum must be republished at a new seq ({base_seq} -> {})",
+        repaired.seq
+    );
     assert!(
         h.store()
             .head(&walgit_proto::keys::checkpoint_key(repaired.seq))
