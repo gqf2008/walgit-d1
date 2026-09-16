@@ -198,7 +198,7 @@
 | 4 | **events 桥对任意 ref** | 验证 collab refs 的 ref 事件完整送达（理论上是，需 golden 测试） | 复用现有桥 |
 | 5 | **SDK 扩展** | `repos.js` 增加 collab lane（读聚合、写条目） | dogfood 规则：不另起 SDK |
 
-> 进度：缺口 1 由 [issue #8](https://github.com/gqf2008/walgit-d1/issues/8) 批次落地——
+> 进度：缺口 1 由 issue #8（历史 GitHub issue；Issues 已随主仓迁移禁用） 批次落地——
 > 已实现 `GET /{o}/{r}/api/refs/all`（全量 ref，全名、字节序分页、SSE）、
 > `GET /{o}/{r}/api/refs/collab`（`refs/collab/*` 命名空间）与
 > `GET /{o}/{r}/api/refs/name/{rest}`（精确单 ref 读取，SWR+ETag）。
@@ -223,7 +223,7 @@
 > 以旧名继续；本地/remote 输出一致（`remote_blame_follows_exact_renames` 锁死）。
 > 改内容型 rename（相似度检测需读候选 blob）仍不跟随，需本地 packs/bundle。
 >
-> 缺口 3-5 由 [issue #10](https://github.com/gqf2008/walgit-d1/issues/10) 批次落地：
+> 缺口 3-5 由 issue #10（历史 GitHub issue；Issues 已随主仓迁移禁用） 批次落地：
 > 缺口 4（events 桥任意 ref）golden 测试已落地（`tests/events.rs`：
 > `refs/collab/*` 的 create/delete 事件与 heads 同一套 cursor/去重/回放契约）；
 > 缺口 5（SDK）`repos.js` 已加 collab lane：`refsAll`/`refsCollab`/`refByName`、
@@ -234,7 +234,7 @@
 > push 到 `refs/collab/meta/principals/<principal>`，吊销 = 删该 ref（tombstone）。
 > "签发时自动注册"（auth.rs 挂接）留待薄 API（见 §11）。
 >
-> 缺口 3、5 的**浏览器写路径 + Web UI** 由 [issue #26](https://github.com/gqf2008/walgit-d1/issues/26)
+> 缺口 3、5 的**浏览器写路径 + Web UI** 由 issue #26（历史 GitHub issue；Issues 已随主仓迁移禁用）
 > 批次落地（薄 API + 交互式 dashboard）：
 > - **薄 API 写路径**：`POST /{o}/{r}/api/collab/entries`（浏览器直写收件箱，
 >   服务端把条目对象打进 pack 走 WAL publish，强制 `actor == principal`）与
@@ -251,7 +251,7 @@
 >   （条目流、验签徽标、PR/评审面板），浏览器 Ed25519 密钥（WebCrypto，私钥不出浏览器）
 >   一键注册并发布 issue/评论/评审/状态/patch 条目。
 >
-> **工作单元看板**由 [issue #30](https://github.com/gqf2008/walgit-d1/issues/30)
+> **工作单元看板**由 issue #30（历史 GitHub issue；Issues 已随主仓迁移禁用）
 > 批次落地（§8 的看板视图 + §11 问题 3 的决定）：
 > - **投影核心**：`BoardDef`（`.walgit/board.toml`，`version = 1`，`[[column]]`
 >   谓词 kind / status / merge(allowed\|blocked) / unverified，声明序

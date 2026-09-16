@@ -26,8 +26,10 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   walgit reaches GitHub through the mirror and triggers `.github/workflows/release.yml`. Never push branches
   to the GitHub remote by hand and never double-push.
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
-  code and the collaboration history. `fork` (`gqf2008/walgit-1`) and `upstream` (`tobi/walgit`) are
-  historical references — never push to them.
+  code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
+  (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
+  and Releases, while Actions/Security keep their CI/release jobs. `fork` (`gqf2008/walgit-1`) and `upstream`
+  (`tobi/walgit`) are historical references — never push to them.
 - The mirror loop lives in `~/.walgit/sync-to-github.sh` (screen `walgit-sync-github`, 60 s). A walgit
   service restart kills that screen, so restart it after restarts (first check `screen -ls | grep walgit`
   so you do not run a second copy — two loops racing push the same refs):
@@ -610,10 +612,12 @@ is the contract agents follow; humans use the same protocol.**
 
 ### 6.1 Work-unit lifecycle
 
-An issue is a *work unit*. Its state is its labels (authoritative) mirrored onto the
-[walgit 工作单元 board](https://github.com/users/gqf2008/projects/5) (Status field):
+A work unit is a **walgit collab thread**: its state is the newest signed `status` entry, projected by
+`.walgit/board.toml` onto the board (`walgit collab board`). The GitHub label/Project-Status mapping below
+is the **historical (pre-2026-09-16) shape** of the same lifecycle — labels and the GitHub board are no
+longer written (Issues disabled, Projects off):
 
-| State | Label | Project Status | Meaning |
+| State | Label (historical) | Project Status (historical) | Meaning |
 |---|---|---|---|
 | Backlog | *(none)* | Backlog | filed, not queued |
 | Ready | `ready` | Ready | queued, anyone may claim |
@@ -622,9 +626,9 @@ An issue is a *work unit*. Its state is its labels (authoritative) mirrored onto
 | Done | *(closed)* | Done | merged/closed |
 | Blocked | `blocked` | (stays put) | waiting on a dependency or external input |
 
-Priority: `P0` (immediate) / `P1` (this batch) / `P2` (queued) / `P3` (spare).
-Kind: `batch` (checklist-driven), `bug`, `enhancement` (task). Batches own the
-`batch` label and a checklist; single units use the task/bug forms.
+Priority in the old label scheme: `P0` (immediate) / `P1` (this batch) / `P2` (queued) / `P3` (spare);
+kind: `batch` (checklist-driven), `bug`, `enhancement`. In walgit the same information travels in the
+thread title/body (and a batch thread carries the checklist).
 
 ### 6.2 Claim protocol (agents) — historical GitHub flow, superseded 2026-09-16
 
@@ -679,8 +683,9 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   (`warnings + test`, `e2e`, `windows fast tier`; clippy excluded), linear history. The
   canonical `main` lives in walgit and is moved by a signed collab `merge_result` plus a
   direct push to `origin`.
-- Design decisions and Q&A live in **Discussions** (Announcements/General/Ideas/Polls/
-  Q&A/Show and tell); issues stay for work units, discussions for "why".
+- Design decisions and Q&A: historically GitHub **Discussions** (Announcements/General/
+  Ideas/Polls/Q&A/Show and tell); discussions are disabled on the mirror now — put the "why"
+  in the walgit collab thread (`comment` entries) instead.
 - Vulnerabilities: private reporting (SECURITY.md) + Dependabot security updates +
   CodeQL scanning on PRs (results in the Security tab).
 - Releases: tag `v*` triggers `release.yml` (builds the linux `.deb`, the Windows
