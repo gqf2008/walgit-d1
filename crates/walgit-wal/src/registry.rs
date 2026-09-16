@@ -525,7 +525,14 @@ fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
 ///
 /// `ErrorKind` carries the portable semantics; the raw codes cover platforms
 /// whose `ErrorKind` mapping predates `DirectoryNotEmpty` and the Windows
-/// sharing/access violations that have no portable kind.
+/// sharing/access violations that have no portable kind. Windows bodies:
+/// git's `READ_ONLY` pack attribute was cleared by the caller, but a still-open
+/// handle (this process's pack-index mmap, a real-time scanner) reports
+/// `SHARING_VIOLATION` (32) / `ACCESS_DENIED` (5) for a moment, and a
+/// concurrent writer (pack prefetch, commit-graph update, a git child just
+/// flushing) can recreate a file inside the tree mid-teardown, which the final
+/// `RemoveDirectory` reports as `DIR_NOT_EMPTY` (145). `33`/`1224` are the
+/// lock-violation / user-mapped-file shapes the same handle races produce.
 fn is_retryable_teardown_error(e: &std::io::Error) -> bool {
     if matches!(
         e.kind(),
@@ -596,7 +603,8 @@ mod teardown_tests {
         let raw = 145;
         #[cfg(target_os = "linux")]
         let raw = 39;
-        #[cfg(target_os = "macos")]
+        // macOS and the BSDs use 66 for ENOTEMPTY.
+        #[cfg(not(any(windows, target_os = "linux")))]
         let raw = 66;
         std::io::Error::from_raw_os_error(raw)
     }
