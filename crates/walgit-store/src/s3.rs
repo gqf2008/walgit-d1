@@ -556,6 +556,9 @@ impl ObjectStore for S3Store {
         if let Some(ct) = opts.content_type {
             builder = builder.content_type(ct);
         }
+        if opts.immutable {
+            builder = builder.cache_control("public, max-age=31536000, immutable");
+        }
 
         let result = builder.send().await;
         match result {
@@ -830,9 +833,38 @@ impl ObjectStore for S3Store {
             sizes.push(m.size);
         }
         let total: u64 = sizes.iter().sum();
+        // Every layout decision happens before the multipart upload is created:
+        // an early return after `CreateMultipartUpload` would leak an upload no
+        // caller can name (review finding on #221).
+        //
+        // Stores disagree about part sizes: AWS only requires each non-trailing
+        // part to be >= MIN_PART, while R2 additionally requires all
+        // non-trailing parts to have the *same* length
+        // (`InvalidPart: All non-trailing parts must have the same length.`,
+        // issue #221). One uniform part size satisfies both. The size is bounded
+        // by MAX_GATHER_PART because a part that spans a source boundary (the
+        // bundle header in front of the pack) is read through this process —
+        // bounding it keeps that buffer small — and by MAX_PARTS so a huge
+        // compose does not turn into tens of thousands of sequential requests.
+        let part_size = total.div_ceil(MAX_PARTS).clamp(MIN_PART, MAX_GATHER_PART);
+        // `MAX_PARTS` is a request-budget soft target: above
+        // `MAX_PARTS * MAX_GATHER_PART` (32 GiB) the gather bound wins and the
+        // part count grows. Refuse before S3's own 10 000-part cap turns into a
+        // confusing Complete failure.
+        let parts_needed = total.div_ceil(part_size.max(1));
+        if parts_needed > 10_000 {
+            return Err(StoreError::InvalidArgument(format!(
+                "compose of {total} bytes needs {parts_needed} parts, above the 10 000-part S3 cap"
+            )));
+        }
+        if total == 0 {
+            // No parts to make: a zero-byte object, honouring `opts` (mode,
+            // content type, immutable cache header).
+            return self.put(dest, PutBody::Bytes(Bytes::new()), opts).await;
+        }
         // The virtual concatenation, cut into parts: a part is [start, end) of the whole.
-        // Runs that lie inside one source and are >= MIN_PART become copies; everything else
-        // (a small source, the tail that pads it to MIN_PART) is read and uploaded.
+        // Runs that lie inside one source become copies; the run that straddles a
+        // source boundary is read and uploaded.
         let incarnation = new_incarnation();
         let mut create = self
             .client
@@ -857,30 +889,6 @@ impl ObjectStore for S3Store {
                 StoreError::other(anyhow::anyhow!("no upload_id from CreateMultipartUpload"))
             })?
             .to_owned();
-        // Stores disagree about part sizes: AWS only requires each non-trailing
-        // part to be >= MIN_PART, while R2 additionally requires all
-        // non-trailing parts to have the *same* length
-        // (`InvalidPart: All non-trailing parts must have the same length.`,
-        // issue #221). One uniform part size satisfies both. The size is bounded
-        // by MAX_GATHER_PART because a part that spans a source boundary (the
-        // bundle header in front of the pack) is read through this process —
-        // bounding it keeps that buffer small — and by MAX_PARTS so a huge
-        // compose does not turn into tens of thousands of sequential requests.
-        let part_size = total.div_ceil(MAX_PARTS).clamp(MIN_PART, MAX_GATHER_PART);
-        // `MAX_PARTS` is a request-budget soft target: above
-        // `MAX_PARTS * MAX_GATHER_PART` (32 GiB) the gather bound wins and the
-        // part count grows. Refuse before S3's own 10 000-part cap turns into a
-        // confusing Complete failure.
-        let parts_needed = total.div_ceil(part_size);
-        if parts_needed > 10_000 {
-            return Err(StoreError::InvalidArgument(format!(
-                "compose of {total} bytes needs {parts_needed} parts, above the 10 000-part S3 cap"
-            )));
-        }
-        if total == 0 {
-            // No parts to make: a zero-byte object, honouring `opts.mode`.
-            return self.put(dest, PutBody::Bytes(Bytes::new()), opts).await;
-        }
         let mut parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
         let mut part_number = 1i32;
         let mut pos: u64 = 0; // absolute offset into the concatenation
@@ -998,15 +1006,7 @@ impl ObjectStore for S3Store {
                                 "compose gather range exceeds this host's usize".into(),
                             )
                         })?;
-                        let bytes = crate::util::collect(body, take_usize).await?;
-                        if bytes.len() as u64 != take {
-                            return Err(StoreError::Other(anyhow::anyhow!(
-                                "compose gather: {} returned {} bytes for range {take_from}..{} ({take} wanted)",
-                                sources[j],
-                                bytes.len(),
-                                take_from + take
-                            )));
-                        }
+                        let bytes = collect_exactly(body, take_usize).await?;
                         buf.extend_from_slice(&bytes);
                         p += take;
                     }
@@ -1134,6 +1134,9 @@ impl S3Store {
 
         if let Some(ct) = opts.content_type {
             create = create.content_type(ct);
+        }
+        if opts.immutable {
+            create = create.cache_control("public, max-age=31536000, immutable");
         }
 
         let upload = create.send().await.map_err(|e| {
@@ -1366,6 +1369,32 @@ impl Drop for MultipartAbortGuard {
                 .await;
         });
     }
+}
+
+/// Collect exactly `want` bytes of a range response and stop at that bound.
+/// `util::collect` only uses its hint for the initial capacity, so a store that
+/// ignores `Range` and answers 200 with the whole object could still stream it
+/// into memory; this errors instead of reading past `want` (review finding on
+/// #221).
+async fn collect_exactly(body: crate::ByteStream, want: usize) -> Result<Bytes> {
+    let mut out = Vec::with_capacity(want);
+    let mut body = body;
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
+        if out.len() + chunk.len() > want {
+            return Err(StoreError::Other(anyhow::anyhow!(
+                "range response is longer than the {want} bytes requested"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    if out.len() != want {
+        return Err(StoreError::Other(anyhow::anyhow!(
+            "range response returned {} bytes, {want} requested",
+            out.len()
+        )));
+    }
+    Ok(Bytes::from(out))
 }
 
 fn static_credentials(
@@ -1855,6 +1884,49 @@ mod tests {
         }
     }
 
+    /// The compose gather must read exactly the range it asked for: a short
+    /// body (backend hiccup) and a long one (a store that ignored `Range` and
+    /// answered 200 with the whole object) both error instead of silently
+    /// truncating or buffering past the bound.
+    #[tokio::test]
+    async fn collect_exactly_rejects_short_and_long_bodies() {
+        let body = |chunks: Vec<&'static str>| -> crate::ByteStream {
+            Box::pin(futures::stream::iter(
+                chunks
+                    .into_iter()
+                    .map(|c| Ok(Bytes::from_static(c.as_bytes()))),
+            ))
+        };
+
+        let ok = collect_exactly(body(vec!["abc", "de"]), 5)
+            .await
+            .expect("exact length");
+        assert_eq!(&ok[..], b"abcde");
+
+        assert!(
+            collect_exactly(body(vec!["abc"]), 5).await.is_err(),
+            "a short body must not pass"
+        );
+        // The bound must fire *before* the next chunk is polled: a store that
+        // ignored `Range` would otherwise keep streaming a whole 32 GiB source
+        // into memory. The third item is an error, so a pass that reads past the
+        // bound surfaces that instead of the "longer than" error.
+        let over = futures::stream::iter(vec![
+            Ok(Bytes::from_static(b"abc")),
+            Ok(Bytes::from_static(b"def")),
+            Err(StoreError::other(anyhow::anyhow!(
+                "collect read past its bound"
+            ))),
+        ]);
+        let err = collect_exactly(Box::pin(over), 5)
+            .await
+            .expect_err("a body longer than the requested range must not be buffered");
+        assert!(
+            format!("{err:?}").contains("longer than"),
+            "the bound must fire on the overflowing chunk, got {err:?}"
+        );
+    }
+
     /// R2/MinIO require every non-trailing multipart part to have the *same*
     /// length (issue #221: the old compose made a 5 MiB gather part followed by
     /// one multi-MiB copy and R2 answered
@@ -1875,13 +1947,16 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let parts: Arc<Mutex<Vec<(i32, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let parts = parts.clone();
+            let requests = requests.clone();
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let parts = parts.clone();
+                    let requests = requests.clone();
                     std::thread::spawn(move || {
-                        fake_s3_compose_eq_parts(stream, &parts, header_len, body_len);
+                        fake_s3_compose_eq_parts(stream, &parts, &requests, header_len, body_len);
                     });
                 }
             });
@@ -1954,15 +2029,24 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let parts: Arc<Mutex<Vec<(i32, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let parts = parts.clone();
+            let requests = requests.clone();
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let parts = parts.clone();
+                    let requests = requests.clone();
                     // 400 GiB body: with the 32 MiB gather bound that is 12 800
                     // parts, above S3's 10 000 cap.
                     std::thread::spawn(move || {
-                        fake_s3_compose_eq_parts(stream, &parts, 120, 400 * 1024 * 1024 * 1024);
+                        fake_s3_compose_eq_parts(
+                            stream,
+                            &parts,
+                            &requests,
+                            120,
+                            400 * 1024 * 1024 * 1024,
+                        );
                     });
                 }
             });
@@ -1997,6 +2081,13 @@ mod tests {
             "part-cap refusal must be InvalidArgument, got {err:?}"
         );
         assert!(parts.lock().unwrap().is_empty(), "nothing may be uploaded");
+        let seen = requests.lock().unwrap().clone();
+        assert!(
+            !seen
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploads")),
+            "a refused compose must not create a multipart upload: {seen:?}"
+        );
     }
 
     /// All sources empty: `compose` must write a zero-byte object instead of
@@ -2009,12 +2100,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let parts: Arc<Mutex<Vec<(i32, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let parts = parts.clone();
+            let requests = requests.clone();
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let parts = parts.clone();
-                    std::thread::spawn(move || fake_s3_compose_eq_parts(stream, &parts, 0, 0));
+                    let requests = requests.clone();
+                    std::thread::spawn(move || {
+                        fake_s3_compose_eq_parts(stream, &parts, &requests, 0, 0);
+                    });
                 }
             });
         }
@@ -2045,6 +2141,20 @@ mod tests {
             .expect("empty compose");
         assert_eq!(meta.size, 0);
         assert!(parts.lock().unwrap().is_empty(), "no multipart parts");
+        let seen = requests.lock().unwrap().clone();
+        assert!(
+            !seen
+                .iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploads")),
+            "an empty compose must not create a multipart upload: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|r| r.starts_with("PUT ") && !r.contains("partNumber="))
+                .count(),
+            1,
+            "an empty compose must write one plain PUT: {seen:?}"
+        );
     }
 
     /// Minimal S3 stub for [`compose_uses_equal_length_parts`]: HEAD reports the
@@ -2053,6 +2163,7 @@ mod tests {
     fn fake_s3_compose_eq_parts(
         mut stream: std::net::TcpStream,
         parts: &std::sync::Arc<std::sync::Mutex<Vec<(i32, u64)>>>,
+        requests: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         header_len: u64,
         body_len: u64,
     ) {
@@ -2094,6 +2205,7 @@ mod tests {
         }
 
         let line = request_line.trim_end().to_owned();
+        requests.lock().unwrap().push(line.clone());
         let (method, target) = line.split_once(' ').unwrap_or((line.as_str(), ""));
         // Only the two sources exist; the destination (a `.bundle`) must answer
         // 404 so `PutMode::Create` proceeds.
