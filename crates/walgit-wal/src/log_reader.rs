@@ -127,7 +127,9 @@ async fn retained_witness_for_cut(
         std::collections::BTreeMap::new();
     let mut stream = handle.store().list_keys(keys::CHECKPOINTS_DIR, None);
     while let Some(key) = stream.next().await {
-        let key = key.map_err(|e| WalError::Corrupt(format!("list checkpoints: {e}")))?;
+        // A LIST/transport failure is transient, not corruption: keep it as
+        // `Store` so planners do not mistake it for a missing witness.
+        let key = key?;
         let Some(rest) = key.strip_prefix(keys::CHECKPOINTS_DIR) else {
             continue;
         };

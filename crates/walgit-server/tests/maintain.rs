@@ -3638,6 +3638,124 @@ async fn bundle_compose_works_after_a_fold_moved_past_the_base() -> anyhow::Resu
     Ok(())
 }
 
+/// #214 回归：单个 bitmap'd base、未 predates window，但 exact witness
+/// 已丢失时，planner 必须选 BaseRebuild，不能继续把它交给 bundle。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use walgit_server::maintain::{Unit, next_unit};
+    use walgit_store::ObjectStore;
+
+    let server = step!(
+        "start",
+        Server::start_with_tweak(|c| {
+            c.server.roles = vec![
+                walgit_config::Role::Serve,
+                walgit_config::Role::Maintain,
+                walgit_config::Role::Compact,
+                walgit_config::Role::Bundle,
+            ];
+            c.maintenance.disk = walgit_config::MaintainerDisk::Ssd;
+            c.cache.mode = walgit_config::CacheMode::Disk;
+            c.bundles.enabled = true;
+            c.bundles.strategy.truncate(1); // weekly only
+            c.compaction.enabled = true;
+            c.maintenance.checkpoints = false;
+            c.maintenance.fsck_interval = std::time::Duration::ZERO;
+        })
+    )?;
+    step!("put repo", server.put_repo("o", "r"))?;
+    let src = tempfile::tempdir()?;
+    git_in(src.path(), &["init", "-q", "-b", "main"])?;
+    git_in(src.path(), &["config", "user.email", "t@t"])?;
+    git_in(src.path(), &["config", "user.name", "Tester"])?;
+    std::fs::write(src.path().join("a.txt"), "one\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "one"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    let id = walgit_git::RepoId::new("o", "r")?;
+    let h = step!("open", server.state.registry.open(&id))?;
+    step!("sync", h.sync())?;
+
+    let mut base_params = HashMap::new();
+    base_params.insert("base".to_string(), "1".to_string());
+    base_params.insert("force".to_string(), "1".to_string());
+    assert!(
+        step!(
+            "base rebuild",
+            walgit_server::maintain::run_op(&server.state, &id, "compact", base_params)
+        ),
+        "the base rebuild must succeed"
+    );
+    step!("sync after rebuild", h.sync())?;
+    let base_seq = walgit_wal::base_pack(&h.manifest())
+        .cloned()
+        .expect("a live tier-2 base")
+        .seq;
+    assert!(
+        h.store()
+            .head(&walgit_proto::keys::checkpoint_key(base_seq))
+            .await?
+            .is_some(),
+        "the rebuild must leave an exact witness"
+    );
+
+    std::fs::write(src.path().join("b.txt"), "two\n")?;
+    git_in(src.path(), &["add", "."])?;
+    git_in(src.path(), &["commit", "-q", "-m", "two"])?;
+    git(
+        &["push", "-q", &server.repo_url("o", "r"), "main"],
+        src.path(),
+    )?;
+    step!("sync after push", h.sync())?;
+    let mut cp_params = HashMap::new();
+    cp_params.insert("trigger".to_string(), "test".to_string());
+    assert!(step!(
+        "fold",
+        walgit_server::maintain::run_op(&server.state, &id, "checkpoint", cp_params)
+    ));
+    step!("sync after fold", h.sync())?;
+    let live_cp = h
+        .manifest()
+        .checkpoint
+        .as_ref()
+        .map(|c| c.seq)
+        .unwrap_or_default();
+    assert!(live_cp > base_seq, "the fold must move past the base");
+
+    // Self-isolating control: with the witness still present the planner is on
+    // the bundle path; only deleting it may flip the decision to BaseRebuild.
+    let before = step!("plan before witness removal", next_unit(&server.state, &id))?;
+    assert!(
+        matches!(before, Unit::BundleSlot(ref s, _) if s == "weekly"),
+        "control state must be BundleSlot, got {before:?}"
+    );
+
+    // Simulate the #214 production state: the old base's witness pair is gone,
+    // while the base itself is still the one live bitmap'd base and no ref
+    // change happened before the weekly window start.
+    h.store()
+        .delete(&walgit_proto::keys::checkpoint_key(base_seq), None)
+        .await?;
+    h.store()
+        .delete(&walgit_proto::keys::checkpoint_refs_key(base_seq), None)
+        .await?;
+    assert!(
+        h.refs_at_seq(base_seq).await.is_err(),
+        "the base must be unreplayable without its witness"
+    );
+
+    let unit = step!("plan", next_unit(&server.state, &id))?;
+    assert!(
+        matches!(unit, Unit::BaseRebuild(ref s, _) if s == "weekly"),
+        "planner must rebuild the base, got {unit:?}"
+    );
+    Ok(())
+}
+
 /// #175 剩余：folded WAL 对象回收 —— `manifest.min_seq` 以下的 log 段与不再
 /// 被引用的 checkpoint 目录，在超过 `maintenance.retention_wal` 之后应被删除；
 /// live checkpoint、live log 段必须留下。
