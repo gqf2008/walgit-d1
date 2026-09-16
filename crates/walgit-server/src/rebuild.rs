@@ -477,13 +477,27 @@ pub async fn rebuild_base(
         {
             // A retry after the publish CAS but before the witness write sees
             // this branch. Re-ensure the exact witness instead of skipping the
-            // publish without healing the missing invariant (#195).
-            walgit_wal::write_witness_checkpoint(handle, p.seq, manifest.packs.clone()).await?;
-            log(format!(
-                "pack {hex} is already live as tier 2; witness checkpoint ensured"
-            ));
-            published.push(hex);
-            continue;
+            // publish without healing the missing invariant (#195). If the old
+            // seq's witness is no longer replayable (a pre-#195 base whose log
+            // was folded), do not keep retrying that dead seq: fall through and
+            // publish the same immutable pack under a fresh COMPACT seq, where
+            // an exact witness can be written again.
+            match walgit_wal::write_witness_checkpoint(handle, p.seq, manifest.packs.clone())
+                .await
+            {
+                Ok(_) => {
+                    log(format!(
+                        "pack {hex} is already live as tier 2; witness checkpoint ensured"
+                    ));
+                    published.push(hex);
+                    continue;
+                }
+                Err(walgit_wal::WalError::Corrupt(reason)) => log(format!(
+                    "pack {hex} is already live but witness at seq {} is not replayable ({reason}); republishing at a fresh seq",
+                    p.seq
+                )),
+                Err(e) => return Err(e.into()),
+            }
         }
         let sup = supersedes_left.take().unwrap_or_default();
         let seq = handle.publish_compact(info, sup, 2).await?;
