@@ -3753,6 +3753,37 @@ async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
         matches!(unit, Unit::BaseRebuild(ref s, _) if s == "weekly"),
         "planner must rebuild the base, got {unit:?}"
     );
+
+    // The rebuild itself must survive the same-checksum case: for these tiny
+    // repos repack can reproduce the old pack checksum, so the old live-seq
+    // witness path would fail forever. The rebuild must republish that
+    // immutable pack at a fresh COMPACT seq and write its witness there.
+    let mut repair = HashMap::new();
+    repair.insert("base".to_string(), "1".to_string());
+    repair.insert("force".to_string(), "1".to_string());
+    assert!(
+        step!(
+            "repair",
+            walgit_server::maintain::run_op(&server.state, &id, "compact", repair)
+        ),
+        "BaseRebuild must recover an already-live same-checksum base"
+    );
+    step!("sync after repair", h.sync())?;
+    let repaired = walgit_wal::base_pack(&h.manifest())
+        .cloned()
+        .expect("repaired base");
+    assert!(
+        h.store()
+            .head(&walgit_proto::keys::checkpoint_key(repaired.seq))
+            .await?
+            .is_some()
+            && h.store()
+                .head(&walgit_proto::keys::checkpoint_refs_key(repaired.seq))
+                .await?
+                .is_some(),
+        "the repaired base must carry an exact witness at seq {}",
+        repaired.seq
+    );
     Ok(())
 }
 
