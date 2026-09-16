@@ -1098,7 +1098,8 @@ impl S3Store {
                 let n = match reader.read(&mut buf[read_total..]).await {
                     Ok(n) => n,
                     Err(e) => {
-                        let _ = self.abort_multipart(key, &upload_id).await;
+                        self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                            .await;
                         return Err(StoreError::other(anyhow::anyhow!("multipart read: {e}")));
                     }
                 };
@@ -1112,8 +1113,8 @@ impl S3Store {
                 // A body shorter than the declared length must never Complete:
                 // the object would keep the content-addressed key while holding
                 // fewer bytes than the key names.
-                let _ = self.abort_multipart(key, &upload_id).await;
-                abort_guard.disarm();
+                self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                    .await;
                 return Err(StoreError::InvalidArgument(format!(
                     "put body for {key} ended after {read_total} bytes of part {part_number} \
                      (declared length {len}); refusing to complete a truncated object"
@@ -1141,7 +1142,8 @@ impl S3Store {
             {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = self.abort_multipart(key, &upload_id).await;
+                    self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                        .await;
                     return Err(transport_retryable("upload part", &e)
                         .unwrap_or_else(|| StoreError::Other(anyhow::anyhow!("s3 upload part: {e}"))));
                 }
@@ -1175,7 +1177,8 @@ impl S3Store {
         {
             Ok(r) => r,
             Err(e) => {
-                let _ = self.abort_multipart(key, &upload_id).await;
+                self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                    .await;
                 return Err(transport_retryable("complete multipart", &e)
                     .unwrap_or_else(|| StoreError::Other(anyhow::anyhow!("s3 complete multipart: {e}"))));
             }
@@ -1188,6 +1191,20 @@ impl S3Store {
             size: len,
             version: version_from_parts(etag.as_deref(), Some(&incarnation), None),
         })
+    }
+
+    /// Explicit abort on an error path. Disarms the drop guard only when the
+    /// abort actually landed: a transient abort failure keeps the guard armed
+    /// so dropping the future retries it best-effort.
+    async fn abort_upload_or_keep_guard(
+        &self,
+        key: &str,
+        upload_id: &str,
+        guard: &mut MultipartAbortGuard,
+    ) {
+        if self.abort_multipart(key, upload_id).await.is_ok() {
+            guard.disarm();
+        }
     }
 
     async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<()> {
