@@ -508,9 +508,12 @@ async fn next_unit_at(
                     let due = match walgit_wal::base_pack(&m).cloned() {
                         None => !m.packs.is_empty(),
                         Some(base) => {
-                            bases.len() > 1
-                                || !base.has_bitmap
-                                || base_predates_window(&handle, strat, r.slot, base.seq).await
+                            base_rebuild_due(
+                                bases.len() > 1,
+                                base.has_bitmap,
+                                base_predates_window(&handle, strat, r.slot, base.seq).await,
+                                !base_lacks_witness(&handle, base.seq).await,
+                            )
                         }
                     };
                     if !skip("base-rebuild") && holds && due {
@@ -623,6 +626,28 @@ async fn base_predates_window(
     }
 }
 
+/// Decide whether the full-bundle slot must rebuild the tier-2 base before it
+/// can compose. `replayable` is the base's exact `refs_at_seq` witness:
+/// without it the compose fails forever, so the maintainer must rebuild instead
+/// of retrying the same bundle slot (the 2026-09-16 vox-seat production case).
+fn base_rebuild_due(
+    many_bases: bool,
+    has_bitmap: bool,
+    predates_window: bool,
+    replayable: bool,
+) -> bool {
+    many_bases || !has_bitmap || predates_window || !replayable
+}
+
+/// A missing witness is the one replay error worth rebuilding for. Store or
+/// other transient errors must not trigger the expensive base rebuild.
+async fn base_lacks_witness(handle: &walgit_wal::RepoHandle, base_seq: u64) -> bool {
+    matches!(
+        handle.refs_at_seq(base_seq).await,
+        Err(walgit_wal::WalError::Corrupt(_))
+    )
+}
+
 /// What the next slot of each strategy will run — so Sunday's base rebuild is
 /// visible in the plan before it happens. Host = the live maintainer that can
 /// run it (ssd for a base rebuild). Wall-time estimate for a rebuild scales
@@ -681,7 +706,14 @@ pub async fn upcoming(
             .map_or(0, |d| d.as_secs());
         let (unit, host) = match strat.kind {
             walgit_config::BundleKind::Full => match &base {
-                Some(b) if many || base_predates_window(handle, strat, slot, b.seq).await => {
+                Some(b)
+                    if base_rebuild_due(
+                        many,
+                        b.has_bitmap,
+                        base_predates_window(handle, strat, slot, b.seq).await,
+                        !base_lacks_witness(handle, b.seq).await,
+                    ) =>
+                {
                     // Display-only: the label rounds to tenths of a GiB and whole
                     // minutes; exact byte counts are not the point of a status string.
                     #[allow(
@@ -1111,11 +1143,23 @@ async fn run_op_value(
 
 #[cfg(test)]
 mod backoff_tests {
-    use super::{BACKOFF_AFTER_FAILURES, Backoff};
+    use super::{BACKOFF_AFTER_FAILURES, Backoff, base_rebuild_due};
     use walgit_git::RepoId;
 
     fn repo() -> RepoId {
         RepoId::new("o", "r").expect("repo id")
+    }
+
+    #[test]
+    fn base_rebuild_due_includes_a_missing_witness() {
+        assert!(
+            base_rebuild_due(false, true, false, false),
+            "an unreplayable base must rebuild even with one bitmap'd base and no new refs"
+        );
+        assert!(!base_rebuild_due(false, true, false, true));
+        assert!(base_rebuild_due(true, true, false, true));
+        assert!(base_rebuild_due(false, false, false, true));
+        assert!(base_rebuild_due(false, true, true, true));
     }
 
     #[test]
