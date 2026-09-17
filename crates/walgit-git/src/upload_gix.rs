@@ -987,7 +987,7 @@ mod frozen_source_tests {
     use gix_pack::Find as _;
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git_command()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1019,7 +1019,7 @@ mod frozen_source_tests {
         for (i, words) in ["one pack", "two pack"].iter().enumerate() {
             let content = format!("{words} {}\n", "x".repeat(300 + i * 50));
             let oid = {
-                let mut c = std::process::Command::new("git")
+                let mut c = crate::git_command()
                     .arg("-C")
                     .arg(dir)
                     .args(["hash-object", "-w", "--stdin"])
@@ -1038,7 +1038,7 @@ mod frozen_source_tests {
                     .to_string()
             };
             // Pack exactly this blob and drop the loose copy.
-            let mut c = std::process::Command::new("git")
+            let mut c = crate::git_command()
                 .arg("-C")
                 .arg(dir)
                 .args(["pack-objects", "-q", "objects/pack/pack"])
@@ -1106,7 +1106,7 @@ mod frozen_source_tests {
         for i in 0..24 {
             let content = format!("later pack {i} {}\n", "y".repeat(200 + i));
             let oid = {
-                let mut c = std::process::Command::new("git")
+                let mut c = crate::git_command()
                     .arg("-C")
                     .arg(dir)
                     .args(["hash-object", "-w", "--stdin"])
@@ -1124,7 +1124,7 @@ mod frozen_source_tests {
                     .trim()
                     .to_string()
             };
-            let mut c = std::process::Command::new("git")
+            let mut c = crate::git_command()
                 .arg("-C")
                 .arg(dir)
                 .args(["pack-objects", "-q", "objects/pack/pack"])

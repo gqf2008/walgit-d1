@@ -35,7 +35,7 @@ pub async fn fetch_objects_as_pack(
         .await
         .map_err(GitError::Io)?;
     let git = |args: &[&str]| {
-        let mut c = tokio::process::Command::new("git");
+        let mut c = crate::git_tokio_command();
         c.arg("--git-dir")
             .arg(&scratch)
             .args(args)

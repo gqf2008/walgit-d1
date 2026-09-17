@@ -13,6 +13,17 @@ same surface a contributor gets.
 - **protoc**: `choco install protoc -y` (prost-build does not vendor it).
 - **git for Windows**: required — the server shells out to real `git`
   (`multi-pack-index write`, `repack`, `index-pack`, …). Any recent build works.
+
+  **Not every `git.exe` behaves the same.** The MSYS2 one
+  (`\msys64\usr\bin\git.exe` — first on PATH for anyone who uses MSYS2, and what
+  the walgit service actually picks up there) runs **bash-style brace expansion
+  on its own arguments**: a spawned `rev-parse HEAD^{commit}` reaches git as
+  `HEAD^commit`, so the source/tree endpoints 404 with `Not a valid object name
+  <sha>^tree`. Never build a `^{tree}` / `^{commit}` suffix for a subprocess —
+  use `git rev-list -1 <rev>` (peels a tag, prints nothing for a non-commit),
+  `git log -1 --format=%T <rev>` (the root tree), `git cat-file -t|-e`, or
+  `ls-tree <commit-ish>` directly. Fixed 2026-09-17, see the collab thread
+  `cc-ai-win-git-argv`.
 - **pnpm**: `corepack enable` or a standalone install; `just web-build` uses it.
 - **just**: optional for a plain build; `just` itself is not installed by any
   package manager on Windows — grab a release binary from
@@ -42,6 +53,11 @@ Notes specific to Windows:
   history-pack stall test (CreateProcess resolves only `.exe`, so a script
   cannot shadow `git`); a missing rustc makes that one test print the reason
   and skip.
+- The server runs **without a console** (the tray starts it detached), so every
+  `git` child would make Windows allocate a *new* console window — a black box
+  flashing on screen per request. All server-side git spawns go through
+  `walgit_git::git_command()` / `git_tokio_command()`, which pass
+  `CREATE_NO_WINDOW`; spawning `git` any other way brings the windows back.
 - git for Windows marks finished `pack-*.pack`/`pack-*.idx` **READ_ONLY**.
   Supersede deletes and repo teardown clear the attribute before removing
   (see `LocalRepo::remove_pack_file` and `Registry::delete`); if you ever hit

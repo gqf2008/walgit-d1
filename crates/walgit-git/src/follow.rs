@@ -56,7 +56,7 @@ pub async fn fetch_refs(
     scratch: &Path,
 ) -> Result<FetchedDelta, GitError> {
     let git = |args: &[&str]| {
-        let mut c = tokio::process::Command::new("git");
+        let mut c = crate::git_tokio_command();
         c.arg("--git-dir")
             .arg(scratch)
             .args(args)
@@ -191,7 +191,7 @@ pub async fn fetch_refs(
 /// What a previous [`fetch_refs`] left in the scratch: upstream's tips
 /// (`refs/follow/*`) and the pack it wrote, if any.
 pub async fn read_scratch(scratch: &Path) -> Result<FetchedDelta, GitError> {
-    let out = tokio::process::Command::new("git")
+    let out = crate::git_tokio_command()
         .arg("--git-dir")
         .arg(scratch)
         .args([

@@ -22,8 +22,42 @@ use gix_object::{FindExt, FindHeader, Kind as ObjKind};
 use gix_traverse::tree::Visit as TreeVisit;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::process::Command;
 use tracing::Instrument;
+
+// ---------------------------------------------------------------------------
+// git subprocesses
+// ---------------------------------------------------------------------------
+
+/// Windows: do not allocate a console for the child.
+///
+/// The server is normally started detached (the tray), so it has no console of
+/// its own; a bare console-subsystem spawn (`git.exe`) then makes Windows
+/// create a *new* console window for every child — a black box flashing on
+/// screen for each request that runs git. `CREATE_NO_WINDOW` asks for no
+/// console at all (the tray passes the same flag for the service itself).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `git` as a blocking [`std::process::Command`], console-less on Windows.
+pub fn git_command() -> std::process::Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = std::process::Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
+/// `git` as a [`tokio::process::Command`], console-less on Windows.
+pub fn git_tokio_command() -> tokio::process::Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = tokio::process::Command::new("git");
+    #[cfg(windows)]
+    c.creation_flags(CREATE_NO_WINDOW);
+    c
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -638,7 +672,7 @@ impl LocalRepo {
         let path = id.local_dir(root);
         std::fs::create_dir_all(path.parent().unwrap_or(root)).map_err(GitError::Io)?;
         // `git init --bare [--object-format=...] <path>`.
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = crate::git_command();
         cmd.arg("init").arg("--bare");
         if format == ObjectFormat::Sha256 {
             cmd.arg("--object-format=sha256");
@@ -667,7 +701,7 @@ impl LocalRepo {
             ("uploadpack.allowSidebandAll", "true"),
             ("pack.writeReverseIndex", "true"),
         ] {
-            let _ = std::process::Command::new("git")
+            let _ = crate::git_command()
                 .arg("-C")
                 .arg(&path)
                 .args(["config", k, v])
@@ -1431,7 +1465,7 @@ impl LocalRepo {
 
         if has_oid_cmds {
             input.push_str("prepare\ncommit\n");
-            let out = std::process::Command::new("git")
+            let out = crate::git_command()
                 .current_dir(&self.inner.path)
                 .env("GIT_DIR", &self.inner.path)
                 .args(["update-ref", "--stdin"])
@@ -2111,7 +2145,7 @@ impl LocalRepo {
 
     /// Run `git` with cwd=repo, `GIT_DIR` set, capturing output.
     pub async fn git(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::git_tokio_command();
         cmd.current_dir(&self.inner.path)
             .env("GIT_DIR", &self.inner.path)
             .args(args)
@@ -2237,7 +2271,7 @@ impl LocalRepo {
         // the pack into `index-pack --stdin`, which writes pack + idx (+ rev)
         // under the pack dir and prints the checksum.
         let hash = {
-            let mut po = tokio::process::Command::new("git")
+            let mut po = crate::git_tokio_command()
                 .current_dir(&self.inner.path)
                 .env("GIT_DIR", &self.inner.path)
                 .args([
@@ -2259,7 +2293,7 @@ impl LocalRepo {
                 .ok_or_else(|| GitError::Io(std::io::Error::other("pack-objects stdout")))?
                 .try_into()
                 .map_err(GitError::Io)?;
-            let ip = tokio::process::Command::new("git")
+            let ip = crate::git_tokio_command()
                 .current_dir(&self.inner.path)
                 .env("GIT_DIR", &self.inner.path)
                 .args([
@@ -2418,7 +2452,7 @@ impl LocalRepo {
         for n in &names {
             let _ = writeln!(input, "{n}");
         }
-        let out = std::process::Command::new("git")
+        let out = crate::git_command()
             .current_dir(&self.inner.path)
             .env("GIT_DIR", &self.inner.path)
             .args([
@@ -2656,7 +2690,7 @@ impl LocalRepo {
         if connectivity_only {
             args.push("--connectivity-only");
         }
-        let mut child = tokio::process::Command::new("git")
+        let mut child = crate::git_tokio_command()
             .current_dir(&self.inner.path)
             .env("GIT_DIR", &self.inner.path)
             .args(&args)
@@ -2730,7 +2764,7 @@ impl LocalRepo {
     }
 
     fn git_cmd_sync(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = crate::git_command();
         cmd.current_dir(&self.inner.path)
             .env("GIT_DIR", &self.inner.path)
             .args(args)
@@ -2753,7 +2787,7 @@ impl LocalRepo {
             let mut full_args: Vec<String> = Vec::with_capacity(args.len() + 1);
             full_args.push(cmd_name.clone());
             full_args.extend(args.iter().cloned());
-            let mut cmd = std::process::Command::new("git");
+            let mut cmd = crate::git_command();
             cmd.current_dir(&path)
                 .env("GIT_DIR", &path)
                 .args(&full_args)
@@ -2788,7 +2822,7 @@ impl LocalRepo {
     {
         let mut body = body;
         let git_protocol = protocol.git_protocol_env();
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::git_tokio_command();
         cmd.current_dir(&self.inner.path)
             .env("GIT_DIR", &self.inner.path)
             .env("GIT_PROTOCOL", git_protocol)
@@ -3080,7 +3114,7 @@ fn git_index_pack(
         format!("{}\n", repo_path.join("objects").display()),
     )
     .map_err(GitError::Io)?;
-    let mut child = std::process::Command::new("git")
+    let mut child = crate::git_command()
         .current_dir(repo_path)
         .env("GIT_DIR", &scratch)
         .env("GIT_TRACE2_EVENT", &trace_path)
@@ -3987,7 +4021,7 @@ mod index_pack_trace_tests {
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::git_command()
                 .current_dir(&src)
                 .args(args)
                 .output()
@@ -4007,7 +4041,7 @@ mod index_pack_trace_tests {
         run(&["add", "f"]);
         run(&["commit", "-qm", "c"]);
         let pack = {
-            let mut child = std::process::Command::new("git")
+            let mut child = crate::git_command()
                 .current_dir(&src)
                 .args(["pack-objects", "--stdout", "--revs"])
                 .stdin(Stdio::piped())
@@ -4029,7 +4063,7 @@ mod index_pack_trace_tests {
             out.stdout
         };
         let dest = dir.path().join("dest.git");
-        let o = std::process::Command::new("git")
+        let o = crate::git_command()
             .args(["init", "-q", "--bare", dest.to_str().unwrap()])
             .output()
             .unwrap();

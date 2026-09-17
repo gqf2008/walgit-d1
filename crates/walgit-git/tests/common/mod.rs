@@ -121,7 +121,7 @@ impl SourceRepo {
     /// with `hash-object --literally` so the source repo accepts it; returns its id. Only
     /// `pack-objects` with an explicit id reaches it (no ref points at it).
     pub fn bad_object(&self) -> String {
-        let tree = run_git(&self.dir, &["rev-parse", "HEAD^{tree}"])
+        let tree = run_git(&self.dir, &["log", "-1", "--format=%T", "HEAD"])
             .trim()
             .to_string();
         let body = format!("tree {tree}\nauthor broken\ncommitter broken\n\nbad\n");

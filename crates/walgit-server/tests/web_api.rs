@@ -585,7 +585,7 @@ async fn api_md_conformance() -> TestResult {
     let feature = git_in(&src, &["rev-parse", "feature/x"])?
         .trim()
         .to_string();
-    let v1_peeled = git_in(&src, &["rev-parse", "v1.0^{commit}"])?
+    let v1_peeled = git_in(&src, &["rev-list", "-1", "v1.0"])?
         .trim()
         .to_string();
     conformance(&server, &src, &head, &feature, &v1_peeled).await?;
@@ -636,7 +636,7 @@ async fn remote_objects_conformance() -> TestResult {
     let feature = git_in(&src, &["rev-parse", "feature/x"])?
         .trim()
         .to_string();
-    let v1_peeled = git_in(&src, &["rev-parse", "v1.0^{commit}"])?
+    let v1_peeled = git_in(&src, &["rev-list", "-1", "v1.0"])?
         .trim()
         .to_string();
 

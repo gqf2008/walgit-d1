@@ -355,7 +355,7 @@ async fn fsck_unit_records_missing_objects_and_repair_unit_fetches_them_from_ups
     let c2 = git_in(src.path(), &["rev-parse", "HEAD"])?
         .trim()
         .to_string();
-    let tree2 = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+    let tree2 = git_in(src.path(), &["log", "-1", "--format=%T", "HEAD"])?
         .trim()
         .to_string();
     let blob2 = git_in(src.path(), &["rev-parse", "HEAD:b.txt"])?
@@ -533,7 +533,7 @@ async fn connectivity_failure_is_reported_per_ref_not_as_remote_failure() -> any
     // zero objects (c2 is "already there") and the server's connectivity check
     // trips on the blob.
     let holes = tempfile::tempdir()?;
-    let tree2 = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+    let tree2 = git_in(src.path(), &["log", "-1", "--format=%T", "HEAD"])?
         .trim()
         .to_string();
     let out = std::process::Command::new("git")
@@ -1359,7 +1359,7 @@ async fn maintainer_builds_and_publishes_missing_rev_indexes() -> anyhow::Result
 
     // A legacy-shaped pack: pack-objects to a file with reverse indexes off (no .rev).
     let legacy = tempfile::tempdir()?;
-    let tree = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+    let tree = git_in(src.path(), &["log", "-1", "--format=%T", "HEAD"])?
         .trim()
         .to_string();
     let out = std::process::Command::new("git")
@@ -2217,7 +2217,7 @@ async fn publishing_a_reclaiming_checksum_is_refused() -> anyhow::Result<()> {
 
     // A pack that is not live yet (so the claim CAS accepts it).
     let dir = tempfile::tempdir()?;
-    let tree = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+    let tree = git_in(src.path(), &["log", "-1", "--format=%T", "HEAD"])?
         .trim()
         .to_string();
     let out = std::process::Command::new("git")

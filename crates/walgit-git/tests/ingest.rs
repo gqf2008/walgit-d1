@@ -59,7 +59,7 @@ async fn ingest_pack_objects_present_fsck_ok() {
     let b_oid = gix_hash::ObjectId::from_hex(b.as_bytes()).unwrap();
     assert!(repo.has_object(&b_oid));
     // The root tree of B exists.
-    let head_tree = cm::run_git(src.dir.as_path(), &["rev-parse", "HEAD^{tree}"]);
+    let head_tree = cm::run_git(src.dir.as_path(), &["log", "-1", "--format=%T", "HEAD"]);
     let tree_oid = gix_hash::ObjectId::from_hex(head_tree.trim().as_bytes()).unwrap();
     assert!(repo.has_object(&tree_oid));
 

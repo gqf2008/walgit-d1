@@ -1778,7 +1778,7 @@ async fn partial_clone_tree_zero_and_depth_with_filter() -> TestResult {
     // Only commits came over: the root tree is not local yet.
     let has_tree = std::process::Command::new("git")
         .current_dir(clone.path())
-        .args(["cat-file", "-e", &format!("{}^{{tree}}", head.trim())])
+        .args(["cat-file", "-e", &format!("{}:", head.trim())])
         .env("GIT_NO_LAZY_FETCH", "1")
         .status()?
         .success();

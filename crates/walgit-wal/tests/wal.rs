@@ -1751,7 +1751,7 @@ async fn test_serve_level_links_base_from_store_mount() {
             .unwrap()
     };
     let tree = String::from_utf8_lossy(
-        &git(&["rev-parse", &format!("{base_tip_for_tree}^{{tree}}")]).stdout,
+        &git(&["log", "-1", "--format=%T", base_tip_for_tree.as_str()]).stdout,
     )
     .trim()
     .to_string();

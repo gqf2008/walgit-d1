@@ -1142,7 +1142,7 @@ async fn git_hash_object(
     content: &[u8],
 ) -> Result<String, ApiError> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("git")
+    let mut child = walgit_git::git_tokio_command()
         .current_dir(local.path())
         .env("GIT_DIR", local.path())
         .args(["hash-object", "-w", "--stdin"])
@@ -1170,7 +1170,7 @@ async fn git_hash_object(
 
 async fn git_pack_object(local: &walgit_git::LocalRepo, oid: &str) -> Result<Vec<u8>, ApiError> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("git")
+    let mut child = walgit_git::git_tokio_command()
         .current_dir(local.path())
         .env("GIT_DIR", local.path())
         .args(["pack-objects", "--stdout", "-q"])
@@ -1295,7 +1295,7 @@ async fn git_cat_file_batch(
 ) -> Result<HashMap<String, Vec<u8>>, ApiError> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     const CHUNK: usize = 512;
-    let mut child = tokio::process::Command::new("git")
+    let mut child = walgit_git::git_tokio_command()
         .current_dir(local.path())
         .env("GIT_DIR", local.path())
         .args(["cat-file", "--batch"])
@@ -2111,8 +2111,9 @@ async fn resolve_name(r: &Repo, name: &str) -> Result<Resolved, ApiError> {
     })
 }
 
-/// `rev-parse --verify <rev>^{commit}`: local git when objects are on disk,
-/// the pack indexes (unique prefix, tag peel) when served remotely.
+/// `rev-list -1 <rev>`, which peels to a commit and prints nothing for a
+/// non-commit: local git when objects are on disk, the pack indexes (unique
+/// prefix, tag peel) when served remotely.
 async fn rev_parse_commit(r: &Repo, rev: &str) -> Result<String, ApiError> {
     if rev.is_empty() || rev.starts_with('-') {
         return Err(not_found("revision"));
@@ -2126,11 +2127,10 @@ async fn rev_parse_commit(r: &Repo, rev: &str) -> Result<String, ApiError> {
     let out = git(
         &r.local,
         vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
+            "rev-list".into(),
+            "-1".into(),
             "--end-of-options".into(),
-            format!("{rev}^{{commit}}"),
+            rev.into(),
         ],
     )
     .await
@@ -2297,8 +2297,11 @@ async fn render_tree(
     local: &walgit_git::LocalRepo,
     res: &Resolved,
 ) -> Result<bytes::Bytes, ApiError> {
+    // A bare commit-ish already denotes its root tree to `ls-tree`; `^{tree}`
+    // is not usable here — a bash-style git (msys64's on Windows) expands the
+    // braces out of the argument before git ever sees it.
     let spec = if res.path.is_empty() {
-        format!("{}^{{tree}}", res.sha)
+        res.sha.clone()
     } else {
         format!("{}:{}", res.sha, res.path)
     };

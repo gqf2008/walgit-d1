@@ -1360,14 +1360,17 @@ impl Runner {
                 Ok(true)
             }
             DueSlot::Run(slot) => {
-                let have = Command::new("git")
+                // `rev-list -1` peels to a commit and prints nothing for a
+                // non-commit; `^{commit}` is not usable — a bash-style git
+                // (msys64's on Windows) expands the braces out of the argument.
+                let probe = Command::new("git")
                     .args(["-C"])
                     .arg(&self.repo)
-                    .args(["cat-file", "-e", &format!("{tip}^{{commit}}")])
+                    .args(["rev-list", "-1", "--end-of-options", tip])
                     .output()
-                    .context("git cat-file -e")?
-                    .status
-                    .success();
+                    .context("git rev-list -1")?;
+                let have = probe.status.success()
+                    && !String::from_utf8_lossy(&probe.stdout).trim().is_empty();
                 if !have {
                     self.fetch_commit(ref_name)?;
                 }
@@ -1714,9 +1717,9 @@ impl Runner {
         let out = Command::new("git")
             .args(["-C"])
             .arg(&self.repo)
-            .args(["rev-parse", "-q", "--verify", "FETCH_HEAD^{commit}"])
+            .args(["rev-list", "-1", "--end-of-options", "FETCH_HEAD"])
             .output()
-            .context("git rev-parse FETCH_HEAD")?;
+            .context("git rev-list -1 FETCH_HEAD")?;
         let oid = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !out.status.success() || oid.is_empty() {
             bail!("{ref_name}: tip does not resolve to a commit");

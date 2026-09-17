@@ -170,7 +170,7 @@ pub async fn create_bundle(
     // client disk are not. Prerequisites still bound the object set exactly.
     let repo_path = local.path();
     let git = |args: &[&str]| {
-        let mut c = tokio::process::Command::new("git");
+        let mut c = walgit_git::git_tokio_command();
         c.args(args)
             .current_dir(repo_path)
             .env("GIT_DIR", repo_path);
@@ -182,13 +182,16 @@ pub async fn create_bundle(
     // the same) — deduped, non-commits dropped.
     let mut prereq_commits: Vec<String> = Vec::with_capacity(prerequisites.len());
     for p in prerequisites {
-        let out = git(&["rev-parse", "--verify", "-q", &format!("{p}^{{commit}}")])
+        // `rev-list -1` peels a tag to its commit and prints nothing for a
+        // non-commit; `rev-parse <p>^{commit}` is not usable — a bash-style git
+        // (msys64's on Windows) expands the braces out of the argument.
+        let out = git(&["rev-list", "-1", "--end-of-options", p])
             .output()
             .await
             .map_err(|e| BundleError::Io(e.to_string()))?;
         if out.status.success() {
             let c = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !prereq_commits.contains(&c) {
+            if !c.is_empty() && !prereq_commits.contains(&c) {
                 prereq_commits.push(c);
             }
         }
@@ -1174,7 +1177,7 @@ pub(crate) async fn count_commits(
         return Ok(0);
     }
     let repo_path = local.path();
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = walgit_git::git_tokio_command();
     cmd.arg("rev-list").arg("--count");
     for t in tips {
         cmd.arg(t);

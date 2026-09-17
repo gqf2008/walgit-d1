@@ -1402,7 +1402,7 @@ mod tests {
         git(&src, &["commit", "-q", "-m", "one"]);
         let tip = git(&src, &["rev-parse", "HEAD"]);
         let blob = git(&src, &["rev-parse", "HEAD:a"]);
-        let tree = git(&src, &["rev-parse", "HEAD^{tree}"]);
+        let tree = git(&src, &["log", "-1", "--format=%T", "HEAD"]);
         let packs = tmp.path().join("packs");
         std::fs::create_dir_all(&packs).unwrap();
         // Pack commit + tree only (a blob:none history pack), no blob.
