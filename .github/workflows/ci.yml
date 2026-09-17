@@ -69,6 +69,8 @@ jobs:
         run: just web-test
 
       - run: just warnings
+      - name: Release changelog filter
+        run: scripts/check-release-changelog-filter.sh
       # #137's structural anti-drift guard, generalized to every crate by #141:
       # the filesystem (crates/*/tests/*.rs) is the truth, the justfile's lane
       # variables (SERVER_TESTS / CLI_TESTS / WILDCARD_TEST_PKGS) are the claim;

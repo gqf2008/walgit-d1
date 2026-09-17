@@ -213,6 +213,10 @@ warnings:
     fi
     echo "no rustc warnings"
 
+# Verify the release changelog filter handles Conventional Commits breaking forms.
+check-release-changelog-filter:
+    scripts/check-release-changelog-filter.sh
+
 # Clippy, workspace-wide, all targets, warnings are errors. The lint set lives in
 # [workspace.lints] in Cargo.toml; test code is exempt from the panic-path restriction
 # lints via clippy.toml (allow-unwrap-in-tests etc.).
@@ -225,6 +229,7 @@ clippy:
 # probe; the ubuntu-only verdict for test-cli is argued at CLI_TESTS).
 ci:
     just warnings
+    just check-release-changelog-filter
     just clippy
     just test
     {{t10}} just test-cli
