@@ -1,6 +1,6 @@
 ---
 name: walgit
-description: Operate a walgit host (object-store-backed Git server) and do D1 collaboration bookkeeping (issues/PRs/reviews/board live in refs/collab/*). Use when the user mentions walgit, a local/self-hosted git host, pushing to/cloning from a walgit host, walgit issues/PRs/reviews/board, walgit service lifecycle, or listening to walgit events. Commands: walgit service start|stop|status|restart; collaboration via walgit collab (--config <walgit.toml>).
+description: "Operate a walgit host (object-store-backed Git server) and do D1 collaboration bookkeeping (issues/PRs/reviews/board live in refs/collab/*). Use when the user mentions walgit, a local/self-hosted git host, pushing to/cloning from a walgit host, walgit issues/PRs/reviews/board, walgit service lifecycle, or listening to walgit events — commands walgit service start|stop|status|restart and walgit collab (--config <walgit.toml>)."
 metadata:
   requires:
     bins: ["screen"]
@@ -70,8 +70,8 @@ $W collab entry --kind <issue|comment|patch|review|merge_result|status> \
 | `issue` | `{"title","body"}` | thread root |
 | `status` | `{"status","owner","worktree?","branch?","work","note?"}` | claim / move the card |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
-| `review` | `{"decision":"approve\|needs-changes","agent","note"}` | independent review |
-| `merge_result` | `{"oid","result":"merged","note"}` then `{"merged":true,"oid",…}` | merge record |
+| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review |
+| `merge_result` | `{"oid","merged":true,"note"}` | merge record (the board keys on `merged:true`) |
 | `comment` | `{"note"}` | progress notes (does not move the card) |
 
 **Board projection rules** (`.walgit/board.toml` defines the columns): `status` is the newest `status`
@@ -85,7 +85,7 @@ therefore projects as an **unowned `open` card** — file the `issue` **and** a 
 not count.
 
 Standard flow: `issue` → `status: in-progress` (owner/worktree/branch) → work in a worktree →
-`patch` → `status: needs-review` → independent `review` → merge locally & push → `merge_result` ×2 →
+`patch` → `status: needs-review` → independent `review` → merge locally & push → `merge_result` →
 `status: closed`. Keep the board and the thread as the single record; never edit state files by hand.
 
 ## 4. Listening for events (pull, never push)

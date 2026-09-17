@@ -2863,6 +2863,23 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
         .await?;
     assert_eq!(revalidated.status(), 304);
 
+    // The base URL is interpolated into the installer: a hostile `Host` cannot smuggle
+    // shell metacharacters in (`request_base_url` accepts only a host[:port] authority).
+    let poisoned = c
+        .get(format!(
+            "{}/services/public/skill/install.sh",
+            server.base_url
+        ))
+        .header("x-forwarded-host", "evil\"; printf PWNED; #")
+        .send()
+        .await?;
+    assert_eq!(poisoned.status(), 200);
+    let poisoned_body = poisoned.text().await?;
+    assert!(
+        !poisoned_body.contains("PWNED") && !poisoned_body.contains("evil"),
+        "host header leaked into the installer: {poisoned_body}"
+    );
+
     for (path, want) in [
         ("/services/public/nothing-else", 404),
         ("/services/public/", 404),
@@ -2880,6 +2897,8 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
             .await?
             .status()
             .as_u16();
+        // Every path is asserted exactly, except a data-free 200 that a build without the
+        // embedded SPA/SDK cannot serve (`/repos.js` reads `web/dist`): there 404 stands in.
         assert!(
             got == want || (want == 200 && got == 404),
             "GET {path}: {got}, want {want}"

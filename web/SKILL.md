@@ -14,14 +14,21 @@ lifecycle, D1 collaboration bookkeeping, pulling events — install the ops skil
 this build ships:
 
 ```sh
-curl -fsSLk '<host>/services/public/skill/install.sh' | sh
+curl -fsSL '<host>/services/public/skill/install.sh' | sh
 ```
 
-The installer checks the download against the sha256 in
-`<host>/services/public/skill/manifest.json` and writes
-`${WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit}/SKILL.md` (drop the `k` on a
-public-CA host). Re-run it after a host upgrade to refresh to that build; it is a
-no-op when the installed file already matches.
+The installer downloads `<host>/services/public/skill/SKILL.md`, verifies it
+against the sha256 baked into the script (the same value
+`<host>/services/public/skill/manifest.json` reports) and writes
+`${WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit}/SKILL.md`. Re-run it after a
+host upgrade to refresh to that build; it is a no-op when the installed file
+already matches.
+
+On a host presenting a **self-signed** certificate, pin it first and add
+`--cacert` — `curl -fsSk '<host>/services/public/ca.pem' -o walgit-ca.pem`, then
+`curl -fsSL --cacert walgit-ca.pem '<host>/services/public/skill/install.sh' |
+sh`. `curl -k` without pinning is trust-on-first-use: it keeps you going, but the
+sha256 then protects only the `SKILL.md` download, not the installer itself.
 
 ## Discover
 

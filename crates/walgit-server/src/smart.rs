@@ -1799,12 +1799,17 @@ pub(crate) fn request_base_url(st: &AppState, headers: &HeaderMap) -> String {
     if let Some(u) = &st.cfg.server.public_url {
         return u.trim_end_matches('/').to_string();
     }
+    // `Host` / `X-Forwarded-Host` are attacker-influenced, and the base URL is embedded
+    // verbatim in shell scripts (both installers), HTML and error text. A `Host:
+    // evil"; cmd; #` must not reach those: accept only `host[:port]` (IPv4/IPv6 literal or
+    // DNS name, optional port), else fall back to the configured listen address. The
+    // multi-value `X-Forwarded-Host: a, b` form uses its first (client-most) element.
     let host = headers
         .get("x-forwarded-host")
         .or_else(|| headers.get(axum::http::header::HOST))
         .and_then(|v| v.to_str().ok())
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty());
+        .map(|h| h.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|h| is_safe_host(h));
     match host {
         Some(h) => {
             let scheme = headers
@@ -1828,6 +1833,18 @@ pub(crate) fn request_base_url(st: &AppState, headers: &HeaderMap) -> String {
         }
         None => crate::listen_url(&st.cfg),
     }
+}
+
+/// Is `host` a `host[:port]` authority safe to interpolate into shell/HTML? Only the
+/// characters that can appear in a DNS name, IPv4 literal, bracketed IPv6 literal or port:
+/// no whitespace, quotes, `$`, backtick, `;`, `#`, `/` or `@` (the ways out of a quoted
+/// shell word or a URL). Length-bounded so a giant header cannot leak into responses.
+fn is_safe_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
 }
 
 /// One-time client setup text for `base_url` (web UI overview + auth errors).
@@ -2060,5 +2077,34 @@ mod issue4_diag_tests {
             Some("1111111111111111111111111111111111111111")
         );
         assert_eq!(heads.len(), 2);
+    }
+
+    // The base URL built from `Host` / `X-Forwarded-Host` is interpolated into both
+    // shell installers: a metacharacter in the header would be a command-injection
+    // primitive (`Host: evil"; cmd; #`). Only a `host[:port]` authority survives.
+    #[test]
+    fn host_guard_admits_only_safe_authorities() {
+        for ok in [
+            "git.example.com",
+            "git.example.com:8080",
+            "127.0.0.1:8081",
+            "[::1]:8080",
+            "localhost",
+        ] {
+            assert!(super::is_safe_host(ok), "should accept {ok:?}");
+        }
+        for bad in [
+            "evil\"; printf PWNED; #",
+            "a b",
+            "a/b",
+            "a\nb",
+            "a`b`",
+            "a$b",
+            "a@b",
+            "a?b",
+            "",
+        ] {
+            assert!(!super::is_safe_host(bad), "should reject {bad:?}");
+        }
     }
 }

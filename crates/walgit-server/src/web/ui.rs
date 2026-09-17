@@ -96,8 +96,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     r.with_state(state)
 }
 
-/// The installer a not-yet-signed-in user needs — the only route on the open
-/// `/services/public/*` prefix;
+/// The routes a not-yet-signed-in user needs on the open `/services/public/*`
+/// prefix: the git installer, the TLS certificate, and the ops skill this build
+/// ships (`skill/{SKILL.md,manifest.json,install.sh}`, D47);
 /// nothing under this router is gated, so nothing with data may ever be added to it.
 pub fn public_router(state: Arc<AppState>) -> Router {
     Router::new()

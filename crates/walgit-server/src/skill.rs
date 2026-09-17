@@ -63,10 +63,12 @@ pub fn manifest(base_url: &str) -> Manifest {
 /// **idempotent** (re-running after a host upgrade refreshes the skill), with the
 /// expected sha256 and base URL baked in so the downloaded bytes are verified.
 ///
-/// A self-signed origin cannot be verified by curl before the *client* installer
-/// pinned its certificate, so this bootstrap fetch falls back to `-k` — the same
-/// one-time concession `/services/public/install.sh` makes. The `sha256` check
-/// still pins the content.
+/// A self-signed origin cannot be verified by curl until the *client* has pinned the
+/// certificate, so this fetch falls back to `-k` — the same trust-on-first-use
+/// concession `/services/public/install.sh` makes. The baked `sha256` then protects
+/// only the `SKILL.md` download against a proxy that cannot rewrite this script; a
+/// `-k` man-in-the-middle can replace the script (and its hash) outright, so callers
+/// that need authentication must pin the CA (`--cacert`) instead of `-k`.
 pub fn install_script(cfg: &Config, base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let sha = sha256_hex(SKILL_MD.as_bytes());
@@ -141,7 +143,8 @@ mod tests {
         assert_eq!(m.bytes, SKILL_MD.len());
         assert_eq!(m.skill_url, "https://git.example.com/services/public/skill/SKILL.md");
         assert_eq!(m.install_url, "https://git.example.com/services/public/skill/install.sh");
-        assert!(!m.version.is_empty());
+        // One source of truth: the manifest reports the same build as `/healthz`/the footer.
+        assert_eq!(m.version, crate::instance::build_version());
     }
 
     #[test]
@@ -203,6 +206,74 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The sha256 guard has to fail closed: a tampered `SKILL.md` must not be written,
+    // the script must exit non-zero, and an already-installed good file must survive
+    // (RULE_技能文档命令须有可执行实现且发布前冒烟 §4: the guard must have seen failure).
+    #[cfg(unix)]
+    #[test]
+    fn install_script_refuses_tampered_bytes_and_keeps_the_old_file() {
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!("walgit-skill-neg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let served = root.join("services/public/skill/SKILL.md");
+        std::fs::create_dir_all(served.parent().unwrap()).unwrap();
+        std::fs::write(&served, b"tampered: not the skill\n").unwrap();
+        let dest = root.join("installed");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), b"previous good skill\n").unwrap();
+
+        let script = super::install_script(
+            &Config::default(),
+            &format!("file://{}", root.display()),
+        );
+        let out = Command::new("sh")
+            .args(["-c", &script])
+            .env("WALGIT_SKILL_DIR", &dest)
+            .output()
+            .expect("run installer");
+
+        assert!(!out.status.success(), "tampered bytes must fail: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The good file is untouched; only the temp download is discarded.
+        assert_eq!(
+            std::fs::read(dest.join("SKILL.md")).unwrap(),
+            b"previous good skill\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The frontmatter is read by skill loaders before any of the prose; an unquoted
+    // scalar carrying a second `: ` (e.g. `… Commands: walgit …`) makes the whole skill
+    // unparseable. Pin the shape without pulling a YAML crate into the server.
+    #[test]
+    fn frontmatter_is_well_formed() {
+        let (front, body) = SKILL_MD
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .expect("frontmatter delimited");
+        assert!(body.trim_start().starts_with('#'), "body follows the frontmatter");
+        let mut seen_name = false;
+        for line in front.lines() {
+            if let Some(value) = line.strip_prefix("description:") {
+                let value = value.trim();
+                assert!(
+                    value.starts_with('"') && value.ends_with('"'),
+                    "description must be a quoted scalar so a stray `: ` cannot break the YAML: {value:?}"
+                );
+            }
+            if line == "name: walgit" {
+                seen_name = true;
+            }
+        }
+        assert!(seen_name, "frontmatter names the skill");
     }
 
     #[test]

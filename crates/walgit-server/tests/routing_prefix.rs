@@ -42,6 +42,11 @@ fn allowed_route(path: &str) -> bool {
         "/_ui/{*path}",
         "/services/public/install.sh",
         "/services/public/ca.pem",
+        // The ops skill this build ships (D47): data-free, on the same open
+        // lane as the installer (no repo data, no credential).
+        "/services/public/skill/SKILL.md",
+        "/services/public/skill/manifest.json",
+        "/services/public/skill/install.sh",
         "/services/public/{*rest}",
         "/services/setup.json",
         "/services/api/instance",
