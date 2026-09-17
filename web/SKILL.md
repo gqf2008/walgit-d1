@@ -72,6 +72,41 @@ The server holds no CI logic. A runner is a client:
   rule), the others are kept for audit.
 - `walgit ci status` — every run in the checkout's collab log, aggregated.
 
+### Listening for events (pull, never push — D46)
+
+The server does not push anything: the events bridge, `[events]` config,
+`events/cursor.json`, `POST /_events/notify` and `walgit ci run --listen`
+were removed (D46 supersedes D32). The **events themselves are the WAL
+entries** (`PUSH` / `REF_UPDATE` / `COMPACT` / `CHECKPOINT` / `SETTINGS`,
+strictly increasing `seq`, replayable) — pick the cheapest lane that answers
+your question, and keep your own cursor:
+
+- **Ref tips only (cheapest, O(1), no pack)** — poll `git ls-remote <remote>`
+  and diff against your previous snapshot. This is what a CI runner needs:
+  `walgit ci run --repo . --remote origin` does exactly this (add `--once`
+  for cron).
+- **Collab entries (issues / PRs / reviews / `status` / CI)** —
+  `walgit collab watch --remote origin --interval 10 --exec <cmd>`: each new
+  or changed `refs/collab/*` entry's JSON arrives on your handler's stdin.
+  State lives in `<gitdir>/collab-watch.json` (dedupe + resume); `--once` runs
+  a single pass. After a D45 `collab gc` the watcher reports the folded
+  snapshot (`kind=snapshot`) instead of the individual entries.
+- **Full WAL stream (not just ref tips)** — `walgit wal ls <owner/repo>
+  --from <last_seq>` returns the entries after your cursor (each has `seq` and
+  `created_at`); persist `last_seq` and advance it only after processing.
+  `--to <seq>` bounds a replay window.
+- **Web / dashboard** — any JSON endpoint that cannot answer immediately
+  streams the **SSE envelope** when the request says
+  `Accept: text/event-stream` (read `progress` / `notice` / terminal
+  `result`|`error`); a long task's live packets are at
+  `GET /{owner}/{repo}/api/tasks/{id}`.
+
+Delivery is **at-least-once**: consumers must be idempotent and dedupe by
+`seq` (WAL) or thread/ref + entry oid (collab); duplicating work is possible,
+losing an event is not (everything is replayable from the WAL). If you need
+push semantics — a webhook, IM or queue — add a sidecar: poll/walk one of the
+lanes above and forward, keeping the cursor on your side.
+
 ### Repository reads over HTTP (no bucket credentials)
 
 `walgit repo` reads a **running host** — any machine, no `walgit.toml`, no
