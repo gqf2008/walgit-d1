@@ -58,4 +58,25 @@ describe("MarkdownRenderer (untrusted entry prose — XSS boundary)", () => {
     const { container } = render(<MarkdownRenderer source={"| a | b |\n| - | - |\n| 1 | 2 |"} />);
     expect(container.querySelector("table")).not.toBeNull();
   });
+
+  // The ventures bug: markdown links are relative to the *file*, not the page.
+  it("resolves relative links and images against the given base", () => {
+    const urls = {
+      raw: (rev: string, path: string) => `/r/api/blob/${rev}/${path}?raw`,
+      tree: (rev: string, path = "") => `/r/tree/${rev}${path ? "/" + path : ""}`,
+      blob: (rev: string, path: string) => `/r/blob/${rev}/${path}`,
+    };
+    const { container } = render(
+      <MarkdownRenderer
+        source={"[dir](vdev-driver-ip/README.md) ![pic](pics/a.png)"}
+        base={{ ref: "main", dir: "content", urls }}
+      />,
+    );
+    expect(container.querySelector("a")?.getAttribute("href")).toBe(
+      "/r/blob/main/content/vdev-driver-ip/README.md",
+    );
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "/r/api/blob/main/content/pics/a.png?raw",
+    );
+  });
 });

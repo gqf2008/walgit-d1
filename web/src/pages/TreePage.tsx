@@ -1,5 +1,5 @@
 import { Link, useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, client } from "../api";
 import { useResolved } from "../use-resolved";
 import { useRepo } from "./RepoLayout";
 import { Box } from "../components/Layout";
@@ -86,7 +86,10 @@ function TreeView({ full, rest }: { full: string; rest: string }) {
       {tree.readme && (
         <Box title={<span className="strong">{tree.readme.name}</span>} className="readme">
           <div className="pad">
-            <Markdown source={tree.readme.contents} />
+            <Markdown
+              source={tree.readme.contents}
+              base={{ ref: tree.ref, dir: tree.path, urls: client.repo(full).urls }}
+            />
           </div>
         </Box>
       )}

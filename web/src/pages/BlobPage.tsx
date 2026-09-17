@@ -9,6 +9,7 @@ import { fmtSize } from "../format";
 import { RefBar } from "../components/RefBar";
 import { Markdown } from "../components/Markdown";
 import { useI18n } from "../i18n";
+import { dirOf } from "../markdown-paths";
 
 export function BlobPage() {
   const { full } = useRepo();
@@ -55,7 +56,10 @@ export function BlobPage() {
         {b.contents !== undefined &&
           (isMd && mode === "preview" ? (
             <div className="pad">
-              <Markdown source={b.contents} />
+              <Markdown
+                source={b.contents}
+                base={{ ref: b.ref, dir: dirOf(b.path), urls: client.repo(full).urls }}
+              />
             </div>
           ) : (
             <File
