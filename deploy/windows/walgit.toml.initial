@@ -1,7 +1,8 @@
 # %USERPROFILE%\.walgit\walgit.toml — Windows 安装器生成的初始配置。
 #
 # 内存后端 = 未配置:首次启动进入 Web UI 首次运行向导(issue #70 / D43),
-# 在浏览器里配置 S3/R2 对象存储与首个管理员 token,保存后服务自动重启。
+# 在浏览器里配置 S3/R2 对象存储与首个管理员 token。保存后需要**手动重启一次**
+# 服务(托盘菜单;Windows 的服务归任务计划程序,没有会替你 respawn 的 supervisor,D48)。
 # 不想要向导(测试/有意只用内存),把 [store] 里的
 #   memory_backend_intentional = true
 # 加回去即可。全部键与默认值见仓库 walgit.example.toml;校验(配置路径走全局

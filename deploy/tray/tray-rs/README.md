@@ -67,6 +67,7 @@ Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统
 ## 已知边界
 
 - 升级构建需要本机有 rustup/cargo(1.98.0 toolchain)与 git
-- 服务若在托盘之外启动且没有 pidfile，「停止服务」可能无法纳管；
-  先在托盘里启动一次即可。
+- Linux:服务若在托盘之外启动且没有 pidfile,「停止服务」可能无法纳管,先在托盘里
+  启动一次即可。Windows 没有这个问题 —— `walgit service stop` 以**端口**为准,pidfile
+  已退役(D48)。
 - `block` crate(上游 objc 依赖)有 future-incompat 提示,不影响功能

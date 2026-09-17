@@ -48,8 +48,11 @@ chinesesimplified.LaunchTray=启动 walgit 托盘(服务请在托盘菜单「启
 english.LaunchTray=Launch the walgit tray (start the service from its menu)
 
 [Tasks]
-Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+; `checkedonce`:没有它 Inno 的任务默认是**不勾选**的——装完既没有桌面图标、也不会
+; 开机自启(README 一直写着「默认勾选自启」,代码却没兑现)。两个都按承诺默认勾上,
+; 用户仍可取消。
+Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -58,6 +61,10 @@ Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignorev
 Source: "walgit.toml.initial"; DestDir: "{%USERPROFILE}\.walgit"; DestName: "walgit.toml"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Icons]
+; 顶层再放一个 `walgit`:只放 {group} 文件夹的话,开始菜单「所有应用」里出现的是
+; 文件夹名;托盘图标一旦被收进溢出区就没有别的入口(macOS 那侧的 Dock 图标
+; #197/#200 是同一个诉求)。
+Name: "{userprograms}\walgit"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\walgit 配置文件 walgit.toml"; Filename: "notepad.exe"; Parameters: """{%USERPROFILE}\.walgit\walgit.toml"""
 Name: "{autodesktop}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
