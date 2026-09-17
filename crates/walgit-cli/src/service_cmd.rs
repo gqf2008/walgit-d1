@@ -5,6 +5,14 @@
 //! pidfile under the deployment home (`~/.walgit/walgit.pid`) plus the
 //! `/healthz` probe; the log is `~/.walgit/server.log` (appended, rotated at
 //! 32 MiB, never truncated out from under a running server).
+//!
+//! **Windows is different (D48):** the Task Scheduler owns the process, not a
+//! pidfile. `start` runs a named task (`MultipleInstancesPolicy=IgnoreNew`, so
+//! a second `start` can never fork a second server), `stop` ends it and then
+//! verifies the port is really free, and `status` reports the task state next
+//! to the version the serving process actually answers with. The old shape —
+//! spawn a detached child and write *its* pid — is what let a stale pidfile
+//! orphan a live server.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -37,22 +45,29 @@ pub async fn run(action: &ServiceAction, config: &Path) -> Result<()> {
     let home = walgit_config::deploy_home();
     std::fs::create_dir_all(&home)
         .with_context(|| format!("creating {}", home.display()))?;
-    let pidfile = home.join("walgit.pid");
     let log = home.join("server.log");
     let listen = cfg.server.listen.to_string();
 
     match action {
-        ServiceAction::Status => status(&listen, &pidfile).await,
-        ServiceAction::Stop => stop(&listen, &pidfile).await,
-        ServiceAction::Start => start(&config, &listen, &pidfile, &log).await,
+        ServiceAction::Status => status(&listen, &home).await,
+        ServiceAction::Stop => stop(&listen, &home).await,
+        ServiceAction::Start => start(&config, &listen, &home, &log).await,
         ServiceAction::Restart => {
-            stop(&listen, &pidfile).await?;
-            start(&config, &listen, &pidfile, &log).await
+            stop(&listen, &home).await?;
+            start(&config, &listen, &home, &log).await
         }
     }
 }
 
-async fn status(listen: &str, pidfile: &Path) -> Result<()> {
+/// `<home>/walgit.pid` — the pidfile the macOS/Linux supervisor writes.
+#[cfg(not(windows))]
+fn pidfile(home: &Path) -> std::path::PathBuf {
+    home.join("walgit.pid")
+}
+
+#[cfg(not(windows))]
+async fn status(listen: &str, home: &Path) -> Result<()> {
+    let pidfile = &pidfile(home);
     let pid = read_pid(pidfile);
     if healthy(listen).await {
         match pid {
@@ -71,7 +86,9 @@ async fn status(listen: &str, pidfile: &Path) -> Result<()> {
     bail!("walgit: not running — http://{listen}");
 }
 
-async fn stop(listen: &str, pidfile: &Path) -> Result<()> {
+#[cfg(not(windows))]
+async fn stop(listen: &str, home: &Path) -> Result<()> {
+    let pidfile = &pidfile(home);
     let Some(pid) = read_pid(pidfile) else {
         if healthy(listen).await {
             bail!("walgit: serving but no pidfile at {} — stop it by hand", pidfile.display());
@@ -81,6 +98,16 @@ async fn stop(listen: &str, pidfile: &Path) -> Result<()> {
     };
     if !process_alive(pid) {
         let _ = std::fs::remove_file(pidfile);
+        // A stale pid is not proof the port is free: a server whose pidfile was
+        // overwritten by another (or older) supervisor keeps answering. Saying
+        // "not running" here is how a live server became un-stoppable.
+        if healthy(listen).await {
+            bail!(
+                "walgit: pid {pid} is gone but http://{listen} still answers — a server is running \
+                 without a valid pidfile; find and stop it by hand (e.g. \
+                 `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`)"
+            );
+        }
         println!("walgit: not running (stale pidfile) — http://{listen}");
         return Ok(());
     }
@@ -105,7 +132,9 @@ async fn stop(listen: &str, pidfile: &Path) -> Result<()> {
     bail!("walgit: stop failed — pid {pid} still alive (stuck in I/O?)")
 }
 
-async fn start(config: &Path, listen: &str, pidfile: &Path, log: &Path) -> Result<()> {
+#[cfg(not(windows))]
+async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<()> {
+    let pidfile = &pidfile(home);
     if healthy(listen).await {
         match read_pid(pidfile) {
             Some(p) => println!("walgit: already running (pid {p}) — http://{listen}"),
@@ -211,8 +240,10 @@ fn read_pid(pidfile: &Path) -> Option<u32> {
 }
 
 /// One GET /healthz over a bare TCP socket: the CLI owes nothing to an HTTP
-/// client dependency for a liveness probe.
-async fn healthy(listen: &str) -> bool {
+/// client dependency for a liveness probe. `Some(body)` iff the server answered
+/// 200 — the body carries the version, which is how "an *old* server is still
+/// holding the port" stops hiding behind a plain "already running".
+async fn healthz_body(listen: &str) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let connect = tokio::time::timeout(
@@ -220,21 +251,67 @@ async fn healthy(listen: &str) -> bool {
         tokio::net::TcpStream::connect(listen),
     );
     let Ok(Ok(mut stream)) = connect.await else {
-        return false;
+        return None;
     };
     let req = format!("GET /healthz HTTP/1.1\r\nHost: {listen}\r\nConnection: close\r\n\r\n");
     if tokio::time::timeout(Duration::from_secs(2), stream.write_all(req.as_bytes()))
         .await
         .is_err()
     {
-        return false;
+        return None;
     }
     let mut buf = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut buf)).await;
-    String::from_utf8_lossy(&buf)
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains(" 200"))
+    let text = String::from_utf8_lossy(&buf).to_string();
+    if !text.lines().next().is_some_and(|line| line.contains(" 200")) {
+        return None;
+    }
+    Some(text.split_once("\r\n\r\n").map_or(text.clone(), |(_, b)| b.to_string()))
+}
+
+async fn healthy(listen: &str) -> bool {
+    healthz_body(listen).await.is_some()
+}
+
+/// `"version":"v0.7.2"` out of a `/healthz` body (whitespace tolerated — the
+/// JSON is produced by two different serializers).
+#[cfg(any(windows, test))]
+fn version_of(body: &str) -> Option<String> {
+    let i = body.find("\"version\"")?;
+    let rest = &body[i + "\"version\"".len()..];
+    let rest = &rest[rest.find(':')? + 1..];
+    let start = rest.find('"')? + 1;
+    let rest = &rest[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// The build the *release* workflow stamped into every crate it compiled, when
+/// this binary has one (a dev build has neither and we stay quiet).
+#[cfg(any(windows, test))]
+fn own_build() -> Option<&'static str> {
+    option_env!("WALGIT_BUILD_SHA").filter(|s| !s.is_empty())
+}
+
+/// `Some(own)` when the port is answered by a *different* build — the shape of
+/// "I reinstalled but it still reports the old version". Split from the printing
+/// so the rule itself is testable.
+#[cfg(any(windows, test))]
+fn mismatch_with<'a>(running: &str, own: Option<&'a str>) -> Option<&'a str> {
+    let own = own?;
+    (!running.contains(own)).then_some(own)
+}
+
+/// Say it out loud: a bare "already running" is exactly what let an old build
+/// keep serving after an upgrade.
+#[cfg(any(windows, test))]
+fn warn_version_mismatch(running: &str) {
+    if let Some(own) = mismatch_with(running, own_build()) {
+        eprintln!(
+            "walgit: 警告 — 端口上在跑的是 {running}，而本二进制是 {own}：\
+             很可能是升级前的老进程没退。先 `walgit service stop`（必要时按端口找 owner 杀掉）再 start。"
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -318,6 +395,380 @@ fn credential_env(home: &Path) -> Vec<(String, String)> {
         ));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Windows: the Task Scheduler owns the process (D48)
+//
+// The old shape — spawn a detached child, write *its* pid, later kill that pid —
+// had two failure modes that cost a user an afternoon:
+//
+//   * `start` never asked whether something already served the port, so a
+//     second server was spawned, died on bind, and its (already dead) pid went
+//     into the pidfile — orphaning the live server;
+//   * every later `stop` matched nothing and reported success/failure while the
+//     real server kept holding :8081, so `/healthz` kept reporting the *old*
+//     build after an upgrade.
+//
+// A named task removes the identity problem: the scheduler owns exactly one
+// instance, `start` is `schtasks /Run`, `stop` is `schtasks /End`, and
+// `MultipleInstancesPolicy=IgnoreNew` turns a double `start` into a no-op
+// instead of a fork.
+// ---------------------------------------------------------------------------
+
+/// Name of the scheduled task that carries the Windows server process.
+#[cfg(windows)]
+const TASK_NAME: &str = "walgit";
+
+#[cfg(windows)]
+async fn status(listen: &str, _home: &Path) -> Result<()> {
+    let version = healthz_body(listen).await.and_then(|b| version_of(&b));
+    let state = task::state();
+    match version {
+        Some(v) => {
+            println!("walgit: running (version {v}, task {TASK_NAME}: {state}) — http://{listen}");
+            warn_version_mismatch(&v);
+        }
+        None => println!("walgit: not running (task {TASK_NAME}: {state}) — http://{listen}"),
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<()> {
+    // Ask first: spawning blind is what forked a second server and clobbered
+    // the pidfile. A healthy port means the job is already done.
+    if let Some(v) = healthz_body(listen).await.and_then(|b| version_of(&b)) {
+        println!("walgit: already running (version {v}) — http://{listen}");
+        warn_version_mismatch(&v);
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("locating the walgit binary")?;
+    rotate_log(log);
+    task::ensure(&exe, config, log, home)?;
+    task::run_now()?;
+    for _ in 0..40 {
+        if healthy(listen).await {
+            println!("walgit: started (task {TASK_NAME}) — http://{listen}");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    bail!(
+        "walgit: 启动失败（task {TASK_NAME}），日志尾部：\n{}",
+        tail(log, 5).unwrap_or_default()
+    )
+}
+
+#[cfg(windows)]
+async fn stop(listen: &str, _home: &Path) -> Result<()> {
+    if !healthy(listen).await && !task::is_running() {
+        println!("walgit: not running — http://{listen}");
+        return Ok(());
+    }
+    // `/End` is best-effort: it fails when the task never started, and it
+    // cannot touch a server an older install left behind. The port is the
+    // ground truth, so verify against it either way.
+    if task::is_running() {
+        task::end()?;
+    }
+    for _ in 0..20 {
+        if !healthy(listen).await {
+            println!("walgit: stopped");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let owners = port_owners(listen).await;
+    if owners.is_empty() {
+        bail!("walgit: stop failed — http://{listen} still answers but no listener owns the port");
+    }
+    for pid in &owners {
+        if !image_is_walgit(*pid) {
+            bail!(
+                "walgit: http://{listen} is served by pid {pid}, which is not a walgit binary — \
+                 not killing it"
+            );
+        }
+    }
+    for pid in &owners {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status();
+    }
+    for _ in 0..10 {
+        if !healthy(listen).await {
+            println!("walgit: stopped (killed {owners:?})");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    bail!("walgit: stop failed — http://{listen} still answers")
+}
+
+/// The pids LISTENING on `listen`'s port, from `netstat -ano`.
+#[cfg(windows)]
+async fn port_owners(listen: &str) -> Vec<u32> {
+    let Some(port) = listen.rsplit(':').next().and_then(|p| p.parse().ok()) else {
+        return Vec::new();
+    };
+    let out = tokio::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .await;
+    let Ok(out) = out else { return Vec::new() };
+    listeners_on(&String::from_utf8_lossy(&out.stdout), port)
+}
+
+/// LISTENING rows for `port` → their owning pids (the last column of
+/// `netstat -ano`). Pure so the parse is unit-tested off-Windows.
+#[cfg(any(windows, test))]
+fn listeners_on(netstat: &str, port: u16) -> Vec<u32> {
+    let suffix = format!(":{port}");
+    let mut out = Vec::new();
+    for line in netstat.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 4 || !cols[0].eq_ignore_ascii_case("tcp") {
+            continue;
+        }
+        if cols[1].ends_with(&suffix) && cols[3].eq_ignore_ascii_case("listening") {
+            if let Ok(pid) = cols[cols.len() - 1].parse() {
+                out.push(pid);
+            }
+        }
+    }
+    out
+}
+
+/// Is `pid` running a walgit image? Refuse to kill anything else — a reused pid
+/// must never cost the user an unrelated process.
+#[cfg(windows)]
+fn image_is_walgit(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output();
+    let Ok(out) = out else { return false };
+    image_from_tasklist(&String::from_utf8_lossy(&out.stdout))
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("walgit"))
+}
+
+/// First CSV field of a `tasklist /FO CSV /NH` line, unquoted.
+#[cfg(any(windows, test))]
+fn image_from_tasklist(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.starts_with('"'))?;
+    let rest = line.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+#[cfg(windows)]
+mod task {
+    //! `schtasks` wrappers for the one named task that carries the server.
+
+    use std::path::Path;
+    use std::process::Command;
+
+    use anyhow::{Context, Result, bail};
+
+    use super::TASK_NAME;
+
+    fn schtasks(args: &[&str]) -> Result<String> {
+        let out = Command::new("schtasks")
+            .args(args)
+            .output()
+            .with_context(|| format!("running schtasks {args:?}"))?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            bail!("schtasks {args:?} failed: {}", text.trim());
+        }
+        Ok(text)
+    }
+
+    /// `Running` / `Ready` / `Disabled` / `absent` — the task's own state, so a
+    /// "task up but port silent" (a crash) is distinguishable from "never
+    /// started".
+    pub fn state() -> String {
+        schtasks(&["/Query", "/TN", TASK_NAME, "/FO", "LIST"])
+            .ok()
+            .and_then(|text| task_state(&text))
+            .unwrap_or_else(|| "absent".to_string())
+    }
+
+    /// The `Status:` value of a `schtasks /FO LIST` block (localised labels are
+    /// matched case-insensitively; a missing one reports `unknown`).
+    fn task_state(text: &str) -> Option<String> {
+        text.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case("Status")
+                .then(|| v.trim().to_string())
+        })
+    }
+
+    pub fn is_running() -> bool {
+        state().eq_ignore_ascii_case("running")
+    }
+
+    /// Create the task if missing, or refresh it when the install moved.
+    ///
+    /// XML, not `/TR`: the action carries quotes inside quotes and
+    /// `Command::args` cannot express that reliably. XML also sets the two
+    /// defaults that are wrong for a long-lived server — `ExecutionTimeLimit`
+    /// `PT0S` (the default kills the task after 72 h) and
+    /// `MultipleInstancesPolicy=IgnoreNew` (a duplicate `start` must not fork).
+    pub fn ensure(exe: &Path, config: &Path, log: &Path, home: &Path) -> Result<()> {
+        let xml_path = home.join("walgit-task.xml");
+        std::fs::write(&xml_path, task_xml(exe, config, log)).with_context(|| {
+            format!("writing the task definition to {}", xml_path.display())
+        })?;
+        let path = xml_path.display().to_string();
+        let result = schtasks(&["/Create", "/TN", TASK_NAME, "/XML", &path, "/F"]);
+        let _ = std::fs::remove_file(&xml_path);
+        result.map(|_| ())
+    }
+
+    pub fn run_now() -> Result<()> {
+        schtasks(&["/Run", "/TN", TASK_NAME]).map(|_| ())
+    }
+
+    pub fn end() -> Result<()> {
+        schtasks(&["/End", "/TN", TASK_NAME]).map(|_| ())
+    }
+
+    /// `cmd /c … >> log 2>&1` is a **redirect, not a supervisor**: the task's own
+    /// job object still owns the tree, so `schtasks /End` kills the server and
+    /// `MultipleInstancesPolicy` still forbids a second copy. The scheduler gives
+    /// an `Exec` action no stdout, and losing `server.log` would take away the
+    /// only window into a failed start.
+    fn task_xml(exe: &Path, config: &Path, log: &Path) -> Vec<u8> {
+        let body = format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>walgit — local git server (managed by `walgit service`)</Description>
+  </RegistrationInfo>
+  <Triggers />
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{comspec}</Command>
+      <Arguments>/c ""{exe}" serve --config "{cfg}" &gt;&gt; "{log}" 2&gt;&amp;1"</Arguments>
+      <WorkingDirectory>{dir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+            exe = xml_escape(&exe.display().to_string()),
+            cfg = xml_escape(&config.display().to_string()),
+            // The scheduler hands the task no stdout: without this the only
+            // window into a failed start would be gone.
+            log = xml_escape(&log.display().to_string()),
+            comspec = xml_escape(&std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())),
+            dir = xml_escape(&exe.parent().unwrap_or(Path::new(".")).display().to_string()),
+        );
+        // `schtasks /Create /XML` rejects UTF-8 on some builds: emit UTF-16LE
+        // with a BOM, which every build accepts.
+        let mut out = Vec::with_capacity(body.len() * 2 + 2);
+        out.extend_from_slice(&[0xFF, 0xFE]);
+        for unit in body.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+}
+
+/// Parsers that the Windows lifecycle leans on. They are `cfg(any(windows,
+/// test))` so the copy that ships on Windows is the copy these tests exercise —
+/// the alternative (test a second, unix-only implementation) is how the
+/// "wrong pid" class of bug survives a green build.
+#[cfg(test)]
+mod listener_parse_tests {
+    use super::{image_from_tasklist, listeners_on, version_of};
+
+    #[test]
+    fn version_of_reads_both_healthz_shapes() {
+        assert_eq!(
+            version_of(r#"{"status":"ok","version":"v0.7.2"}"#).as_deref(),
+            Some("v0.7.2")
+        );
+        assert_eq!(
+            version_of("{\"status\": \"ok\", \"version\" : \"0.1.0+abc\"}").as_deref(),
+            Some("0.1.0+abc")
+        );
+        assert_eq!(version_of(r#"{"status":"ok"}"#), None);
+    }
+
+    #[test]
+    fn listeners_on_takes_only_the_matching_port() {
+        // Shape of `netstat -ano -p tcp` on a Chinese Windows: v4 + v6 rows for
+        // the port we want, a decoy on another port, and a non-LISTENING row.
+        let netstat = "\
+  TCP    127.0.0.1:8081         0.0.0.0:0              LISTENING       4242\r
+  TCP    127.0.0.1:9999         0.0.0.0:0              LISTENING       1111\r
+  TCP    127.0.0.1:8081         127.0.0.1:50812        ESTABLISHED     9999\r
+  TCP    [::1]:8081             [::]:0                 LISTENING       4243\r";
+        assert_eq!(listeners_on(netstat, 8081), vec![4242, 4243]);
+        assert!(listeners_on(netstat, 1234).is_empty());
+    }
+
+    #[test]
+    fn a_different_build_on_the_port_is_a_mismatch() {
+        use super::mismatch_with;
+        assert_eq!(mismatch_with("v0.7.2", Some("v0.7.2")), None);
+        assert_eq!(mismatch_with("0.1.0+v0.7.2", Some("v0.7.2")), None);
+        // The shape the user hit: the port still answers with the *old* build.
+        assert_eq!(mismatch_with("v0.7.0", Some("v0.7.2")), Some("v0.7.2"));
+        // A dev build has nothing stamped: stay quiet rather than cry wolf.
+        assert_eq!(mismatch_with("v0.7.2", None), None);
+        // Smoke the printing path too (silent in a dev build, which has no stamp).
+        super::warn_version_mismatch("v0.7.2");
+    }
+
+    #[test]
+    fn image_from_tasklist_reads_the_csv_name() {
+        assert_eq!(
+            image_from_tasklist(r#""walgit.exe","4242","Console","1","12,345 K""#).as_deref(),
+            Some("walgit.exe")
+        );
+        // The localised "no tasks match" line has no CSV row: unknown, never a
+        // licence to kill.
+        assert_eq!(
+            image_from_tasklist("信息: 没有运行的任务匹配指定标准。"),
+            None
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

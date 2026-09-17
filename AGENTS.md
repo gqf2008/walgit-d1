@@ -547,6 +547,20 @@ decision in §4 — or the PR is; never "fix later".
   upgrade to refresh, and it is a no-op when the bytes already match. Still data-free — nothing
   credential-bearing or repo-scoped may join the lane.
 
+- **D48** **On Windows the Task Scheduler owns the server process; nothing else may (2026-09-17,
+  cc-ai-win-task-service).** `walgit service start|stop|status` drives one named task
+  (`schtasks /Create /XML /TN walgit`, `MultipleInstancesPolicy=IgnoreNew`,
+  `ExecutionTimeLimit=PT0S`, `LogonType=InteractiveToken`) instead of spawning a detached child and
+  writing *its* pid. The pidfile is a macOS/Linux mechanism only: it carries no meaning once a
+  supervisor can hand out a pid it does not own, and a stale one must never be read as "not
+  running" (the CLI now probes `/healthz` even on the stale branch and says so instead). `start`
+  asks `/healthz` before it does anything, and `status` reports the version the port *answers*
+  with next to this binary's build — "already running" is not evidence that the *right* build is
+  running. `stop` ends the task, then verifies the port is free, and only then falls back to
+  killing the listener, and only when the listener's image really is a walgit binary. The task
+  action is `cmd /c … >> server.log 2>&1`: a redirect, not a supervisor — the task's own job
+  object still owns the tree, and the scheduler gives an `Exec` action no stdout to log to.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
