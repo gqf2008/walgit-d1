@@ -15,8 +15,8 @@ direction = "desc" # desc(默认,新在前) | asc
 #   owner/worktree/branch 各自取最新一条**写了该字段**的 status 条目：
 #                        缺字段继承旧值，显式空字符串清除
 #   work                 缺省回退到同一条 status 的 note
-# 投影**不按验签过滤**（未验签条目的字段同样进看板）；验签只体现在 verified/unverified
-# 计数与 `done` 的门禁上（done 需要 needs-review + verified approve）。
+# 字段投影**不按验签过滤**（未验签条目的字段同样进看板）。验签体现在 verified/unverified 计数、
+# merge 规则判定（只有 verified approve 计入 human_approvals）、以及 `done` 门禁上。
 # 只写 `issue` 根条目、没有 `status` 的线程 → 默认 open + owner 空（看板显示"未分配"）。
 # 因此**建单即认领**：创建 issue 后立刻补一条带 owner 的 status；纯待办也要 owner，
 # 用 blocked / needs-human 表达。评论里写 owner 不算数——只有 status 条目的字段进看板。
