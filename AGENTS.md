@@ -626,11 +626,16 @@ is the contract agents follow; humans use the same protocol.**
 
 ### 6.1 Work-unit lifecycle
 
-A work unit is a **walgit collab thread**: its state **and its owner** are the newest signed `status` entry,
-projected by `.walgit/board.toml` onto the board (`walgit collab board`). Filing a thread is therefore two
-entries: the `issue` root **and** a `status` entry naming `owner` (add `worktree`/`branch`/`work` when claimed).
-An issue-only thread projects as an unowned `open` card — and parked work still names its owner, using
-`blocked` / `needs-human`. An owner written in a `comment` does not count; only the signed `status` body does.
+A work unit is a **walgit collab thread**; the board (`walgit collab board`, definition `.walgit/board.toml`)
+projects it with **per-field inheritance**: `status` is the newest `status` entry carrying a string `status`
+(a `merge_result {"merged":true}` also lands the card on `merged`), while `owner` / `worktree` / `branch` /
+`work` each come from the newest `status` entry that names that field — later entries inherit what they omit,
+an explicit empty string clears it, and `work` falls back to that entry's `note`. Projection does **not** filter
+by signature: every entry's fields count, and verification shows up in the `verified`/`unverified` counts and in
+the `done` gate. Filing a thread is therefore two entries: the `issue` root **and** a `status` entry naming
+`owner` (add `worktree`/`branch`/`work` when claimed); an issue-only thread projects as an unowned `open` card.
+Parked work still names its owner (`blocked` / `needs-human`). An owner written in a `comment` does not count —
+only the `status` entry's fields do.
 
 The GitHub label/Project-Status mapping below is the **historical (pre-2026-09-16) shape** of the same
 lifecycle — labels and the GitHub board are no longer written (Issues disabled, Projects off):
