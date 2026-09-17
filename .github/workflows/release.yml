@@ -238,7 +238,8 @@ jobs:
           # the range empty or start at a pre-release.
           prev=$(git tag --sort=-version:refname | grep -v "^${GITHUB_REF#refs/tags/}$" | sed -n '1p')
           if [ -n "$prev" ]; then range="$prev..HEAD"; else range="HEAD"; fi
-          git log --pretty=format:'%s' "$range" | grep -E '^(feat|fix|docs|refactor|test|perf|chore)(\(|:)' > changelog.txt || true
+          # Conventional Commits: optional scope and optional breaking `!` before `:`.
+          git log --pretty=format:'%s' "$range" | grep -E '^(feat|fix|docs|refactor|test|perf|chore)(\([^)]*\))?!?:' > changelog.txt || true
           echo "generated from ${range:-HEAD}"
       - uses: actions/download-artifact@v4
         with:
