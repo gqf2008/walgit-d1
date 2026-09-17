@@ -98,6 +98,36 @@ begin
   end;
 end;
 
+// 路径要嵌进 PowerShell 的单引号字符串里，先按 PS 规则转义单引号。
+function PsQuote(s: String): String;
+begin
+  Result := StringChangeEx(s, '''', '''''', True);
+end;
+
+// 只有确认这个 `walgit` 任务确实指向 walgit 二进制时，才允许 End/Delete：
+// 名字撞车的别人的任务不能碰（和「按端口清扫只杀 walgit* 进程」同一条原则）。
+function TaskIsOurs: Boolean;
+var
+  ResultCode: Integer;
+  OutFile: String;
+  Lines: TArrayOfString;
+begin
+  Result := False;
+  OutFile := ExpandConstant('{tmp}\walgit-task-query.txt');
+  if not Exec(ExpandConstant('{cmd}'),
+    '/C powershell -NoProfile -Command "$t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction SilentlyContinue; ' +
+    'if ($t -and ($t.Actions | Where-Object { $_.Arguments -match ''walgit'' -or $_.Execute -match ''walgit'' })) { ''ours'' }" > "' +
+    OutFile + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Log('WARNING: could not query the walgit task');
+    exit;
+  end;
+  if LoadStringsFromFile(OutFile, Lines) and (GetArrayLength(Lines) > 0) then
+    Result := Trim(Lines[0]) = 'ours';
+  DeleteFile(OutFile);
+end;
+
 procedure StopWalgit;
 var
   ResultCode: Integer;
@@ -109,21 +139,24 @@ begin
   //    端口才是真凭据。端口从用户配置里读，自定义端口不会被漏掉；只杀进程名以
   //    walgit 开头的，绝不误伤别人的进程。
   // 3) 最后按安装目录圈定托盘与本体。
-  Exec(ExpandConstant('{cmd}'),
-    '/C schtasks /End /TN walgit >NUL 2>&1',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if TaskIsOurs then
+    Exec(ExpandConstant('{cmd}'),
+      '/C schtasks /End /TN walgit >NUL 2>&1',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Script :=
     '$t = Join-Path $env:USERPROFILE ''\.walgit\walgit.toml''; ' +
-    '$port = ''''; ' +
+    '$q = [char]34; $port = '''' ; ' +
     'if (Test-Path $t) { ' +
     '$m = Select-String -Path $t -Pattern ''^\s*listen\s*='' | Select-Object -First 1; ' +
-    'if ($m) { $port = ($m.Line -split '':'' | Select-Object -Last 1) -replace ''\D'',''''; } }; ' +
-    'if ($port) { Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | ForEach-Object { ' +
+    'if ($m -and ($m.Line -match (''listen\s*=\s*'' + $q + ''([^'' + $q + '']+)'' + $q))) ' +
+    '{ $port = ($Matches[1] -split '':'' | Select-Object -Last 1) } }; ' +
+    'if (-not ($port -match ''^\d+$'')) { $port = ''8081'' }; ' +
+    'Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | ForEach-Object { ' +
     '$p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
-    'if ($p -and $p.ProcessName -like ''walgit*'') { Stop-Process -Id $p.Id -Force } } }; ' +
-    'Get-Process walgit,walgit-tray -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
-    ExpandConstant('{app}') + '\*'') -or ($_.Path -like ''' +
-    LegacyProgramDir + '\*'') } | Stop-Process -Force';
+    'if ($p -and $p.ProcessName -like ''walgit*'') { Stop-Process -Id $p.Id -Force } }; ' +
+    'Get-Process walgit,walgit-tray,walgit-server -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
+    PsQuote(ExpandConstant('{app}')) + '\*'') -or ($_.Path -like ''' +
+    PsQuote(LegacyProgramDir) + '\*'') } | Stop-Process -Force';
   Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -Command "' + Script + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -152,14 +185,18 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
     StopWalgit;
     // 任务本身也要注销：留着它，下次重装会指向一个已删除的 exe（D48）。
-    Exec(ExpandConstant('{cmd}'),
-      '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // 同样先确认归属，别删掉别人的同名任务。
+    if TaskIsOurs then
+      Exec(ExpandConstant('{cmd}'),
+        '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
   end;
 end;

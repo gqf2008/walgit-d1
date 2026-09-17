@@ -15,6 +15,7 @@
 //! orphan a live server.
 
 use std::path::Path;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -189,8 +190,11 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
 /// Put the server in its own session/process group so the short-lived
 /// `walgit service start` process and the shell/tray that invoked it can exit
 /// without reaping the server.
+///
+/// macOS/Linux only: on Windows the *Task Scheduler* creates the process (D48),
+/// so there is nothing to detach.
+#[cfg(not(windows))]
 fn detach_process(cmd: &mut std::process::Command) {
-    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: pre_exec runs after fork and before exec in the child. The
@@ -204,13 +208,6 @@ fn detach_process(cmd: &mut std::process::Command) {
                 Ok(())
             });
         }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 }
 
@@ -231,6 +228,7 @@ fn tail(path: &Path, lines: usize) -> Option<String> {
     Some(tail.join("\n"))
 }
 
+#[cfg(not(windows))]
 fn read_pid(pidfile: &Path) -> Option<u32> {
     std::fs::read_to_string(pidfile)
         .ok()?
@@ -299,7 +297,9 @@ fn own_build() -> Option<&'static str> {
 #[cfg(any(windows, test))]
 fn mismatch_with<'a>(running: &str, own: Option<&'a str>) -> Option<&'a str> {
     let own = own?;
-    (!running.contains(own)).then_some(own)
+    // Exact: `/healthz` echoes the build string it was compiled with, so a
+    // substring test would call `v0.7.20` a match for `v0.7.2`.
+    (running.trim() != own).then_some(own)
 }
 
 /// Say it out loud: a bare "already running" is exactly what let an old build
@@ -314,6 +314,7 @@ fn warn_version_mismatch(running: &str) {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 enum Signal {
     Term,
@@ -332,19 +333,6 @@ fn signal(pid: u32, sig: Signal) {
         .status();
 }
 
-#[cfg(windows)]
-fn signal(pid: u32, sig: Signal) {
-    // Windows has no SIGTERM: `/F` is the only reliable stop, and the SIGTERM
-    // step above becomes a graceful `taskkill /PID` (which posts WM_CLOSE to
-    // GUI apps and terminates a console app).
-    let mut cmd = std::process::Command::new("taskkill");
-    cmd.arg("/PID").arg(pid.to_string());
-    if matches!(sig, Signal::Kill) {
-        cmd.arg("/F");
-    }
-    let _ = cmd.status();
-}
-
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     // `kill -0` is the portable "does this pid exist" (and on Unix it also
@@ -358,19 +346,9 @@ fn process_alive(pid: u32) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-#[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    let out = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()),
-        Err(_) => false,
-    }
-}
-
 /// `<home>/.r2-credentials` as KEY=VALUE (`export ` tolerated): the object
 /// store credentials the server used to get from a sourced shell script.
+#[cfg(not(windows))]
 fn credential_env(home: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Ok(text) = std::fs::read_to_string(home.join(".r2-credentials")) else {
@@ -462,26 +440,25 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
 
 #[cfg(windows)]
 async fn stop(listen: &str, _home: &Path) -> Result<()> {
-    if !healthy(listen).await && !task::is_running() {
-        println!("walgit: not running — http://{listen}");
-        return Ok(());
-    }
-    // `/End` is best-effort: it fails when the task never started, and it
-    // cannot touch a server an older install left behind. The port is the
-    // ground truth, so verify against it either way.
-    if task::is_running() {
-        task::end()?;
-    }
-    for _ in 0..20 {
-        if !healthy(listen).await {
+    // `/End` first — it takes the task's whole tree in one shot. Its failure is
+    // *not* fatal: the task may never have run, and a server an older install
+    // left behind is not its child either. The **port** is the ground truth
+    // throughout: `/healthz` can be silent while a hung process still owns the
+    // socket, which is exactly the case that used to be reported as "stopped".
+    let mut owners = port_owners(listen).await;
+    if task::exists() {
+        if let Err(e) = task::end() {
+            eprintln!("walgit: `schtasks /End` failed ({e}); falling back to the port");
+        }
+        if wait_port_free(listen, 20).await {
             println!("walgit: stopped");
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        owners = port_owners(listen).await;
     }
-    let owners = port_owners(listen).await;
     if owners.is_empty() {
-        bail!("walgit: stop failed — http://{listen} still answers but no listener owns the port");
+        println!("walgit: not running — http://{listen}");
+        return Ok(());
     }
     for pid in &owners {
         if !image_is_walgit(*pid) {
@@ -496,14 +473,23 @@ async fn stop(listen: &str, _home: &Path) -> Result<()> {
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .status();
     }
-    for _ in 0..10 {
-        if !healthy(listen).await {
-            println!("walgit: stopped (killed {owners:?})");
-            return Ok(());
+    if wait_port_free(listen, 10).await {
+        println!("walgit: stopped (killed {owners:?})");
+        return Ok(());
+    }
+    bail!("walgit: stop failed — {owners:?} still hold {listen}")
+}
+
+/// Poll until nothing listens on the port.
+#[cfg(windows)]
+async fn wait_port_free(listen: &str, tries: u32) -> bool {
+    for _ in 0..tries {
+        if port_owners(listen).await.is_empty() {
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    bail!("walgit: stop failed — http://{listen} still answers")
+    port_owners(listen).await.is_empty()
 }
 
 /// The pids LISTENING on `listen`'s port, from `netstat -ano`.
@@ -552,6 +538,14 @@ fn image_is_walgit(pid: u32) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().starts_with("walgit"))
 }
 
+/// Is this scheduled-task definition ours? Ours names a walgit binary in its
+/// action (`cmd.exe /c ""…\walgit.exe" serve …"`), so a task that merely shares
+/// the name `walgit` is somebody else's and must not be overwritten or deleted.
+#[cfg(any(windows, test))]
+fn task_is_ours(xml: &str) -> bool {
+    xml.to_ascii_lowercase().contains("walgit")
+}
+
 /// First CSV field of a `tasklist /FO CSV /NH` line, unquoted.
 #[cfg(any(windows, test))]
 fn image_from_tasklist(text: &str) -> Option<String> {
@@ -585,29 +579,39 @@ mod task {
         Ok(text)
     }
 
-    /// `Running` / `Ready` / `Disabled` / `absent` — the task's own state, so a
-    /// "task up but port silent" (a crash) is distinguishable from "never
-    /// started".
+    /// `Running` / `Ready` / `Disabled` / `absent` — for the human readout.
+    ///
+    /// NOT from `schtasks /FO LIST`: those labels are localised (`状态:` on a
+    /// Chinese Windows), so parsing them silently reports a *running* task as
+    /// absent — and the old stop logic then decided not to end it. The
+    /// scheduled-task object's `.State` is a .NET enum and stays English.
+    /// Decisions do not use this at all any more; the port is the ground truth.
     pub fn state() -> String {
-        schtasks(&["/Query", "/TN", TASK_NAME, "/FO", "LIST"])
-            .ok()
-            .and_then(|text| task_state(&text))
-            .unwrap_or_else(|| "absent".to_string())
+        let out = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("(Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction Stop).State"),
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { "absent".to_string() } else { s }
+            }
+            _ => "absent".to_string(),
+        }
     }
 
-    /// The `Status:` value of a `schtasks /FO LIST` block (localised labels are
-    /// matched case-insensitively; a missing one reports `unknown`).
-    fn task_state(text: &str) -> Option<String> {
-        text.lines().find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim()
-                .eq_ignore_ascii_case("Status")
-                .then(|| v.trim().to_string())
-        })
+    /// Does a task with our name exist at all (without judging whose it is)?
+    pub fn exists() -> bool {
+        schtasks(&["/Query", "/TN", TASK_NAME, "/XML"]).is_ok()
     }
 
-    pub fn is_running() -> bool {
-        state().eq_ignore_ascii_case("running")
+    /// Its definition, for the ownership check below.
+    fn definition() -> Option<String> {
+        schtasks(&["/Query", "/TN", TASK_NAME, "/XML"]).ok()
     }
 
     /// Create the task if missing, or refresh it when the install moved.
@@ -618,6 +622,17 @@ mod task {
     /// `PT0S` (the default kills the task after 72 h) and
     /// `MultipleInstancesPolicy=IgnoreNew` (a duplicate `start` must not fork).
     pub fn ensure(exe: &Path, config: &Path, log: &Path, home: &Path) -> Result<()> {
+        // `/Create /F` overwrites by name. Refuse to clobber a task that happens
+        // to be called `walgit` but is somebody else's (the same care the port
+        // sweep takes before it kills a pid).
+        if let Some(existing) = definition()
+            && !super::task_is_ours(&existing)
+        {
+            bail!(
+                "walgit: a scheduled task named `{TASK_NAME}` already exists and does not look like \
+                 ours — refusing to replace it. Rename or delete it, then retry."
+            );
+        }
         let xml_path = home.join("walgit-task.xml");
         std::fs::write(&xml_path, task_xml(exe, config, log)).with_context(|| {
             format!("writing the task definition to {}", xml_path.display())
@@ -747,13 +762,27 @@ mod listener_parse_tests {
     fn a_different_build_on_the_port_is_a_mismatch() {
         use super::mismatch_with;
         assert_eq!(mismatch_with("v0.7.2", Some("v0.7.2")), None);
-        assert_eq!(mismatch_with("0.1.0+v0.7.2", Some("v0.7.2")), None);
+        assert_eq!(mismatch_with("v0.7.2\n", Some("v0.7.2")), None);
+        // Not a prefix match: v0.7.20 is a different build.
+        assert_eq!(mismatch_with("v0.7.20", Some("v0.7.2")), Some("v0.7.2"));
         // The shape the user hit: the port still answers with the *old* build.
         assert_eq!(mismatch_with("v0.7.0", Some("v0.7.2")), Some("v0.7.2"));
         // A dev build has nothing stamped: stay quiet rather than cry wolf.
         assert_eq!(mismatch_with("v0.7.2", None), None);
         // Smoke the printing path too (silent in a dev build, which has no stamp).
         super::warn_version_mismatch("v0.7.2");
+    }
+
+    #[test]
+    fn only_our_own_task_may_be_replaced() {
+        use super::task_is_ours;
+        // Ours: the redirect wrapper still names the binary in its arguments.
+        let ours = r#"<Exec><Command>C:\Windows\System32\cmd.exe</Command>
+            <Arguments>/c ""C:\Users\x\AppData\Local\Programs\walgit\walgit.exe" serve --config "…" >> "…" 2>&1"</Arguments></Exec>"#;
+        assert!(task_is_ours(ours));
+        // Someone else's task that happens to be called `walgit`.
+        let theirs = r#"<Exec><Command>C:\tools\backup.exe</Command><Arguments>--nightly</Arguments></Exec>"#;
+        assert!(!task_is_ours(theirs));
     }
 
     #[test]

@@ -396,6 +396,13 @@ jobs:
           : > target/release/walgit-tray.exe
           iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
           "$iscc" "-DMyAppVersion=0.0.0-ci" deploy/windows/installer.iss
+      - name: Tray (Windows branch) compiles
+        # tray-rs is its own workspace, so the root `cargo check --all-targets`
+        # never sees it: without this the Windows tray path is only built at
+        # release time (RULE_可达性). tray.yml covers PRs as well, but the
+        # platform leg stays self-contained.
+        shell: bash
+        run: cargo check --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
       - name: Service lifecycle smoke (scheduled task, D48)
         # The real binary, the real task and the real port: `start` twice (must
         # not fork), then `stop` (the port must go quiet). This is the level the
