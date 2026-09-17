@@ -782,43 +782,47 @@ fn install_dock_reopen_hook() {
 /// supervisor because `walgit serve` exits 75 after the setup wizard saves and
 /// needs an immediate respawn. Either way, no walgit-ensure shell and no binary
 /// copy under ~/.walgit.
-#[cfg(target_os = "macos")]
+/// 服务生命周期统一走二进制里的 `walgit service`（macOS 与 Windows，D48）：进程
+/// 不属于托盘，托盘只是客户端 —— 起停、pidfile/任务的记账都归二进制一处。
+/// Windows 上还必须带 CREATE_NO_WINDOW（`run` 已带），否则每点一次菜单闪一次黑窗。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn service_cmd(verb: &str) -> Result<(), String> {
     let bin = walgit_binary();
     if !bin.is_file() {
         return Err(format!("missing walgit binary: {}", bin.display()));
     }
     let cfg = state_dir().join("walgit.toml");
-    let mut cmd = std::process::Command::new(&bin);
-    cmd.args(["service", verb, "--config"]).arg(&cfg);
-    let out = cmd
-        .output()
-        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
-    let text =
-        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    if out.status.success() {
+    let bin_s = bin.display().to_string();
+    let cfg_s = cfg.display().to_string();
+    let (code, out) = run(
+        None,
+        &bin_s,
+        &["service", verb, "--config", &cfg_s],
+        &[],
+    );
+    if code == 0 {
         Ok(())
     } else {
-        Err(text)
+        Err(out)
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn service_start() -> Result<(), String> {
     service_cmd("start")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn service_stop() -> Result<(), String> {
     service_cmd("stop")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn pid_file() -> PathBuf {
     state_dir().join("walgit.pid")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn service_start() -> Result<(), String> {
     let child = spawn_service()?;
     std::fs::write(pid_file(), child.id().to_string()).map_err(|e| format!("pidfile: {e}"))?;
@@ -831,7 +835,7 @@ fn service_start() -> Result<(), String> {
 
 /// Spawn `walgit serve --config <state>/walgit.toml` detached (windows: no
 /// console window, new group; unix: own session).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_service() -> Result<std::process::Child, String> {
     let exe = walgit_binary();
     let cfg = state_dir().join("walgit.toml");
@@ -863,7 +867,7 @@ fn spawn_service() -> Result<std::process::Child, String> {
 /// for a restart (D43) — respawn, at most five times in a row (a loop means
 /// the written config does not hold; the user reads the log). Any other exit
 /// is final.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn supervise_service(mut child: std::process::Child) {
     let mut restarts: u32 = 0;
     loop {
@@ -902,26 +906,15 @@ fn supervise_service(mut child: std::process::Child) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux only: the tray is the supervisor there (no scheduler to hand the
+/// process to), so it owns the pidfile and stops the child it forked. On Windows
+/// `walgit service stop` ends the scheduled task instead — see D48.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn service_stop() -> Result<(), String> {
     let pid: u32 = std::fs::read_to_string(pid_file())
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .ok_or_else(|| "no pidfile".to_string())?;
-    // 双过滤:PID 与映像名同时匹配才杀——裸 /PID 会撞上 pid 复用误杀
-    // 无关进程树(pidfile 在服务崩溃后就是陈旧的)。
-    #[cfg(target_os = "windows")]
-    let (code, out) = {
-        let pid_filter = format!("PID eq {pid}");
-        let name_filter = format!("IMAGENAME eq {}", exe_name());
-        run(
-            None,
-            "taskkill",
-            &["/F", "/T", "/FI", &pid_filter, "/FI", &name_filter],
-            &[],
-        )
-    };
-    #[cfg(not(target_os = "windows"))]
     let (code, out) = sh(&format!("kill {pid}"));
     if code == 0 {
         Ok(())

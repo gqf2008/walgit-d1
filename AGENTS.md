@@ -559,7 +559,13 @@ decision in §4 — or the PR is; never "fix later".
   running. `stop` ends the task, then verifies the port is free, and only then falls back to
   killing the listener, and only when the listener's image really is a walgit binary. The task
   action is `cmd /c … >> server.log 2>&1`: a redirect, not a supervisor — the task's own job
-  object still owns the tree, and the scheduler gives an `Exec` action no stdout to log to.
+  object still owns the tree, and the scheduler gives an `Exec` action no stdout to log to. The
+  Windows tray stops spawning and supervising anything: it calls `walgit service`, exactly like
+  macOS (Linux keeps its tray-side supervisor — no equivalent scheduler there). The installer ends
+  the task, sweeps the *port owner* (not a pidfile) plus both program directories before it
+  replaces files, and deletes the task on uninstall; the windows CI leg type-checks `installer.iss`
+  against dummy payloads and runs a real start-twice-stop smoke, so neither half waits for a
+  release tag to be exercised.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

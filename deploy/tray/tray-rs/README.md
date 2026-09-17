@@ -5,9 +5,11 @@
 ## 菜单
 
 - **状态行**:`walgit 服务:运行中/已停止`(5 秒轮询 `/healthz`)
-- **启动 / 停止服务**:macOS 直接调用安装目录里的 `walgit service …`；
-  Windows/Linux 由托盘的 supervisor 启动 `walgit serve`（setup wizard 保存后
-  exit 75 需要立即重启），pidfile 写到 `~/.walgit`。程序文件不复制到状态目录。
+- **启动 / 停止服务**:macOS 与 Windows 都直接调用安装目录里的 `walgit service …`
+  ——Windows 上那个进程归**任务计划程序**里的具名任务 `walgit`（D48），托盘不再自己
+  spawn/supervise，也就没有可写坏的 pidfile。Linux 没有等价的桌面调度器，仍由托盘的
+  supervisor 启动 `walgit serve`（setup wizard 保存后 exit 75 需要立即重启），pidfile
+  写到 `~/.walgit`。程序文件不复制到状态目录。
 - **⬆️ 发现新版本 — 点击升级**:升级**只由用户点击触发**。macOS App Bundle
   走 Release 管线:下载 DMG → 校验 sha256/签名/公证/版本 → 交给
   `release-install.sh` 换装(失败回滚旧 bundle);开发机与 Windows/Linux 走

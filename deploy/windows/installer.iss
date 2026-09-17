@@ -94,36 +94,38 @@ end;
 procedure StopWalgit;
 var
   ResultCode: Integer;
-  // AnsiString:LoadStringFromFile 的 var 参数是这个类型(Unicode string 会
-  // 编译期 Type mismatch);pid 内容是 ASCII 数字,无损。
-  pidbuf: AnsiString;
-  pid: String;
+  Script: String;
 begin
-  // 换文件前结束新旧程序目录里的实例:
-  // 1) 服务优先按 pidfile + 映像名**双过滤**精确杀——裸 /PID 会撞上 pid
-  //    复用误杀无关进程(taskkill /FI 要求 PID 与 IMAGENAME 同时匹配);
-  // 2) 清扫只按可执行文件路径圈定新旧安装目录,不碰机器上其他同名进程。
-  // 失败一律忽略——多半本就没在跑。
-  pidbuf := '';
-  if not LoadStringFromFile(ExpandConstant('{%USERPROFILE}\.walgit\walgit.pid'), pidbuf) then
-    LoadStringFromFile(LegacyProgramDir + '\walgit.pid', pidbuf);
-  pid := Trim(pidbuf);
-  if pid <> '' then
-  begin
-    Exec(ExpandConstant('{cmd}'),
-      '/C taskkill /F /T /FI "PID eq ' + pid + '" /FI "IMAGENAME eq walgit.exe"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\walgit.pid'));
-    DeleteFile(LegacyProgramDir + '\walgit.pid');
-  end;
+  // 换文件前结束服务，顺序按「谁真正持有进程」来（D48）：
+  // 1) 服务归任务计划程序：先 /End 那个具名任务。失败忽略——多半本就没起。
+  // 2) 再按**监听端口**清扫：旧形态的 pidfile 会被写坏（写进已死子进程的 pid），
+  //    端口才是真凭据。端口从用户配置里读，自定义端口不会被漏掉；只杀进程名以
+  //    walgit 开头的，绝不误伤别人的进程。
+  // 3) 最后按安装目录圈定托盘与本体。
+  Exec(ExpandConstant('{cmd}'),
+    '/C schtasks /End /TN walgit >NUL 2>&1',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Script :=
+    '$t = Join-Path $env:USERPROFILE ''\.walgit\walgit.toml''; ' +
+    '$port = ''''; ' +
+    'if (Test-Path $t) { ' +
+    '$m = Select-String -Path $t -Pattern ''^\s*listen\s*='' | Select-Object -First 1; ' +
+    'if ($m) { $port = ($m.Line -split '':'' | Select-Object -Last 1) -replace ''\D'',''''; } }; ' +
+    'if ($port) { Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | ForEach-Object { ' +
+    '$p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
+    'if ($p -and $p.ProcessName -like ''walgit*'') { Stop-Process -Id $p.Id -Force } } }; ' +
+    'Get-Process walgit,walgit-tray -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
+    ExpandConstant('{app}') + '\*'') -or ($_.Path -like ''' +
+    LegacyProgramDir + '\*'') } | Stop-Process -Force';
+  Exec(ExpandConstant('{cmd}'),
+    '/C powershell -NoProfile -Command "' + Script + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // 托盘升级管线留的备份:安装器换装后它已无意义,留着会在托盘某次升级
   // 健康检查失败时被回滚逻辑盖回旧版本——删。
   DeleteFile(ExpandConstant('{app}\walgit.bak-tray'));
-  Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "Get-Process walgit,walgit-tray -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
-    ExpandConstant('{app}') + '\*'') -or ($_.Path -like ''' +
-    LegacyProgramDir + '\*'') } | Stop-Process -Force"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 旧形态遗留的 pidfile：D48 之后 Windows 不再有它的位置。
+  DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\walgit.pid'));
+  DeleteFile(LegacyProgramDir + '\walgit.pid');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -147,6 +149,10 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     StopWalgit;
+    // 任务本身也要注销：留着它，下次重装会指向一个已删除的 exe（D48）。
+    Exec(ExpandConstant('{cmd}'),
+      '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
   end;
 end;

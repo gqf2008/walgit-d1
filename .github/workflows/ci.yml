@@ -384,6 +384,26 @@ jobs:
         shell: bash
         run: |
           cargo test -p walgit-server --test e2e || { echo "e2e failed once (possibly known-flaky); rerunning"; sleep 5; cargo test -p walgit-server --test e2e; }
+      - name: Type-check the Windows installer
+        # `installer.iss` only ever compiles on a release tag otherwise, so a
+        # Pascal slip (or a missing Source file) would surface as a broken
+        # release. ISCC validates the [Code] section against dummy payloads —
+        # cheap, and it is the only pre-tag compile the script gets.
+        shell: bash
+        run: |
+          mkdir -p target/release
+          : > target/release/walgit.exe
+          : > target/release/walgit-tray.exe
+          iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
+          "$iscc" "-DMyAppVersion=0.0.0-ci" deploy/windows/installer.iss
+      - name: Service lifecycle smoke (scheduled task, D48)
+        # The real binary, the real task and the real port: `start` twice (must
+        # not fork), then `stop` (the port must go quiet). This is the level the
+        # old "stale pidfile orphans a live server" bug was visible at.
+        shell: pwsh
+        run: |
+          cargo build -p walgit-cli
+          ./deploy/windows/service-smoke.ps1
 
   # PR summary: one authoritative comment per PR instead of raw job colors.
   # expected-red (clippy known debt) is annotated, everything else red is a
