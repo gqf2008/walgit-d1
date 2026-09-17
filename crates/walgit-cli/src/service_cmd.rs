@@ -440,23 +440,20 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
 
 #[cfg(windows)]
 async fn stop(listen: &str, _home: &Path) -> Result<()> {
-    // `/End` first — it takes the task's whole tree in one shot. Its failure is
-    // *not* fatal: the task may never have run, and a server an older install
-    // left behind is not its child either. The **port** is the ground truth
-    // throughout: `/healthz` can be silent while a hung process still owns the
-    // socket, which is exactly the case that used to be reported as "stopped".
-    let mut owners = port_owners(listen).await;
-    if task::exists() {
-        if let Err(e) = task::end() {
-            eprintln!("walgit: `schtasks /End` failed ({e}); falling back to the port");
-        }
-        if wait_port_free(listen, 20).await {
-            println!("walgit: stopped");
-            return Ok(());
-        }
-        owners = port_owners(listen).await;
-    }
+    // The **port** is the ground truth, and the owners are what actually hold
+    // it: `/End` alone is not enough (measured on the CI runner, the task's
+    // `cmd /c` wrapper is ended while the server child keeps the socket). So
+    // kill the owners first, verify the port is free, and only then tidy the
+    // task the scheduler is still tracking.
+    let owners = port_owners(listen).await;
     if owners.is_empty() {
+        if task::exists() {
+            // Task up, port silent: a crash or a never-started run. Ending it is
+            // just bookkeeping, and failure is not worth an error.
+            if let Err(e) = task::end() {
+                eprintln!("walgit: `schtasks /End` failed ({e})");
+            }
+        }
         println!("walgit: not running — http://{listen}");
         return Ok(());
     }
@@ -473,11 +470,16 @@ async fn stop(listen: &str, _home: &Path) -> Result<()> {
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .status();
     }
-    if wait_port_free(listen, 10).await {
-        println!("walgit: stopped (killed {owners:?})");
-        return Ok(());
+    if !wait_port_free(listen, 20).await {
+        bail!("walgit: stop failed — {owners:?} still hold {listen}")
     }
-    bail!("walgit: stop failed — {owners:?} still hold {listen}")
+    if task::exists()
+        && let Err(e) = task::end()
+    {
+        eprintln!("walgit: `schtasks /End` failed ({e})");
+    }
+    println!("walgit: stopped (killed {owners:?})");
+    Ok(())
 }
 
 /// Poll until nothing listens on the port.

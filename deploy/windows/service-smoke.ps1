@@ -43,7 +43,10 @@ function Get-Healthz {
   catch { return $null }
 }
 function Get-Listeners {
-  return @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue).Count
+  # Distinct *processes*: walgit binds the v4 address and its `::1` twin, so the
+  # socket rows are two while the server is one.
+  return @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique).Count
 }
 function Wait-Free {
   for ($i = 0; $i -lt 20; $i++) {
