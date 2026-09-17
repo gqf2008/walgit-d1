@@ -44,6 +44,19 @@ use crate::web::objects::{CommitMeta, Remote};
 use crate::{AppState, cache::RefIndex, error::ApiError};
 
 const MAX_BLOB: i64 = 2 * 1024 * 1024;
+
+/// Cap on `?raw`. A blob is faulted whole (the remote reader has no range
+/// reader), so this bounds what one request can materialize on a tmpfs host.
+/// Real streaming for multi-GB media is a follow-up, not a silently-broken
+/// viewer: over the cap the endpoint answers 413 instead of pretending.
+const RAW_BLOB_MAX: i64 = 32 * 1024 * 1024;
+
+/// Repository HTML/SVG is untrusted and must never execute on the app's origin
+/// (a stored-XSS hole straight into every signed-in session). `sandbox` with no
+/// allowances neuters scripts *and* same-origin access even when the URL is
+/// opened directly; the viewer additionally frames HTML with `sandbox=""`.
+const ACTIVE_CONTENT_CSP: &str =
+    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
 const IMMUTABLE: &str = "private, max-age=31536000, immutable";
 const SWR: &str = "private, max-age=0, stale-while-revalidate=60";
 const DEFAULT_PAGE: usize = 100;
@@ -1105,6 +1118,8 @@ async fn archive(
                 content_type,
                 cache_control: SWR,
                 etag: Some(etag_for(&format!("{}:{format}", res.sha))),
+                extra: Vec::new(),
+                range: None,
             })
         },
     )
@@ -1816,6 +1831,8 @@ async fn collab_ci_artifact(
                         content_type: "application/octet-stream",
                         cache_control: IMMUTABLE,
                         etag: Some(etag_for(&sha256)),
+                        extra: Vec::new(),
+                        range: None,
                     });
                 }
                 // A ref whose payload does not hash to its address is hostile
@@ -1922,6 +1939,8 @@ async fn collab_ci_artifact_size(
                     content_type: "application/octet-stream",
                     cache_control: IMMUTABLE,
                     etag: Some(etag_for(&sha256)),
+                    extra: Vec::new(),
+                    range: None,
                 });
             }
             if saw_oversize {
@@ -2513,6 +2532,7 @@ async fn blob(
             .map(|(res, _)| blob_key(&format!("{owner}/{repo_name}"), &res.sha, &res.path))
     };
     let st2 = st.clone();
+    let req_headers = headers.clone();
     run(
         &st,
         &plain_headers,
@@ -2561,19 +2581,23 @@ async fn blob(
                 .await?;
                 (i64::try_from(bytes.len()).unwrap_or(i64::MAX), Some(bytes))
             };
+            // `?raw` is the **byte** channel (images, media, PDF …): any type, its
+            // real content type, and a single range so media can seek. It used to
+            // answer only for text and hand every other file back as JSON
+            // `{binary:true}` — i.e. the bytes were unreachable, so nothing but
+            // plain text could ever be rendered.
+            if raw {
+                if size > RAW_BLOB_MAX {
+                    return Err(ApiError::PayloadTooLarge);
+                }
+                let bytes = bytes.ok_or_else(|| not_found("blob"))?;
+                return Ok(raw_blob(bytes::Bytes::from(bytes), &res.path, &res.sha, immutable, &req_headers));
+            }
             let is_text = size <= MAX_BLOB
+                && !bytes.as_ref().is_some_and(|b| b.contains(&0))
                 && bytes
                     .as_ref()
-                    .is_some_and(|b| !b.contains(&0) && std::str::from_utf8(b).is_ok());
-            if raw && is_text {
-                let etag = etag_for(&res.sha);
-                return Ok(Rendered {
-                    body: bytes::Bytes::from(bytes.unwrap_or_default()),
-                    content_type: "text/plain; charset=utf-8",
-                    cache_control: if immutable { IMMUTABLE } else { SWR },
-                    etag: (!immutable).then_some(etag),
-                });
-            }
+                    .is_some_and(|b| std::str::from_utf8(b).is_ok());
             let b = if size > MAX_BLOB {
                 Blob {
                     ref_name: res.ref_name.clone(),
@@ -2615,6 +2639,164 @@ async fn blob(
         },
     )
     .await
+}
+
+/// `?raw` for any file: the real content type, a single RFC 9110 range (media
+/// seeking and PDF partial loads), and the two headers that keep untrusted
+/// repository content inert. Extracted so the policy is one readable place.
+fn raw_blob(
+    bytes: bytes::Bytes,
+    path: &str,
+    rev: &str,
+    immutable: bool,
+    req: &HeaderMap,
+) -> Rendered {
+    let content_type = content_type_for(path);
+    let total = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let range = req
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|spec| parse_range(spec, total));
+    let body = match range {
+        // Bounds come from parse_range(), which clamps to `total - 1`.
+        Some((start, end)) => bytes.slice(
+            usize::try_from(start).unwrap_or(0)..=usize::try_from(end).unwrap_or(0),
+        ),
+        None => bytes,
+    };
+    let mut extra = vec![(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    )];
+    if is_active_content(content_type) {
+        extra.push((
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(ACTIVE_CONTENT_CSP),
+        ));
+    }
+    Rendered {
+        body,
+        content_type,
+        cache_control: if immutable { IMMUTABLE } else { SWR },
+        // Keyed by *file*, not just revision: every path at one commit used to
+        // share a validator.
+        etag: (!immutable).then(|| etag_for(&format!("{rev}:{path}"))),
+        extra,
+        range: range.map(|(start, end)| (start, end, total)),
+    }
+}
+
+/// Content type for the raw byte channel, by extension. Deliberately
+/// conservative: anything unknown is `application/octet-stream`, and the two
+/// formats that are actually *programs* (HTML, SVG, XML) are marked so the
+/// caller can sandbox them.
+fn content_type_for(path: &str) -> &'static str {
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        Some("svg") => "image/svg+xml",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("ogv") => "video/ogg",
+        Some("mov") => "video/quicktime",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("oga" | "ogg") => "audio/ogg",
+        Some("m4a") => "audio/mp4",
+        Some("flac") => "audio/flac",
+        Some("pdf") => "application/pdf",
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("xhtml") => "application/xhtml+xml; charset=utf-8",
+        Some("xml") => "application/xml; charset=utf-8",
+        _ => "text/plain; charset=utf-8",
+    }
+}
+
+/// Formats that can run code when a browser treats them as a document.
+fn is_active_content(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or_default().trim();
+    matches!(
+        base,
+        "text/html" | "application/xhtml+xml" | "image/svg+xml" | "application/xml"
+    )
+}
+
+/// `bytes=start-end`, `bytes=start-`, `bytes=-suffix` → `(start, end)` with
+/// `end` inclusive. `None` for anything else (multi-range, malformed, or
+/// unsatisfiable) — the caller then serves the whole body, which RFC 9110
+/// allows and is what a plain `<img>`/`<video>` expects.
+fn parse_range(spec: &str, len: u64) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let rest = spec.trim().strip_prefix("bytes=")?;
+    if rest.contains(',') {
+        return None;
+    }
+    let (first, last) = rest.split_once('-')?;
+    let last = last.trim();
+    if first.trim().is_empty() {
+        let suffix: u64 = last.parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        return Some((len.saturating_sub(suffix), len - 1));
+    }
+    let start: u64 = first.trim().parse().ok()?;
+    if start >= len {
+        return None;
+    }
+    let end = if last.is_empty() {
+        len - 1
+    } else {
+        last.parse::<u64>().ok()?.min(len - 1)
+    };
+    (end >= start).then_some((start, end))
+}
+
+#[cfg(test)]
+mod blob_view_tests {
+    use super::{content_type_for, is_active_content, parse_range};
+
+    #[test]
+    fn content_types_cover_the_viewer_formats() {
+        assert_eq!(content_type_for("a/b/pic.PNG"), "image/png");
+        assert_eq!(content_type_for("clip.mp4"), "video/mp4");
+        assert_eq!(content_type_for("song.flac"), "audio/flac");
+        assert_eq!(content_type_for("doc.pdf"), "application/pdf");
+        assert_eq!(content_type_for("page.html"), "text/html; charset=utf-8");
+        // Unknown → bytes; the viewer decides, not a guess.
+        assert_eq!(content_type_for("blob.bin"), "text/plain; charset=utf-8");
+        assert_eq!(content_type_for("noext"), "text/plain; charset=utf-8");
+    }
+
+    #[test]
+    fn only_code_bearing_types_are_active() {
+        assert!(is_active_content("text/html; charset=utf-8"));
+        assert!(is_active_content("image/svg+xml"));
+        assert!(!is_active_content("image/png"));
+        assert!(!is_active_content("application/pdf"));
+        assert!(!is_active_content("text/plain; charset=utf-8"));
+    }
+
+    #[test]
+    fn ranges_are_inclusive_and_clamped() {
+        assert_eq!(parse_range("bytes=0-9", 100), Some((0, 9)));
+        assert_eq!(parse_range("bytes=90-", 100), Some((90, 99)));
+        assert_eq!(parse_range("bytes=-10", 100), Some((90, 99)));
+        assert_eq!(parse_range("bytes=0-999", 100), Some((0, 99)));
+        // Multi-range and unsatisfiable requests fall back to the whole body.
+        assert_eq!(parse_range("bytes=0-1,5-6", 100), None);
+        assert_eq!(parse_range("bytes=100-", 100), None);
+        assert_eq!(parse_range("items=0-9", 100), None);
+        assert_eq!(parse_range("bytes=0-9", 0), None);
+    }
 }
 
 // ---- commits -------------------------------------------------------------------

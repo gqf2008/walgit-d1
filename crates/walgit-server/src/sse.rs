@@ -95,6 +95,13 @@ pub struct Rendered {
     pub content_type: &'static str,
     pub cache_control: &'static str,
     pub etag: Option<String>,
+    /// Extra response headers (e.g. `X-Content-Type-Options`, a CSP for active
+    /// content). Empty for the JSON lanes.
+    pub extra: Vec<(http::header::HeaderName, http::HeaderValue)>,
+    /// A single RFC 9110 byte range being served: `(start, end_inclusive, total)`.
+    /// `Some` → 206 + `Content-Range` (+ `Accept-Ranges`), which is what media
+    /// elements need to seek.
+    pub range: Option<(u64, u64, u64)>,
 }
 
 impl Rendered {
@@ -104,6 +111,8 @@ impl Rendered {
             content_type: "application/json",
             cache_control,
             etag,
+            extra: Vec::new(),
+            range: None,
         }
     }
     /// Plain HTTP response (honours `If-None-Match` when an `ETag` is set).
@@ -125,7 +134,22 @@ impl Rendered {
                 return r;
             }
         }
-        let mut r = (StatusCode::OK, Body::from(self.body)).into_response();
+        let mut r = match self.range {
+            Some((start, end, total)) => {
+                let mut r = (StatusCode::PARTIAL_CONTENT, Body::from(self.body)).into_response();
+                // Digits and dashes only: the value always parses.
+                let cr = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}"))
+                    .unwrap_or_else(|_| HeaderValue::from_static("bytes */*"));
+                r.headers_mut().insert(header::CONTENT_RANGE, cr);
+                r.headers_mut()
+                    .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                r
+            }
+            None => (StatusCode::OK, Body::from(self.body)).into_response(),
+        };
+        for (name, value) in self.extra {
+            r.headers_mut().insert(name, value);
+        }
         r.headers_mut()
             .insert(header::CONTENT_TYPE, HeaderValue::from_static(self.content_type));
         r.headers_mut()
