@@ -101,7 +101,10 @@ end;
 // 路径要嵌进 PowerShell 的单引号字符串里，先按 PS 规则转义单引号。
 function PsQuote(s: String): String;
 begin
-  Result := StringChangeEx(s, '''', '''''', True);
+  // Inno 的 StringChangeEx 是就地修改的 procedure（不是返回新串的函数）——
+  // 按函数用会得到 "Type mismatch"（这一条正是 windows leg 的 ISCC 步骤抓到的）。
+  StringChangeEx(s, '''', '''''', True);
+  Result := s;
 end;
 
 // 只有确认这个 `walgit` 任务确实指向 walgit 二进制时，才允许 End/Delete：
