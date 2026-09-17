@@ -348,7 +348,7 @@ jobs:
           # refs-sync case, issue #94; the same shape as Server integration
           # below), then a repeat is real.
           just test-wildcard-crates || { echo "wildcard crates failed once (windows timing flaky); rerunning"; sleep 3; just test-wildcard-crates; }
-      # The server integration suites: the justfile's SERVER_TESTS — the same 15
+      # The server integration suites: the justfile's SERVER_TESTS — the same 14
       # both legs run (issue #137; this leg's hand-copied enumeration is gone).
       # Suite-set-level rerun once (windows timing; AGENTS.md §5), then a repeat
       # is real. timeout-minutes replaces the justfile's tN guards — windows must

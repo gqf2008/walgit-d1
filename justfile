@@ -92,11 +92,11 @@ dev-store-stop:
 # The server integration suites — THE list (issue #137). Both CI legs run exactly
 # this set: ubuntu through `test` below, windows through the "Server integration"
 # step in ci.yml calling `test-server-integration`. The windows leg used to
-# hand-copy an enumeration and drifted twice: c971024 added events/budgets here
+# hand-copy an enumeration and drifted twice: c971024 added budgets here
 # without ever touching ci.yml; 7f18675 (#136) edited both lists side by side and
 # still missed them. The build-test job asserts this list is complete. Facts kept
 # from the old windows-leg comment: setup_wizard's one unix-only case is
-# #[cfg(unix)]-gated in its suite; events/budgets and the #134 five (setup_wizard,
+# #[cfg(unix)]-gated in its suite; budgets and the #134 five (setup_wizard,
 # api_cli, follow, policy, policy_inbox — 21 tests, ~6 s on ubuntu) were evaluated
 # platform-clean for windows in #137 (no cfg/shell/signal/file-mode seams; the
 # same hermetic harness the windows-approved suites use since issue #2).
@@ -151,7 +151,7 @@ WILDCARD_TEST_PKGS := "-p walgit-store -p walgit-git -p walgit-wal -p walgit-bun
 # `timeout 300 cargo` is a hard error there), so a timeout-wrapped recipe line must
 # stay unreachable from windows. Hang protection on the windows leg is the CI
 # step's timeout-minutes; ubuntu wraps the call in `test` below with t10 — one
-# 600 s budget for all 15 suites, the sum of the old two t5 lines, because 300 s
+# 600 s budget for all 14 suites, the sum of the old two t5 lines, because 300 s
 # has tripped this tier under CI load (exit 124; see the note at ci.yml's
 # fast-tier step).
 

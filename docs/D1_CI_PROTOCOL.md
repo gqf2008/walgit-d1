@@ -100,7 +100,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
 ## 4. 触发（trigger）：ref 事实与 refs 级轮询
 
 **触发面是事实，不是消息**："`ref R 的 tip 变成了 X`"。事实由 WAL 的 PUSH/REF_UPDATE
-条目产生（D32），消费端从 refs 级轮询观察到这一事实：
+条目产生（D46；D32 已 supersede），消费端从 refs 级轮询观察到这一事实：
 
 1. **refs 级轮询（normative 默认，本批次实现）**：`git ls-remote` 每 `interval` 秒一次
    （一个往返，无 pack），与本地状态文件对比得"变化过的 ref"。对离线一段时间后回来的
