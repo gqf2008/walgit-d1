@@ -47,19 +47,20 @@ Web UI, `walgit collab` views and the board are deterministic projections. Work 
 leaves no collaboration record.
 
 ```bash
-W="walgit --config ~/.walgit/walgit.toml"
-$W collab ls                     # thread ids
-$W collab board                  # work-unit board (.walgit/board.toml; read-only projection)
-$W collab report                 # threads / PRs / verification / activity
-$W collab thread <id>            # parent-ordered, per-entry signature verification
-$W collab pr <id>                # aggregated PR view + merge-rule evaluation
+# A function, not `W="walgit …"; $W …` — zsh does not word-split an unquoted expansion.
+W() { walgit --config ~/.walgit/walgit.toml "$@"; }
+W collab ls                     # thread ids
+W collab board                  # work-unit board (.walgit/board.toml; read-only projection)
+W collab report                 # threads / PRs / verification / activity
+W collab thread <id>            # parent-ordered, per-entry signature verification
+W collab pr <id>                # aggregated PR view + merge-rule evaluation
 ```
 
 Write entries (one signed entry per push; the printed second column is the entry oid that becomes the
 next `--parent`):
 
 ```bash
-$W collab entry --kind <issue|comment|patch|review|merge_result|status> \
+W collab entry --kind <issue|comment|patch|review|merge_result|status> \
   --id <thread-id> --actor <principal> --parent <oid|""> \
   --body '<json>' --key ~/.walgit/keys/<principal>.ed25519 --push origin \
   [--base refs/heads/main --head refs/heads/<branch>]      # patch only
