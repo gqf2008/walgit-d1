@@ -9,6 +9,16 @@ version = 1
 by = "ts"          # ts(默认,按最后活动) | id(按线程 id)
 direction = "desc" # desc(默认,新在前) | asc
 
+# owner 从哪来：看板的 owner/work 字段取自线程里**最新一条签名 `status` 条目**的 body。
+# 只写 `issue` 根条目、没有 `status` 的线程会投影成默认 `open` 且 owner 为空（看板显示"未分配"）。
+# 因此**建单即认领**：创建 issue 后立刻补一条 status，例如
+#   walgit --config ~/.walgit/walgit.toml collab entry --kind status \
+#     --id <thread-id> --actor <you> --parent <issue-oid> \
+#     --body '{"status":"in-progress","owner":"<principal>","worktree":"wt-x","branch":"feat/x","work":"..."}' \
+#     --key ~/.walgit/keys/<principal>.ed25519 --push origin
+# 纯待办（等外部事件/需要人）也必须带 owner，用 blocked / needs-human 表达，不允许无主卡片。
+# 评论里写 owner 不算数——只有签名 status 条目的 owner 会进看板。
+
 # 一列一个谓词；只声明你真正想看到的列。
 # 字段：name(必填)、kind、status、merge、unverified
 #   kind       —— 线程必须包含该 kind 的条目

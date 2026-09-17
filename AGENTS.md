@@ -626,10 +626,14 @@ is the contract agents follow; humans use the same protocol.**
 
 ### 6.1 Work-unit lifecycle
 
-A work unit is a **walgit collab thread**: its state is the newest signed `status` entry, projected by
-`.walgit/board.toml` onto the board (`walgit collab board`). The GitHub label/Project-Status mapping below
-is the **historical (pre-2026-09-16) shape** of the same lifecycle — labels and the GitHub board are no
-longer written (Issues disabled, Projects off):
+A work unit is a **walgit collab thread**: its state **and its owner** are the newest signed `status` entry,
+projected by `.walgit/board.toml` onto the board (`walgit collab board`). Filing a thread is therefore two
+entries: the `issue` root **and** a `status` entry naming `owner` (add `worktree`/`branch`/`work` when claimed).
+An issue-only thread projects as an unowned `open` card — and parked work still names its owner, using
+`blocked` / `needs-human`. An owner written in a `comment` does not count; only the signed `status` body does.
+
+The GitHub label/Project-Status mapping below is the **historical (pre-2026-09-16) shape** of the same
+lifecycle — labels and the GitHub board are no longer written (Issues disabled, Projects off):
 
 | State | Label (historical) | Project Status (historical) | Meaning |
 |---|---|---|---|
