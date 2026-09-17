@@ -10,13 +10,19 @@ import { RefBar } from "../components/RefBar";
 import { Markdown } from "../components/Markdown";
 import { useI18n } from "../i18n";
 import { dirOf } from "../markdown-paths";
+import { blobKind } from "../blob-kind";
 
 export function BlobPage() {
   const { full } = useRepo();
   const { t } = useI18n();
   const rest = useParams()["*"] ?? "";
   const { r, data: b } = useResolved(full, rest, (res) => api.blob(full, res.sha, res.path));
-  const isMd = /\.(md|markdown)$/i.test(rest);
+  // Presentation only: the API tells us whether the bytes are text, `?raw`
+  // serves every type — this just picks the viewer.
+  const kind = blobKind(b.path);
+  const isMd = kind === "markdown";
+  const isViewer =
+    kind === "image" || kind === "video" || kind === "audio" || kind === "pdf" || kind === "html";
   const [mode, setMode] = useState<"preview" | "code">("preview");
   const lines = b.contents ? b.contents.split("\n").length - (b.contents.endsWith("\n") ? 1 : 0) : 0;
   const rawURL = client.repo(full).urls.raw(b.sha, b.path);
@@ -51,9 +57,35 @@ export function BlobPage() {
           </div>
         }
       >
-        {b.too_large && <div className="pad muted">{t("blob.tooLarge", { size: fmtSize(b.size) })}</div>}
-        {b.binary && <div className="pad muted">{t("blob.binary")}</div>}
-        {b.contents !== undefined &&
+        {isViewer && (
+          <div className="pad">
+            {kind === "image" && <img className="blob-image" src={rawURL} alt={b.name} />}
+            {kind === "video" && <video className="blob-media" src={rawURL} controls preload="metadata" />}
+            {kind === "audio" && <audio className="blob-media" src={rawURL} controls preload="metadata" />}
+            {/* `<object>`, not a sandboxed iframe: `sandbox=""` also disables the
+                browser's own PDF viewer, and a PDF is not active content on our
+                origin (the API serves it `application/pdf` + nosniff). The
+                fallback child covers browsers with no inline viewer. */}
+            {kind === "pdf" && (
+              <object className="blob-frame" data={rawURL} type="application/pdf" title={b.name}>
+                <p className="muted small">{t("blob.pdfNoViewer")}</p>
+              </object>
+            )}
+            {kind === "html" && (
+              <>
+                <p className="muted small">{t("blob.htmlSandboxed")}</p>
+                {/* sandbox="" — no scripts, no same-origin: repository HTML is
+                    untrusted input and must never reach the app's origin. */}
+                <iframe className="blob-frame" sandbox="" src={rawURL} title={b.name} />
+              </>
+            )}
+          </div>
+        )}
+        {!isViewer && b.too_large && (
+          <div className="pad muted">{t("blob.tooLarge", { size: fmtSize(b.size) })}</div>
+        )}
+        {!isViewer && !b.too_large && b.binary && <div className="pad muted">{t("blob.binary")}</div>}
+        {!isViewer && b.contents !== undefined &&
           (isMd && mode === "preview" ? (
             <div className="pad">
               <Markdown

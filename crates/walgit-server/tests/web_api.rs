@@ -92,6 +92,7 @@ fn fixture(server: &Server) -> anyhow::Result<std::path::PathBuf> {
     std::fs::write(dir.join("src/main.rs"), "fn main() {}\n")?;
     std::fs::write(dir.join("src/inner/x.txt"), "x\n")?;
     std::fs::write(dir.join("bin.dat"), [0u8, 159, 146, 150, 0, 1, 2])?;
+    std::fs::write(dir.join("page.html"), "<script>alert(1)</script>")?;
     std::fs::write(dir.join("big.txt"), vec![b'a'; 2 * 1024 * 1024 + 1])?;
     git_in(&dir, &["add", "."])?;
     git_in(&dir, &["commit", "-q", "-m", "initial\n\nbody line"])?;
@@ -132,6 +133,63 @@ fn fixture(server: &Server) -> anyhow::Result<std::path::PathBuf> {
         &["push", "-q", "--mirror", &server.repo_url("o", "r")],
     )?;
     Ok(dir)
+}
+
+/// `?raw` is the byte channel the blob viewers depend on: real content types,
+/// ranges for media seeking, and a CSP that keeps repository HTML inert. It used
+/// to answer only for text — every binary file came back as JSON `{binary:true}`,
+/// so an image or a PDF could not be rendered at all.
+#[tokio::test]
+async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
+    let server = Server::start().await?;
+    fixture(&server)?;
+    let c = reqwest::Client::new();
+    let url = |p: &str| format!("{}{p}", server.base_url);
+
+    // Bytes reach the client, with the type the viewer needs.
+    let r = c.get(url("/o/r/api/blob/main/bin.dat?raw")).send().await?;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "application/octet-stream");
+    assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        r.bytes().await?.as_ref(),
+        [0_u8, 159, 146, 150, 0, 1, 2],
+        "the raw endpoint must not mangle binary"
+    );
+
+    // A single range is what `<video>`/`<audio>` seek with, and what a PDF uses
+    // to load partially. "bytes 0-5/15" for a 15-byte README.
+    let r = c
+        .get(url("/o/r/api/blob/main/README.md?raw"))
+        .header("range", "bytes=0-5")
+        .send()
+        .await?;
+    assert_eq!(r.status(), 206);
+    assert_eq!(r.headers()["content-range"], "bytes 0-5/15");
+    assert_eq!(r.headers()["accept-ranges"], "bytes");
+    assert_eq!(r.text().await?, "# Titl");
+
+    // Repository HTML must never run on the app's origin.
+    let r = c.get(url("/o/r/api/blob/main/page.html?raw")).send().await?;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
+    assert!(
+        r.headers()["content-security-policy"]
+            .to_str()?
+            .contains("sandbox"),
+        "active content needs a sandbox CSP"
+    );
+
+    // The JSON lane is unchanged: the viewer still learns it is binary.
+    let v: Value = c
+        .get(url("/o/r/api/blob/main/bin.dat"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(v["binary"], true);
+    assert!(v.get("contents").is_none());
+    Ok(())
 }
 
 /// web/API.md §6 against one server (called for the local-packs instance and
@@ -424,7 +482,7 @@ async fn conformance(
         .collect();
     assert_eq!(
         names,
-        vec!["dir", "src", "README.md", "big.txt", "bin.dat"],
+        vec!["dir", "src", "README.md", "big.txt", "bin.dat", "page.html"],
         "dirs first, then byte order"
     );
     let src_entry = &tree["entries"][1];
