@@ -95,9 +95,9 @@ question, and keep your own cursor:
   --from <seq> [--to <seq>]` enumerates the **retained** log entries. `--from` is
   inclusive, so advance your cursor to `seq + 1` after processing (or keep it as
   "next seq to read"). `wal ls` prints summaries (`seq`/`kind`/…); use
-  `walgit wal show <owner/repo> <seq>` for `created_at` and the full entry.
+  `walgit wal show <owner/repo> <seq>` for `created_at` and a detailed entry view (note: `SETTINGS` payloads are not printed).
   Entries folded into a checkpoint and reclaimed by WAL GC are no longer listed —
-  use the checkpoint or `walgit wal materialize --at-seq` for that history.
+  use the checkpoint or `walgit wal materialize <owner/repo> --at-seq <seq> --out <dir>` for that history.
 - **Web narration (best effort)** — any JSON endpoint that cannot answer
   immediately streams the **SSE envelope** when the request says
   `Accept: text/event-stream` (read `progress` / `notice` / terminal
