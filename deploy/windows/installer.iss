@@ -48,11 +48,11 @@ chinesesimplified.LaunchTray=启动 walgit 托盘(服务请在托盘菜单「启
 english.LaunchTray=Launch the walgit tray (start the service from its menu)
 
 [Tasks]
-; `checkedonce`:没有它 Inno 的任务默认是**不勾选**的——装完既没有桌面图标、也不会
-; 开机自启(README 一直写着「默认勾选自启」,代码却没兑现)。两个都按承诺默认勾上,
-; 用户仍可取消。
+; `checkedonce`:没有它 Inno 的任务默认是**不勾选**的——装完不会开机自启(README
+; 一直写着「默认勾选自启」,代码却没兑现)。桌面图标不做成可选项:checkedonce 只在首次
+; 安装生效,升级会沿用上次的选择,已经装过且当时没勾的机器永远补不上图标。
 Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
+
 
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -67,7 +67,7 @@ Source: "walgit.toml.initial"; DestDir: "{%USERPROFILE}\.walgit"; DestName: "wal
 Name: "{userprograms}\walgit"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\walgit 配置文件 walgit.toml"; Filename: "notepad.exe"; Parameters: """{%USERPROFILE}\.walgit\walgit.toml"""
-Name: "{autodesktop}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "walgit-tray"; ValueData: """{app}\walgit-tray.exe"""; Flags: uninsdeletevalue; Tasks: autostart

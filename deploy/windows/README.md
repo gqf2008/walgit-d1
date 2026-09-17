@@ -11,9 +11,9 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 |---|---|
 | `walgit.exe`(服务)/ `walgit-tray.exe`(托盘) | `%LOCALAPPDATA%\Programs\walgit` |
 | `walgit.toml` 初始配置(`walgit.toml.initial`) | `%USERPROFILE%\.walgit\walgit.toml`;**仅在不存在时生成,卸载不删除** |
-| 开始菜单 | 顶层 `walgit`(直接出现在「所有应用」里)+ 文件夹里的「walgit 托盘」
-「walgit 配置文件 walgit.toml」 |
-| 桌面快捷方式、开机自启(HKCU `Run`) | 安装时**默认都勾选**,可取消 |
+| 开始菜单 | 顶层 `walgit`(直接出现在「所有应用」里)+ 文件夹里的「walgit 托盘」「walgit 配置文件 walgit.toml」 |
+| 桌面快捷方式 | **总是创建**(不做成可选项:Inno 的 `checkedonce` 只在首次安装生效,升级会沿用上次选择,老机器永远补不上) |
+| 开机自启(HKCU `Run`) | 默认勾选,可取消 |
 
 - 每用户安装(`PrivilegesRequired=lowest`),不需要管理员。
 - 升级 = 再跑一遍 setup:替换二进制前自动结束在跑的托盘与服务
