@@ -105,6 +105,12 @@ pub fn public_router(state: Arc<AppState>) -> Router {
         // The certificate this process presents (self_signed/files, D39): public
         // material, what the installer pins for git. 404 behind an edge (h2c).
         .route("/services/public/ca.pem", get(ca_pem))
+        // The ops skill this build carries (`skills/walgit/SKILL.md`), its manifest
+        // and the one-line installer. Data-free like the rest of the lane; the
+        // manifest's sha256 is what an agent verifies before trusting the bytes.
+        .route("/services/public/skill/SKILL.md", get(skill_md_public))
+        .route("/services/public/skill/manifest.json", get(skill_manifest))
+        .route("/services/public/skill/install.sh", get(skill_install_sh))
         // Nothing else lives on the public lane: explicit 404 so no gated route can ever be
         // reached through it by accident.
         .route(
@@ -131,6 +137,67 @@ async fn ca_pem(State(state): State<Arc<AppState>>) -> Response {
         )
             .into_response(),
     }
+}
+
+/// `GET|HEAD /services/public/skill/SKILL.md` — the ops skill this build
+/// carries (D42's operator sibling), served verbatim and open like `/SKILL.md`.
+async fn skill_md_public(headers: HeaderMap) -> Response {
+    let body = crate::skill::SKILL_MD;
+    // Same strong-ETag contract as `/SKILL.md`: a rebuild that changes the text
+    // changes the tag, so agent revalidation is a cheap 304.
+    let etag = format!("\"{:016x}\"", fnv1a64(body.as_bytes()));
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+    {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::ETAG, etag.as_str()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /services/public/skill/manifest.json` — what an agent checks before it
+/// fetches: the skill's sha256/bytes and the serving build's version.
+async fn skill_manifest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let base = crate::smart::request_base_url(&state, &headers);
+    (
+        [(header::CACHE_CONTROL, "no-cache")],
+        axum::Json(crate::skill::manifest(&base)),
+    )
+        .into_response()
+}
+
+/// `GET /services/public/skill/install.sh` — the idempotent one-liner that drops
+/// the skill (matching this host's build) into the agent's skills directory.
+async fn skill_install_sh(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let base = crate::smart::request_base_url(&state, &headers);
+    (
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (
+                header::CONTENT_DISPOSITION,
+                "inline; filename=\"install.sh\"",
+            ),
+        ],
+        crate::skill::install_script(&state.cfg, &base),
+    )
+        .into_response()
 }
 
 async fn root(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {

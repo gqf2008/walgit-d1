@@ -39,6 +39,10 @@
             ./Cargo.toml
             ./Cargo.lock
             ./crates
+            # include_str!-ed at compile time (web/SKILL.md -> /SKILL.md,
+            # skills/walgit/SKILL.md -> /services/public/skill/*).
+            ./web/SKILL.md
+            ./skills
           ];
         };
 

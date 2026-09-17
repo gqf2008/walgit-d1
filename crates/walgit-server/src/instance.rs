@@ -114,6 +114,22 @@ fn gib(b: u64) -> String {
     }
 }
 
+/// The build string every surface reports: crate version, plus the short git
+/// sha baked in at build time when the checkout had one (`0.7.1+abc123def456`).
+/// One home so the footer, `/readyz` and the shipped-skill manifest cannot drift.
+pub fn build_version() -> String {
+    match option_env!("WALGIT_BUILD_SHA") {
+        Some(sha) if !sha.is_empty() => format!(
+            "{}+{}",
+            env!("CARGO_PKG_VERSION"),
+            // build SHAs are ASCII hex (rev-parse --short=12 HEAD): byte 12 is
+            // a char boundary, so split_at cannot panic.
+            sha.split_at(sha.len().min(12)).0
+        ),
+        _ => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 pub fn info(cfg: &walgit_config::Config) -> InstanceInfo {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let disk = match cfg.maintenance.disk {
@@ -142,16 +158,7 @@ pub fn info(cfg: &walgit_config::Config) -> InstanceInfo {
                 .rev()
                 .collect()
         });
-    let version = match option_env!("WALGIT_BUILD_SHA") {
-        Some(sha) if !sha.is_empty() => format!(
-            "{}+{}",
-            env!("CARGO_PKG_VERSION"),
-            // build SHAs are ASCII hex (rev-parse --short=12 HEAD): byte 12 is
-            // a char boundary, so split_at cannot panic.
-            sha.split_at(sha.len().min(12)).0
-        ),
-        _ => env!("CARGO_PKG_VERSION").to_string(),
-    };
+    let version = build_version();
     let roles = if cfg.server.roles.is_empty() {
         vec!["all".to_string()]
     } else {

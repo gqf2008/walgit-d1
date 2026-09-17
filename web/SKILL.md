@@ -7,6 +7,22 @@ hosts are disposable caches, the bucket is the repository. Collaboration
 teaches an AI agent to discover, read, and write repositories on **this host**
 with plain git, the CLI, and HTTP. No interactive steps anywhere.
 
+## Install the walgit ops skill (operator guide)
+
+This file teaches an agent to *use* the host. To also *operate* it — service
+lifecycle, D1 collaboration bookkeeping, pulling events — install the ops skill
+this build ships:
+
+```sh
+curl -fsSLk '<host>/services/public/skill/install.sh' | sh
+```
+
+The installer checks the download against the sha256 in
+`<host>/services/public/skill/manifest.json` and writes
+`${WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit}/SKILL.md` (drop the `k` on a
+public-CA host). Re-run it after a host upgrade to refresh to that build; it is a
+no-op when the installed file already matches.
+
 ## Discover
 
 - `GET /api/v1` — the discovery document (lanes, endpoint list).

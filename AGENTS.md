@@ -111,7 +111,8 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   allowlist and `write_domains`.
 - Open at the application (no credential): `/healthz`, `/readyz`, `/repos.js`, `/repos.mjs`, `/SKILL.md`
   (D42, the AI-agent guide), `/_auth/*` (the
-  sign-in flow itself) and **`/services/public/*`** (data-free; today `install.sh` + `ca.pem`; everything else
+  sign-in flow itself) and **`/services/public/*`** (data-free; today `install.sh`, `ca.pem` and the shipped
+  ops skill `skill/{SKILL.md,manifest.json,install.sh}` (D47); everything else
   under it 404; never reads repo data or takes a bearer — test `public_lane_serves_only_the_installer_without_auth`).
 - **The server answers an invalid/expired credential with a real 401** — that is what makes git `erase` it from
   its helpers and ask again; the friendly 200 + in-band ERR is reserved for failures a retry cannot fix (account
@@ -533,6 +534,18 @@ decision in §4 — or the PR is; never "fix later".
   binary. Breaking, pre-1.0 ("no backwards compatibility"): a `walgit.toml` still carrying `[events]`
   or `roles = ["events"]` is now a hard parse error (`deny_unknown_fields` / unknown enum variant) —
   delete the section and the role. Supersedes D32.
+
+- **D47** **The ops skill ships with the binary and installs from the public lane (2026-09-17,
+  cc-ai-ship-skill).** The agent *operator* guide (`skills/walgit/SKILL.md`) is compiled into the
+  server (`include_str!`) and served on the data-free lane: `GET /services/public/skill/SKILL.md`
+  verbatim (strong ETag), `…/manifest.json` (`name` / `version` == `instance::build_version()` /
+  `sha256` / `bytes` / URLs) and `…/install.sh` — a POSIX-sh, idempotent one-liner with the sha256
+  and base URL baked in, writing `${WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit}/SKILL.md` and
+  re-verifying on every run. `web/SKILL.md` (D42, the *consumer* guide, still at `/SKILL.md`) gains
+  the install one-liner, so an agent reads one public document and can pull the matching operator
+  skill. The skill is versioned with the build, not the bucket: re-run the installer after a host
+  upgrade to refresh, and it is a no-op when the bytes already match. Still data-free — nothing
+  credential-bearing or repo-scoped may join the lane.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

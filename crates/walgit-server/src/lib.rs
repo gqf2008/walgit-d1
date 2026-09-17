@@ -24,6 +24,7 @@ pub mod repo;
 pub mod settings;
 pub mod setup;
 pub mod setup_wizard;
+pub mod skill;
 pub mod smart;
 pub mod sse;
 pub mod static_object;

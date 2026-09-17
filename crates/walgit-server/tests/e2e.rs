@@ -2800,9 +2800,74 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
         "{body}"
     );
     assert!(body.contains("-c fetch.bundleURI="), "{body}");
+
+    // The shipped ops skill: three data-free endpoints on the same public lane.
+    // The manifest must pin the exact bytes served, so an agent can verify a
+    // download against it (issue cc-ai-ship-skill).
+    let skill = c
+        .get(format!("{}/services/public/skill/SKILL.md", server.base_url))
+        .send()
+        .await?;
+    assert_eq!(skill.status(), 200);
+    assert_eq!(
+        skill.headers()["content-type"],
+        "text/markdown; charset=utf-8"
+    );
+    let etag = skill.headers()["etag"].to_str()?.to_string();
+    let skill_body = skill.text().await?;
+    assert_eq!(skill_body, walgit_server::skill::SKILL_MD);
+
+    let manifest: serde_json::Value = c
+        .get(format!(
+            "{}/services/public/skill/manifest.json",
+            server.base_url
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(manifest["name"], "walgit");
+    assert_eq!(
+        manifest["bytes"].as_u64(),
+        Some(skill_body.len() as u64),
+        "{manifest}"
+    );
+    let expected_sha = walgit_server::skill::sha256_hex(skill_body.as_bytes());
+    assert_eq!(manifest["sha256"].as_str(), Some(expected_sha.as_str()), "{manifest}");
+    assert!(
+        manifest["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "{manifest}"
+    );
+
+    let install = c
+        .get(format!(
+            "{}/services/public/skill/install.sh",
+            server.base_url
+        ))
+        .send()
+        .await?;
+    assert_eq!(install.status(), 200);
+    let install_body = install.text().await?;
+    assert!(install_body.starts_with("#!/bin/sh"), "{install_body}");
+    assert!(
+        install_body.contains(manifest["sha256"].as_str().unwrap()),
+        "{install_body}"
+    );
+    assert!(install_body.contains(".agents/skills/walgit"), "{install_body}");
+
+    // A strong ETag makes a re-read a 304.
+    let revalidated = c
+        .get(format!("{}/services/public/skill/SKILL.md", server.base_url))
+        .header("if-none-match", etag)
+        .send()
+        .await?;
+    assert_eq!(revalidated.status(), 304);
+
     for (path, want) in [
         ("/services/public/nothing-else", 404),
         ("/services/public/", 404),
+        ("/services/public/skill/nothing-else", 404),
+        ("/services/public/skill/", 404),
         ("/services/install.sh", 401), // the old path: not an alias, not open
         ("/services/setup.json", 401),
         ("/t/r/api/refs", 401),

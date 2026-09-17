@@ -29,6 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compil
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# `include_str!`-ed at compile time: the agent guide (web/SKILL.md, served at
+# /SKILL.md) and the shipped ops skill (skills/, served at /services/public/skill/*).
+COPY web/SKILL.md ./web/SKILL.md
+COPY skills ./skills
 COPY --from=web /src/web/dist ./web/dist
 ARG WALGIT_BUILD_SHA=dev
 ENV WALGIT_BUILD_SHA=${WALGIT_BUILD_SHA}
