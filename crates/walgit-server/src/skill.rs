@@ -255,7 +255,10 @@ mod tests {
     // unparseable. Pin the shape without pulling a YAML crate into the server.
     #[test]
     fn frontmatter_is_well_formed() {
-        let (front, body) = SKILL_MD
+        // `include_str!` keeps the bytes as checked out: a Windows `core.autocrlf`
+        // checkout hands us CRLF, so normalise before splitting.
+        let normalized = SKILL_MD.replace("\r\n", "\n");
+        let (front, body) = normalized
             .strip_prefix("---\n")
             .and_then(|rest| rest.split_once("\n---\n"))
             .expect("frontmatter delimited");

@@ -1801,9 +1801,11 @@ pub(crate) fn request_base_url(st: &AppState, headers: &HeaderMap) -> String {
     }
     // `Host` / `X-Forwarded-Host` are attacker-influenced, and the base URL is embedded
     // verbatim in shell scripts (both installers), HTML and error text. A `Host:
-    // evil"; cmd; #` must not reach those: accept only `host[:port]` (IPv4/IPv6 literal or
-    // DNS name, optional port), else fall back to the configured listen address. The
-    // multi-value `X-Forwarded-Host: a, b` form uses its first (client-most) element.
+    // evil"; cmd; #` must not reach those: keep only a shell/URL-safe authority
+    // (`is_safe_host`), else fall back to the configured listen address. The multi-value
+    // `X-Forwarded-Host: a, b` form uses its first (client-most) element. An edge in front
+    // must overwrite the header; the operator can instead pin `server.public_url`, which
+    // is trusted and short-circuits this path entirely.
     let host = headers
         .get("x-forwarded-host")
         .or_else(|| headers.get(axum::http::header::HOST))
@@ -1835,13 +1837,17 @@ pub(crate) fn request_base_url(st: &AppState, headers: &HeaderMap) -> String {
     }
 }
 
-/// Is `host` a `host[:port]` authority safe to interpolate into shell/HTML? Only the
-/// characters that can appear in a DNS name, IPv4 literal, bracketed IPv6 literal or port:
-/// no whitespace, quotes, `$`, backtick, `;`, `#`, `/` or `@` (the ways out of a quoted
-/// shell word or a URL). Length-bounded so a giant header cannot leak into responses.
+/// May `host` be interpolated into a URL, a shell script or HTML? A **character-safety
+/// whitelist**, not a full authority parser: it admits the characters that can appear in a
+/// DNS name, IPv4 literal, bracketed IPv6 literal or port, and rejects everything that could
+/// break out of a quoted shell word or a URL (whitespace, quotes, `$`, backtick, `;`, `#`,
+/// `/`, `@`, `%`). At least one alphanumeric must appear, so `":"` / `"[]"` fail; the length
+/// bound stops a giant header from leaking into responses. Odd-but-harmless shapes
+/// (`a:80:90`) may still pass — they only produce a broken URL, never an injection.
 fn is_safe_host(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= 255
+        && host.chars().any(|c| c.is_ascii_alphanumeric())
         && host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
@@ -2102,6 +2108,8 @@ mod issue4_diag_tests {
             "a$b",
             "a@b",
             "a?b",
+            ":",
+            "[]",
             "",
         ] {
             assert!(!super::is_safe_host(bad), "should reject {bad:?}");
