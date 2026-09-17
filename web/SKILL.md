@@ -74,38 +74,45 @@ The server holds no CI logic. A runner is a client:
 
 ### Listening for events (pull, never push — D46)
 
-The server does not push anything: the events bridge, `[events]` config,
-`events/cursor.json`, `POST /_events/notify` and `walgit ci run --listen`
-were removed (D46 supersedes D32). The **events themselves are the WAL
-entries** (`PUSH` / `REF_UPDATE` / `COMPACT` / `CHECKPOINT` / `SETTINGS`,
-strictly increasing `seq`, replayable) — pick the cheapest lane that answers
-your question, and keep your own cursor:
+The server does not push anything: the events bridge, the `[events]` config (and
+`roles = ["events"]`), `events/cursor.json`, `POST /_events/notify` and
+`walgit ci run --listen` were removed (D46 supersedes D32). The **events themselves
+are the WAL entries** (`PUSH` / `REF_UPDATE` / `COMPACT` / `CHECKPOINT` / `SETTINGS`,
+strictly increasing `seq`, replayable) — pick the cheapest lane that answers your
+question, and keep your own cursor:
 
-- **Ref tips only (cheapest, O(1), no pack)** — poll `git ls-remote <remote>`
-  and diff against your previous snapshot. This is what a CI runner needs:
-  `walgit ci run --repo . --remote origin` does exactly this (add `--once`
-  for cron).
+- **Ref tips only (cheapest, O(1), no pack)** — poll `git ls-remote <remote>` and
+  diff against your previous snapshot. A CI runner does exactly this:
+  `walgit ci run --repo . --remote origin --actor <principal> --key <keyfile> [--once]`
+  (`--once` suits cron).
 - **Collab entries (issues / PRs / reviews / `status` / CI)** —
-  `walgit collab watch --remote origin --interval 10 --exec <cmd>`: each new
-  or changed `refs/collab/*` entry's JSON arrives on your handler's stdin.
-  State lives in `<gitdir>/collab-watch.json` (dedupe + resume); `--once` runs
-  a single pass. After a D45 `collab gc` the watcher reports the folded
-  snapshot (`kind=snapshot`) instead of the individual entries.
+  `walgit collab watch --remote origin --interval 10 --exec <cmd>`: each new or
+  changed `refs/collab/*` entry's JSON arrives on your handler's stdin. State lives
+  in `<gitdir>/collab-watch.json` (dedupe + resume); `--once` runs a single pass.
+  After a D45 `collab gc` the watcher reports the folded snapshot
+  (`kind=snapshot`) instead of the individual entries.
 - **Full WAL stream (not just ref tips)** — `walgit wal ls <owner/repo>
-  --from <last_seq>` returns the entries after your cursor (each has `seq` and
-  `created_at`); persist `last_seq` and advance it only after processing.
-  `--to <seq>` bounds a replay window.
-- **Web / dashboard** — any JSON endpoint that cannot answer immediately
-  streams the **SSE envelope** when the request says
+  --from <seq> [--to <seq>]` enumerates the **retained** log entries. `--from` is
+  inclusive, so advance your cursor to `seq + 1` after processing (or keep it as
+  "next seq to read"). `wal ls` prints summaries (`seq`/`kind`/…); use
+  `walgit wal show <owner/repo> <seq>` for `created_at` and the full entry.
+  Entries folded into a checkpoint and reclaimed by WAL GC are no longer listed —
+  use the checkpoint or `walgit wal materialize --at-seq` for that history.
+- **Web narration (best effort)** — any JSON endpoint that cannot answer
+  immediately streams the **SSE envelope** when the request says
   `Accept: text/event-stream` (read `progress` / `notice` / terminal
   `result`|`error`); a long task's live packets are at
-  `GET /{owner}/{repo}/api/tasks/{id}`.
+  `GET /{owner}/{repo}/api/tasks/{id}`. Task packets are **per instance**: an
+  unknown id returns 404 and a stream that ends without a terminal packet is an
+  error — treat SSE as live narration, not a durable subscription.
 
-Delivery is **at-least-once**: consumers must be idempotent and dedupe by
-`seq` (WAL) or thread/ref + entry oid (collab); duplicating work is possible,
-losing an event is not (everything is replayable from the WAL). If you need
-push semantics — a webhook, IM or queue — add a sidecar: poll/walk one of the
-lanes above and forward, keeping the cursor on your side.
+Delivery: the pull lanes above (`git ls-remote`, `collab watch`, and `wal ls` for
+entries still in the retention window) are **at-least-once** — be idempotent and
+dedupe by `seq` (WAL) or thread/ref + entry oid (collab); duplicates are possible,
+but a fact you can still read is never lost. SSE can drop packets (connection loss,
+instance change), so a lossless sidecar must forward from a pull lane, never from
+SSE. If you need push semantics — a webhook, IM or queue — add that sidecar: poll
+or walk one of the pull lanes above and forward, keeping the cursor on your side.
 
 ### Repository reads over HTTP (no bucket credentials)
 
