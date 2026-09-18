@@ -119,7 +119,7 @@ begin
   OutFile := ExpandConstant('{tmp}\walgit-task-query.txt');
   if not Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -Command "$t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction SilentlyContinue; ' +
-    'if ($t -and ($t.Actions | Where-Object { $_.Arguments -match ''walgit'' -or $_.Execute -match ''walgit'' })) { ''ours'' }" > "' +
+    'if ($t -and ($t.Actions | Where-Object { (($_.Execute + '' '' + $_.Arguments) -match ''(?i)(^|[\\/])walgit\.exe(?=$|[\s\x22])'') })) { ''ours'' }" > "' +
     OutFile + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin

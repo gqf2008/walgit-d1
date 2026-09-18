@@ -48,12 +48,25 @@ function Get-Listeners {
   return @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique).Count
 }
+# "Free" is decided by *connecting*, not by a socket listing: a failing
+# Get-NetTCPConnection returns an empty set, and reading that as "nothing
+# listens" is how a smoke (or a stop) can green-light a port that is still served.
+function Test-PortFree {
+  try {
+    $c = [System.Net.Sockets.TcpClient]::new()
+    $c.Connect('127.0.0.1', $port)
+    $c.Close()
+    return $false
+  } catch {
+    return $true
+  }
+}
 function Wait-Free {
   for ($i = 0; $i -lt 20; $i++) {
-    if ((Get-Listeners) -eq 0) { return $true }
+    if (Test-PortFree) { return $true }
     Start-Sleep -Milliseconds 500
   }
-  return ((Get-Listeners) -eq 0)
+  return (Test-PortFree)
 }
 
 $failed = $null
@@ -73,7 +86,14 @@ try {
   # `walgit service start` returns early on a healthy port, so it never reaches
   # /Run: only asking the scheduler directly proves the policy holds.
   schtasks /Run /TN $task | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "schtasks /Run failed with exit code $LASTEXITCODE" }
   Start-Sleep -Seconds 2
+  # The policy itself, not just its effect: a forked child would die on the bind
+  # anyway, so the listener count alone cannot tell IgnoreNew from Parallel.
+  $xml = schtasks /Query /TN $task /XML
+  if ($xml -notmatch '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>') {
+    throw 'the task does not carry MultipleInstancesPolicy=IgnoreNew'
+  }
   if ((Get-Listeners) -ne 1) {
     throw "schtasks /Run started a second instance: $(Get-Listeners) listeners (MultipleInstancesPolicy?)"
   }

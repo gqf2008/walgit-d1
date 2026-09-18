@@ -440,20 +440,14 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
 
 #[cfg(windows)]
 async fn stop(listen: &str, _home: &Path) -> Result<()> {
-    // The **port** is the ground truth, and the owners are what actually hold
-    // it: `/End` alone is not enough (measured on the CI runner, the task's
-    // `cmd /c` wrapper is ended while the server child keeps the socket). So
-    // kill the owners first, verify the port is free, and only then tidy the
-    // task the scheduler is still tracking.
-    let owners = port_owners(listen).await;
+    // The **port** is the ground truth and the owners are what actually hold it:
+    // `/End` alone is not enough (measured on the CI runner — the task's `cmd /c`
+    // wrapper is ended while the server child keeps the socket). So kill the
+    // owners, verify the port is really free, and only then tidy up the task the
+    // scheduler still tracks — and only when that task is provably ours.
+    let owners = port_owners(listen).await?;
     if owners.is_empty() {
-        if task::exists() {
-            // Task up, port silent: a crash or a never-started run. Ending it is
-            // just bookkeeping, and failure is not worth an error.
-            if let Err(e) = task::end() {
-                eprintln!("walgit: `schtasks /End` failed ({e})");
-            }
-        }
+        end_task_if_ours();
         println!("walgit: not running — http://{listen}");
         return Ok(());
     }
@@ -470,42 +464,67 @@ async fn stop(listen: &str, _home: &Path) -> Result<()> {
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .status();
     }
-    if !wait_port_free(listen, 20).await {
+    if !wait_port_free(listen, 20).await? {
         bail!("walgit: stop failed — {owners:?} still hold {listen}")
     }
-    if task::exists()
-        && let Err(e) = task::end()
-    {
-        eprintln!("walgit: `schtasks /End` failed ({e})");
-    }
+    end_task_if_ours();
     println!("walgit: stopped (killed {owners:?})");
     Ok(())
 }
 
+/// `/End` the task, but only when it is provably ours. Doubt is a reason to do
+/// nothing (and say so), never to end somebody else's task.
+#[cfg(windows)]
+fn end_task_if_ours() {
+    match task::probe() {
+        task::Task::Ours => {
+            if let Err(e) = task::end() {
+                eprintln!("walgit: `schtasks /End` failed ({e})");
+            }
+        }
+        task::Task::Foreign => eprintln!(
+            "walgit: a scheduled task named `{TASK_NAME}` exists but is not ours — leaving it alone"
+        ),
+        task::Task::Unknown => eprintln!(
+            "walgit: could not determine who owns the `{TASK_NAME}` task — leaving it alone"
+        ),
+        task::Task::Absent => {}
+    }
+}
+
 /// Poll until nothing listens on the port.
 #[cfg(windows)]
-async fn wait_port_free(listen: &str, tries: u32) -> bool {
+async fn wait_port_free(listen: &str, tries: u32) -> Result<bool> {
     for _ in 0..tries {
-        if port_owners(listen).await.is_empty() {
-            return true;
+        if port_owners(listen).await?.is_empty() {
+            return Ok(true);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    port_owners(listen).await.is_empty()
+    Ok(port_owners(listen).await?.is_empty())
 }
 
 /// The pids LISTENING on `listen`'s port, from `netstat -ano`.
+///
+/// `Err` when the query itself could not be answered — a failed lookup is *not*
+/// evidence that the port is free, and treating it as such is how `stop` came to
+/// report success over a live server.
 #[cfg(windows)]
-async fn port_owners(listen: &str) -> Vec<u32> {
-    let Some(port) = listen.rsplit(':').next().and_then(|p| p.parse().ok()) else {
-        return Vec::new();
-    };
+async fn port_owners(listen: &str) -> Result<Vec<u32>> {
+    let port: u16 = listen
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .with_context(|| format!("cannot derive a port from `{listen}`"))?;
     let out = tokio::process::Command::new("netstat")
         .args(["-ano", "-p", "tcp"])
         .output()
-        .await;
-    let Ok(out) = out else { return Vec::new() };
-    listeners_on(&String::from_utf8_lossy(&out.stdout), port)
+        .await
+        .context("running netstat")?;
+    if !out.status.success() {
+        bail!("netstat exited with {}", out.status);
+    }
+    Ok(listeners_on(&String::from_utf8_lossy(&out.stdout), port))
 }
 
 /// LISTENING rows for `port` → their owning pids (the last column of
@@ -540,12 +559,34 @@ fn image_is_walgit(pid: u32) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().starts_with("walgit"))
 }
 
-/// Is this scheduled-task definition ours? Ours names a walgit binary in its
-/// action (`cmd.exe /c ""…\walgit.exe" serve …"`), so a task that merely shares
-/// the name `walgit` is somebody else's and must not be overwritten or deleted.
+/// Is this scheduled-task definition ours? **Only the action counts**: our task
+/// runs `walgit.exe` (through `cmd /c … >> log 2>&1`), so a definition whose
+/// action names that binary is ours — while one that merely mentions walgit in
+/// its description, or runs `walgit-backup.exe`, is not. Getting this wrong
+/// means ending or deleting somebody else's task.
 #[cfg(any(windows, test))]
 fn task_is_ours(xml: &str) -> bool {
-    xml.to_ascii_lowercase().contains("walgit")
+    xml.to_ascii_lowercase()
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | '&' | ';' | ')'))
+        .map(|token| token.trim_end_matches(','))
+        .any(|token| {
+            token == "walgit.exe"
+                || token.ends_with(r"\walgit.exe")
+                || token.ends_with("/walgit.exe")
+        })
+}
+
+/// Does a `schtasks /FO CSV /NH` listing contain our task? The first field is
+/// the task name (`"\walgit","N/A","Ready"`), which — unlike the rest of that
+/// output — is not localised.
+#[cfg(any(windows, test))]
+fn lists_task(list: &str, name: &str) -> bool {
+    list.lines().any(|line| {
+        line.trim_start_matches('"')
+            .split('"')
+            .next()
+            .is_some_and(|field| field.trim_start_matches('\\').eq_ignore_ascii_case(name))
+    })
 }
 
 /// First CSV field of a `tasklist /FO CSV /NH` line, unquoted.
@@ -606,14 +647,33 @@ mod task {
         }
     }
 
-    /// Does a task with our name exist at all (without judging whose it is)?
-    pub fn exists() -> bool {
-        schtasks(&["/Query", "/TN", TASK_NAME, "/XML"]).is_ok()
+    /// What the scheduler holds under our name. The states exist because
+    /// conflating them is what let `stop` end a stranger's task and `ensure`
+    /// overwrite it.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Task {
+        Absent,
+        Ours,
+        Foreign,
+        /// Could not tell (listing or lookup failed) — callers must not act.
+        Unknown,
     }
 
-    /// Its definition, for the ownership check below.
-    fn definition() -> Option<String> {
-        schtasks(&["/Query", "/TN", TASK_NAME, "/XML"]).ok()
+    /// Enumerate first, then inspect. Task *names* are not localised (unlike
+    /// `schtasks`' status labels), so a successful listing is authoritative
+    /// about existence; anything we cannot answer comes back as `Unknown`.
+    pub fn probe() -> Task {
+        let Ok(list) = schtasks(&["/Query", "/FO", "CSV", "/NH"]) else {
+            return Task::Unknown;
+        };
+        if !lists_task(&list, TASK_NAME) {
+            return Task::Absent;
+        }
+        match schtasks(&["/Query", "/TN", TASK_NAME, "/XML"]) {
+            Ok(xml) if task_is_ours(&xml) => Task::Ours,
+            Ok(_) => Task::Foreign,
+            Err(_) => Task::Unknown,
+        }
     }
 
     /// Create the task if missing, or refresh it when the install moved.
@@ -627,13 +687,16 @@ mod task {
         // `/Create /F` overwrites by name. Refuse to clobber a task that happens
         // to be called `walgit` but is somebody else's (the same care the port
         // sweep takes before it kills a pid).
-        if let Some(existing) = definition()
-            && !super::task_is_ours(&existing)
-        {
-            bail!(
-                "walgit: a scheduled task named `{TASK_NAME}` already exists and does not look like \
-                 ours — refusing to replace it. Rename or delete it, then retry."
-            );
+        match probe() {
+            Task::Absent | Task::Ours => {}
+            Task::Foreign => bail!(
+                "walgit: a scheduled task named `{TASK_NAME}` already exists and is not ours — \
+                 refusing to replace it. Rename or delete it, then retry."
+            ),
+            Task::Unknown => bail!(
+                "walgit: could not determine whether a task named `{TASK_NAME}` already exists — \
+                 refusing to replace it; inspect `schtasks /Query /TN {TASK_NAME} /XML` first"
+            ),
         }
         let xml_path = home.join("walgit-task.xml");
         std::fs::write(&xml_path, task_xml(exe, config, log)).with_context(|| {
@@ -785,6 +848,40 @@ mod listener_parse_tests {
         // Someone else's task that happens to be called `walgit`.
         let theirs = r#"<Exec><Command>C:\tools\backup.exe</Command><Arguments>--nightly</Arguments></Exec>"#;
         assert!(!task_is_ours(theirs));
+    }
+
+    #[test]
+    fn ownership_looks_at_the_action_only() {
+        use super::{lists_task, task_is_ours};
+        // Ours: the redirect wrapper still names the binary in its arguments.
+        let ours = r#"<Exec><Command>C:\Windows\System32\cmd.exe</Command>
+            <Arguments>/c ""C:\Users\x\AppData\Local\Programs\walgit\walgit.exe" serve >> log 2>&1"</Arguments></Exec>"#;
+        assert!(task_is_ours(ours));
+        assert!(task_is_ours(r"<Command>walgit.exe</Command><Arguments>serve</Arguments>"));
+        // Somebody else's task that happens to be called `walgit`: a description
+        // that mentions the name, a differently-named binary, or a name that
+        // merely *ends* with ours must not qualify.
+        assert!(!task_is_ours(
+            "<Description>backup walgit data</Description><Command>ntbackup.exe</Command><Arguments>/all</Arguments>"
+        ));
+        assert!(!task_is_ours(
+            r"<Command>C:\tools\walgit-backup.exe</Command><Arguments>--now</Arguments>"
+        ));
+        assert!(!task_is_ours(
+            r"<Command>C:\tools\evilwalgit.exe</Command><Arguments>--now</Arguments>"
+        ));
+
+        // Existence comes from the *(unlocalised)* name column of the listing.
+        let list = concat!(
+            r"\Microsoft\Windows\Defrag\ScheduledDefrag,N/A,Ready", "\n",
+            r#""\walgit",N/A,Running"#, "\n",
+        );
+        assert!(lists_task(list, "walgit"));
+        assert!(!lists_task(list, "walgit2"));
+        assert!(!lists_task(
+            r"\Microsoft\Windows\Defrag\ScheduledDefrag,N/A,Ready",
+            "walgit"
+        ));
     }
 
     #[test]
