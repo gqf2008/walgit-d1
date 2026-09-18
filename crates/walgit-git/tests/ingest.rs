@@ -560,6 +560,35 @@ fn open_history_pack_repo(root: &tempfile::TempDir, id: &RepoId) -> LocalRepo {
     LocalRepo::open(root.path(), id).unwrap().unwrap()
 }
 
+async fn full_midx_repo(
+    format: ObjectFormat,
+) -> (tempfile::TempDir, RepoId, gix_hash::ObjectId) {
+    let root = tempfile::TempDir::new().unwrap();
+    let id = RepoId::new("acme", "full-midx").unwrap();
+    let repo = LocalRepo::init(root.path(), &id, format).unwrap();
+    let src = cm::SourceRepo::new_with_object_format(format.as_str());
+    let head = src.head();
+    let base = repo
+        .ingest_pack(
+            cm::cursor(src.pack(&[head.as_str()], &[], false)),
+            IngestOptions {
+                fsck: false,
+                max_bytes: None,
+                thin: false,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let out = repo.git(&["multi-pack-index", "write"]).await.unwrap();
+    assert!(
+        out.status.success(),
+        "git multi-pack-index write: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (root, id, base.checksum)
+}
+
 fn assert_midx_ok(repo: &LocalRepo) {
     let midx = repo.path().join("objects/pack/multi-pack-index");
     if !midx.is_file() {
@@ -592,10 +621,43 @@ async fn removing_midx_covered_base_rewrites_stale_midx() {
     let repo = open_history_pack_repo(&root, &id);
     assert!(midx_names_pack(&repo, &base));
     let before = repo.refs_diag("HEAD").generation;
-    assert!(repo.remove_pack(&base).unwrap());
+    repo.remove_pack(&base).unwrap();
+    assert_eq!(repo.refs_diag("HEAD").generation, before);
+    repo.refresh().unwrap();
     assert_eq!(repo.refs_diag("HEAD").generation, before + 1);
     assert!(!midx_names_pack(&repo, &base));
     assert_midx_ok(&repo);
+}
+
+#[tokio::test]
+async fn real_git_full_midx_survives_refresh_for_sha1_and_sha256() {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let (root, id, base) = full_midx_repo(format).await;
+        let midx = id.local_dir(root.path()).join("objects/pack/multi-pack-index");
+        let before = std::fs::read(&midx).unwrap();
+        let verify = Command::new("git")
+            .arg("--git-dir")
+            .arg(id.local_dir(root.path()))
+            .args(["multi-pack-index", "verify"])
+            .output()
+            .unwrap();
+        assert!(
+            verify.status.success(),
+            "{format:?}: git MIDX must be valid before refresh: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+
+        let repo = open_history_pack_repo(&root, &id);
+        assert!(midx_names_pack(&repo, &base));
+        repo.refresh().unwrap();
+        assert!(midx.is_file(), "{format:?}: legal full MIDX was removed");
+        assert_eq!(
+            std::fs::read(&midx).unwrap(),
+            before,
+            "{format:?}: legal full MIDX was rewritten"
+        );
+        assert_midx_ok(&repo);
+    }
 }
 
 #[tokio::test]
@@ -612,7 +674,13 @@ async fn refresh_repairs_stale_midx_that_names_a_missing_pack() {
 
 #[tokio::test]
 async fn refresh_rebuilds_empty_truncated_and_missing_chunk_midx() {
-    for case in ["empty", "truncated", "missing-oidf"] {
+    for case in [
+        "empty",
+        "truncated",
+        "missing-oidf",
+        "duplicate-chunk",
+        "bad-terminator",
+    ] {
         let (root, id, base) = history_pack_repo(ObjectFormat::Sha1).await;
         let local_dir = id.local_dir(root.path());
         let midx = local_dir.join("objects/pack/multi-pack-index");
@@ -634,6 +702,19 @@ async fn refresh_rebuilds_empty_truncated_and_missing_chunk_midx() {
                     }
                 }
                 assert!(found, "fixture MIDX has an OIDF chunk");
+                std::fs::write(&midx, bytes).unwrap();
+            }
+            "duplicate-chunk" => {
+                let mut bytes = std::fs::read(&midx).unwrap();
+                let first = bytes[12..16].to_vec();
+                bytes[24..28].copy_from_slice(&first);
+                std::fs::write(&midx, bytes).unwrap();
+            }
+            "bad-terminator" => {
+                let mut bytes = std::fs::read(&midx).unwrap();
+                let nchunks = usize::from(bytes[6]);
+                bytes[12 + nchunks * 12..16 + nchunks * 12]
+                    .copy_from_slice(b"BAD!");
                 std::fs::write(&midx, bytes).unwrap();
             }
             _ => unreachable!(),

@@ -239,11 +239,6 @@ pub(crate) async fn link_and_install_pack(
     let oid = gix_hash::ObjectId::from_hex(checksum.as_bytes())
         .map_err(|e| WalError::Corrupt(format!("invalid pack checksum {checksum}: {e}")))?;
     if local.pack_path(&oid).exists() {
-        // A store-mount blip can make the linked base disappear from the
-        // history MIDX while its symlink stays behind. On recovery the pack
-        // path exists again, but this early return would otherwise leave the
-        // base out of the MIDX forever, losing the history-first lookup.
-        local.ensure_history_midx_covers_base(&oid).await?;
         return Ok(());
     }
     let span =
@@ -634,21 +629,8 @@ pub(crate) async fn reconcile_packs(
     handle: &super::handle::RepoHandle,
     manifest: &Manifest,
     level: SyncLevel,
-) -> Result<bool, WalError> {
-    reconcile_packs_inner(handle, manifest, level, false).await
-}
-
-/// Finish a pack reconciliation with a coherent gix handle. A removal may
-/// already have refreshed it under the write lock; paying for a second full
-/// ODB-index load on a large repository is pure latency.
-pub(crate) async fn refresh_after_reconcile(
-    local: &LocalRepo,
-    already_refreshed: bool,
 ) -> Result<(), WalError> {
-    if !already_refreshed {
-        local.refresh_async().await?;
-    }
-    Ok(())
+    reconcile_packs_inner(handle, manifest, level, false).await
 }
 
 /// `background_history = true`: this call *is* the background history-pack
@@ -658,7 +640,7 @@ pub(crate) async fn reconcile_packs_inner(
     manifest: &Manifest,
     level: SyncLevel,
     background_history: bool,
-) -> Result<bool, WalError> {
+) -> Result<(), WalError> {
     let store = &handle.store;
     let local = &handle.local;
     // Pack reconciliation is the proof itself: invalidate the previous
@@ -918,11 +900,10 @@ pub(crate) async fn reconcile_packs_inner(
     let prune_lock = handle.prune_lock();
     let Ok(_prune_guard) = prune_lock.try_lock() else {
         handle.state.lock().packs_dirty = true;
-        return Ok(false);
+        return Ok(());
     };
     let pending = std::mem::take(&mut handle.state.lock().pending_pack_removals);
     let mut removed = 0usize;
-    let mut refreshed_after_removal = false;
     let mut still_pending: Vec<String> = Vec::new();
     let mut deferred_staged: Vec<String> = Vec::new();
     let mut candidates: std::collections::BTreeSet<String> = pending
@@ -986,7 +967,7 @@ pub(crate) async fn reconcile_packs_inner(
                 .map(|(_, oid)| *oid)
                 .collect();
             if !existing.is_empty() {
-                refreshed_after_removal = local.remove_packs(&existing)?;
+                local.remove_packs(&existing)?;
                 tracing::info!(repo = %handle.id, packs = existing.len(), "local packs outside the manifest removed");
             }
             removed = existing.len();
@@ -1010,7 +991,7 @@ pub(crate) async fn reconcile_packs_inner(
     if handle.state.lock().packs_ready() {
         handle.mark_packs_verified();
     }
-    Ok(refreshed_after_removal)
+    Ok(())
 }
 
 /// Keep the local commit-graph chain current after packs were installed:
@@ -1257,8 +1238,9 @@ pub(crate) async fn materialize_from_scratch(
         .await?;
     reconcile_packs(handle, manifest, SyncLevel::Serve)
         .instrument(span.clone())
-        .await
-        .map(|_| ())
+        .await?;
+    handle.local.refresh_async().await?;
+    Ok(())
 }
 
 /// The **bulk runtime**: a small dedicated tokio runtime (own worker threads)
@@ -1306,89 +1288,8 @@ pub(crate) async fn on_bulk_runtime<T: Send + 'static>(
 
 #[cfg(test)]
 mod download_tests {
-    use super::{download_object, link_and_install_pack, refresh_after_reconcile};
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    use walgit_git::{IngestOptions, LocalRepo, ObjectFormat, RepoId, gix_hash};
-    use walgit_proto::v1::PackRef;
+    use super::download_object;
     use walgit_store::{ObjectStoreExt, Prefixed, PutMode, memory::MemoryStore};
-
-    fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    }
-
-    async fn history_repo_without_base_in_midx()
-    -> (tempfile::TempDir, LocalRepo, gix_hash::ObjectId) {
-        let source = tempfile::tempdir().unwrap();
-        run_git(source.path(), &["init", "-q"]);
-        run_git(source.path(), &["config", "user.email", "t@t"]);
-        run_git(source.path(), &["config", "user.name", "t"]);
-        std::fs::write(source.path().join("file"), b"hello\n").unwrap();
-        run_git(source.path(), &["add", "file"]);
-        run_git(source.path(), &["commit", "-q", "-m", "init"]);
-        let head = run_git(source.path(), &["rev-parse", "HEAD"]);
-
-        let mut pack = Command::new("git")
-            .current_dir(source.path())
-            .args(["pack-objects", "--stdout", "--revs"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        pack.stdin.as_mut().unwrap().write_all(b"HEAD\n").unwrap();
-        let pack = pack.wait_with_output().unwrap();
-        assert!(
-            pack.status.success(),
-            "pack-objects: {}",
-            String::from_utf8_lossy(&pack.stderr)
-        );
-
-        let root = tempfile::tempdir().unwrap();
-        let id = RepoId::new("test", "midx-recovery").unwrap();
-        let local = LocalRepo::init(root.path(), &id, ObjectFormat::Sha1).unwrap();
-        let base = local
-            .ingest_pack(
-                std::io::Cursor::new(pack.stdout),
-                IngestOptions {
-                    fsck: false,
-                    max_bytes: None,
-                    thin: false,
-                },
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let out = local
-            .git(&["update-ref", "refs/heads/main", head.as_str()])
-            .await
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        local.refresh_refs().unwrap();
-        local.write_history_pack(&base.checksum).await.unwrap();
-        local.write_history_midx().await.unwrap();
-
-        let base_pack = local.pack_path(&base.checksum);
-        let hidden = base_pack.with_extension("hidden");
-        std::fs::rename(&base_pack, &hidden).unwrap();
-        local.write_history_midx().await.unwrap();
-        std::fs::rename(&hidden, &base_pack).unwrap();
-        (root, local, base.checksum)
-    }
 
     #[tokio::test]
     async fn striped_download_matches_source() {
@@ -1425,53 +1326,4 @@ mod download_tests {
         assert_eq!(std::fs::read(&small).unwrap(), b"tiny");
     }
 
-    #[tokio::test]
-    async fn refresh_after_reconcile_skips_a_removal_refresh() {
-        let root = tempfile::tempdir().unwrap();
-        let id = RepoId::new("test", "refresh").unwrap();
-        let local = LocalRepo::init(root.path(), &id, ObjectFormat::Sha1).unwrap();
-        let before = local.refs_diag("HEAD").generation;
-        refresh_after_reconcile(&local, true).await.unwrap();
-        assert_eq!(local.refs_diag("HEAD").generation, before);
-        refresh_after_reconcile(&local, false).await.unwrap();
-        assert_eq!(local.refs_diag("HEAD").generation, before + 1);
-    }
-
-    #[tokio::test]
-    async fn linked_pack_early_return_restores_the_base_to_a_history_midx() {
-        let (_root, local, base) = history_repo_without_base_in_midx().await;
-        let midx = local.path().join("objects/pack/multi-pack-index");
-        let needle = format!("pack-{base}.idx");
-        let contains = |path: &std::path::Path| {
-            std::fs::read(path)
-                .unwrap()
-                .windows(needle.len())
-                .any(|window| window == needle.as_bytes())
-        };
-        assert!(!contains(&midx));
-
-        let store = Prefixed::new(MemoryStore::shared(), "p/");
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("mounted.pack");
-        let pack = PackRef {
-            checksum: base.to_string(),
-            ..PackRef::default()
-        };
-        link_and_install_pack(&store, &local, &pack, tmp.path(), &target)
-            .await
-            .unwrap();
-
-        assert!(contains(&midx));
-        let verify = Command::new("git")
-            .arg("--git-dir")
-            .arg(local.path())
-            .args(["multi-pack-index", "verify"])
-            .output()
-            .unwrap();
-        assert!(
-            verify.status.success(),
-            "multi-pack-index verify: {}",
-            String::from_utf8_lossy(&verify.stderr)
-        );
-    }
 }

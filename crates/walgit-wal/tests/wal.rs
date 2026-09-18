@@ -1740,6 +1740,45 @@ async fn test_serve_level_links_base_from_store_mount() {
         assert!(std::time::Instant::now() < deadline, "history pack install");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let midx_contains_base = || {
+        let needle = format!("pack-{base_hex}.idx");
+        std::fs::read(&midx)
+            .unwrap()
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(midx_contains_base());
+
+    // Simulate a mount blip: the base pair disappears, a normal history-MIDX
+    // rewrite drops it, then the mount returns. A later ordinary sync (forced
+    // by a ref-only manifest revision) must put the base back even though the
+    // already-enumerated base pack is not part of missing_packs.
+    let hidden_mount_pack = mounted_pack.with_extension("mount-hidden");
+    std::fs::rename(&mounted_pack, &hidden_mount_pack).unwrap();
+    handle2.local().write_history_midx().await.unwrap();
+    assert!(!midx_contains_base());
+    std::fs::rename(&hidden_mount_pack, &mounted_pack).unwrap();
+    let ref_only = handle
+        .publish_push(
+            None,
+            make_txn(vec![("refs/heads/mount-recovery", "", top.as_str())]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        ref_only.per_ref.iter().all(|(_, result)| result.is_ok()),
+        "{:?}",
+        ref_only.per_ref
+    );
+    {
+        let _g = handle2.sync().await.unwrap();
+    }
+    assert!(
+        midx_contains_base(),
+        "sync must restore a recovered linked base to the history MIDX"
+    );
+
     // Effect: with the mounted base unreadable, a tree still resolves (from
     // the history pack through the midx) while a blob does not.
     let git = |args: &[&str]| {
