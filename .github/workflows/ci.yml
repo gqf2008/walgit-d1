@@ -137,6 +137,35 @@ jobs:
       # the script (control fields, layout, naming) on every PR with debug binaries,
       # the way a tag build would with release ones (issue #108). Build the bins
       # explicitly: the earlier steps' test builds may not leave plain executables.
+      # D49: the MCP adapter is a stdio protocol. The unit tests cover the message
+      # layer in-process; this covers the *binary* speaking it — framing, no reply
+      # to notifications, and the read-only surface (a writing tool must not be
+      # listed until `--allow-write`).
+      - name: MCP stdio smoke
+        run: |
+          # The earlier steps build test binaries; make sure the plain executable
+          # exists before piping a session into it.
+          cargo build -q -p walgit-cli --bin walgit
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            "{not json" \
+            '{"jsonrpc":"2.0","id":3,"method":"nope"}' \
+            | target/debug/walgit mcp --config walgit.example.toml > mcp-smoke.jsonl
+          python3 - <<'PY'
+          import json
+          lines = [json.loads(l) for l in open("mcp-smoke.jsonl")]
+          assert len(lines) == 4, lines  # the notification must not produce a reply
+          init, tools, bad, unknown = lines
+          assert init["result"]["protocolVersion"] == "2024-11-05", init
+          names = [t["name"] for t in tools["result"]["tools"]]
+          assert "repo_tree" in names, names
+          assert "collab_entry" not in names, names
+          assert bad["error"]["code"] == -32700, bad
+          assert unknown["error"]["code"] == -32601, unknown
+          print(f"MCP smoke OK - {len(names)} read-only tools")
+          PY
       - name: Assemble and inspect the linux .deb
         run: |
           sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
