@@ -517,3 +517,94 @@ async fn ingest_failures_name_the_cause_and_leave_nothing_behind() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+async fn history_pack_repo() -> (tempfile::TempDir, LocalRepo, gix_hash::ObjectId) {
+    let root = tempfile::TempDir::new().unwrap();
+    let id = RepoId::new("acme", "midx").unwrap();
+    let repo = LocalRepo::init(root.path(), &id, ObjectFormat::Sha1).unwrap();
+    let src = cm::SourceRepo::new();
+    let head = src.head();
+    let base = repo
+        .ingest_pack(
+            cm::cursor(src.pack(&[head.as_str()], &[], false)),
+            IngestOptions {
+                fsck: false,
+                max_bytes: None,
+                thin: false,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let out = repo
+        .git(&["update-ref", "refs/heads/main", head.as_str()])
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    repo.refresh_refs().unwrap();
+    let history = repo.write_history_pack(&base.checksum).await.unwrap();
+    repo.write_history_midx().await.unwrap();
+    let packs = repo.packs().unwrap();
+    assert!(packs.iter().any(|p| p.checksum == base.checksum));
+    assert!(packs.iter().any(|p| p.checksum == history.checksum));
+    (root, repo, base.checksum)
+}
+
+fn assert_midx_ok(repo: &LocalRepo) {
+    let midx = repo.path().join("objects/pack/multi-pack-index");
+    if !midx.is_file() {
+        return;
+    }
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(repo.path())
+        .args(["multi-pack-index", "verify"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "multi-pack-index verify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn midx_names_pack(repo: &LocalRepo, checksum: &gix_hash::oid) -> bool {
+    let Ok(bytes) = std::fs::read(repo.path().join("objects/pack/multi-pack-index")) else {
+        return false;
+    };
+    let needle = format!("pack-{checksum}.idx");
+    String::from_utf8_lossy(&bytes).contains(&needle)
+}
+
+#[tokio::test]
+async fn removing_midx_covered_base_rewrites_stale_midx() {
+    let (_root, repo, base) = history_pack_repo().await;
+    assert!(midx_names_pack(&repo, &base));
+    repo.remove_pack(&base).unwrap();
+    assert!(!midx_names_pack(&repo, &base));
+    assert_midx_ok(&repo);
+}
+
+#[tokio::test]
+async fn refresh_repairs_stale_midx_that_names_a_missing_pack() {
+    let (_root, repo, base) = history_pack_repo().await;
+    assert!(midx_names_pack(&repo, &base));
+    std::fs::remove_file(repo.pack_path(&base).with_extension("pack")).unwrap();
+    std::fs::remove_file(repo.pack_path(&base).with_extension("idx")).unwrap();
+    repo.refresh().unwrap();
+    assert!(!midx_names_pack(&repo, &base));
+    assert_midx_ok(&repo);
+}
+
+#[tokio::test]
+async fn history_midx_never_names_a_pack_without_its_index() {
+    let (_root, repo, base) = history_pack_repo().await;
+    std::fs::remove_file(repo.pack_path(&base).with_extension("idx")).unwrap();
+    repo.write_history_midx().await.unwrap();
+    assert!(!midx_names_pack(&repo, &base));
+    assert_midx_ok(&repo);
+}
