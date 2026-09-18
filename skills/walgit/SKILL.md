@@ -46,6 +46,21 @@ Issues, PRs, reviews, status and the board are **append-only signed entries** in
 Web UI, `walgit collab` views and the board are deterministic projections. Work done without entries
 leaves no collaboration record.
 
+**Parallel team first.** For parallel work, register one principal + Ed25519 key per
+agent *before* opening threads — a worker pool (`<proj>-worker-1..N`), a reviewer pool
+(`<proj>-reviewer-1..N`), and a coordinator (`<proj>-coordinator`). N active agents = N
+cards = N worktrees/branches; one card has one owner; the reviewer must sign with a
+different principal than the author and reject a self-approve (the merge rule counts
+verified approvals but does not infer authorship); the coordinator performs the merge. Never let
+multiple agents sign under one shared key (`sqb` or otherwise): the board and audit can
+then no longer distinguish implementer, reviewer, and merger. See `/SKILL.md` §0b for
+the full topology and copyable checklist.
+
+```bash
+walgit collab principal-register --repo <checkout> --principal <principal> \
+  --key ~/.walgit/keys/<principal>.ed25519 --push origin
+```
+
 ```bash
 # A function, not `W="walgit …"; $W …` — zsh does not word-split an unquoted expansion.
 W() { walgit --config ~/.walgit/walgit.toml "$@"; }
@@ -71,8 +86,8 @@ W collab entry --kind <issue|comment|patch|review|merge_result|status> \
 | `issue` | `{"title","body"}` | thread root |
 | `status` | `{"status","owner","worktree?","branch?","work","note?"}` | claim / move the card |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
-| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review |
-| `merge_result` | `{"oid","merged":true,"note"}` | merge record (the board keys on `merged:true`) |
+| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review; actor must differ from the author (coordinator-enforced) |
+| `merge_result` | first `{"oid","result":"merged","note"}`, then `{"oid","merged":true,"note"}` | merge record (the board keys on `merged:true`) |
 | `comment` | `{"note"}` | progress notes (does not move the card) |
 
 **Board projection rules** (`.walgit/board.toml` defines the columns): `status` is the newest `status`
@@ -86,8 +101,10 @@ therefore projects as an **unowned `open` card** — file the `issue` **and** a 
 not count.
 
 Standard flow: `issue` → `status: in-progress` (owner/worktree/branch) → work in a worktree →
-`patch` → `status: needs-review` → independent `review` → merge locally & push → `merge_result` →
-`status: closed`. Keep the board and the thread as the single record; never edit state files by hand.
+`patch` → `status: needs-review` → independent `review` by another principal → coordinator merges
+locally & pushes → `merge_result` with the oid → `merge_result {"merged":true}` → `status: closed`.
+Remove the worktree after closure. Keep the board and the thread as the single record; never edit
+state files by hand.
 
 ## 4. Listening for events (pull, never push)
 

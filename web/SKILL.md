@@ -87,10 +87,10 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
   - `walgit collab report` — global dashboard: threads, PR status,
     verification health, activity.
 - Write (construct + sign + deliver):
-  - First use only: `walgit collab principal-register` — publish your
-    principal's public key.
+  - Before a parallel workstream: register the whole team, one principal per
+    agent (see §0b); `walgit collab principal-register` publishes a public key.
   - `walgit collab entry --kind <kind> --id <thread> --actor <principal>
-    --body '<json>' --key <ed25519-hex> [--base … --head …] --push <remote>`
+    --body '<json>' --key <keyfile> [--base … --head …] --push <remote>`
     — appends a signed entry and pushes it. Nobody edits state; a change is
     a new signed entry whose parent chain anyone can replay and verify.
 - Automate: `walgit collab watch --exec <cmd>` — resident loop: fetch
@@ -238,17 +238,136 @@ as **signed threads on `refs/collab/*`**. Agents never collaborate out-of-band (
 chat, no shared scratch files as the source of truth): the thread is the only shared memory,
 everyone re-derives the same view from the refs.
 
-### 0. Identity
+### 0. Identity — register the team before the work
 
 - One principal per agent, one Ed25519 key (`32` raw bytes as hex, keep at
-  `~/.walgit/keys/<name>.ed25519`). Register once per repository:
-  `walgit collab principal-register --repo <checkout> --principal <you> --key <keyfile> --push origin`.
-- Write only your own inbox (`refs/collab/inbox/<you>/*`). Never borrow another principal's
+  `~/.walgit/keys/<principal>.ed25519`). Each agent owns its key; never share one
+  key across agents or roles.
+- Before the first thread, register the whole team, not one lone identity: a worker
+  pool, a reviewer pool, and a coordinator. A practical default is
+  `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, and `<proj>-coordinator`. Each agent
+  registers only its own line:
+
+  ```sh
+  checkout=/path/to/checkout
+  proj=my-project
+  walgit collab principal-register --repo "$checkout" --principal "${proj}-worker-1" \
+    --key "$HOME/.walgit/keys/${proj}-worker-1.ed25519" --push origin
+  walgit collab principal-register --repo "$checkout" --principal "${proj}-worker-2" \
+    --key "$HOME/.walgit/keys/${proj}-worker-2.ed25519" --push origin
+  walgit collab principal-register --repo "$checkout" --principal "${proj}-reviewer-1" \
+    --key "$HOME/.walgit/keys/${proj}-reviewer-1.ed25519" --push origin
+  walgit collab principal-register --repo "$checkout" --principal "${proj}-coordinator" \
+    --key "$HOME/.walgit/keys/${proj}-coordinator.ed25519" --push origin
+  ```
+
+- Register once per repository. `--push origin` publishes the public key so other agents
+  can verify it. A rejected registration is a hard stop: do not start writing entries
+  under an unregistered principal.
+- Never sign an entry for another agent or make every agent use one shared key. If the
+  author, reviewer, and merger all sign as `sqb` (or any other shared principal), the
+  board sees one owner and verification cannot tell who implemented, reviewed, or
+  merged. That destroys independent review and the audit trail.
+- Write only your own inbox (`refs/collab/inbox/<principal>/*`). Never borrow another principal's
   key. Read-side verification marks `actor != inbox` entries unverified — treat them as untrusted.
+
+### 0b. Parallelism — register a team, not a lone agent
+
+Parallel work is a topology, not simply "use more agents." Start from this default:
+**N active agents = N principals/keys = N cards (threads) = N worktrees/branches**.
+
+- **One owner per card at a time.** The latest `status` entry's `owner`, `worktree`,
+  and `branch` are the claim ledger; ownership may hand off only through a new signed
+  `status` entry. Do not let two agents work the same card; split the work into a new
+  thread instead.
+- **Reviewers are different principals.** The `review` entry must be signed by a
+  principal other than the patch author (and, for the final review, other than the
+  merger). Treat the author's own `approve` as invalid: do not merge on it. The
+  `review.body.agent` field is descriptive; the verified `actor` and key are the
+  identities the coordinator must compare. The merge rule counts verified approvals
+  but does not infer authorship, so this is a coordinator gate, not an automatic one.
+- **The coordinator merges and archives.** After approval, the coordinator merges the
+  branch locally and pushes the result. Record the merged oid first, then move the card:
+  1. `merge_result` with `{"oid":"<sha>","result":"merged","note":"..."}` (record the oid);
+  2. `merge_result` with `{"merged":true,"oid":"<sha>","note":"..."}` (move to `merged`);
+  3. `status` with `{"status":"closed","owner":"<proj>-coordinator","worktree":"...","branch":"main","work":"..."}`.
+- **Move cards only through signed entries.** Use `status` for normal moves; the
+  projector also treats `merge_result {"merged":true}` as the terminal `merged` move.
+  Never edit the board, a state file, or another agent's inbox to move a card.
+- **Clean up immediately after closure.** Remove the card's worktree and delete its
+  local branch only after the merge is recorded, then verify `git worktree list` no
+  longer contains it.
+- **Split by write set, not by title.** Parallelize work whose files, interfaces, and
+  review surface do not overlap. Serialize changes to the same file, schema, or
+  migration; otherwise two workers will create a conflict that review cannot resolve
+  cheaply.
+
+A common shape is **2–4 workers, 1–2 reviewers, and 1 coordinator**. Reviewers can be
+pulled in per review; every active card still needs its own owner and worktree. The
+coordinator should keep the smallest possible write set so the merge path stays easy to
+replay.
+
+**Copyable start checklist** (replace `<...>` values; use the returned oid as the next
+`--parent`):
+
+```sh
+# 1. File the card (coordinator). The issue names the objective, roles, owner,
+#    and machine-checkable acceptance.
+walgit collab entry --repo <checkout> --kind issue --id <thread> \
+  --actor <proj>-coordinator \
+  --body '{"title":"<title>","body":"objective; roles; machine-checkable acceptance"}' \
+  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+
+# 2. Claim it (worker). status fields are the claim ledger; use the issue entry oid as parent.
+walgit collab entry --repo <checkout> --kind status --id <thread> \
+  --actor <proj>-worker-1 --parent <issue-oid> \
+  --body '{"status":"in-progress","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"<one-line plan>"}' \
+  --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
+
+# 3. Work on exactly that card.
+git worktree add .worktrees/wt-<thread> -b feat/<thread> <base>
+git push origin feat/<thread>
+
+# 4. Attach the implementation, then ask for review (use the status entry oid as parent).
+walgit collab entry --repo <checkout> --kind patch --id <thread> \
+  --actor <proj>-worker-1 --parent <status-oid> \
+  --base refs/heads/main --head refs/heads/feat/<thread> \
+  --body '{"title":"<patch title>","message":"<what changed and why>"}' \
+  --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
+walgit collab entry --repo <checkout> --kind status --id <thread> \
+  --actor <proj>-worker-1 --parent <patch-oid> \
+  --body '{"status":"needs-review","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"ready for independent review"}' \
+  --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
+
+# 5. Review with a different principal. Full findings go in note; the key is the identity.
+walgit collab entry --repo <checkout> --kind review --id <thread> \
+  --actor <proj>-reviewer-1 --parent <review-request-oid> \
+  --body '{"decision":"approve","agent":"<proj>-reviewer-1","note":"location; problem; suggestion; reproducible verification"}' \
+  --key ~/.walgit/keys/<proj>-reviewer-1.ed25519 --push origin
+
+# 6. Coordinator only: merge, push, then record the oid and the terminal move.
+walgit collab entry --repo <checkout> --kind merge_result --id <thread> \
+  --actor <proj>-coordinator --parent <review-oid> \
+  --body '{"oid":"<merged-oid>","result":"merged","note":"merged feat/<thread> into main"}' \
+  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+walgit collab entry --repo <checkout> --kind merge_result --id <thread> \
+  --actor <proj>-coordinator --parent <merge-oid-entry> \
+  --body '{"merged":true,"oid":"<merged-oid>","note":"<release summary>"}' \
+  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+walgit collab entry --repo <checkout> --kind status --id <thread> \
+  --actor <proj>-coordinator --parent <merged-entry-oid> \
+  --body '{"status":"closed","owner":"<proj>-coordinator","worktree":"wt-<thread>","branch":"main","work":"merged and verified"}' \
+  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+```
+
+The anti-pattern is a single identity serially doing the whole job, or several agents
+sharing one key/knowing each other's keys to "make the board green." Both make the board
+look productive while its rows cannot answer the only questions it exists to answer:
+*who did this, who reviewed it, and who merged it?*
 
 ### 1. Work unit = one thread
 
-- Open an `issue` entry with: objective, roles, and **machine-checkable acceptance**.
+- Open an `issue` entry with: objective, roles, one owner, and **machine-checkable acceptance**.
 - Split large jobs into sub-threads; each sub-deliverable is its own thread. Reference other
   threads by entry oid in the body — `walgit collab entry --related <oid>` /
   `--depends-on <oid>` (the thread view reports `broken_refs` for unresolvable oids).
@@ -268,9 +387,10 @@ everyone re-derives the same view from the refs.
 
 - **Read before write.** Fetch the thread (and repo refs) first; append with the latest entry
   oid as `--parent`. Never answer from memory/cache.
-- Express state with kinds, not prose: `status` (`in-progress` / `needs-review` / `done`),
-  `review` (`approve` / `request_changes` + note), `merge_result` (`merged: true` + oid),
-  `comment` for claims/progress/questions.
+- Express state with kinds, not prose: `status` (`in-progress` / `needs-review` /
+  `blocked` / `needs-human` / `done` / `closed`), `review` (`approve` /
+  `request_changes` + note), `merge_result` (`merged: true` + oid), `comment` for
+  claims/progress/questions.
 - Every `in-progress` / `needs-review` / `blocked` / `needs-human` status carries the supervision
   context: `owner`, `worktree`, `branch`, `work` (or `note`). Fields inherit across status moves;
   an explicit empty string clears them. Example:
@@ -279,8 +399,12 @@ everyone re-derives the same view from the refs.
 
 ### 4. Review
 
-- An independent agent (or human) reviews the diff/artifacts and posts **full findings** in the
-  `review` entry — location, problem, suggestion — not a one-line conclusion.
+- An independent agent (or human) — a **different principal** from the patch author and,
+  for the final review, from the merger — reviews the diff/artifacts and posts **full
+  findings** in the `review` entry — location, problem, suggestion — not a one-line
+  conclusion. The author's own `approve` is not independent review and must not satisfy
+  the review gate; the coordinator must check the actor, because the merge rule counts
+  verified approvals without excluding the author automatically.
 - `request_changes` → the implementer fixes on the branch and replies on the thread mapping each
   point to what changed → reviewer re-reviews → `approve` only when satisfied.
 - Treat "approve with no evidence" as noise; verification claims must be reproducible.
@@ -292,7 +416,9 @@ everyone re-derives the same view from the refs.
 - After approval: merge locally (fast-forward preferred), push the result to this host. Push the
   same refs to a GitHub mirror only for projects that are dual-homed (walgit = fact source,
   GitHub = backup/public mirror) — never as a requirement of walgit itself.
-- Write `merge_result` `{"merged": true, "oid": "<sha>"}` and a `status` `done` on the thread.
+- The coordinator merges locally and pushes the result. First write `merge_result`
+  `{"oid": "<sha>", "result": "merged"}`; then write `merge_result`
+  `{"merged": true, "oid": "<sha>"}`; then move the card with `status` `closed`.
 - Archive human-facing artifacts as files in the repository (reports under `docs/`), not only in
   thread bodies.
 

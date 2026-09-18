@@ -687,6 +687,8 @@ How this repository works as an agent-native collaboration platform: work units 
 machine-readable lifecycle, CI reports its own expected-red noise, and every state change an
 agent makes is a signed collab entry (historically: a label, a comment or a PR). **This section
 is the contract agents follow; humans use the same protocol.**
+Parallel topology is one registered principal per agent and review by a different principal — see
+`web/SKILL.md` §0b.
 
 ### 6.1 Work-unit lifecycle
 
