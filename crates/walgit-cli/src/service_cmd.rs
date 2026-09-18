@@ -480,13 +480,40 @@ async fn stop(listen: &str, _home: &Path) -> Result<()> {
 /// stopped. Doubt is a reason to do nothing (and say so), never to end somebody
 /// else's task; a task left `Running` is a reason to fail loudly, because
 /// `MultipleInstancesPolicy=IgnoreNew` would make the next `start` a no-op.
+/// A transient query failure is retried, but persistent doubt still fails the
+/// command: `stop` must never report success while ownership is unknown.
+#[cfg(any(windows, test))]
+const TASK_PROBE_ATTEMPTS: usize = 5;
+#[cfg(any(windows, test))]
+const TASK_PROBE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 #[cfg(windows)]
 fn end_task_if_ours() -> Result<()> {
-    match task::probe() {
+    end_task_if_ours_with(task::probe, task::end, task::is_running)
+}
+
+#[cfg(any(windows, test))]
+fn end_task_if_ours_with(
+    mut probe: impl FnMut() -> task::Task,
+    mut end: impl FnMut() -> Result<()>,
+    mut is_running: impl FnMut() -> Result<bool>,
+) -> Result<()> {
+    let mut existing = task::Task::Unknown;
+    for attempt in 0..TASK_PROBE_ATTEMPTS {
+        existing = probe();
+        if existing != task::Task::Unknown {
+            break;
+        }
+        if attempt + 1 < TASK_PROBE_ATTEMPTS {
+            std::thread::sleep(TASK_PROBE_RETRY_DELAY);
+        }
+    }
+
+    match existing {
         task::Task::Ours => {
-            task::end()?;
+            end()?;
             for _ in 0..20 {
-                if !task::is_running()? {
+                if !is_running()? {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -503,10 +530,10 @@ fn end_task_if_ours() -> Result<()> {
             Ok(())
         }
         task::Task::Unknown => {
-            eprintln!(
-                "walgit: could not determine who owns the `{TASK_NAME}` task — leaving it alone"
-            );
-            Ok(())
+            bail!(
+                "walgit: could not determine who owns the `{TASK_NAME}` task after \
+                 {TASK_PROBE_ATTEMPTS} attempts — refusing to report stop success"
+            )
         }
         task::Task::Absent => Ok(()),
     }
@@ -630,8 +657,11 @@ fn task_is_ours(xml: &str) -> bool {
         if is_our_image(command) || ends_with_our_image(command) {
             return true;
         }
-        // …or our redirect wrapper: `cmd.exe /c ""<path>\walgit.exe" serve …`.
-        is_cmd_wrapper(command) && arguments.get(i).is_some_and(|args| names_our_binary(args))
+        // …or our redirect wrapper runs it at the command position after `/c`.
+        is_cmd_wrapper(command)
+            && arguments
+                .get(i)
+                .is_some_and(|args| cmd_runs_our_binary(args))
     })
 }
 
@@ -639,16 +669,77 @@ fn task_is_ours(xml: &str) -> bool {
 #[cfg(any(windows, test))]
 fn ends_with_our_image(token: &str) -> bool {
     let token = token.trim_matches(['"', '\'']);
+    if token.chars().any(char::is_whitespace) && !looks_like_windows_path(token) {
+        return false;
+    }
     let base = token.rsplit(['\\', '/']).next().unwrap_or(token);
     is_our_image(base)
 }
 
-/// Does this action text name one of our binaries as a *token*?
+/// A quoted command token may contain spaces, but it must still look like a
+/// path — not a sentence such as `echo C:\tools\walgit.exe`.
 #[cfg(any(windows, test))]
-fn names_our_binary(args: &str) -> bool {
-    args.split(|c: char| c.is_whitespace() || c == '"')
-        .filter(|t| !t.is_empty())
-        .any(ends_with_our_image)
+fn looks_like_windows_path(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+        || token.starts_with(r"\\")
+        || token.starts_with(r".\")
+        || token.starts_with("./")
+        || token.starts_with(r"..\")
+        || token.starts_with("../")
+}
+
+/// Does `cmd.exe`'s action text run one of our binaries in command position?
+///
+/// `cmd /c echo C:\...\walgit.exe` merely mentions our path; it does not run
+/// it. Only the first token after `/c` may identify the task as ours.
+#[cfg(any(windows, test))]
+fn cmd_runs_our_binary(args: &str) -> bool {
+    cmd_command_token(args).is_some_and(ends_with_our_image)
+}
+
+/// The command token `cmd.exe` runs after `/c` (`/d`/`/s` may precede it).
+#[cfg(any(windows, test))]
+fn cmd_command_token(args: &str) -> Option<&str> {
+    let mut rest = args.trim_start();
+    loop {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..end];
+        rest = rest[end..].trim_start();
+        if token.eq_ignore_ascii_case("/c") {
+            return first_cmd_token(rest);
+        }
+        if !token.starts_with('/') {
+            return None;
+        }
+    }
+}
+
+/// Parse the first command token, including the usual `cmd /c ""…" args"`
+/// quoting shape and quoted paths that contain spaces.
+#[cfg(any(windows, test))]
+fn first_cmd_token(args: &str) -> Option<&str> {
+    let args = args.trim_start();
+    if let Some(rest) = args.strip_prefix('"')
+        && rest.starts_with('"')
+    {
+        return quoted_token(rest);
+    }
+    if args.starts_with('"') {
+        return quoted_token(args);
+    }
+    let end = args.find(char::is_whitespace).unwrap_or(args.len());
+    (!args[..end].is_empty()).then_some(&args[..end])
+}
+
+#[cfg(any(windows, test))]
+fn quoted_token(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 #[cfg(any(windows, test))]
@@ -694,7 +785,7 @@ fn image_from_tasklist(text: &str) -> Option<String> {
 mod task {
     //! `schtasks` wrappers for the one named task that carries the server.
 
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use anyhow::{Context, Result, bail};
@@ -821,7 +912,7 @@ mod task {
             ),
         }
         let xml_path = home.join("walgit-task.xml");
-        std::fs::write(&xml_path, task_xml(exe, config, log))
+        std::fs::write(&xml_path, task_xml(exe, config, log)?)
             .with_context(|| format!("writing the task definition to {}", xml_path.display()))?;
         let path = xml_path.display().to_string();
         // `/F` only when we are refreshing a task we proved is ours: if `walgit`
@@ -852,14 +943,18 @@ mod task {
     /// Do **not** rely on `/End` to stop the server: measured on the CI runner,
     /// `/End` ended the wrapper while the `walgit.exe` child kept the socket — so
     /// `stop` kills the port's owner first and only then tidies the task.
-    fn task_xml(exe: &Path, config: &Path, log: &Path) -> Vec<u8> {
+    fn task_xml(exe: &Path, config: &Path, log: &Path) -> Result<Vec<u8>> {
         // The scheduler starts the task in `WorkingDirectory`, so a *relative*
         // `--config` (which worked for the caller) would resolve against the
         // install directory instead — silently reading another file or none.
         // Write absolute paths, always.
-        let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-        let (exe, config, log) = (abs(exe), abs(config), abs(log));
-        let (exe, config, log) = (&exe, &config, &log);
+        fn absolute(p: &Path) -> Result<PathBuf> {
+            std::path::absolute(p)
+                .with_context(|| format!("resolving `{}` to an absolute path", p.display()))
+        }
+        let exe = absolute(exe)?;
+        let config = absolute(config)?;
+        let log = absolute(log)?;
         let body = format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -916,7 +1011,7 @@ mod task {
         for unit in body.encode_utf16() {
             out.extend_from_slice(&unit.to_le_bytes());
         }
-        out
+        Ok(out)
     }
 
     fn xml_escape(s: &str) -> String {
@@ -933,6 +1028,8 @@ mod task {
 /// "wrong pid" class of bug survives a green build.
 #[cfg(test)]
 mod listener_parse_tests {
+    use std::cell::Cell;
+
     use super::{image_from_tasklist, listeners_on, version_of};
 
     #[test]
@@ -1017,6 +1114,82 @@ mod listener_parse_tests {
             r"<Actions><Exec><Command>C:\tools\walgit-backup.exe</Command></Exec></Actions>"
         ));
         assert!(!task_is_ours("<Task>no actions at all</Task>"));
+    }
+
+    #[test]
+    fn cmd_ownership_requires_the_binary_in_command_position() {
+        use super::task_is_ours;
+        assert!(task_is_ours(
+            r#"<Actions><Exec><Command>cmd.exe</Command><Arguments>/c ""C:\Program Files\walgit\walgit.exe" serve --config "x"</Arguments></Exec></Actions>"#
+        ));
+        assert!(task_is_ours(
+            r#"<Actions><Exec><Command>cmd.exe</Command><Arguments>/d /s /c "C:\walgit\walgit.exe" serve</Arguments></Exec></Actions>"#
+        ));
+        // A path merely printed or passed as an argument is not the command.
+        assert!(!task_is_ours(
+            r"<Actions><Exec><Command>cmd.exe</Command><Arguments>/c echo C:\walgit\walgit.exe</Arguments></Exec></Actions>"
+        ));
+        assert!(!task_is_ours(
+            r#"<Actions><Exec><Command>cmd.exe</Command><Arguments>/c "echo C:\walgit\walgit.exe"</Arguments></Exec></Actions>"#
+        ));
+        assert!(!task_is_ours(
+            r"<Actions><Exec><Command>cmd.exe</Command><Arguments>/c helper.exe C:\walgit\walgit.exe</Arguments></Exec></Actions>"
+        ));
+    }
+
+    #[test]
+    fn stop_retries_unknown_task_probes_then_fails_closed() {
+        use super::{TASK_PROBE_ATTEMPTS, end_task_if_ours_with, task::Task};
+
+        let probes = Cell::new(0);
+        let ended = Cell::new(false);
+        let result = end_task_if_ours_with(
+            || {
+                probes.set(probes.get() + 1);
+                Task::Unknown
+            },
+            || -> anyhow::Result<()> {
+                ended.set(true);
+                Ok(())
+            },
+            || -> anyhow::Result<bool> { panic!("is_running called for an unknown task") },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(probes.get(), TASK_PROBE_ATTEMPTS);
+        assert!(!ended.get());
+    }
+
+    #[test]
+    fn task_probe_stops_retrying_once_ownership_is_known() {
+        use super::{end_task_if_ours_with, task::Task};
+
+        let mut probes = [Task::Unknown, Task::Unknown, Task::Absent].into_iter();
+        let calls = Cell::new(0);
+        let result = end_task_if_ours_with(
+            || {
+                calls.set(calls.get() + 1);
+                probes.next().unwrap()
+            },
+            || -> anyhow::Result<()> { panic!("end called for an absent task") },
+            || -> anyhow::Result<bool> { panic!("is_running called for an absent task") },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn foreign_task_is_left_alone_without_failing_stop() {
+        use super::{end_task_if_ours_with, task::Task};
+
+        let result = end_task_if_ours_with(
+            || Task::Foreign,
+            || -> anyhow::Result<()> { panic!("end called for a foreign task") },
+            || -> anyhow::Result<bool> { panic!("is_running called for a foreign task") },
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -107,31 +107,60 @@ begin
   Result := s;
 end;
 
+const
+  TaskStateUnknown = -1;
+  TaskStateAbsent = 0;
+  TaskStateOurs = 1;
+  TaskStateForeign = 2;
+
 // 只有确认这个 `walgit` 任务确实指向 walgit 二进制时，才允许 End/Delete：
 // 名字撞车的别人的任务不能碰（和「按端口清扫只杀 walgit* 进程」同一条原则）。
-function TaskIsOurs: Boolean;
+// 查询失败与任务不存在必须分开：前者是未知，不能静默当成“无需删除”。
+function TaskOwnership: Integer;
 var
   ResultCode: Integer;
-  OutFile: String;
+  OutFile, Status: String;
   Lines: TArrayOfString;
 begin
-  Result := False;
+  Result := TaskStateUnknown;
   OutFile := ExpandConstant('{tmp}\walgit-task-query.txt');
+  DeleteFile(OutFile);
   if not Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "$t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction SilentlyContinue; ' +
-    '$ok = $false; if ($t) { foreach ($a in $t.Actions) { $cmd = '''' + $a.Execute; $args = '''' + $a.Arguments; ' +
+    '/C powershell -NoProfile -Command "' +
+    '$ErrorActionPreference = ''Stop''; ' +
+    'try { $t = Get-ScheduledTask -TaskName ''walgit'' } ' +
+    'catch { if ($_.FullyQualifiedErrorId -like ''CmdletizationQuery_NotFound*'') { ''absent'' } else { ''unknown'' }; exit 0 }; ' +
+    '$ok = $false; foreach ($a in $t.Actions) { ' +
+    '$cmd = '''' + $a.Execute; $actionArgs = '''' + $a.Arguments; ' +
     '$base = [System.IO.Path]::GetFileName($cmd); ' +
     'if ($base -match ''^(?i)(walgit|walgit-server)\.exe$'') { $ok = $true } ' +
-    'elseif ($base -match ''^(?i)cmd(\.exe)?$'' -and $args -match ''(?i)(^|[\\/])walgit(-server)?\.exe(?=$|[\s\x22])'') { $ok = $true } } }; ' +
-    'if ($ok) { ''ours'' }" > "' +
+    'elseif ($base -match ''^(?i)cmd(\.exe)?$'' -and $actionArgs -match ''(?i)(^|[\\/])walgit(-server)?\.exe(?=$|[\s\x22])'') { $ok = $true } }; ' +
+    'if ($ok) { ''ours'' } else { ''foreign'' }" > "' +
     OutFile + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
-    Log('WARNING: could not query the walgit task');
+    Log('ERROR: could not run the walgit task-ownership query');
+    exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    Log('ERROR: walgit task-ownership query exited ' + IntToStr(ResultCode));
     exit;
   end;
   if LoadStringsFromFile(OutFile, Lines) and (GetArrayLength(Lines) > 0) then
-    Result := Trim(Lines[0]) = 'ours';
+  begin
+    Status := Trim(Lines[0]);
+    if Status = 'ours' then
+      Result := TaskStateOurs
+    else if Status = 'absent' then
+      Result := TaskStateAbsent
+    else if Status = 'foreign' then
+      Result := TaskStateForeign
+    else
+      Log('ERROR: walgit task-ownership query returned: ' + Status);
+  end
+  else
+    Log('ERROR: walgit task-ownership query produced no status');
   DeleteFile(OutFile);
 end;
 
@@ -139,6 +168,7 @@ procedure StopWalgit;
 var
   ResultCode: Integer;
   Script: String;
+  Ownership: Integer;
 begin
   // 换文件前结束服务，顺序按「谁真正持有进程」来（D48）：
   // 1) 服务归任务计划程序：先 /End 那个具名任务。失败忽略——多半本就没起。
@@ -146,10 +176,14 @@ begin
   //    端口才是真凭据。端口从用户配置里读，自定义端口不会被漏掉；只杀进程名以
   //    walgit 开头的，绝不误伤别人的进程。
   // 3) 最后按安装目录圈定托盘与本体。
-  if TaskIsOurs then
+  Ownership := TaskOwnership;
+  if Ownership = TaskStateOurs then
     Exec(ExpandConstant('{cmd}'),
       '/C schtasks /End /TN walgit >NUL 2>&1',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Ownership = TaskStateUnknown then
+    MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器不会自动结束它。' + #13#10 +
+      '为避免误伤同名任务，请手工检查后再继续。', mbError, MB_OK);
   Script :=
     '$t = Join-Path $env:USERPROFILE ''\.walgit\walgit.toml''; ' +
     '$q = [char]34; $port = '''' ; ' +
@@ -160,7 +194,7 @@ begin
     'if (-not ($port -match ''^\d+$'')) { $port = ''8081'' }; ' +
     'Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | ForEach-Object { ' +
     '$p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
-    'if ($p -and $p.ProcessName -match ''^(?i)(walgit|walgit-server)\.exe$'') { Stop-Process -Id $p.Id -Force } }; ' +
+    'if ($p -and $p.ProcessName -match ''^(?i)(walgit|walgit-server)$'') { Stop-Process -Id $p.Id -Force } }; ' +
     'Get-Process walgit,walgit-tray,walgit-server -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
     PsQuote(ExpandConstant('{app}')) + '\*'') -or ($_.Path -like ''' +
     PsQuote(LegacyProgramDir) + '\*'') } | Stop-Process -Force; ' +
@@ -211,16 +245,22 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ResultCode: Integer;
+  Ownership: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
     StopWalgit;
     // 任务本身也要注销：留着它，下次重装会指向一个已删除的 exe（D48）。
     // 同样先确认归属，别删掉别人的同名任务。
-    if TaskIsOurs then
+    Ownership := TaskOwnership;
+    if Ownership = TaskStateOurs then
       Exec(ExpandConstant('{cmd}'),
         '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if Ownership = TaskStateUnknown then
+      MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器没有删除它。' + #13#10 +
+        '为避免删除同名任务，请手工检查 `schtasks /Query /TN walgit /XML` 后处理。',
+        mbError, MB_OK);
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
   end;
 end;

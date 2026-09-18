@@ -78,11 +78,13 @@ $failed = $null
 try {
   Write-Host '--- start'
   & $bin service start --config $cfg
+  if ($LASTEXITCODE -ne 0) { throw "service start exited $LASTEXITCODE" }
   if (-not (Get-Healthz)) { throw 'start did not bring /healthz up' }
   if ((Get-Listeners) -ne 1) { throw "expected exactly 1 listener after start, got $(Get-Listeners)" }
 
   Write-Host '--- start again (the port must stay served by exactly one process)'
   & $bin service start --config $cfg
+  if ($LASTEXITCODE -ne 0) { throw "service start (second) exited $LASTEXITCODE" }
   Start-Sleep -Seconds 2
   if ((Get-Listeners) -ne 1) { throw "a second start forked another server: $(Get-Listeners) listeners" }
   if (-not (Get-Healthz)) { throw 'still one listener, but /healthz stopped answering' }
@@ -109,7 +111,7 @@ try {
     throw "the task's ExecutionTimeLimit is $($settings.ExecutionTimeLimit), not PT0S (unlimited)"
   }
   Write-Host "task settings: MultipleInstances=$($settings.MultipleInstances) ExecutionTimeLimit=$($settings.ExecutionTimeLimit) LogonType=$($taskObj.Principal.LogonType)"
-  if ($taskObj.Principal.LogonType -ne 'Interactive') {
+  if ($taskObj.Principal.LogonType -notin @('Interactive', 'InteractiveToken')) {
     throw "the task's LogonType is $($taskObj.Principal.LogonType), not the logged-on user's token"
   }
   if ((Get-Listeners) -ne 1) {
@@ -128,6 +130,7 @@ try {
 
   Write-Host '--- stop (the port must really go quiet)'
   & $bin service stop --config $cfg
+  if ($LASTEXITCODE -ne 0) { throw "service stop exited $LASTEXITCODE" }
   if (-not (Wait-Free)) { throw "stop left $(Get-Listeners) listener(s) behind" }
 
   Write-Host '--- an unsupervised server (not the task) must still be stoppable'
@@ -142,14 +145,17 @@ try {
   if (-not $up) { throw 'the orphan server never came up; cannot test the port fallback' }
   if ($orphan.HasExited) { throw 'the orphan server exited before the stop — the fallback was not exercised' }
   & $bin service stop --config $cfg
+  if ($LASTEXITCODE -ne 0) { throw "service stop (orphan) exited $LASTEXITCODE" }
   if (-not (Wait-Free)) { throw "stop left the unsupervised server holding $(Get-Listeners) listener(s)" }
   # The point of the scenario: `service stop` killed a server it never started.
   if (-not $orphan.HasExited) { throw "the unsupervised server (pid $($orphan.Id)) survived 'service stop'" }
 
   Write-Host '--- restart (stop + start in one command)'
   & $bin service restart --config $cfg
+  if ($LASTEXITCODE -ne 0) { throw "service restart exited $LASTEXITCODE" }
   if (-not (Get-Healthz)) { throw 'restart did not bring the service back' }
   & $bin service stop --config $cfg
+  if ($LASTEXITCODE -ne 0) { throw "service stop (after restart) exited $LASTEXITCODE" }
   if (-not (Wait-Free)) { throw 'stop after restart left the port busy' }
 
   Write-Host 'service smoke: OK'
