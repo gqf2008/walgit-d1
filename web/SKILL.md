@@ -30,6 +30,21 @@ On a host presenting a **self-signed** certificate, pin it first and add
 sh`. `curl -k` without pinning is trust-on-first-use: it keeps you going, but the
 sha256 then protects only the `SKILL.md` download, not the installer itself.
 
+## MCP (optional, client-side)
+
+Some hosts would rather call tools than shell out. `walgit mcp` serves the Model Context Protocol
+on stdio — host-spawned, so configure it as a command, not a URL:
+
+```jsonc
+{ "command": "walgit", "args": ["mcp"] }                       // read-only
+{ "command": "walgit", "args": ["mcp", "--allow-write", "--key", "/path/to/key.ed25519"] }
+```
+
+Its tools **are** this CLI (`repo_*` reads, `collab_*` reads, `ci_status`, `wal_ls`), so anything
+documented here has a tool twin. `collab_entry` is the only writing tool and only exists with
+`--allow-write`. Destructive operations (GC, compaction, import, settings/policy writes) are not
+exposed at all.
+
 ## Discover
 
 - `GET /api/v1` — the discovery document (lanes, endpoint list).

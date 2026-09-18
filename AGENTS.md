@@ -573,6 +573,17 @@ decision in §4 — or the PR is; never "fix later".
   against dummy payloads and runs a real start-twice-stop smoke, so neither half waits for a
   release tag to be exercised.
 
+- **D49** **MCP is a client-side adapter (`walgit mcp`), never a server endpoint (2026-09-18,
+  cc-ai-mcp-client).** An agent host spawns it over stdio; it speaks newline-delimited JSON-RPC 2.0
+  (`initialize` / `tools/list` / `tools/call` / `ping`) and its tools **are** the CLI — every call
+  runs this same binary's subcommand, so there is exactly one implementation and no second contract
+  to drift from `web/API.md`, the CLI or the SDK. The default surface is **read-only**; the one
+  writing tool (`collab_entry`) is registered only under `--allow-write` and needs `--key`.
+  Destructive operations (`gc`/`reclaim`, `compact`, `import`, per-repo settings/policy writes, ref
+  deletion, force-push) appear in **neither** the tool table nor the dispatch match: an agent must
+  not be able to start a bucket-GC pass by naming a tool, and `tools/call` cannot reach what
+  `tools/list` hides. Bytes never travel over MCP — clone/fetch/push stay git + bundle-uri.
+
 - **D50** **The blob viewer embeds by type; the PDF case is an *accepted* risk (2026-09-18,
   cc-ai-blob-viewers).** `?raw` is the byte channel — content type by extension, a single `Range` →
   206, `X-Content-Type-Options: nosniff`, `Content-Encoding: identity`, 32 MiB cap → 413, strong
@@ -587,7 +598,6 @@ decision in §4 — or the PR is; never "fix later".
   that matrix (or download-only); until then this decision, not a claim of proof, is what the code
   rests on. A PDF stays otherwise inert on our origin: `application/pdf` + `nosniff`, and it is not
   in the active-content set for the CSP clause.
-
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

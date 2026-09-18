@@ -23,6 +23,7 @@ mod import_direct;
 mod mirror;
 mod principal_cmd;
 pub mod repo;
+mod mcp_cmd;
 mod serve;
 mod service_cmd;
 #[cfg(test)]
@@ -76,6 +77,22 @@ struct ServerCli {
 enum Command {
     /// Run the HTTP server (smart HTTP v0/v2, LFS, bundles, optional compaction/bundle loops).
     Serve,
+    /// Serve the Model Context Protocol on stdio: **client-side** adapter, tools
+    /// are this CLI. Read-only unless `--allow-write`.
+    Mcp {
+        /// Local checkout the `collab_*` tools read (and write).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Register the writing tool (`collab_entry`); off by default.
+        #[arg(long)]
+        allow_write: bool,
+        /// Ed25519 seed used to sign `collab_entry` writes.
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// Remote `collab_entry` pushes to.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Trigger compaction (geometric repack) for one repo or all.
     Compact {
         /// `owner/name` — omit with `--all` for every repo.
@@ -761,6 +778,21 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
             seed,
         } => synth::run(&out, size, commits, files, seed),
         Command::Serve => serve::run(&cfg, &config_path).await,
+        Command::Mcp {
+            repo,
+            allow_write,
+            key,
+            remote,
+        } => {
+            mcp_cmd::run(mcp_cmd::Options {
+                repo,
+                config: config_path.clone(),
+                allow_write,
+                key,
+                remote,
+            })
+            .await
+        }
         Command::Service { action } => service_cmd::run(&action, &config_path).await,
         Command::Compact {
             repo,
