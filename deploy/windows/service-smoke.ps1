@@ -144,7 +144,7 @@ try {
   & $bin service stop --config $cfg
   if (-not (Wait-Free)) { throw "stop left the unsupervised server holding $(Get-Listeners) listener(s)" }
   # The point of the scenario: `service stop` killed a server it never started.
-  if (-not $orphan.HasExited) { throw "the unsupervised server (pid $($orphan.Id)) survived `service stop`" }
+  if (-not $orphan.HasExited) { throw "the unsupervised server (pid $($orphan.Id)) survived 'service stop'" }
 
   Write-Host '--- restart (stop + start in one command)'
   & $bin service restart --config $cfg

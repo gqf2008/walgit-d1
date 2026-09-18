@@ -409,6 +409,9 @@ jobs:
         # old "stale pidfile orphans a live server" bug was visible at.
         shell: pwsh
         run: |
+          # Parse first: a PowerShell quoting slip (a backtick before a closing
+          # quote escapes it) otherwise surfaces only after the ~6 minute build.
+          pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./deploy/windows/service-smoke.ps1)) | Out-Null"
           cargo build -p walgit-cli
           ./deploy/windows/service-smoke.ps1
 
