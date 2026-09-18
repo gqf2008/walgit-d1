@@ -90,9 +90,13 @@ try {
   Start-Sleep -Seconds 2
   # The policy itself, not just its effect: a forked child would die on the bind
   # anyway, so the listener count alone cannot tell IgnoreNew from Parallel.
-  $xml = schtasks /Query /TN $task /XML
-  if ($xml -notmatch '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>') {
-    throw 'the task does not carry MultipleInstancesPolicy=IgnoreNew'
+  #
+  # Asked of the scheduled-task *object*: `schtasks /Query /XML` emits UTF-16,
+  # which PowerShell decodes with the console encoding (mojibake), and the
+  # `MultipleInstances` property is an enum — unaffected by either.
+  $settings = (Get-ScheduledTask -TaskName $task -ErrorAction Stop).Settings
+  if ($settings.MultipleInstances -ne 'IgnoreNew') {
+    throw "the task's MultipleInstancesPolicy is $($settings.MultipleInstances), not IgnoreNew"
   }
   if ((Get-Listeners) -ne 1) {
     throw "schtasks /Run started a second instance: $(Get-Listeners) listeners (MultipleInstancesPolicy?)"
