@@ -390,11 +390,15 @@ jobs:
         # as a normal file and prevent the unavailable API from returning.
         shell: bash
         run: |
-          if grep -n 'ExtractTemporaryFile' deploy/windows/installer.iss; then
+          # Case-insensitive and plural-tolerant: Inno identifiers are
+          # case-insensitive, so `extracttemporaryfiles` is the same trap.
+          if grep -inE 'extracttemporaryfiles?' deploy/windows/installer.iss; then
             echo 'installer.iss uses an API unavailable to uninstallers (sfNoUninstall)' >&2
             exit 1
           fi
-          grep -Fq 'Source: "task-ownership.ps1"; DestDir: "{app}"' deploy/windows/installer.iss || {
+          # Full-line match: a trailing `Flags: dontcopy` would silently turn the
+          # shared script back into an install-only temp file.
+          grep -nqE '^Source: "task-ownership\.ps1"; DestDir: "\{app\}"; Flags: ignoreversion$' deploy/windows/installer.iss || {
             echo 'task-ownership.ps1 must be installed as a normal {app} file' >&2
             exit 1
           }
