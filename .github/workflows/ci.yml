@@ -384,6 +384,20 @@ jobs:
         shell: bash
         run: |
           cargo test -p walgit-server --test e2e || { echo "e2e failed once (possibly known-flaky); rerunning"; sleep 5; cargo test -p walgit-server --test e2e; }
+      - name: Installer uninstall-safety guard
+        # Inno marks ExtractTemporaryFile sfNoUninstall, but TaskOwnership is
+        # called from the uninstall path too. Keep the shared script installed
+        # as a normal file and prevent the unavailable API from returning.
+        shell: bash
+        run: |
+          if grep -n 'ExtractTemporaryFile' deploy/windows/installer.iss; then
+            echo 'installer.iss uses an API unavailable to uninstallers (sfNoUninstall)' >&2
+            exit 1
+          fi
+          grep -Fq 'Source: "task-ownership.ps1"; DestDir: "{app}"' deploy/windows/installer.iss || {
+            echo 'task-ownership.ps1 must be installed as a normal {app} file' >&2
+            exit 1
+          }
       - name: Type-check the Windows installer
         # `installer.iss` only ever compiles on a release tag otherwise, so a
         # Pascal slip (or a missing Source file) would surface as a broken

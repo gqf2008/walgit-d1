@@ -57,8 +57,9 @@ Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:Add
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
-; CI 与安装器共用的任务归属探测；安装时从安装包临时解压，不落到 {app}。
-Source: "task-ownership.ps1"; Flags: dontcopy
+; CI 与安装器共用的任务归属探测。必须作为普通文件装到 {app}；Inno 的临时解压 API
+; 注册为 sfNoUninstall，而卸载路径也会调用归属探测，不能在安装器里依赖它。
+Source: "task-ownership.ps1"; DestDir: "{app}"; Flags: ignoreversion
 ; 已有配置绝不覆盖;卸载也不删(用户数据)。写到状态目录而非程序目录。
 Source: "walgit.toml.initial"; DestDir: "{%USERPROFILE}\.walgit"; DestName: "walgit.toml"; Flags: onlyifdoesntexist uninsneveruninstall
 
@@ -115,6 +116,22 @@ const
   TaskStateOurs = 1;
   TaskStateForeign = 2;
 
+// 只回答“任务是否确定不存在”：NotFound -> 0，存在 -> 2，查询失败 -> 3。
+// 这用于 ssInstall 阶段脚本尚未落盘时的安全旁路，不参与归属判断。
+function TaskIsAbsent: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{cmd}'),
+    '/C powershell -NoProfile -ExecutionPolicy Bypass -Command "' +
+    '$ErrorActionPreference = ''Stop''; ' +
+    'try { Get-ScheduledTask -TaskName ''walgit'' -ErrorAction Stop | Out-Null; exit 2 } ' +
+    'catch { if ($_.FullyQualifiedErrorId -like ''CmdletizationQuery_NotFound*'') { exit 0 } else { exit 3 } }"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Result then
+    Result := ResultCode = 0;
+end;
+
 // 只有确认这个 `walgit` 任务确实指向 walgit 二进制时，才允许 End/Delete：
 // 名字撞车的别人的任务不能碰（和「按端口清扫只杀 walgit* 进程」同一条原则）。
 // 查询失败与任务不存在必须分开：前者是未知，不能静默当成“无需删除”。
@@ -126,9 +143,18 @@ var
 begin
   Result := TaskStateUnknown;
   OutFile := ExpandConstant('{tmp}\walgit-task-query.txt');
-  ScriptFile := ExpandConstant('{tmp}\task-ownership.ps1');
+  ScriptFile := ExpandConstant('{app}\task-ownership.ps1');
   DeleteFile(OutFile);
-  ExtractTemporaryFile('task-ownership.ps1');
+  if not FileExists(ScriptFile) then
+  begin
+    // ssInstall 发生在 [Files] 之前；首次安装没有旧任务时可以安全返回
+    // Absent，任何无法证明不存在的情况都保持 Unknown，交给调用方询问用户。
+    if TaskIsAbsent then
+      Result := TaskStateAbsent
+    else
+      Log('ERROR: task-ownership.ps1 is missing and task absence cannot be proven');
+    exit;
+  end;
   if not Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -ExecutionPolicy Bypass -File "' + ScriptFile +
     '" -TaskName walgit -OutFile "' + OutFile + '"',
@@ -170,16 +196,16 @@ begin
     '$ErrorActionPreference = ''Stop''; ' +
     'try { $t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction Stop } ' +
     'catch { if ($_.FullyQualifiedErrorId -like ''CmdletizationQuery_NotFound*'') { exit 0 } else { exit 4 } }; ' +
-    'if ($t.State -ne ''Running'') { exit 0 }; ' +
+    'if ($t.State -eq ''Ready'' -or $t.State -eq ''Disabled'') { exit 0 }; ' +
     'for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Milliseconds 250; ' +
     'try { $t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction Stop } catch { exit 4 }; ' +
-    'if ($t.State -ne ''Running'') { exit 0 } }; exit 3"',
+    'if ($t.State -eq ''Ready'' -or $t.State -eq ''Disabled'') { exit 0 } }; exit 3"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if Result then
     Result := ResultCode = 0;
 end;
 
-procedure StopWalgit;
+procedure StopWalgit(AskAboutUnknown: Boolean);
 var
   ResultCode: Integer;
   Script: String;
@@ -206,12 +232,16 @@ begin
     if not TaskIsStopped then
       if MsgBox('walgit: /End 后无法确认计划任务已经停止；任务可能仍在运行。' + #13#10 +
         '继续安装可能让下一次 start 被 IgnoreNew 挡住。仍要继续吗？',
-        mbConfirmation, MB_YESNO) = IDNO then
+        mbConfirmation, MB_YESNO) <> IDYES then
         Abort;
   end;
   if Ownership = TaskStateUnknown then
-    MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器不会自动结束它。' + #13#10 +
-      '为避免误伤同名任务，请手工检查后再继续。', mbError, MB_OK);
+  begin
+    if AskAboutUnknown then
+      if MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器不会自动结束它。' + #13#10 +
+        '是否继续安装/升级？', mbConfirmation, MB_YESNO) <> IDYES then
+        Abort;
+  end;
   Script :=
     '$t = Join-Path $env:USERPROFILE ''\.walgit\walgit.toml''; ' +
     '$q = [char]34; $port = '''' ; ' +
@@ -243,7 +273,7 @@ begin
   begin
     if MsgBox('walgit: 无法确认服务已停止（端口可能仍被占用）。' + #13#10 +
       '继续安装会替换正在运行的二进制，旧进程会继续占用端口。仍要继续吗？',
-      mbConfirmation, MB_YESNO) = IDNO then
+      mbConfirmation, MB_YESNO) <> IDYES then
       Abort;
   end;
   // 托盘升级管线留的备份:安装器换装后它已无意义,留着会在托盘某次升级
@@ -259,7 +289,7 @@ begin
   if CurStep = ssInstall then
   begin
     MigrateLegacyState;
-    StopWalgit;
+    StopWalgit(True);
   end;
   if CurStep = ssPostInstall then
     // 自启勾选承诺的是「部署开机可用」,不是只把托盘拉起来:写标记文件,
@@ -277,7 +307,7 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    StopWalgit;
+    StopWalgit(False);
     // 任务本身也要注销：留着它，下次重装会指向一个已删除的 exe（D48）。
     // 同样先确认归属，别删掉别人的同名任务。
     Ownership := TaskOwnership;
@@ -286,9 +316,14 @@ begin
         '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if Ownership = TaskStateUnknown then
-      MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器没有删除它。' + #13#10 +
-        '为避免删除同名任务，请手工检查 `schtasks /Query /TN walgit /XML` 后处理。',
-        mbError, MB_OK);
+    begin
+      if MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序。' + #13#10 +
+        '是否仍然删除同名任务？', mbConfirmation, MB_YESNO) <> IDYES then
+        Abort;
+      Exec(ExpandConstant('{cmd}'),
+        '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
   end;
 end;
