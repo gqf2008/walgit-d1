@@ -254,8 +254,10 @@ async fn handle_line(line: &str, opts: &Options) -> Option<String> {
         ));
     }
     let Some(method) = req.get("method").and_then(Value::as_str) else {
-        // A notification that is malformed is still a notification: no reply.
-        id.as_ref()?;
+        // A *missing or non-string* method is an invalid request, not a
+        // notification — JSON-RPC 2.0 requires a method even for notifications.
+        // Staying silent would leave the client waiting for a reply that never
+        // comes, so answer with `id: null` as the spec prescribes.
         return Some(error_reply(
             id.unwrap_or(Value::Null),
             -32600,
@@ -268,6 +270,13 @@ async fn handle_line(line: &str, opts: &Options) -> Option<String> {
     let params = req.get("params").cloned().unwrap_or(Value::Null);
     match method {
         "initialize" => {
+            if !params.is_object() {
+                return Some(error_reply(
+                    id,
+                    -32602,
+                    "invalid params: `params` must be an object",
+                ));
+            }
             let asked = params
                 .get("protocolVersion")
                 .and_then(Value::as_str)
@@ -304,6 +313,13 @@ async fn handle_line(line: &str, opts: &Options) -> Option<String> {
             Some(result_reply(id, json!({"tools": tools})))
         }
         "tools/call" => {
+            if !params.is_object() {
+                return Some(error_reply(
+                    id,
+                    -32602,
+                    "invalid params: `params` must be an object",
+                ));
+            }
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(error_reply(
                     id,
@@ -311,7 +327,19 @@ async fn handle_line(line: &str, opts: &Options) -> Option<String> {
                     "invalid params: `name` must be a string",
                 ));
             };
-            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            // `arguments` is defined as an object; an array or scalar used to
+            // execute the tool with the value silently ignored.
+            let args = match params.get("arguments") {
+                None => json!({}),
+                Some(v) if v.is_object() => v.clone(),
+                Some(_) => {
+                    return Some(error_reply(
+                        id,
+                        -32602,
+                        "invalid params: `arguments` must be an object",
+                    ));
+                }
+            };
             Some(match call_tool(name, &args, opts).await {
                 Ok(text) => result_reply(id, json!({"content": [{"type": "text", "text": text}]})),
                 // A request the model can repair is a protocol error; a tool that
@@ -360,24 +388,117 @@ async fn call_tool(name: &str, args: &Value, opts: &Options) -> Result<String, T
             "`{name}` writes; start the server with `--allow-write` to register it"
         )));
     }
+    validate_arguments(&spec, args)?;
     let argv = argv_for(name, args, opts)?;
     run_child(&argv, &opts.config).await
 }
 
-/// Run this same binary with `argv`, bounded in both time and output.
-///
-/// `kill_on_drop` matters as much as the timeout: when the deadline fires the
-/// child is killed rather than left holding a pipe, and a child that floods
-/// stdout is stopped by the capped reads filling its pipe (the deadline then
-/// fires instead of memory ballooning).
-async fn run_child(argv: &[String], config: &std::path::Path) -> Result<String, ToolError> {
-    use tokio::io::AsyncReadExt;
+/// Hold `arguments` to the schema the tool advertises: an object, known fields,
+/// declared types, required present. `additionalProperties: false` is a promise
+/// to the model, so it is enforced rather than merely declared — a field the
+/// model invents (or mistypes) must come back as `-32602`, not be dropped on the
+/// floor.
+fn validate_arguments(spec: &Tool, args: &Value) -> Result<(), ToolError> {
+    let Some(obj) = args.as_object() else {
+        return Err(ToolError::InvalidParams(
+            "`arguments` must be an object".into(),
+        ));
+    };
+    let props = spec.schema.get("properties").and_then(Value::as_object);
+    for (key, value) in obj {
+        let Some(field) = props.and_then(|p| p.get(key)) else {
+            return Err(ToolError::InvalidParams(format!(
+                "unknown argument `{key}` for `{}`",
+                spec.name
+            )));
+        };
+        if value.is_null() {
+            continue; // explicit "not provided"
+        }
+        let declared = field.get("type").and_then(Value::as_str);
+        let ok = match declared {
+            Some("string") => value.is_string(),
+            Some("integer") => value.as_u64().is_some(),
+            Some("boolean") => value.is_boolean(),
+            _ => true,
+        };
+        if !ok {
+            return Err(ToolError::InvalidParams(format!(
+                "`{key}` must be a {}",
+                declared.unwrap_or("value")
+            )));
+        }
+        // Empty is meaningless for every argument except `collab_entry.parent`,
+        // where "" is the documented "this is a root entry" marker.
+        if key != "parent" && value.as_str().is_some_and(|v| v.trim().is_empty()) {
+            return Err(ToolError::InvalidParams(format!(
+                "`{key}` must not be empty"
+            )));
+        }
+    }
+    if let Some(required) = spec.schema.get("required").and_then(Value::as_array) {
+        for name in required.iter().filter_map(Value::as_str) {
+            match obj.get(name) {
+                Some(v) if !v.is_null() => {}
+                _ => return Err(ToolError::InvalidParams(format!("`{name}` is required"))),
+            }
+        }
+    }
+    Ok(())
+}
 
+/// Run this same binary with `argv`, bounded in both time and output.
+async fn run_child(argv: &[String], config: &std::path::Path) -> Result<String, ToolError> {
     let exe = std::env::current_exe()
         .map_err(|e| ToolError::Execution(format!("locating walgit: {e}")))?;
-    let mut child = tokio::process::Command::new(&exe)
-        .arg("--config")
-        .arg(config)
+    let mut args = vec!["--config".to_string(), config.display().to_string()];
+    args.extend_from_slice(argv);
+    run_child_with(&exe, &args, TOOL_TIMEOUT, TOOL_OUTPUT_MAX).await
+}
+
+/// Read one stream, stopping the moment it passes `cap` — **not** waiting for
+/// EOF, because an endless writer never closes its pipe (a `join!` of two
+/// `read_to_end`s deadlocks exactly there: stdout floods forever while stderr
+/// stays open and silent). Returns the bytes plus "this one ran over".
+async fn read_capped<R>(mut r: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(cap.min(64 * 1024));
+    let mut chunk = vec![0_u8; 16 * 1024];
+    loop {
+        let n = r.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok((buf, false));
+        }
+        if buf.len() + n > cap {
+            // `get` rather than indexing: the workspace lints forbid slicing.
+            if let Some(head) = chunk.get(..cap.saturating_sub(buf.len())) {
+                buf.extend_from_slice(head);
+            }
+            return Ok((buf, true));
+        }
+        if let Some(head) = chunk.get(..n) {
+            buf.extend_from_slice(head);
+        }
+    }
+}
+
+/// The bounded exec itself, split out so the two limits are testable with a cheap
+/// command (`sh -c yes` / `sh -c 'sleep 30'`) instead of a real walgit operation.
+///
+/// * `timeout` caps the wall clock; on expiry the child is killed and reaped.
+/// * `cap` caps **each** of stdout/stderr. The reads stop at `cap + 1` bytes, so a
+///   flooding child is cut off immediately (it then blocks on a full pipe and is
+///   killed here) rather than being waited on until the deadline.
+async fn run_child_with(
+    exe: &std::path::Path,
+    argv: &[String],
+    timeout: std::time::Duration,
+    cap: usize,
+) -> Result<String, ToolError> {
+    let mut child = tokio::process::Command::new(exe)
         .args(argv)
         // Never the MCP stream: the child's stdin must not be able to consume it.
         .stdin(Stdio::null())
@@ -385,54 +506,79 @@ async fn run_child(argv: &[String], config: &std::path::Path) -> Result<String, 
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| ToolError::Execution(format!("running walgit {}: {e}", argv.join(" "))))?;
+        .map_err(|e| ToolError::Execution(format!("running `{}`: {e}", argv.join(" "))))?;
 
+    let shown = argv.join(" ");
+    let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(ToolError::Execution(format!(
+            "`{shown}`: stdout/stderr were not captured"
+        )));
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let status = {
-        let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
-            return Err(ToolError::Execution(
-                "child stdout/stderr were not captured".to_string(),
-            ));
-        };
-        let read = async {
-            let mut out = out.take(TOOL_OUTPUT_MAX as u64 + 1);
-            let mut err = err.take(TOOL_OUTPUT_MAX as u64 + 1);
-            let _ = tokio::join!(out.read_to_end(&mut stdout), err.read_to_end(&mut stderr),);
-            child.wait().await
-        };
-        match tokio::time::timeout(TOOL_TIMEOUT, read).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(e)) => {
-                return Err(ToolError::Execution(format!(
-                    "walgit {}: {e}",
-                    argv.join(" ")
-                )));
+    let mut over = false;
+    let deadline = tokio::time::Instant::now() + timeout;
+    {
+        let mut out_fut = std::pin::pin!(read_capped(out, cap));
+        let mut err_fut = std::pin::pin!(read_capped(err, cap));
+        let (mut got_out, mut got_err) = (false, false);
+        while !(got_out && got_err) {
+            tokio::select! {
+                r = &mut out_fut, if !got_out => {
+                    let (buf, exceeded) = r.map_err(|e| ToolError::Execution(format!("reading `{shown}`: {e}")))?;
+                    stdout = buf;
+                    got_out = true;
+                    over |= exceeded;
+                }
+                r = &mut err_fut, if !got_err => {
+                    let (buf, exceeded) = r.map_err(|e| ToolError::Execution(format!("reading `{shown}`: {e}")))?;
+                    stderr = buf;
+                    got_err = true;
+                    over |= exceeded;
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(ToolError::Execution(format!(
+                        "`{shown}` timed out after {}s",
+                        timeout.as_secs()
+                    )));
+                }
             }
-            Err(_) => {
-                return Err(ToolError::Execution(format!(
-                    "walgit {} timed out after {}s",
-                    argv.join(" "),
-                    TOOL_TIMEOUT.as_secs()
-                )));
+            if over {
+                break;
             }
         }
-    };
-    if stdout.len() > TOOL_OUTPUT_MAX || stderr.len() > TOOL_OUTPUT_MAX {
+    }
+    if over {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
         return Err(ToolError::Execution(format!(
-            "walgit {} produced more than {} KiB — run the CLI directly for bulk output",
-            argv.join(" "),
-            TOOL_OUTPUT_MAX / 1024
+            "`{shown}` produced more than {} KiB — run the CLI directly for bulk output",
+            cap / 1024
         )));
     }
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            return Err(ToolError::Execution(format!("waiting for `{shown}`: {e}")));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ToolError::Execution(format!(
+                "`{shown}` timed out after {}s",
+                timeout.as_secs()
+            )));
+        }
+    };
     let stdout = String::from_utf8_lossy(&stdout).to_string();
     let stderr = String::from_utf8_lossy(&stderr).to_string();
     if status.success() {
         Ok(stdout)
     } else {
         Err(ToolError::Execution(format!(
-            "walgit {} failed ({status}): {}",
-            argv.join(" "),
+            "`{shown}` failed ({status}): {}",
             if stderr.trim().is_empty() {
                 stdout.trim()
             } else {
@@ -463,10 +609,20 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
             ))),
         }
     };
-    let opt =
-        |key: &str| -> Option<String> { args.get(key).and_then(Value::as_str).map(str::to_string) };
+    // Absent/null is "not provided"; anything else must be a string. Silently
+    // dropping `path: 123` would run a *different* command than the model asked
+    // for, and the model would never learn why.
+    let opt = |key: &str| -> Result<Option<String>, ToolError> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(v)) => Ok(Some(v.clone())),
+            Some(_) => Err(ToolError::InvalidParams(format!(
+                "`{key}` must be a string"
+            ))),
+        }
+    };
     let one_of = |key: &str, allowed: &[&str]| -> Result<Option<String>, ToolError> {
-        match opt(key) {
+        match opt(key)? {
             None => Ok(None),
             Some(v) if allowed.contains(&v.as_str()) => Ok(Some(v)),
             Some(v) => Err(ToolError::InvalidParams(format!(
@@ -518,7 +674,7 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
                 req("repo")?,
                 req("rev")?,
             ];
-            if let Some(path) = opt("path") {
+            if let Some(path) = opt("path")? {
                 v.push(path);
             }
             v
@@ -533,7 +689,7 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
         ],
         "repo_commits" => {
             let mut v = vec!["repo".into(), "commits".into()];
-            if let Some(r) = opt("ref") {
+            if let Some(r) = opt("ref")? {
                 v.push(flag("--ref", &r));
             }
             if let Some(n) = count("n", 1000)? {
@@ -542,7 +698,7 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
             if let Some(skip) = count("skip", 1_000_000)? {
                 v.push(flag("--skip", &skip.to_string()));
             }
-            if let Some(p) = opt("path") {
+            if let Some(p) = opt("path")? {
                 v.push(flag("--path", &p));
             }
             v.push("--".into());
@@ -551,7 +707,7 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
         }
         "repo_diff" => {
             let mut v = vec!["repo".into(), "diff".into()];
-            if let Some(f) = opt("format") {
+            if let Some(f) = opt("format")? {
                 v.push(flag("--format", &f));
             }
             v.push("--".into());
@@ -619,13 +775,13 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
                 flag("--key", &key.display().to_string()),
                 flag("--push", &opts.remote),
             ];
-            if let Some(parent) = opt("parent") {
+            if let Some(parent) = opt("parent")? {
                 v.push(flag("--parent", &parent));
             }
-            if let Some(base) = opt("base") {
+            if let Some(base) = opt("base")? {
                 v.push(flag("--base", &base));
             }
-            if let Some(head) = opt("head") {
+            if let Some(head) = opt("head")? {
                 v.push(flag("--head", &head));
             }
             v
@@ -887,6 +1043,91 @@ mod tests {
             reply(r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#, false).await["result"],
             json!({})
         );
+    }
+
+    // The limits themselves, with a command that cannot cooperate: `yes` never
+    // stops on its own, and `sleep 30` outlives the deadline. Without the
+    // cap-and-kill these two tests hang, so a regression here is loud.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_flooding_tool_is_cut_off_and_killed() {
+        let args = vec!["-c".to_string(), "yes".to_string()];
+        let err = super::run_child_with(
+            std::path::Path::new("sh"),
+            &args,
+            std::time::Duration::from_secs(30),
+            4096,
+        )
+        .await
+        .expect_err("cut off");
+        assert!(format!("{err:?}").contains("more than"), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wedged_tool_times_out_and_is_killed() {
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        let started = std::time::Instant::now();
+        let err = super::run_child_with(
+            std::path::Path::new("sh"),
+            &args,
+            std::time::Duration::from_millis(300),
+            4096,
+        )
+        .await
+        .expect_err("timeout");
+        assert!(format!("{err:?}").contains("timed out"), "{err:?}");
+        // The deadline fired and the child was killed — not `sleep` finishing.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_quick_tool_under_both_limits_succeeds() {
+        let args = vec!["-c".to_string(), "printf hello".to_string()];
+        let out = super::run_child_with(
+            std::path::Path::new("sh"),
+            &args,
+            std::time::Duration::from_secs(5),
+            4096,
+        )
+        .await
+        .expect("under both limits");
+        assert_eq!(out, "hello");
+    }
+
+    #[tokio::test]
+    async fn bad_arguments_are_rejected_before_anything_runs() {
+        // `arguments` must be an object, fields must exist and be typed, and an
+        // empty string is meaningless everywhere except `collab_entry.parent`.
+        for (label, args) in [
+            ("array arguments", json!([])),
+            ("unknown field", json!({"nope": 1})),
+            ("wrong type", json!({"repo": "o/r", "rev": 123})),
+            ("empty repo", json!({"repo": "   ", "rev": "main"})),
+        ] {
+            let err = super::call_tool("repo_tree", &args, &opts(false))
+                .await
+                .expect_err(label);
+            assert!(
+                matches!(err, ToolError::InvalidParams(_)),
+                "{label}: {err:?}"
+            );
+        }
+        // …and the root marker stays legal.
+        let ok = super::argv_for(
+            "collab_entry",
+            &json!({
+                "kind": "comment",
+                "id": "t",
+                "actor": "a",
+                "body": "{}",
+                "parent": ""
+            }),
+            &opts(true),
+        )
+        .expect("root parent is legal");
+        assert!(ok.iter().any(|a| a == "--parent="), "{ok:?}");
     }
 
     #[test]

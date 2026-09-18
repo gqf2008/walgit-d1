@@ -152,14 +152,19 @@ jobs:
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
             "{not json" \
             '{"jsonrpc":"2.0","id":3,"method":"nope"}' \
-            | timeout 30 target/debug/walgit mcp --config walgit.example.toml > mcp-smoke.jsonl
+            | RUST_LOG=walgit=trace timeout 30 target/debug/walgit mcp --config walgit.example.toml > mcp-smoke.jsonl 2> mcp-smoke.err
           python3 - <<'PY'
           import json
           lines = [json.loads(l) for l in open("mcp-smoke.jsonl")]
           assert len(lines) == 4, lines  # the notification must not produce a reply
           init, tools, bad, unknown = lines
-          # Ids come back in order, and the return of the *last* one proves the
-          # session kept going rather than stopping at the first reply.
+          # stdout is a JSON-RPC stream: with `RUST_LOG=walgit=trace` set, a
+          # single tracing line landing there would make this parse fail. (Logs
+          # go to stderr; `walgit mcp` installs a stderr subscriber for exactly
+          # this reason.)
+          #
+          # Ids come back in order, and the reply to the *last* request proves the
+          # session kept going rather than stopping at the first one.
           assert [l["id"] for l in lines] == [1, 2, None, 3], lines
           assert init["result"]["protocolVersion"] == "2024-11-05", init
           names = [t["name"] for t in tools["result"]["tools"]]

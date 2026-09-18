@@ -36,7 +36,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use walgit_config::Config;
-use walgit_server::telemetry::tracing_init;
+use walgit_server::telemetry::{tracing_init, tracing_init_to_stderr};
 
 #[derive(Parser)]
 #[command(
@@ -730,7 +730,12 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
     } else {
         load_config(config)
     };
-    tracing_init(&cfg);
+    // `mcp` owns stdout as a JSON-RPC stream: its logs must never land there.
+    if matches!(command, Command::Mcp { .. }) {
+        tracing_init_to_stderr(&cfg);
+    } else {
+        tracing_init(&cfg);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
