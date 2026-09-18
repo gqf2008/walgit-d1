@@ -63,9 +63,11 @@ export function BlobPage() {
             {kind === "video" && <video className="blob-media" src={rawURL} controls preload="metadata" />}
             {kind === "audio" && <audio className="blob-media" src={rawURL} controls preload="metadata" />}
             {/* `<object>`, not a sandboxed iframe: `sandbox=""` also disables the
-                browser's own PDF viewer, and a PDF is not active content on our
-                origin (the API serves it `application/pdf` + nosniff). The
-                fallback child covers browsers with no inline viewer. */}
+                browser's own PDF viewer, and the built-in viewers do not execute
+                embedded PDF JavaScript or expose the embedding document. That is
+                an **accepted risk** pending a browser matrix (D50) — the API
+                sends `application/pdf` + nosniff and nothing else. The fallback
+                child covers browsers with no inline viewer. */}
             {kind === "pdf" && (
               <object className="blob-frame" data={rawURL} type="application/pdf" title={b.name}>
                 <p className="muted small">{t("blob.pdfNoViewer")}</p>

@@ -573,6 +573,21 @@ decision in §4 — or the PR is; never "fix later".
   against dummy payloads and runs a real start-twice-stop smoke, so neither half waits for a
   release tag to be exercised.
 
+- **D50** **The blob viewer embeds by type; the PDF case is an *accepted* risk (2026-09-18,
+  cc-ai-blob-viewers).** `?raw` is the byte channel — content type by extension, a single `Range` →
+  206, `X-Content-Type-Options: nosniff`, `Content-Encoding: identity`, 32 MiB cap → 413, strong
+  hashed ETag (immutable included) — and the four types a browser can treat as a *program*
+  (`text/html`, `application/xhtml+xml`, `image/svg+xml`, `application/xml`) additionally carry
+  `Content-Security-Policy: sandbox; default-src 'none'; …`, with HTML framed at `sandbox=""`. The
+  viewer embeds images (`<img>`), media (`<video>`/`<audio>`), HTML in that sandboxed frame, and
+  **PDF in `<object type="application/pdf">` with no CSP**. The PDF choice is deliberate and is an
+  accepted risk, not a verified property: `sandbox=""` also disables the browser's own PDF viewer,
+  and the built-in viewers are expected not to execute embedded PDF JavaScript or to expose the
+  embedding document — but that expectation has no browser matrix behind it yet. The follow-up is
+  that matrix (or download-only); until then this decision, not a claim of proof, is what the code
+  rests on. A PDF stays otherwise inert on our origin: `application/pdf` + `nosniff`, and it is not
+  in the active-content set for the CSP clause.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

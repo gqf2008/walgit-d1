@@ -624,7 +624,11 @@ Directory listing (one round trip for the repo home).
   rely on it. Untrusted active content (`text/html`, `application/xhtml+xml`,
   `image/svg+xml`, `application/xml`) additionally carries
   `Content-Security-Policy: sandbox; default-src 'none'; …` so it can never run
-  on the app's origin. The complete object is faulted to serve it, so the channel
+  on the app's origin. **PDFs are not in that set**: they are embedded with
+  `<object type="application/pdf">` and rely on the browser's built-in viewer
+  (which is expected not to execute embedded PDF JavaScript or expose the
+  embedding document). That is an accepted risk pending a browser matrix — we
+  send `application/pdf` + `nosniff` and nothing else (D50). The complete object is faulted to serve it, so the channel
   is capped at 32 MiB and answers `413` beyond that (the JSON lane keeps its own
   2 MiB cap). Strong `ETag` (hashed over the *resolved* revision + path) on every response, immutable
   or not; `If-None-Match` → `304`.
