@@ -411,7 +411,9 @@ jobs:
             param([string]$Name)
             Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
             & $probe -TaskName $Name -OutFile $out
-            if ($LASTEXITCODE -ne 0) { throw "task-ownership.ps1 exited $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $out -PathType Leaf)) {
+              throw "task-ownership.ps1 did not write $out"
+            }
             return (Get-Content -LiteralPath $out -Raw).Trim()
           }
 
