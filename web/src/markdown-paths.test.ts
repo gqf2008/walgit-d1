@@ -60,6 +60,22 @@ describe("resolveMarkdownTarget", () => {
     expect(normalizePath("content", "../../../etc/passwd")).toBe("etc/passwd");
   });
 
+  it("sends a root-resolving directory target to the tree route, not the browser", () => {
+    // `[root](../)` from `content/README.md` normalises to the repository root.
+    // Returning the raw target would let the *page* URL resolve it and drop the
+    // `content` segment — exactly the bug this file exists to fix.
+    expect(resolveMarkdownTarget("../", base, "link")).toBe("/gqf2008/ventures/tree/main");
+    expect(resolveMarkdownTarget("./", base, "link")).toBe("/gqf2008/ventures/tree/main/content");
+  });
+
+  it("joins an image query onto the raw url with &", () => {
+    // `urls.raw` already ends in `?raw`; `?raw?size=1` would make the server read
+    // a key called `raw?size` and hand back JSON instead of bytes.
+    expect(resolveMarkdownTarget("pics/a.png?size=1#frag", base, "image")).toBe(
+      "/gqf2008/ventures/api/blob/main/content/pics/a.png?raw&size=1#frag",
+    );
+  });
+
   it("dirOf gives the containing directory", () => {
     expect(dirOf("content/vdev-driver-ip/README.md")).toBe("content/vdev-driver-ip");
     expect(dirOf("README.md")).toBe("");

@@ -1148,9 +1148,21 @@ export class RepoClient {
   blob(rev: string, path: string, opts?: CallOptions) {
     return this.client.json<Blob>(`${this.p}/blob/${enc(rev)}/${enc(path)}`, opts);
   }
-  /** Raw text of a blob (`?raw`). */
+  /**
+   * Raw **text** of a blob (`?raw`), decoded as UTF-8.
+   *
+   * The endpoint itself is a byte channel (real `Content-Type`, `Range`, up to
+   * 32 MiB), so binary callers should fetch it themselves rather than go through
+   * this string helper:
+   * `await (await fetch(repo.urls.raw(rev, path))).arrayBuffer()`.
+   */
   raw(rev: string, path: string, opts?: CallOptions) {
     return this.client.text(`${this.p}/blob/${enc(rev)}/${enc(path)}?raw`, opts);
+  }
+
+  /** The browser-navigable URL of the byte channel (for `<img>`, `<video>`, …). */
+  rawUrl(rev: string, path: string) {
+    return this.urls.raw(rev, path);
   }
   /** Linear history page. */
   commits(q: CommitsQuery = {}, opts?: CallOptions) {

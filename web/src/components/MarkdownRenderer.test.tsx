@@ -2,6 +2,13 @@ import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import MarkdownRenderer from "./MarkdownRenderer";
 
+/** react-markdown's default filter drops these; nothing may survive. */
+function assertNoUnsafe(hrefs: (string | null)[]) {
+  for (const href of hrefs) {
+    expect(href ?? "").not.toMatch(/^\s*(javascript|data|vbscript):/i);
+  }
+}
+
 /**
  * The renderer's security boundary (issue #112): entry prose is untrusted
  * (any actor's signed entries), so the markdown pipeline must hold against
@@ -78,5 +85,25 @@ describe("MarkdownRenderer (untrusted entry prose — XSS boundary)", () => {
     expect(container.querySelector("img")?.getAttribute("src")).toBe(
       "/r/api/blob/main/content/pics/a.png?raw",
     );
+  });
+
+  // Supplying `urlTransform` replaces react-markdown's protocol filter, so the
+  // filter has to hold with a `base` too — blob markdown is untrusted input.
+  it("still neutralises unsafe URLs when a base is set", () => {
+    const urls = {
+      raw: (rev: string, path: string) => `/r/api/blob/${rev}/${path}?raw`,
+      tree: (rev: string, path = "") => `/r/tree/${rev}${path ? "/" + path : ""}`,
+      blob: (rev: string, path: string) => `/r/blob/${rev}/${path}`,
+    };
+    const { container } = render(
+      <MarkdownRenderer
+        source={"[x](javascript:alert(1)) [y](data:text/html,<b>x</b>) [ok](./b.md)"}
+        base={{ ref: "main", dir: "content", urls }}
+      />,
+    );
+    const hrefs = [...container.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    assertNoUnsafe(hrefs);
+    // …and the relative link is still rewritten.
+    expect(hrefs).toContain("/r/blob/main/content/b.md");
   });
 });

@@ -50,13 +50,25 @@ export function resolveMarkdownTarget(
   const bare = queryAt >= 0 ? withoutHash.slice(0, queryAt) : withoutHash;
 
   const path = normalizePath(base.dir, bare);
-  if (!path) return target;
-  if (kind === "image") return base.urls.raw(base.ref, path) + query + fragment;
-  // A trailing slash means the author pointed at a directory (a blob route for
-  // it would 404); it is the one hint markdown gives us.
-  return bare.endsWith("/")
-    ? base.urls.tree(base.ref, path) + query + fragment
-    : base.urls.blob(base.ref, path) + query + fragment;
+  // A directory target — including one that resolves to the repository root
+  // (`../`, `./`) — goes to the tree route. Returning `target` unchanged here
+  // would hand it back to the browser, which resolves it against the *page* URL
+  // and lands somewhere else entirely.
+  const isDir = bare.endsWith("/");
+  if (kind === "image") {
+    // `urls.raw` already carries `?raw`, so a caller query is joined with `&`
+    // (`?raw?x=1` would make the server read the key as `raw?x`).
+    return appendQuery(base.urls.raw(base.ref, path), query) + fragment;
+  }
+  const url = isDir ? base.urls.tree(base.ref, path) : base.urls.blob(base.ref, path);
+  return appendQuery(url, query) + fragment;
+}
+
+/// Join `query` (already `?`-prefixed) onto `url`, using `&` when the url
+/// already has a query string.
+function appendQuery(url: string, query: string): string {
+  if (!query) return url;
+  return url.includes("?") ? url + "&" + query.slice(1) : url + query;
 }
 
 /** Join `dir` with a relative `target`, folding `.`/`..` (never above the root). */

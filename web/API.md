@@ -614,9 +614,20 @@ Directory listing (one round trip for the repo home).
 - Exactly one of: `contents` (UTF-8 text, no NUL bytes), `binary: true`,
   or `too_large: true` (walgit's limit is 2 MiB; the limit is the server's
   choice, the UI just shows "too large"/"binary" with `size`).
-- `?raw`: when `contents` exists, respond `200 text/plain; charset=utf-8`
-  with the bytes instead of JSON (the "Raw" link). Binary/too-large still
-  return the JSON shape.
+- `?raw`: the **byte channel** (the "Raw" link, and what the blob page's
+  image/video/audio/PDF viewers fetch). Any file type, with its real
+  `Content-Type` by extension (images, `video/*`, `audio/*`, `application/pdf`,
+  `text/html`, …; unknown extensions are `application/octet-stream`) plus
+  `X-Content-Type-Options: nosniff` and `Content-Encoding: identity` (the byte
+  channel is never re-encoded). A single `Range` is served as `206` +
+  `Content-Range` + `Accept-Ranges: bytes` — media seeking and PDF partial loads
+  rely on it. Untrusted active content (`text/html`, `application/xhtml+xml`,
+  `image/svg+xml`, `application/xml`) additionally carries
+  `Content-Security-Policy: sandbox; default-src 'none'; …` so it can never run
+  on the app's origin. The complete object is faulted to serve it, so the channel
+  is capped at 32 MiB and answers `413` beyond that (the JSON lane keeps its own
+  2 MiB cap). Strong `ETag` (hashed over ref+path) on every response, immutable
+  or not; `If-None-Match` → `304`.
 - Markdown (`.md`, `.markdown`) and README blobs get a Preview/Code toggle
   client-side; no server involvement.
 - `404` if unknown ref or path. Cache: as tree (`{ref}` sha → immutable;

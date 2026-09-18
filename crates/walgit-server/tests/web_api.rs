@@ -193,6 +193,37 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
         .await?;
     assert_eq!(v["binary"], true);
     assert!(v.get("contents").is_none());
+
+    // The JSON lane's 2 MiB cap must not leak into the byte channel: `big.txt`
+    // is 2 MiB + 1, which the JSON lane refuses and `?raw` must still serve.
+    let r = c.get(url("/o/r/api/blob/main/big.txt?raw")).send().await?;
+    assert_eq!(r.status(), 200, "the raw cap is its own budget");
+    assert_eq!(r.bytes().await?.len(), 2 * 1024 * 1024 + 1);
+
+    // A browser's Accept-Encoding must not turn the byte channel into a
+    // compressed response (which would also drop Content-Length/Accept-Ranges).
+    let r = c
+        .get(url("/o/r/api/blob/main/bin.dat?raw"))
+        .header("accept-encoding", "gzip, br")
+        .send()
+        .await?;
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers().get("content-encoding").and_then(|v| v.to_str().ok()),
+        Some("identity"),
+        "raw bytes must not be re-encoded"
+    );
+
+    // A strong validator, and revalidation is a 304.
+    let r = c.get(url("/o/r/api/blob/main/README.md?raw")).send().await?;
+    let etag = r.headers()["etag"].to_str()?.to_string();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+    let r = c
+        .get(url("/o/r/api/blob/main/README.md?raw"))
+        .header("if-none-match", etag)
+        .send()
+        .await?;
+    assert_eq!(r.status(), 304);
     Ok(())
 }
 
@@ -728,6 +759,7 @@ async fn remote_objects_conformance() -> TestResult {
         text.contains("event: task\n"),
         "remote-index task announced: {text}"
     );
+
     let result_line = text
         .split("\n\n")
         .find(|p| p.starts_with("event: result"))
@@ -736,6 +768,23 @@ async fn remote_objects_conformance() -> TestResult {
         serde_json::from_str(result_line.trim_start_matches("event: result\ndata: "))?;
     assert_eq!(body["sha"], head);
     assert!(body["entries"].as_array().unwrap().len() >= 5);
+
+    // A blob above the JSON lane's 2 MiB cap must still come back through the
+    // byte channel on a *remote-serving* host (the object is faulted from the
+    // pack set: `cache.max_bytes = 1` guarantees the remote reader). This used to
+    // answer 404 — the read was skipped on the JSON cap while `?raw` allowed 32
+    // MiB, which broke exactly the 2–32 MiB images/PDFs/audio the channel exists
+    // for.
+    let resp = reqwest::Client::new()
+        .get(format!("{}/o/r/api/blob/main/big.txt?raw", small.base_url))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        200,
+        "remote raw must be bounded by the byte channel's own cap"
+    );
+    assert_eq!(resp.bytes().await?.len(), 2 * 1024 * 1024 + 1);
 
     // Second time: served from the immutable cache as plain JSON even with SSE accept.
     let resp = reqwest::Client::new()

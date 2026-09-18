@@ -2545,6 +2545,9 @@ async fn blob(
             if res.path.is_empty() {
                 return Err(not_found("blob path"));
             }
+            // How much may be materialized: the byte channel is why a 3 MiB image
+            // has to work at all, while the JSON lane keeps its smaller cap.
+            let cap = if raw { RAW_BLOB_MAX } else { MAX_BLOB };
             let name = res.path.rsplit('/').next().unwrap_or(&res.path).to_string();
             let (size, bytes): (i64, Option<Vec<u8>>) = if let Some(remote) = r.remote() {
                 let sha = gix_hash::ObjectId::from_hex(res.sha.as_bytes())
@@ -2563,23 +2566,39 @@ async fn blob(
                 // Real blob sizes are far below 2^63; the old `as i64` wrapped
                 // only for sizes no repository can reach, so saturate instead.
                 let size = i64::try_from(size).unwrap_or(i64::MAX);
-                if size > MAX_BLOB {
+                // The cap has to follow the *request*: a 3 MiB image is exactly
+                // what the byte channel exists for, and deciding to skip the read
+                // on the JSON lane's 2 MiB would answer 404 below.
+                if size > cap {
                     (size, None)
                 } else {
                     let o = remote.get(&target).await?;
                     (size, Some(o.data.to_vec()))
                 }
             } else {
-                let bytes = git(
-                    &r.local,
-                    vec![
-                        "cat-file".into(),
-                        "blob".into(),
-                        format!("{}:{}", res.sha, res.path),
-                    ],
+                // Ask for the size first: `cat-file blob` buffers the whole
+                // object, so checking the cap afterwards would mean a 1 GiB blob
+                // is materialized before being rejected.
+                let spec = format!("{}:{}", res.sha, res.path);
+                let size = i64::try_from(
+                    String::from_utf8_lossy(
+                        &git(&r.local, vec!["cat-file".into(), "-s".into(), spec.clone()]).await?,
+                    )
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or(u64::MAX),
                 )
-                .await?;
-                (i64::try_from(bytes.len()).unwrap_or(i64::MAX), Some(bytes))
+                .unwrap_or(i64::MAX);
+                if size > cap {
+                    (size, None)
+                } else {
+                    let bytes = git(
+                        &r.local,
+                        vec!["cat-file".into(), "blob".into(), spec],
+                    )
+                    .await?;
+                    (i64::try_from(bytes.len()).unwrap_or(i64::MAX), Some(bytes))
+                }
             };
             // `?raw` is the **byte** channel (images, media, PDF …): any type, its
             // real content type, and a single range so media can seek. It used to
@@ -2664,10 +2683,20 @@ fn raw_blob(
         ),
         None => bytes,
     };
-    let mut extra = vec![(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    )];
+    let mut extra = vec![
+        (
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ),
+        // "Already in its final encoding": the web API router is wrapped in a
+        // compression layer whose default predicate skips responses that carry a
+        // content-encoding, so a browser's `Accept-Encoding: gzip` cannot turn
+        // the byte channel into a compressed (and Content-Length-less) response.
+        (
+            header::CONTENT_ENCODING,
+            HeaderValue::from_static("identity"),
+        ),
+    ];
     if is_active_content(content_type) {
         extra.push((
             header::CONTENT_SECURITY_POLICY,
@@ -2678,12 +2707,24 @@ fn raw_blob(
         body,
         content_type,
         cache_control: if immutable { IMMUTABLE } else { SWR },
-        // Keyed by *file*, not just revision: every path at one commit used to
-        // share a validator.
-        etag: (!immutable).then(|| etag_for(&format!("{rev}:{path}"))),
+        // Keyed by *file*, not just revision — and hashed rather than
+        // interpolated: a path may hold quotes, commas or newlines, and either
+        // produces an invalid opaque-tag or panics in `HeaderValue::from_str`.
+        // Immutable responses carry one too (AGENTS §5).
+        etag: Some(etag_for(&path_etag(rev, path))),
         extra,
         range: range.map(|(start, end)| (start, end, total)),
     }
+}
+
+/// A stable ASCII validator for one `(rev, path)` pair.
+fn path_etag(rev: &str, path: &str) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(rev.as_bytes());
+    h.update(b"\0");
+    h.update(path.as_bytes());
+    hex::encode(h.finalize())
 }
 
 /// Content type for the raw byte channel, by extension. Deliberately
@@ -2784,6 +2825,24 @@ mod blob_view_tests {
         assert_eq!(content_type_for("blob.bin"), "application/octet-stream");
         assert_eq!(content_type_for("bin.dat"), "application/octet-stream");
         assert_eq!(content_type_for("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn the_validator_survives_hostile_paths() {
+        use super::path_etag;
+        for path in [
+            "content/README.md",
+            "weird/\"quote\".png",
+            "comma,name.txt",
+            "new\nline.txt",
+            "中文/文件.md",
+            "a%2Fb",
+        ] {
+            let tag = path_etag("deadbeef", path);
+            assert!(tag.chars().all(|c| c.is_ascii_hexdigit()), "{path}: {tag}");
+            // Distinct files must not share a validator.
+            assert_ne!(tag, path_etag("deadbeef", "other"));
+        }
     }
 
     #[test]
