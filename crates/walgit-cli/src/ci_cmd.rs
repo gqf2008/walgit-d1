@@ -288,8 +288,7 @@ pub async fn run(action: CiAction) -> Result<()> {
                     eprintln!("ci: {fname}: duplicate artifact name, skipped");
                     continue;
                 }
-                let Some(bytes) =
-                    fetch_ci_object(&repo, &remote, &result.actor, &a.sha256).await?
+                let Some(bytes) = fetch_ci_object(&repo, &remote, &result.actor, &a.sha256).await?
                 else {
                     if let Some(url) = &a.url {
                         println!("ci: {fname}: external artifact, see {url}");
@@ -525,7 +524,9 @@ fn git_http_authorization(repo: &Path, remote_url: &str) -> Result<Option<String
         )
         .context("write git credential query")?;
     }
-    let out = child.wait_with_output().context("wait git credential fill")?;
+    let out = child
+        .wait_with_output()
+        .context("wait git credential fill")?;
     if !out.status.success() {
         return Ok(None);
     }
@@ -604,9 +605,7 @@ fn read_ci_object_local(repo: &Path, sha256: &str) -> Result<Option<Vec<u8>>> {
         }
         let actual = sha256_hex(&out.stdout);
         if actual != sha256 {
-            eprintln!(
-                "ci: artifact {sha256}: object {oid} hashes to {actual}; ignored"
-            );
+            eprintln!("ci: artifact {sha256}: object {oid} hashes to {actual}; ignored");
             continue;
         }
         return Ok(Some(out.stdout));
@@ -1153,10 +1152,7 @@ fn apply_schedule_snapshot(
         if !preserve_cron {
             state.cron.remove(&key);
         }
-        if let Some((_, Some(expr))) = schedules
-            .iter()
-            .find(|(name, _)| name == task_name)
-        {
+        if let Some((_, Some(expr))) = schedules.iter().find(|(name, _)| name == task_name) {
             state.schedules.insert(key, expr.clone());
         }
         return;
@@ -1285,15 +1281,21 @@ impl Runner {
         // is exactly what a schedule fires on. A deferred ref (a task still
         // held elsewhere) is not swept; the trigger path revisits it first.
         let now = chrono::Utc::now().timestamp();
-        let tip_by_ref: HashMap<&str, &str> =
-            tips.iter().map(|(name, tip)| (name.as_str(), tip.as_str())).collect();
+        let tip_by_ref: HashMap<&str, &str> = tips
+            .iter()
+            .map(|(name, tip)| (name.as_str(), tip.as_str()))
+            .collect();
         let mut scheduled_keys: Vec<String> = state.schedules.keys().cloned().collect();
         scheduled_keys.sort();
         for key in scheduled_keys {
             let Some((ref_name, task_name)) = key.split_once('\u{1f}') else {
                 continue;
             };
-            if self.task_filter.as_deref().is_some_and(|name| name != task_name) {
+            if self
+                .task_filter
+                .as_deref()
+                .is_some_and(|name| name != task_name)
+            {
                 continue;
             }
             let Some(tip) = tip_by_ref.get(ref_name).copied() else {
@@ -2409,9 +2411,7 @@ command = "cargo test"
                 }
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -2452,21 +2452,13 @@ command = "cargo test"
         std::process::Command::new("git")
             .args(["-C"])
             .arg(dir.path())
-            .args([
-                "config",
-                "http.https://example.test/.sslVerify",
-                "false",
-            ])
+            .args(["config", "http.https://example.test/.sslVerify", "false"])
             .status()
             .unwrap();
         assert_eq!(
-            git_config_urlmatch(
-                dir.path(),
-                "https://example.test/o/r.git",
-                "http.sslVerify"
-            )
-            .unwrap()
-            .as_deref(),
+            git_config_urlmatch(dir.path(), "https://example.test/o/r.git", "http.sslVerify")
+                .unwrap()
+                .as_deref(),
             Some("false")
         );
     }
@@ -2532,9 +2524,7 @@ command = "cargo test"
         let state = read_state(&path).unwrap();
         assert_eq!(state.schedules.len(), 0);
         assert!(
-            state
-                .schedule_migration
-                .contains("refs/heads/main"),
+            state.schedule_migration.contains("refs/heads/main"),
             "legacy cron state must rediscover its schedules"
         );
     }

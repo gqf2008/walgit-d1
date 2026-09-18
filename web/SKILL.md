@@ -40,10 +40,13 @@ on stdio — host-spawned, so configure it as a command, not a URL:
 { "command": "walgit", "args": ["mcp", "--allow-write", "--key", "/path/to/key.ed25519"] }
 ```
 
-Its tools **are** this CLI (`repo_*` reads, `collab_*` reads, `ci_status`, `wal_ls`), so anything
-documented here has a tool twin. `collab_entry` is the only writing tool and only exists with
-`--allow-write`. Destructive operations (GC, compaction, import, settings/policy writes) are not
-exposed at all.
+Its tools **are** this CLI, so they cannot drift from it — but the surface is deliberately partial:
+today `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_ls/thread/pr/board/report`,
+`ci_status` and `wal_ls`; everything else (`repo info/blame/commit`, `ci log/artifacts`,
+`collab watch`, …) still goes through the CLI directly. `collab_entry` is the only writing tool and
+exists only with `--allow-write`. Destructive operations (GC, compaction, import, settings/policy
+writes, ref deletion) are not exposed at all — and bytes never travel over MCP: clone/fetch/push
+stay git + bundle-uri.
 
 ## Discover
 

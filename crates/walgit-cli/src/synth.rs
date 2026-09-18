@@ -136,9 +136,7 @@ pub fn run(
         .current_dir(out)
         .output()?;
     let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    println!(
-        "synth OK: {n_commits} commits, {n_files} files, HEAD={head}"
-    );
+    println!("synth OK: {n_commits} commits, {n_files} files, HEAD={head}");
 
     Ok(())
 }

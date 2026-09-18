@@ -20,10 +20,10 @@ mod collab_cmd;
 mod compact;
 mod import;
 mod import_direct;
+mod mcp_cmd;
 mod mirror;
 mod principal_cmd;
 pub mod repo;
-mod mcp_cmd;
 mod serve;
 mod service_cmd;
 #[cfg(test)]
@@ -745,24 +745,25 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
 fn is_host_read(command: &Command) -> bool {
     matches!(
         command,
-        Command::Principal { .. } | Command::Repo {
-            action: RepoAction::Refs { .. }
-                | RepoAction::Ref { .. }
-                | RepoAction::MergeBase { .. }
-                | RepoAction::Diff { .. }
-                | RepoAction::Blame { .. }
-                | RepoAction::Archive { .. }
-                | RepoAction::Ops { .. }
-                | RepoAction::OpStart { .. }
-                | RepoAction::Owners { .. }
-                | RepoAction::Resolve { .. }
-                | RepoAction::Tree { .. }
-                | RepoAction::Blob { .. }
-                | RepoAction::Commits { .. }
-                | RepoAction::Commit { .. }
-                | RepoAction::Overview { .. }
-                | RepoAction::Tasks { .. }
-        }
+        Command::Principal { .. }
+            | Command::Repo {
+                action: RepoAction::Refs { .. }
+                    | RepoAction::Ref { .. }
+                    | RepoAction::MergeBase { .. }
+                    | RepoAction::Diff { .. }
+                    | RepoAction::Blame { .. }
+                    | RepoAction::Archive { .. }
+                    | RepoAction::Ops { .. }
+                    | RepoAction::OpStart { .. }
+                    | RepoAction::Owners { .. }
+                    | RepoAction::Resolve { .. }
+                    | RepoAction::Tree { .. }
+                    | RepoAction::Blob { .. }
+                    | RepoAction::Commits { .. }
+                    | RepoAction::Commit { .. }
+                    | RepoAction::Overview { .. }
+                    | RepoAction::Tasks { .. }
+            }
     )
 }
 

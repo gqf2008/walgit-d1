@@ -787,7 +787,8 @@ pub async fn run_with_store(
                 cfg.bundles
                     .strategy
                     .iter()
-                    .find(|s| s.kind == walgit_config::BundleKind::Full).map_or_else(|| "import".to_string(), |s| s.name.clone())
+                    .find(|s| s.kind == walgit_config::BundleKind::Full)
+                    .map_or_else(|| "import".to_string(), |s| s.name.clone())
             });
             let p0 = &packs[0];
             match walgit_bundle::ops::compose_full(
@@ -992,7 +993,8 @@ pub async fn run_with_store(
 // ---- helpers -------------------------------------------------------------------
 
 fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname").map_or_else(|_| "local".into(), |s| s.trim().to_string())
+    std::fs::read_to_string("/etc/hostname")
+        .map_or_else(|_| "local".into(), |s| s.trim().to_string())
 }
 
 fn count_loose(git_dir: &Path) -> u64 {
@@ -1632,8 +1634,10 @@ mod resume_tests {
         .unwrap();
         let mut expected = 0usize;
         for p in &m.packs {
-            expected +=
-                2 + usize::from(p.has_rev) + usize::from(p.has_bitmap) + usize::from(p.has_commit_graph);
+            expected += 2
+                + usize::from(p.has_rev)
+                + usize::from(p.has_bitmap)
+                + usize::from(p.has_commit_graph);
         }
         assert_eq!(
             total_uploaded, expected,
@@ -1892,7 +1896,9 @@ mod resume_tests {
         sh(src2.path(), &["prune-packed"]);
         let mut o2 = opts(src2.path(), repo);
         o2.replace = true;
-        run_with_store(o2, &cfg, store.clone(), false).await.unwrap();
+        run_with_store(o2, &cfg, store.clone(), false)
+            .await
+            .unwrap();
 
         let (_, bytes) = repo_store.get_bytes(keys::MANIFEST).await.unwrap().unwrap();
         let new = Manifest::decode(bytes.as_ref()).unwrap();
@@ -1965,7 +1971,9 @@ mod resume_tests {
         sh(src2.path(), &["prune-packed"]);
         let mut o2 = opts(src2.path(), repo);
         o2.replace = true;
-        run_with_store(o2, &cfg, store.clone(), false).await.unwrap();
+        run_with_store(o2, &cfg, store.clone(), false)
+            .await
+            .unwrap();
 
         assert!(
             repo_store

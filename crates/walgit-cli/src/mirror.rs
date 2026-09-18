@@ -193,7 +193,8 @@ impl Mirror {
             let commits = match old {
                 Some(old) => self
                     .rev_list_count(old, sha)
-                    .await.map_or_else(|_| "?".into(), |n| n.to_string()),
+                    .await
+                    .map_or_else(|_| "?".into(), |n| n.to_string()),
                 None => "all".into(),
             };
             info!(r#ref = %name, old = old.as_deref().unwrap_or("-"), new = %sha, commits = %commits, to = %self.to, "mirror: pushing");
