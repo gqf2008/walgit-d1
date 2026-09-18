@@ -431,10 +431,7 @@ fn validate_arguments(spec: &Tool, args: &Value) -> Result<(), ToolError> {
         if value.is_null() {
             return Err(ToolError::InvalidParams(format!(
                 "`{key}` must be a {0}, not null",
-                field
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("value")
+                field.get("type").and_then(Value::as_str).unwrap_or("value")
             )));
         }
         let declared = field.get("type").and_then(Value::as_str);
@@ -910,7 +907,11 @@ mod tests {
             .lines()
             .map(|line| line.trim().parse().expect("pid"))
             .collect();
-        assert_eq!(pids.len(), 2, "both shell and grandchild wrote PIDs: {raw:?}");
+        assert_eq!(
+            pids.len(),
+            2,
+            "both shell and grandchild wrote PIDs: {raw:?}"
+        );
         for pid in pids {
             for _ in 0..100 {
                 if !process_exists(pid) {
