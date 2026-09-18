@@ -391,7 +391,7 @@ h2 {
 .readme .box-header {
   font-size: 13px;
 }
-/* Blob viewers (D49): images and media scale down, frames get a fixed height so
+/* Blob viewers (D50): images and media scale down, frames get a fixed height so
    a PDF/HTML preview cannot grow the page without bound. */
 .blob-image {
   max-width: 100%;

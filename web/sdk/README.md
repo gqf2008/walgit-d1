@@ -72,7 +72,7 @@ r.resolve("feature/x/src/main.go")           → { ref, sha, path, kind }       
 r.tree(rev, path?)                           → { ref, sha, path, entries, commit?, readme? }
 r.blob(rev, path)                            → { …, contents | binary | too_large }
 r.raw(rev, path)                             → string (UTF-8 text of the `?raw` byte channel)
-r.rawUrl(rev, path)                          → same-origin URL for <img>/<video>/<iframe>
+r.rawUrl(rev, path)                          → browser-navigable URL for <img>/<video>/<iframe> (per lane)
 r.commits({ ref, path, skip, n })            → { ref, sha, commits, more }
 r.commit(sha)                                → { commit, stats, patch }
 r.overview()                                 → WAL overview (walgit-specific)
