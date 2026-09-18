@@ -71,7 +71,8 @@ r.collab.report() / .thread(id) / .board()   → the D1 aggregation reads (exact
 r.resolve("feature/x/src/main.go")           → { ref, sha, path, kind }           (server splits ref/path, API.md §3)
 r.tree(rev, path?)                           → { ref, sha, path, entries, commit?, readme? }
 r.blob(rev, path)                            → { …, contents | binary | too_large }
-r.raw(rev, path)                             → string
+r.raw(rev, path)                             → string (UTF-8 text of the `?raw` byte channel)
+r.rawUrl(rev, path)                          → same-origin URL for <img>/<video>/<iframe>
 r.commits({ ref, path, skip, n })            → { ref, sha, commits, more }
 r.commit(sha)                                → { commit, stats, patch }
 r.overview()                                 → WAL overview (walgit-specific)
@@ -83,6 +84,8 @@ r.settings.get() / .put(toml, message) / .delete()
 r.settings.effective() / .history() / .describe() / .validate(toml)
                                              → per-repository WAL settings and their effective host overlay
 r.urls.{html, clone, api, raw(rev,path), tree(rev,path), blob(rev,path), commit(sha)}
+                                             → `urls.raw` is the byte channel: real Content-Type, Range/206,
+                                               up to 32 MiB (413 beyond), sandbox CSP for HTML/SVG
 
 repos.configure({ token, base, lane, onProgress, interactive })
 repos.createClient(opts)   repos.ReposError   repos.version

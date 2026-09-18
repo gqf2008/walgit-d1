@@ -146,7 +146,7 @@ export function ApiPage() {
               path={`…/${r}/blob/{rev}/{path}[?raw]`}
               desc={
                 <>
-                  <code>{`{name,size,contents}`}</code> {t("apipage.row.blob.a")} <code>binary:true</code> / <code>too_large:true</code>; <code>?raw</code> {t("apipage.row.blob.b")} <code>text/plain</code>
+                  <code>{`{name,size,contents}`}</code> {t("apipage.row.blob.a")} <code>binary:true</code> / <code>too_large:true</code>; <code>?raw</code> {t("apipage.row.blob.b")} <code>{`{Content-Type}`}</code> {t("apipage.row.blob.c")}
                   {t("apipage.dot")}
                 </>
               }

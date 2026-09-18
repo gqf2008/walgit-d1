@@ -626,7 +626,7 @@ Directory listing (one round trip for the repo home).
   `Content-Security-Policy: sandbox; default-src 'none'; …` so it can never run
   on the app's origin. The complete object is faulted to serve it, so the channel
   is capped at 32 MiB and answers `413` beyond that (the JSON lane keeps its own
-  2 MiB cap). Strong `ETag` (hashed over ref+path) on every response, immutable
+  2 MiB cap). Strong `ETag` (hashed over the *resolved* revision + path) on every response, immutable
   or not; `If-None-Match` → `304`.
 - Markdown (`.md`, `.markdown`) and README blobs get a Preview/Code toggle
   client-side; no server involvement.

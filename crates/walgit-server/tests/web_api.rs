@@ -177,12 +177,12 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     let r = c.get(url("/o/r/api/blob/main/page.html?raw")).send().await?;
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
-    assert!(
-        r.headers()["content-security-policy"]
-            .to_str()?
-            .contains("sandbox"),
-        "active content needs a sandbox CSP"
-    );
+    let csp = r.headers()["content-security-policy"].to_str()?;
+    assert!(csp.contains("sandbox"), "active content needs a sandbox CSP: {csp}");
+    // The word alone proves nothing: a policy that re-enabled scripts would
+    // still contain it. Pin the two clauses that make it inert.
+    assert!(!csp.contains("allow-scripts"), "scripts must stay disabled: {csp}");
+    assert!(csp.contains("default-src 'none'"), "nothing may be loaded: {csp}");
 
     // The JSON lane is unchanged: the viewer still learns it is binary.
     let v: Value = c
@@ -202,8 +202,11 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
 
     // A browser's Accept-Encoding must not turn the byte channel into a
     // compressed response (which would also drop Content-Length/Accept-Ranges).
+    // `big.txt` (2 MiB + 1) is above the compression layer's size threshold, so
+    // this fails if the byte channel is ever compressed — a 7-byte body would
+    // pass regardless.
     let r = c
-        .get(url("/o/r/api/blob/main/bin.dat?raw"))
+        .get(url("/o/r/api/blob/main/big.txt?raw"))
         .header("accept-encoding", "gzip, br")
         .send()
         .await?;
@@ -213,6 +216,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
         Some("identity"),
         "raw bytes must not be re-encoded"
     );
+    assert_eq!(r.bytes().await?.len(), 2 * 1024 * 1024 + 1);
 
     // A strong validator, and revalidation is a 304.
     let r = c.get(url("/o/r/api/blob/main/README.md?raw")).send().await?;

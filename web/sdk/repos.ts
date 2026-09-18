@@ -1154,7 +1154,9 @@ export class RepoClient {
    * The endpoint itself is a byte channel (real `Content-Type`, `Range`, up to
    * 32 MiB), so binary callers should fetch it themselves rather than go through
    * this string helper:
-   * `await (await fetch(repo.urls.raw(rev, path))).arrayBuffer()`.
+   * `await (await fetch(repo.urls.raw(rev, path), { credentials: "include" })).arrayBuffer()`
+   * (the credentials matter on the cross-origin browser lane, where the session
+   * cookie is what authorises the read).
    */
   raw(rev: string, path: string, opts?: CallOptions) {
     return this.client.text(`${this.p}/blob/${enc(rev)}/${enc(path)}?raw`, opts);

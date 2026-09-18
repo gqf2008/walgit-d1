@@ -2692,6 +2692,12 @@ fn raw_blob(
         // compression layer whose default predicate skips responses that carry a
         // content-encoding, so a browser's `Accept-Encoding: gzip` cannot turn
         // the byte channel into a compressed (and Content-Length-less) response.
+        //
+        // RFC 9110 §8.4 says `identity` SHOULD NOT appear in `Content-Encoding`,
+        // and tower-http's predicate only ever sees the *response* — so this is
+        // the one signal available on a shared route (`?raw` and the JSON lane
+        // are the same path). The clean fix is a compression predicate that can
+        // see the request; until tower-http offers one, this is deliberate.
         (
             header::CONTENT_ENCODING,
             HeaderValue::from_static("identity"),
@@ -2825,6 +2831,17 @@ mod blob_view_tests {
         assert_eq!(content_type_for("blob.bin"), "application/octet-stream");
         assert_eq!(content_type_for("bin.dat"), "application/octet-stream");
         assert_eq!(content_type_for("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn the_byte_channel_has_its_own_budget() {
+        use super::{MAX_BLOB, RAW_BLOB_MAX};
+        // The JSON lane's cap must not leak into `?raw` (a 3 MiB image is the
+        // point of the channel), and the byte channel must stay bounded because
+        // the object is faulted whole.
+        assert_eq!(MAX_BLOB, 2 * 1024 * 1024);
+        assert_eq!(RAW_BLOB_MAX, 32 * 1024 * 1024);
+        assert!(RAW_BLOB_MAX > MAX_BLOB);
     }
 
     #[test]
