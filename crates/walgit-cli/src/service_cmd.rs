@@ -607,7 +607,7 @@ mod task {
 
     use anyhow::{Context, Result, bail};
 
-    use super::TASK_NAME;
+    use super::{TASK_NAME, task_is_ours};
 
     fn schtasks(args: &[&str]) -> Result<String> {
         let out = Command::new("schtasks")
