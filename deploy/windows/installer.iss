@@ -119,7 +119,11 @@ begin
   OutFile := ExpandConstant('{tmp}\walgit-task-query.txt');
   if not Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -Command "$t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction SilentlyContinue; ' +
-    'if ($t -and ($t.Actions | Where-Object { (($_.Execute + '' '' + $_.Arguments) -match ''(?i)(^|[\\/])walgit\.exe(?=$|[\s\x22])'') })) { ''ours'' }" > "' +
+    '$ok = $false; if ($t) { foreach ($a in $t.Actions) { $cmd = '''' + $a.Execute; $args = '''' + $a.Arguments; ' +
+    '$base = [System.IO.Path]::GetFileName($cmd); ' +
+    'if ($base -match ''^(?i)(walgit|walgit-server)\.exe$'') { $ok = $true } ' +
+    'elseif ($base -match ''^(?i)cmd(\.exe)?$'' -and $args -match ''(?i)(^|[\\/])walgit(-server)?\.exe(?=$|[\s\x22])'') { $ok = $true } } }; ' +
+    'if ($ok) { ''ours'' }" > "' +
     OutFile + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
@@ -156,13 +160,30 @@ begin
     'if (-not ($port -match ''^\d+$'')) { $port = ''8081'' }; ' +
     'Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | ForEach-Object { ' +
     '$p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
-    'if ($p -and $p.ProcessName -like ''walgit*'') { Stop-Process -Id $p.Id -Force } }; ' +
+    'if ($p -and $p.ProcessName -match ''^(?i)(walgit|walgit-server)\.exe$'') { Stop-Process -Id $p.Id -Force } }; ' +
     'Get-Process walgit,walgit-tray,walgit-server -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
     PsQuote(ExpandConstant('{app}')) + '\*'') -or ($_.Path -like ''' +
-    PsQuote(LegacyProgramDir) + '\*'') } | Stop-Process -Force';
+    PsQuote(LegacyProgramDir) + '\*'') } | Stop-Process -Force; ' +
+    // The sweeps above are best-effort (a quietly failing query used to look like
+    // "nothing to kill"); the last word is a *verified* check, so any non-zero
+    // exit means we could not prove the port is free and the caller must not
+    // replace files over a live server.
+    'if ($port -match ''^\d+$'') { $still = Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction Stop; ' +
+    'if ($still) { exit 3 } }';
   Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -Command "' + Script + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // The sweep's last step *proves* the port is free: a non-zero exit means it
+  // could not (still listening, or the query itself failed). Replacing files over
+  // a live server is the bug this whole path exists to prevent, so ask rather
+  // than proceed silently.
+  if ResultCode <> 0 then
+  begin
+    if MsgBox('walgit: 无法确认服务已停止（端口可能仍被占用）。' + #13#10 +
+      '继续安装会替换正在运行的二进制，旧进程会继续占用端口。仍要继续吗？',
+      mbConfirmation, MB_YESNO) = IDNO then
+      Abort;
+  end;
   // 托盘升级管线留的备份:安装器换装后它已无意义,留着会在托盘某次升级
   // 健康检查失败时被回滚逻辑盖回旧版本——删。
   DeleteFile(ExpandConstant('{app}\walgit.bak-tray'));

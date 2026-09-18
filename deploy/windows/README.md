@@ -24,9 +24,9 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 
 ## 初始配置与对象存储
 
-初始 `walgit.toml` 是 loopback + 内存后端的「先跑起来」形态:S3/R2 配置
-向导(issue #70)落地前,手工把 `[store]` 换成真实桶(文件内有 R2 示例),
-托盘菜单里重启服务生效。
+初始 `walgit.toml` 是 loopback + 内存后端的「先跑起来」形态：首次启动会进 Web UI 的
+S3/R2 配置向导（D43），保存后在托盘菜单里重启服务生效（Windows 的服务归任务计划程序，
+没有会替你 respawn 的 supervisor，D48）。也可以直接改 `[store]`（文件内有 R2 示例）。
 
 ## 本机构建
 

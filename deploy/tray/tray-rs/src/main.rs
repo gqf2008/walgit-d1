@@ -778,10 +778,11 @@ fn install_dock_reopen_hook() {
 
 // ---------- 服务控制 ----------
 
-/// macOS uses the in-binary service command. Windows/Linux keep the tray-side
-/// supervisor because `walgit serve` exits 75 after the setup wizard saves and
-/// needs an immediate respawn. Either way, no walgit-ensure shell and no binary
-/// copy under ~/.walgit.
+/// macOS **and Windows** use the in-binary service command (D48): on Windows the
+/// process belongs to the Task Scheduler, so the tray is a client. Linux keeps the
+/// tray-side supervisor — `walgit serve` exits 75 after the setup wizard saves and
+/// needs an immediate respawn, and there is no desktop scheduler to hand it to.
+/// Either way: no walgit-ensure shell, and no binary copy under ~/.walgit.
 /// 服务生命周期统一走二进制里的 `walgit service`（macOS 与 Windows，D48）：进程
 /// 不属于托盘，托盘只是客户端 —— 起停、pidfile/任务的记账都归二进制一处。
 /// Windows 上还必须带 CREATE_NO_WINDOW（`run` 已带），否则每点一次菜单闪一次黑窗。

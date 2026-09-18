@@ -52,14 +52,19 @@ function Get-Listeners {
 # Get-NetTCPConnection returns an empty set, and reading that as "nothing
 # listens" is how a smoke (or a stop) can green-light a port that is still served.
 function Test-PortFree {
-  try {
-    $c = [System.Net.Sockets.TcpClient]::new()
-    $c.Connect('127.0.0.1', $port)
-    $c.Close()
-    return $false
-  } catch {
-    return $true
+  # Both families: the server binds the v4 address *and* its `::1` twin, so a
+  # v4-only check would call the port free while the twin still listens.
+  foreach ($addr in @('127.0.0.1', '::1')) {
+    try {
+      $c = [System.Net.Sockets.TcpClient]::new()
+      $c.Connect($addr, $port)
+      $c.Close()
+      return $false
+    } catch {
+      # Nothing on that address (or no IPv6 at all) — try the next family.
+    }
   }
+  return $true
 }
 function Wait-Free {
   for ($i = 0; $i -lt 20; $i++) {
@@ -94,9 +99,18 @@ try {
   # Asked of the scheduled-task *object*: `schtasks /Query /XML` emits UTF-16,
   # which PowerShell decodes with the console encoding (mojibake), and the
   # `MultipleInstances` property is an enum — unaffected by either.
-  $settings = (Get-ScheduledTask -TaskName $task -ErrorAction Stop).Settings
+  $taskObj = Get-ScheduledTask -TaskName $task -ErrorAction Stop
+  $settings = $taskObj.Settings
   if ($settings.MultipleInstances -ne 'IgnoreNew') {
     throw "the task's MultipleInstancesPolicy is $($settings.MultipleInstances), not IgnoreNew"
+  }
+  # The default would kill a long-lived server after 72 hours.
+  if ($settings.ExecutionTimeLimit -ne 'PT0S') {
+    throw "the task's ExecutionTimeLimit is $($settings.ExecutionTimeLimit), not PT0S (unlimited)"
+  }
+  Write-Host "task settings: MultipleInstances=$($settings.MultipleInstances) ExecutionTimeLimit=$($settings.ExecutionTimeLimit) LogonType=$($taskObj.Principal.LogonType)"
+  if ($taskObj.Principal.LogonType -ne 'Interactive') {
+    throw "the task's LogonType is $($taskObj.Principal.LogonType), not the logged-on user's token"
   }
   if ((Get-Listeners) -ne 1) {
     throw "schtasks /Run started a second instance: $(Get-Listeners) listeners (MultipleInstancesPolicy?)"
@@ -104,8 +118,13 @@ try {
 
   Write-Host '--- status'
   $status = (& $bin service status --config $cfg | Out-String)
+  $statusExit = $LASTEXITCODE
   Write-Host $status
-  if ($status -notmatch 'running') { throw "status did not report a running service: $status" }
+  if ($statusExit -ne 0) { throw "service status exited $statusExit" }
+  # Anchored: `walgit: not running` also contains the word "running".
+  if ($status -notmatch '(?m)^walgit: running\b') {
+    throw "status did not report a running service: $status"
+  }
 
   Write-Host '--- stop (the port must really go quiet)'
   & $bin service stop --config $cfg
@@ -121,8 +140,17 @@ try {
     Start-Sleep -Milliseconds 500
   }
   if (-not $up) { throw 'the orphan server never came up; cannot test the port fallback' }
+  if ($orphan.HasExited) { throw 'the orphan server exited before the stop — the fallback was not exercised' }
   & $bin service stop --config $cfg
   if (-not (Wait-Free)) { throw "stop left the unsupervised server holding $(Get-Listeners) listener(s)" }
+  # The point of the scenario: `service stop` killed a server it never started.
+  if (-not $orphan.HasExited) { throw "the unsupervised server (pid $($orphan.Id)) survived `service stop`" }
+
+  Write-Host '--- restart (stop + start in one command)'
+  & $bin service restart --config $cfg
+  if (-not (Get-Healthz)) { throw 'restart did not bring the service back' }
+  & $bin service stop --config $cfg
+  if (-not (Wait-Free)) { throw 'stop after restart left the port busy' }
 
   Write-Host 'service smoke: OK'
 }
