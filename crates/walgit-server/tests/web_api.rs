@@ -139,9 +139,13 @@ fn fixture(server: &Server) -> anyhow::Result<std::path::PathBuf> {
 /// ranges for media seeking, and a CSP that keeps repository HTML inert. It used
 /// to answer only for text — every binary file came back as JSON `{binary:true}`,
 /// so an image or a PDF could not be rendered at all.
-#[tokio::test]
+// Same flavor as every other test that drives git: `fixture()` pushes with a
+// *blocking* `git` child, and a current-thread runtime would starve the
+// in-process server on its only thread — the push then hangs forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     let server = Server::start().await?;
+    server.put_repo("o", "r").await?; // the fixture only pushes; the repo must exist
     fixture(&server)?;
     let c = reqwest::Client::new();
     let url = |p: &str| format!("{}{p}", server.base_url);

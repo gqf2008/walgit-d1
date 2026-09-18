@@ -2714,7 +2714,15 @@ fn content_type_for(path: &str) -> &'static str {
         Some("html" | "htm") => "text/html; charset=utf-8",
         Some("xhtml") => "application/xhtml+xml; charset=utf-8",
         Some("xml") => "application/xml; charset=utf-8",
-        _ => "text/plain; charset=utf-8",
+        // Named text formats stay text (the "Raw" link should display them).
+        Some(
+            "md" | "markdown" | "txt" | "log" | "csv" | "tsv" | "json" | "yaml" | "yml" | "toml"
+            | "ini" | "cfg" | "rs" | "py" | "js" | "ts" | "sh" | "go" | "c" | "h" | "cpp" | "sql",
+        ) => "text/plain; charset=utf-8",
+        // Everything else is bytes: unknown is *not* a licence to hand a binary
+        // to the browser as text (the blob page reads text through the JSON
+        // lane, so `?raw` only has to be right for downloads and media).
+        _ => "application/octet-stream",
     }
 }
 
@@ -2771,9 +2779,11 @@ mod blob_view_tests {
         assert_eq!(content_type_for("song.flac"), "audio/flac");
         assert_eq!(content_type_for("doc.pdf"), "application/pdf");
         assert_eq!(content_type_for("page.html"), "text/html; charset=utf-8");
-        // Unknown → bytes; the viewer decides, not a guess.
-        assert_eq!(content_type_for("blob.bin"), "text/plain; charset=utf-8");
-        assert_eq!(content_type_for("noext"), "text/plain; charset=utf-8");
+        assert_eq!(content_type_for("notes.md"), "text/plain; charset=utf-8");
+        // Unknown → bytes, never text: a `.dat` is not a document.
+        assert_eq!(content_type_for("blob.bin"), "application/octet-stream");
+        assert_eq!(content_type_for("bin.dat"), "application/octet-stream");
+        assert_eq!(content_type_for("noext"), "application/octet-stream");
     }
 
     #[test]
