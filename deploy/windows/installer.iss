@@ -57,6 +57,8 @@ Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:Add
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
+; CI 与安装器共用的任务归属探测；安装时从安装包临时解压，不落到 {app}。
+Source: "task-ownership.ps1"; Flags: dontcopy
 ; 已有配置绝不覆盖;卸载也不删(用户数据)。写到状态目录而非程序目录。
 Source: "walgit.toml.initial"; DestDir: "{%USERPROFILE}\.walgit"; DestName: "walgit.toml"; Flags: onlyifdoesntexist uninsneveruninstall
 
@@ -119,32 +121,25 @@ const
 function TaskOwnership: Integer;
 var
   ResultCode: Integer;
-  OutFile, Status: String;
+  OutFile, ScriptFile, Status: String;
   Lines: TArrayOfString;
 begin
   Result := TaskStateUnknown;
   OutFile := ExpandConstant('{tmp}\walgit-task-query.txt');
+  ScriptFile := ExpandConstant('{tmp}\task-ownership.ps1');
   DeleteFile(OutFile);
+  ExtractTemporaryFile('task-ownership.ps1');
   if not Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "' +
-    '$ErrorActionPreference = ''Stop''; ' +
-    'try { $t = Get-ScheduledTask -TaskName ''walgit'' } ' +
-    'catch { if ($_.FullyQualifiedErrorId -like ''CmdletizationQuery_NotFound*'') { ''absent'' } else { ''unknown'' }; exit 0 }; ' +
-    '$ok = $false; foreach ($a in $t.Actions) { ' +
-    '$cmd = '''' + $a.Execute; $actionArgs = '''' + $a.Arguments; ' +
-    '$base = [System.IO.Path]::GetFileName($cmd); ' +
-    'if ($base -match ''^(?i)(walgit|walgit-server)\.exe$'') { $ok = $true } ' +
-    'elseif ($base -match ''^(?i)cmd(\.exe)?$'' -and $actionArgs -match ''(?i)(^|[\\/])walgit(-server)?\.exe(?=$|[\s\x22])'') { $ok = $true } }; ' +
-    'if ($ok) { ''ours'' } else { ''foreign'' }" > "' +
-    OutFile + '"',
+    '/C powershell -NoProfile -ExecutionPolicy Bypass -File "' + ScriptFile +
+    '" -TaskName walgit -OutFile "' + OutFile + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
-    Log('ERROR: could not run the walgit task-ownership query');
+    Log('ERROR: could not run the walgit task-ownership probe');
     exit;
   end;
   if ResultCode <> 0 then
   begin
-    Log('ERROR: walgit task-ownership query exited ' + IntToStr(ResultCode));
+    Log('ERROR: walgit task-ownership probe exited ' + IntToStr(ResultCode));
     exit;
   end;
   if LoadStringsFromFile(OutFile, Lines) and (GetArrayLength(Lines) > 0) then
@@ -157,11 +152,31 @@ begin
     else if Status = 'foreign' then
       Result := TaskStateForeign
     else
-      Log('ERROR: walgit task-ownership query returned: ' + Status);
+      Log('ERROR: walgit task-ownership probe returned: ' + Status);
   end
   else
-    Log('ERROR: walgit task-ownership query produced no status');
+    Log('ERROR: walgit task-ownership probe produced no status');
   DeleteFile(OutFile);
+end;
+
+// `/End` 只负责发起停止；真正的判据是任务不再处于 Running。查询失败也必须
+// 让用户决定，不能把“没法确认”当成“已经停止”。
+function TaskIsStopped: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{cmd}'),
+    '/C powershell -NoProfile -ExecutionPolicy Bypass -Command "' +
+    '$ErrorActionPreference = ''Stop''; ' +
+    'try { $t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction Stop } ' +
+    'catch { if ($_.FullyQualifiedErrorId -like ''CmdletizationQuery_NotFound*'') { exit 0 } else { exit 4 } }; ' +
+    'if ($t.State -ne ''Running'') { exit 0 }; ' +
+    'for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Milliseconds 250; ' +
+    'try { $t = Get-ScheduledTask -TaskName ''walgit'' -ErrorAction Stop } catch { exit 4 }; ' +
+    'if ($t.State -ne ''Running'') { exit 0 } }; exit 3"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Result then
+    Result := ResultCode = 0;
 end;
 
 procedure StopWalgit;
@@ -169,18 +184,31 @@ var
   ResultCode: Integer;
   Script: String;
   Ownership: Integer;
+  EndOk: Boolean;
 begin
   // 换文件前结束服务，顺序按「谁真正持有进程」来（D48）：
-  // 1) 服务归任务计划程序：先 /End 那个具名任务。失败忽略——多半本就没起。
+  // 1) 服务归任务计划程序：先 /End 那个具名任务，再验证 State 不再是 Running；
+  //    失败时让用户显式决定是否继续，不能把“无法确认”当作“已经停止”。
   // 2) 再按**监听端口**清扫：旧形态的 pidfile 会被写坏（写进已死子进程的 pid），
   //    端口才是真凭据。端口从用户配置里读，自定义端口不会被漏掉；只杀进程名以
   //    walgit 开头的，绝不误伤别人的进程。
   // 3) 最后按安装目录圈定托盘与本体。
   Ownership := TaskOwnership;
   if Ownership = TaskStateOurs then
-    Exec(ExpandConstant('{cmd}'),
+  begin
+    EndOk := Exec(ExpandConstant('{cmd}'),
       '/C schtasks /End /TN walgit >NUL 2>&1',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if not EndOk then
+      Log('WARNING: could not run schtasks /End for the walgit task');
+    if EndOk and (ResultCode <> 0) then
+      Log('WARNING: schtasks /End exited ' + IntToStr(ResultCode));
+    if not TaskIsStopped then
+      if MsgBox('walgit: /End 后无法确认计划任务已经停止；任务可能仍在运行。' + #13#10 +
+        '继续安装可能让下一次 start 被 IgnoreNew 挡住。仍要继续吗？',
+        mbConfirmation, MB_YESNO) = IDNO then
+        Abort;
+  end;
   if Ownership = TaskStateUnknown then
     MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器不会自动结束它。' + #13#10 +
       '为避免误伤同名任务，请手工检查后再继续。', mbError, MB_OK);

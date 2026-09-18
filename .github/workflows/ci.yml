@@ -396,6 +396,58 @@ jobs:
           : > target/release/walgit-tray.exe
           iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
           "$iscc" "-DMyAppVersion=0.0.0-ci" deploy/windows/installer.iss
+      - name: Task ownership runtime smoke
+        # The installer consumes this same script. Exercise real Task Scheduler
+        # objects here so a parser/encoding change cannot pass only ISCC.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probe = (Resolve-Path './deploy/windows/task-ownership.ps1').Path
+          $task = 'walgit'
+          $out = Join-Path $env:TEMP "walgit-task-ownership-$PID.txt"
+          $app = $null
+
+          function Get-Ownership {
+            param([string]$Name)
+            Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+            & $probe -TaskName $Name -OutFile $out
+            if ($LASTEXITCODE -ne 0) { throw "task-ownership.ps1 exited $LASTEXITCODE" }
+            return (Get-Content -LiteralPath $out -Raw).Trim()
+          }
+
+          function Assert-Ownership {
+            param([string]$Expected, [string]$Actual)
+            if ($Actual -ne $Expected) { throw "expected '$Expected', got '$Actual'" }
+          }
+
+          try {
+            Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue |
+              Unregister-ScheduledTask -Confirm:$false
+            Assert-Ownership 'absent' (Get-Ownership $task)
+
+            $foreign = 'cmd.exe /c echo C:\nonexistent\walgit.exe'
+            schtasks.exe /Create /TN $task /TR $foreign /SC ONCE /ST 23:59 /F | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "schtasks /Create foreign exited $LASTEXITCODE" }
+            Assert-Ownership 'foreign' (Get-Ownership $task)
+
+            $app = Join-Path $env:TEMP "walgit task ownership $PID"
+            New-Item -ItemType Directory -Force -Path $app | Out-Null
+            $exe = Join-Path $app 'walgit.exe'
+            New-Item -ItemType File -Force -Path $exe | Out-Null
+            $ourShape = 'cmd.exe /c ""{0}" serve"' -f $exe
+            schtasks.exe /Create /TN $task /TR $ourShape /SC ONCE /ST 23:59 /F | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "schtasks /Create ours exited $LASTEXITCODE" }
+            Assert-Ownership 'ours' (Get-Ownership $task)
+
+            $bytes = [System.IO.File]::ReadAllBytes($out)
+            if ($bytes -contains [byte]0) { throw 'ownership output contains NUL bytes' }
+          }
+          finally {
+            Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue |
+              Unregister-ScheduledTask -Confirm:$false
+            Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+            if ($app) { Remove-Item -LiteralPath $app -Recurse -Force -ErrorAction SilentlyContinue }
+          }
       - name: Tray (Windows branch) compiles
         # tray-rs is its own workspace, so the root `cargo check --all-targets`
         # never sees it: without this the Windows tray path is only built at
