@@ -41,11 +41,9 @@ const LOG_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub async fn run(action: &ServiceAction, config: &Path) -> Result<()> {
     let config = config.to_path_buf();
-    let cfg = Config::load(&config)
-        .with_context(|| format!("loading {}", config.display()))?;
+    let cfg = Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
     let home = walgit_config::deploy_home();
-    std::fs::create_dir_all(&home)
-        .with_context(|| format!("creating {}", home.display()))?;
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     let log = home.join("server.log");
     let listen = cfg.server.listen.to_string();
 
@@ -92,7 +90,10 @@ async fn stop(listen: &str, home: &Path) -> Result<()> {
     let pidfile = &pidfile(home);
     let Some(pid) = read_pid(pidfile) else {
         if healthy(listen).await {
-            bail!("walgit: serving but no pidfile at {} — stop it by hand", pidfile.display());
+            bail!(
+                "walgit: serving but no pidfile at {} — stop it by hand",
+                pidfile.display()
+            );
         }
         println!("walgit: not running — http://{listen}");
         return Ok(());
@@ -230,11 +231,7 @@ fn tail(path: &Path, lines: usize) -> Option<String> {
 
 #[cfg(not(windows))]
 fn read_pid(pidfile: &Path) -> Option<u32> {
-    std::fs::read_to_string(pidfile)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()
 }
 
 /// One GET /healthz over a bare TCP socket: the CLI owes nothing to an HTTP
@@ -261,10 +258,17 @@ async fn healthz_body(listen: &str) -> Option<String> {
     let mut buf = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut buf)).await;
     let text = String::from_utf8_lossy(&buf).to_string();
-    if !text.lines().next().is_some_and(|line| line.contains(" 200")) {
+    if !text
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains(" 200"))
+    {
         return None;
     }
-    Some(text.split_once("\r\n\r\n").map_or(text.clone(), |(_, b)| b.to_string()))
+    Some(
+        text.split_once("\r\n\r\n")
+            .map_or(text.clone(), |(_, b)| b.to_string()),
+    )
 }
 
 async fn healthy(listen: &str) -> bool {
@@ -395,7 +399,7 @@ fn credential_env(home: &Path) -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Name of the scheduled task that carries the Windows server process.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const TASK_NAME: &str = "walgit";
 
 #[cfg(windows)]
@@ -598,7 +602,15 @@ fn image_from_tasklist(text: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-#[cfg(windows)]
+// Compiled on every platform (not just Windows) so that name-resolution and
+// borrow errors in this module surface in a local `cargo test` instead of
+// costing a 40-minute Windows CI round trip. Nothing here runs off-Windows:
+// `schtasks` simply does not exist, which the callers treat as "unknown".
+#[cfg(any(windows, test))]
+#[allow(
+    dead_code,
+    reason = "off-Windows test builds compile this module only to type-check it"
+)]
 mod task {
     //! `schtasks` wrappers for the one named task that carries the server.
 
@@ -607,7 +619,7 @@ mod task {
 
     use anyhow::{Context, Result, bail};
 
-    use super::{TASK_NAME, task_is_ours};
+    use super::{TASK_NAME, lists_task, task_is_ours};
 
     fn schtasks(args: &[&str]) -> Result<String> {
         let out = Command::new("schtasks")
@@ -641,7 +653,11 @@ mod task {
         match out {
             Ok(o) if o.status.success() => {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() { "absent".to_string() } else { s }
+                if s.is_empty() {
+                    "absent".to_string()
+                } else {
+                    s
+                }
             }
             _ => "absent".to_string(),
         }
@@ -699,9 +715,8 @@ mod task {
             ),
         }
         let xml_path = home.join("walgit-task.xml");
-        std::fs::write(&xml_path, task_xml(exe, config, log)).with_context(|| {
-            format!("writing the task definition to {}", xml_path.display())
-        })?;
+        std::fs::write(&xml_path, task_xml(exe, config, log))
+            .with_context(|| format!("writing the task definition to {}", xml_path.display()))?;
         let path = xml_path.display().to_string();
         let result = schtasks(&["/Create", "/TN", TASK_NAME, "/XML", &path, "/F"]);
         let _ = std::fs::remove_file(&xml_path);
@@ -857,7 +872,9 @@ mod listener_parse_tests {
         let ours = r#"<Exec><Command>C:\Windows\System32\cmd.exe</Command>
             <Arguments>/c ""C:\Users\x\AppData\Local\Programs\walgit\walgit.exe" serve >> log 2>&1"</Arguments></Exec>"#;
         assert!(task_is_ours(ours));
-        assert!(task_is_ours(r"<Command>walgit.exe</Command><Arguments>serve</Arguments>"));
+        assert!(task_is_ours(
+            r"<Command>walgit.exe</Command><Arguments>serve</Arguments>"
+        ));
         // Somebody else's task that happens to be called `walgit`: a description
         // that mentions the name, a differently-named binary, or a name that
         // merely *ends* with ours must not qualify.
@@ -873,8 +890,10 @@ mod listener_parse_tests {
 
         // Existence comes from the *(unlocalised)* name column of the listing.
         let list = concat!(
-            r"\Microsoft\Windows\Defrag\ScheduledDefrag,N/A,Ready", "\n",
-            r#""\walgit",N/A,Running"#, "\n",
+            r"\Microsoft\Windows\Defrag\ScheduledDefrag,N/A,Ready",
+            "\n",
+            r#""\walgit",N/A,Running"#,
+            "\n",
         );
         assert!(lists_task(list, "walgit"));
         assert!(!lists_task(list, "walgit2"));

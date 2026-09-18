@@ -148,12 +148,13 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
             println_kv("writer", &entry.writer);
             println_kv(
                 "created_at",
-                entry
-                    .created_at
-                    .as_ref().map_or_else(|| "(none — predates the field)".into(), |t| {
+                entry.created_at.as_ref().map_or_else(
+                    || "(none — predates the field)".into(),
+                    |t| {
                         humantime::format_rfc3339_seconds(walgit_proto::time::to_system(t))
                             .to_string()
-                    }),
+                    },
+                ),
             );
 
             if let Some(pack) = &entry.pack {
@@ -214,9 +215,7 @@ fn apply_pack_entry(
     entry: &walgit_proto::v1::LogEntry,
 ) {
     if let Some(pack) = &entry.pack {
-        pack_set.retain(|p| {
-            p.checksum != pack.checksum && !entry.supersedes.contains(&p.checksum)
-        });
+        pack_set.retain(|p| p.checksum != pack.checksum && !entry.supersedes.contains(&p.checksum));
         pack_set.push(pack.clone());
     } else {
         pack_set.retain(|p| !entry.supersedes.contains(&p.checksum));
@@ -423,7 +422,11 @@ mod tests {
             ..Default::default()
         };
         apply_pack_entry(&mut set, &entry);
-        assert_eq!(set.len(), 1, "the old seq must not survive beside the new seq");
+        assert_eq!(
+            set.len(),
+            1,
+            "the old seq must not survive beside the new seq"
+        );
         assert_eq!(set[0].seq, 5);
 
         let mut set = vec![pack("old", 4), pack("keep", 4)];
