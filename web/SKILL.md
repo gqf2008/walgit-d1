@@ -95,7 +95,7 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     a new signed entry whose parent chain anyone can replay and verify.
 - Automate: `walgit collab watch --exec <cmd>` — resident loop: fetch
   `refs/collab/*`, invoke `cmd` with each new/changed entry's JSON on stdin.
-- Housekeeping (D45): `walgit collab gc --actor <principal> --key <key>
+- Housekeeping (D45): `walgit collab gc --actor <principal> --key <keyfile>
   --push <remote>` folds the append-only inbox into the signed snapshot at
   `refs/collab/meta/snapshot` and prunes the folded refs — every aggregation
   (snapshot ∪ tail) is byte-identical across a fold, so run it whenever the
@@ -243,6 +243,10 @@ everyone re-derives the same view from the refs.
 - One principal per agent, one Ed25519 key (`32` raw bytes as hex, keep at
   `~/.walgit/keys/<principal>.ed25519`). Each agent owns its key; never share one
   key across agents or roles.
+- `--key` always takes a **file path**. walgit has no key-generation subcommand:
+  each principal must have its own 32-byte Ed25519 seed (64 hex characters) created
+  by your own key-generation flow, stored in a `0600` file. Pass only the path;
+  never paste the file contents into the command line or shell history.
 - Before the first thread, register the whole team, not one lone identity: a worker
   pool, a reviewer pool, and a coordinator. A practical default is
   `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, and `<proj>-coordinator`. Each agent
@@ -264,6 +268,9 @@ everyone re-derives the same view from the refs.
 - Register once per repository. `--push origin` publishes the public key so other agents
   can verify it. A rejected registration is a hard stop: do not start writing entries
   under an unregistered principal.
+- Reviewer principals must not start with `svc-`: `merge_rule_eval` excludes `svc-*`
+  actors from human approvals, so such an approve cannot satisfy a protected-base
+  merge rule.
 - Never sign an entry for another agent or make every agent use one shared key. If the
   author, reviewer, and merger all sign as `sqb` (or any other shared principal), the
   board sees one owner and verification cannot tell who implemented, reviewed, or
@@ -307,54 +314,57 @@ pulled in per review; every active card still needs its own owner and worktree. 
 coordinator should keep the smallest possible write set so the merge path stays easy to
 replay.
 
-**Copyable start checklist** (replace `<...>` values; use the returned oid as the next
-`--parent`):
+**Copyable start checklist** (set `checkout=/path/to/checkout` first, replace the
+remaining `<...>` values, and use the returned oid as the next `--parent`):
 
 ```sh
 # 1. File the card (coordinator). The issue names the objective, roles, owner,
 #    and machine-checkable acceptance.
-walgit collab entry --repo <checkout> --kind issue --id <thread> \
+walgit collab entry --repo "$checkout" --kind issue --id <thread> \
   --actor <proj>-coordinator \
   --body '{"title":"<title>","body":"objective; roles; machine-checkable acceptance"}' \
   --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
 
 # 2. Claim it (worker). status fields are the claim ledger; use the issue entry oid as parent.
-walgit collab entry --repo <checkout> --kind status --id <thread> \
+walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-worker-1 --parent <issue-oid> \
   --body '{"status":"in-progress","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"<one-line plan>"}' \
   --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
 
 # 3. Work on exactly that card.
-git worktree add .worktrees/wt-<thread> -b feat/<thread> <base>
-git push origin feat/<thread>
+git -C "$checkout" worktree add "$checkout/.worktrees/wt-<thread>" -b feat/<thread> <base>
+git -C "$checkout" push origin feat/<thread>
 
 # 4. Attach the implementation, then ask for review (use the status entry oid as parent).
-walgit collab entry --repo <checkout> --kind patch --id <thread> \
+walgit collab entry --repo "$checkout" --kind patch --id <thread> \
   --actor <proj>-worker-1 --parent <status-oid> \
   --base refs/heads/main --head refs/heads/feat/<thread> \
   --body '{"title":"<patch title>","message":"<what changed and why>"}' \
   --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
-walgit collab entry --repo <checkout> --kind status --id <thread> \
+walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-worker-1 --parent <patch-oid> \
   --body '{"status":"needs-review","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"ready for independent review"}' \
   --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
 
 # 5. Review with a different principal. Full findings go in note; the key is the identity.
-walgit collab entry --repo <checkout> --kind review --id <thread> \
+walgit collab entry --repo "$checkout" --kind review --id <thread> \
   --actor <proj>-reviewer-1 --parent <review-request-oid> \
   --body '{"decision":"approve","agent":"<proj>-reviewer-1","note":"location; problem; suggestion; reproducible verification"}' \
   --key ~/.walgit/keys/<proj>-reviewer-1.ed25519 --push origin
 
 # 6. Coordinator only: merge, push, then record the oid and the terminal move.
-walgit collab entry --repo <checkout> --kind merge_result --id <thread> \
+git -C "$checkout" switch main
+git -C "$checkout" merge --ff-only feat/<thread>
+git -C "$checkout" push origin main
+walgit collab entry --repo "$checkout" --kind merge_result --id <thread> \
   --actor <proj>-coordinator --parent <review-oid> \
   --body '{"oid":"<merged-oid>","result":"merged","note":"merged feat/<thread> into main"}' \
   --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
-walgit collab entry --repo <checkout> --kind merge_result --id <thread> \
+walgit collab entry --repo "$checkout" --kind merge_result --id <thread> \
   --actor <proj>-coordinator --parent <merge-oid-entry> \
   --body '{"merged":true,"oid":"<merged-oid>","note":"<release summary>"}' \
   --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
-walgit collab entry --repo <checkout> --kind status --id <thread> \
+walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-coordinator --parent <merged-entry-oid> \
   --body '{"status":"closed","owner":"<proj>-coordinator","worktree":"wt-<thread>","branch":"main","work":"merged and verified"}' \
   --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin

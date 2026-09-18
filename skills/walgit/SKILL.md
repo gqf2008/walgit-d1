@@ -61,6 +61,11 @@ walgit collab principal-register --repo <checkout> --principal <principal> \
   --key ~/.walgit/keys/<principal>.ed25519 --push origin
 ```
 
+`--key` is a file path: generate each principal's 32-byte Ed25519 seed with your own
+key-generation flow, store it `0600`, and never paste its contents on the command line.
+Reviewer principals must not start with `svc-`; `merge_rule_eval` excludes `svc-*`
+actors from human approvals.
+
 ```bash
 # A function, not `W="walgit …"; $W …` — zsh does not word-split an unquoted expansion.
 W() { walgit --config ~/.walgit/walgit.toml "$@"; }
