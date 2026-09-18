@@ -153,10 +153,16 @@ jobs:
             "{not json" \
             '{"jsonrpc":"2.0","id":3,"method":"nope"}' \
             | RUST_LOG=walgit=trace timeout 30 target/debug/walgit mcp --config walgit.example.toml > mcp-smoke.jsonl 2> mcp-smoke.err
+          # The tracing smoke is only real if a trace level known to be emitted
+          # reaches stderr. Without this, an empty stderr (or logs accidentally
+          # on stdout) could still read green.
+          test -s mcp-smoke.err || { echo "MCP smoke stderr is empty — tracing smoke is vacuous"; exit 1; }
+          grep -Fq 'mcp stdio ready' mcp-smoke.err
           python3 - <<'PY'
           import json
           lines = [json.loads(l) for l in open("mcp-smoke.jsonl")]
           assert len(lines) == 4, lines  # the notification must not produce a reply
+          assert all(l.get("jsonrpc") == "2.0" for l in lines), lines
           init, tools, bad, unknown = lines
           # stdout is a JSON-RPC stream: with `RUST_LOG=walgit=trace` set, a
           # single tracing line landing there would make this parse fail. (Logs

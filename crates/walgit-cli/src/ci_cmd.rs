@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use walgit_bundle::schedule::DueSlot;
@@ -26,6 +26,8 @@ use walgit_wal::ci::{
     CI_CLAIM_KIND, CI_RESULT_KIND, Conclusion, Decision, RunView, run_id, scheduled_run_id,
 };
 use walgit_wal::collab::{Entry, EntryRef, sign_entry};
+
+use crate::proc_group::{kill_tree, spawn_in_own_group};
 
 // ---- schema limits (docs/D1_CI_PROTOCOL.md §3.1, normative bounds) -------------
 
@@ -2106,62 +2108,6 @@ fn millis_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Put the child in its own process group (§8.1): Unix `setpgid` via
-/// `process_group(0)`, Windows a fresh console process group. `sh -c` does
-/// not always exec its single command (it forks on some shells), so a timeout
-/// that killed only the direct child would leave a grandchild holding the
-/// capture pipes open — and the drain threads' joins unbounded.
-fn spawn_in_own_group(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
-}
-
-/// Kill a timed-out command's whole tree (§8.1): one group signal (Unix) or a
-/// tree walk (`taskkill /T`, Windows) so every forked descendant dies with the
-/// child and the capture pipes reach EOF. Falls back to the direct child.
-#[cfg(unix)]
-#[allow(unsafe_code)] // killpg — the same platform-seam exception as walgit-wal/src/platform.rs
-fn kill_tree(child: &mut Child) {
-    // `spawn_in_own_group` made the child its own group leader: pgid == pid.
-    let Ok(pgid) = libc::pid_t::try_from(child.id()) else {
-        let _ = child.kill();
-        return;
-    };
-    // SAFETY: a plain signal dispatch — SIGKILL to the child's own process
-    // group, no state read or written.
-    if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
-        let _ = child.kill();
-    }
-}
-
-/// Windows twin of the Unix `kill_tree`: `taskkill /T /F` walks the process
-/// tree by snapshot (CREATE_NEW_PROCESS_GROUP alone would not reach
-/// grandchildren of `cmd /C`); the direct child is the fallback.
-#[cfg(windows)]
-fn kill_tree(child: &mut Child) {
-    let pid = child.id().to_string();
-    let killed = Command::new("taskkill")
-        .arg("/PID")
-        .arg(&pid)
-        .args(["/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !killed {
-        let _ = child.kill();
-    }
-}
-
 /// The captured tail out of the shared buffer (poison-tolerant: a panicking
 /// reader thread must not lose the task's output).
 fn take_log(log: &Mutex<CapturedLog>) -> CapturedLog {
@@ -2897,6 +2843,46 @@ max_attempts = 2
         use super::*;
         use std::process::Command as SysCommand;
 
+        fn shell_quote(value: &str) -> String {
+            format!("'{}'", value.replace('\'', "'\\''"))
+        }
+
+        #[allow(unsafe_code)] // kill(pid, 0) is the Unix process-existence probe.
+        fn process_exists(pid: u32) -> bool {
+            let Ok(pid) = libc::pid_t::try_from(pid) else {
+                return false;
+            };
+            // SAFETY: signal 0 performs access checks only; it never signals the
+            // process or mutates any state.
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                true
+            } else {
+                std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            }
+        }
+
+        fn assert_processes_are_gone(pid_file: &Path) {
+            let raw = std::fs::read_to_string(pid_file).expect("pid file");
+            let pids: Vec<u32> = raw
+                .lines()
+                .map(|line| line.trim().parse().expect("pid"))
+                .collect();
+            assert_eq!(
+                pids.len(),
+                2,
+                "both shell and grandchild wrote PIDs: {raw:?}"
+            );
+            for pid in pids {
+                for _ in 0..100 {
+                    if !process_exists(pid) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert!(!process_exists(pid), "PID {pid} survived the tree kill");
+            }
+        }
+
         struct Fixture {
             _dir: tempfile::TempDir,
             repo: PathBuf,
@@ -3022,8 +3008,14 @@ max_attempts = 2
             // kill — the ubuntu failure this regression came from).
             let f = fixture_repo();
             let r = runner(&f.repo);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let pid_file = dir.path().join("pids");
+            let command = format!(
+                "echo $$ > {path}\nsh -c 'echo $$ >> {path}; exec sleep 30' sh {path} &\nwhile [ \"$(wc -l < {path} | tr -d ' ')\" -lt 2 ]; do sleep 0.01; done\nwait",
+                path = shell_quote(&pid_file.to_string_lossy())
+            );
             let out = r.execute(
-                &task("sleep 30 & wait", 1, &[]),
+                &task(&command, 1, &[]),
                 "refs/heads/main",
                 &f.commit,
                 "ci-x",
@@ -3036,6 +3028,7 @@ max_attempts = 2
                 "the command must be killed, not waited out: {} ms",
                 out.duration_ms
             );
+            assert_processes_are_gone(&pid_file);
         }
 
         #[test]

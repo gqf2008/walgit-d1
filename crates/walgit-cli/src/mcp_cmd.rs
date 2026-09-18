@@ -26,6 +26,8 @@ use std::process::Stdio;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use crate::proc_group::{kill_tree, spawn_in_own_group};
+
 /// Latest revision this adapter implements; the client's requested one is
 /// echoed when we know it (the spec lets the server choose and the client
 /// decide).
@@ -206,6 +208,7 @@ fn tool_defs() -> Vec<Tool> {
 pub async fn run(opts: Options) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    tracing::debug!("mcp stdio ready");
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut out = tokio::io::stdout();
     while let Some(line) = lines.next_line().await.context("reading stdin")? {
@@ -277,14 +280,20 @@ async fn handle_line(line: &str, opts: &Options) -> Option<String> {
                     "invalid params: `params` must be an object",
                 ));
             }
-            let asked = params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let version = if KNOWN_PROTOCOLS.contains(&asked) {
-                asked
-            } else {
-                PROTOCOL_VERSION
+            let asked = match params.get("protocolVersion") {
+                None => None,
+                Some(Value::String(version)) => Some(version.as_str()),
+                Some(_) => {
+                    return Some(error_reply(
+                        id,
+                        -32602,
+                        "invalid params: `protocolVersion` must be a string",
+                    ));
+                }
+            };
+            let version = match asked {
+                Some(version) if KNOWN_PROTOCOLS.contains(&version) => version,
+                _ => PROTOCOL_VERSION,
             };
             Some(result_reply(
                 id,
@@ -303,6 +312,13 @@ async fn handle_line(line: &str, opts: &Options) -> Option<String> {
         }
         "ping" => Some(result_reply(id, json!({}))),
         "tools/list" => {
+            if !params.is_null() && !params.is_object() {
+                return Some(error_reply(
+                    id,
+                    -32602,
+                    "invalid params: `params` must be an object",
+                ));
+            }
             let tools: Vec<Value> = tool_defs()
                 .iter()
                 .filter(|t| opts.allow_write || !t.write)
@@ -413,7 +429,13 @@ fn validate_arguments(spec: &Tool, args: &Value) -> Result<(), ToolError> {
             )));
         };
         if value.is_null() {
-            continue; // explicit "not provided"
+            return Err(ToolError::InvalidParams(format!(
+                "`{key}` must be a {0}, not null",
+                field
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("value")
+            )));
         }
         let declared = field.get("type").and_then(Value::as_str);
         let ok = match declared {
@@ -451,7 +473,7 @@ fn validate_arguments(spec: &Tool, args: &Value) -> Result<(), ToolError> {
 async fn run_child(argv: &[String], config: &std::path::Path) -> Result<String, ToolError> {
     let exe = std::env::current_exe()
         .map_err(|e| ToolError::Execution(format!("locating walgit: {e}")))?;
-    let mut args = vec!["--config".to_string(), config.display().to_string()];
+    let mut args = vec![format!("--config={}", config.display())];
     args.extend_from_slice(argv);
     run_child_with(&exe, &args, TOOL_TIMEOUT, TOOL_OUTPUT_MAX).await
 }
@@ -498,13 +520,15 @@ async fn run_child_with(
     timeout: std::time::Duration,
     cap: usize,
 ) -> Result<String, ToolError> {
-    let mut child = tokio::process::Command::new(exe)
-        .args(argv)
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args(argv)
         // Never the MCP stream: the child's stdin must not be able to consume it.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    spawn_in_own_group(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| ToolError::Execution(format!("running `{}`: {e}", argv.join(" "))))?;
 
@@ -537,7 +561,7 @@ async fn run_child_with(
                     over |= exceeded;
                 }
                 () = tokio::time::sleep_until(deadline) => {
-                    let _ = child.kill().await;
+                    kill_tree(&mut child);
                     let _ = child.wait().await;
                     return Err(ToolError::Execution(format!(
                         "`{shown}` timed out after {}s",
@@ -551,7 +575,7 @@ async fn run_child_with(
         }
     }
     if over {
-        let _ = child.kill().await;
+        kill_tree(&mut child);
         let _ = child.wait().await;
         return Err(ToolError::Execution(format!(
             "`{shown}` produced more than {} KiB — run the CLI directly for bulk output",
@@ -564,7 +588,7 @@ async fn run_child_with(
             return Err(ToolError::Execution(format!("waiting for `{shown}`: {e}")));
         }
         Err(_) => {
-            let _ = child.kill().await;
+            kill_tree(&mut child);
             let _ = child.wait().await;
             return Err(ToolError::Execution(format!(
                 "`{shown}` timed out after {}s",
@@ -609,12 +633,12 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
             ))),
         }
     };
-    // Absent/null is "not provided"; anything else must be a string. Silently
-    // dropping `path: 123` would run a *different* command than the model asked
-    // for, and the model would never learn why.
+    // Absent is "not provided"; anything present must be a string. Explicit
+    // null is rejected too: the schemas are not nullable, and treating null as
+    // absent made `path: null` diverge from the typed validation above.
     let opt = |key: &str| -> Result<Option<String>, ToolError> {
         match args.get(key) {
-            None | Some(Value::Null) => Ok(None),
+            None => Ok(None),
             Some(Value::String(v)) => Ok(Some(v.clone())),
             Some(_) => Err(ToolError::InvalidParams(format!(
                 "`{key}` must be a string"
@@ -646,7 +670,7 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
         "repo_list" => vec!["repo".into(), "list".into()],
         "repo_owners" => {
             let mut v = vec!["repo".into(), "owners".into()];
-            if let Ok(owner) = req("owner") {
+            if let Some(owner) = opt("owner")? {
                 v.push("--".into());
                 v.push(owner);
             }
@@ -815,6 +839,8 @@ fn error_reply(id: Value, code: i64, message: &str) -> String {
 mod tests {
     use super::{Options, PROTOCOL_VERSION, ToolError, argv_for, handle_line, tool_defs};
     use serde_json::{Value, json};
+    #[cfg(unix)]
+    use std::path::Path;
     use std::path::PathBuf;
 
     fn opts(allow_write: bool) -> Options {
@@ -832,6 +858,68 @@ mod tests {
             .await
             .expect("a reply");
         serde_json::from_str(&out).expect("valid JSON")
+    }
+
+    #[cfg(unix)]
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    /// A shell that records its own PID and a forked grandchild's PID before it
+    /// (optionally) floods stdout or sleeps forever. The outer shell waits for
+    /// both writes, so the test observes a ready process tree rather than a
+    /// scheduling race.
+    #[cfg(unix)]
+    fn pid_command(pid_file: &Path, flood: bool) -> Vec<String> {
+        let child = if flood {
+            "echo $$ >> \"$1\"; while :; do printf x; done"
+        } else {
+            "echo $$ >> \"$1\"; exec sleep 30"
+        };
+        let script = format!(
+            "echo $$ > \"$1\"\nsh -c {} sh \"$1\" &\nwhile [ \"$(wc -l < \"$1\" | tr -d ' ')\" -lt 2 ]; do sleep 0.01; done\nwait",
+            shell_quote(child)
+        );
+        vec![
+            "-c".to_string(),
+            script,
+            "sh".to_string(),
+            pid_file.to_string_lossy().into_owned(),
+        ]
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)] // kill(pid, 0) is the Unix process-existence probe.
+    fn process_exists(pid: u32) -> bool {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 performs access checks only; it never signals the
+        // process or mutates any state.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            true
+        } else {
+            std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_processes_are_gone(pid_file: &Path) {
+        let raw = std::fs::read_to_string(pid_file).expect("pid file");
+        let pids: Vec<u32> = raw
+            .lines()
+            .map(|line| line.trim().parse().expect("pid"))
+            .collect();
+        assert_eq!(pids.len(), 2, "both shell and grandchild wrote PIDs: {raw:?}");
+        for pid in pids {
+            for _ in 0..100 {
+                if !process_exists(pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(!process_exists(pid), "PID {pid} survived the tree kill");
+        }
     }
 
     #[test]
@@ -1004,6 +1092,22 @@ mod tests {
             reply(&line, false).await["result"]["protocolVersion"],
             PROTOCOL_VERSION
         );
+
+        let line = json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": 123}}).to_string();
+        let v = reply(&line, false).await;
+        assert_eq!(v["error"]["code"], -32602, "{v}");
+        assert!(v["result"].is_null(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn tools_list_params_are_typed() {
+        let v = reply(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":[]}"#,
+            false,
+        )
+        .await;
+        assert_eq!(v["error"]["code"], -32602, "{v}");
+        assert!(v["result"].is_null(), "{v}");
     }
 
     #[tokio::test]
@@ -1051,7 +1155,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_flooding_tool_is_cut_off_and_killed() {
-        let args = vec!["-c".to_string(), "yes".to_string()];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("pids");
+        let args = pid_command(&pid_file, true);
         let err = super::run_child_with(
             std::path::Path::new("sh"),
             &args,
@@ -1061,12 +1167,15 @@ mod tests {
         .await
         .expect_err("cut off");
         assert!(format!("{err:?}").contains("more than"), "{err:?}");
+        assert_processes_are_gone(&pid_file);
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn a_wedged_tool_times_out_and_is_killed() {
-        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("pids");
+        let args = pid_command(&pid_file, false);
         let started = std::time::Instant::now();
         let err = super::run_child_with(
             std::path::Path::new("sh"),
@@ -1079,6 +1188,7 @@ mod tests {
         assert!(format!("{err:?}").contains("timed out"), "{err:?}");
         // The deadline fired and the child was killed — not `sleep` finishing.
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_processes_are_gone(&pid_file);
     }
 
     #[cfg(unix)]
@@ -1104,6 +1214,11 @@ mod tests {
             ("array arguments", json!([])),
             ("unknown field", json!({"nope": 1})),
             ("wrong type", json!({"repo": "o/r", "rev": 123})),
+            ("required null", json!({"repo": null, "rev": "main"})),
+            (
+                "optional null",
+                json!({"repo": "o/r", "rev": "main", "path": null}),
+            ),
             ("empty repo", json!({"repo": "   ", "rev": "main"})),
         ] {
             let err = super::call_tool("repo_tree", &args, &opts(false))
@@ -1128,6 +1243,15 @@ mod tests {
         )
         .expect("root parent is legal");
         assert!(ok.iter().any(|a| a == "--parent="), "{ok:?}");
+    }
+
+    #[test]
+    fn optional_owner_is_not_silently_dropped_when_mistyped() {
+        for owner in [json!(123), Value::Null] {
+            let err = argv_for("repo_owners", &json!({"owner": owner}), &opts(false))
+                .expect_err("mistyped owner");
+            assert!(matches!(err, ToolError::InvalidParams(_)), "{err:?}");
+        }
     }
 
     #[test]

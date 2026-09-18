@@ -23,6 +23,7 @@ mod import_direct;
 mod mcp_cmd;
 mod mirror;
 mod principal_cmd;
+mod proc_group;
 pub mod repo;
 mod serve;
 mod service_cmd;
