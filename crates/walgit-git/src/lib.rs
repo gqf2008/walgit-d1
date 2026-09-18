@@ -1037,8 +1037,8 @@ impl LocalRepo {
     }
 
     /// Delete `.pack/.idx/.rev/.bitmap` for `checksum`. Caller guarantees no
-    /// readers.
-    pub fn remove_pack(&self, checksum: &gix_hash::oid) -> Result<(), GitError> {
+    /// readers. `Ok(true)` means this call already refreshed the gix handle.
+    pub fn remove_pack(&self, checksum: &gix_hash::oid) -> Result<bool, GitError> {
         self.remove_packs(&[checksum.to_owned()])
     }
 
@@ -1049,7 +1049,9 @@ impl LocalRepo {
     /// per pack would invalidate *all* warm maps K times for K packs, then
     /// re-parse the survivors from disk on every subsequent refresh.
     /// Caller guarantees no readers.
-    pub fn remove_packs(&self, checksums: &[gix_hash::ObjectId]) -> Result<(), GitError> {
+    /// Return `true` when the gix handle was refreshed after the removals, so
+    /// callers can avoid a second expensive ODB-index reload.
+    pub fn remove_packs(&self, checksums: &[gix_hash::ObjectId]) -> Result<bool, GitError> {
         #[cfg(windows)]
         {
             // This process's own refresh() deliberately mmaps every pack index
@@ -1088,9 +1090,10 @@ impl LocalRepo {
             let repaired = self.repair_stale_midx_blocking()?;
             if repaired || removed_history {
                 self.refresh()?;
+                return Ok(true);
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     #[cfg(unix)]
@@ -2435,6 +2438,47 @@ impl LocalRepo {
         self.refresh()
     }
 
+    /// Ensure the history MIDX covers `base` again after a store-mount blip.
+    /// This is deliberately local-only: it reads PNAM and stats files already
+    /// on disk, and never touches the object store.
+    pub async fn ensure_history_midx_covers_base(
+        &self,
+        base: &gix_hash::oid,
+    ) -> Result<(), GitError> {
+        let this = self.clone();
+        let base = base.to_owned();
+        tokio::task::spawn_blocking(move || this.ensure_history_midx_covers_base_blocking(&base))
+            .await
+            .map_err(|e| GitError::Protocol(format!("midx ensure task: {e}")))?
+    }
+
+    fn ensure_history_midx_covers_base_blocking(
+        &self,
+        base: &gix_hash::oid,
+    ) -> Result<(), GitError> {
+        let base = base.to_string();
+        if !self
+            .packs()?
+            .iter()
+            .any(|p| p.history_of.as_deref() == Some(base.as_str()))
+        {
+            return Ok(());
+        }
+        let midx = self.objects_pack_dir().join("multi-pack-index");
+        let expected = format!("pack-{base}.idx");
+        if let Ok(names) = read_midx_pack_names(&midx)
+            && names.iter().any(|name| name == &expected)
+        {
+            return Ok(());
+        }
+        tracing::info!(
+            repo = %self.inner.path.display(),
+            base = %base,
+            "history base returned; rewriting multi-pack-index"
+        );
+        self.write_history_midx_file_blocking()
+    }
+
     /// Cheaply detect a midx that points at a pack which is no longer on disk
     /// and rewrite it over the survivors (or remove it when no history pack
     /// remains). `refresh()` calls this before opening gix; the PNAM chunk is
@@ -2451,8 +2495,9 @@ impl LocalRepo {
                 return Ok(false);
             }
             Err(e) => {
-                tracing::warn!(repo = %self.inner.path.display(), error = %e, "removing unreadable multi-pack-index");
+                tracing::warn!(repo = %self.inner.path.display(), error = %e, "rebuilding unreadable multi-pack-index");
                 self.remove_midx_file(&midx)?;
+                self.write_history_midx_file_blocking()?;
                 return Ok(true);
             }
         };
@@ -3060,6 +3105,9 @@ pub fn copy_into_place(src: &Path, dst: &Path) -> Result<(), GitError> {
 /// read just that chunk instead of loading the potentially multi-GB OID/offset
 /// sections.
 const MIDX_PNAM: [u8; 4] = *b"PNAM";
+const MIDX_OIDF: [u8; 4] = *b"OIDF";
+const MIDX_OIDL: [u8; 4] = *b"OIDL";
+const MIDX_OOFF: [u8; 4] = *b"OOFF";
 const MIDX_HEADER_LEN: usize = 12;
 const MIDX_CHUNK_ENTRY_LEN: usize = 12;
 const MIDX_PNAM_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -3074,14 +3122,15 @@ fn pack_pair_exists(pack_dir: &Path, checksum: &gix_hash::oid) -> bool {
     pack.is_file() && pack.with_extension("idx").is_file()
 }
 
-fn valid_midx_pack_name(name: &str) -> bool {
+fn valid_midx_pack_name(name: &str, hash_len: u64) -> bool {
     let Some(hex) = name
         .strip_prefix("pack-")
         .and_then(|name| name.strip_suffix(".idx"))
     else {
         return false;
     };
-    (hex.len() == 40 || hex.len() == 64) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    u64::try_from(hex.len()).ok() == hash_len.checked_mul(2)
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
@@ -3113,6 +3162,23 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
         GitError::InvalidInput("multi-pack-index: missing pack count".into())
     })?) as usize;
     let nchunks = usize::from(header[6]);
+    let table_end = MIDX_HEADER_LEN
+        .checked_add(nchunks.checked_mul(MIDX_CHUNK_ENTRY_LEN).ok_or_else(|| {
+            GitError::InvalidInput("multi-pack-index: chunk table size overflow".into())
+        })?)
+        .ok_or_else(|| {
+            GitError::InvalidInput("multi-pack-index: chunk table size overflow".into())
+        })?;
+    let table_end = u64::try_from(table_end)
+        .map_err(|_| GitError::InvalidInput("multi-pack-index: chunk table overflow".into()))?;
+    let data_end = file_len.checked_sub(hash_len).ok_or_else(|| {
+        GitError::InvalidInput("multi-pack-index: file is shorter than its checksum".into())
+    })?;
+    if table_end > data_end {
+        return Err(GitError::InvalidInput(
+            "multi-pack-index: truncated chunk table".into(),
+        ));
+    }
     let mut chunks = Vec::with_capacity(nchunks);
     let mut entry = [0u8; MIDX_CHUNK_ENTRY_LEN];
     for _ in 0..nchunks {
@@ -3121,43 +3187,77 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
         id.copy_from_slice(&entry[..4]);
         let mut offset = [0u8; 8];
         offset.copy_from_slice(&entry[4..]);
-        chunks.push((id, u64::from_be_bytes(offset)));
+        let offset = u64::from_be_bytes(offset);
+        if offset < table_end || offset >= data_end {
+            return Err(GitError::InvalidInput(format!(
+                "multi-pack-index: chunk {} has invalid bounds {offset}",
+                String::from_utf8_lossy(&id)
+            )));
+        }
+        chunks.push((id, offset));
     }
-    let pnam_off = chunks
-        .iter()
-        .find_map(|(id, offset)| (*id == MIDX_PNAM).then_some(*offset))
-        .ok_or_else(|| GitError::InvalidInput("multi-pack-index: missing PNAM chunk".into()))?;
-    let pnam_end = chunks
-        .iter()
-        .map(|(_, offset)| *offset)
-        .filter(|offset| *offset > pnam_off)
-        .min()
-        .unwrap_or_else(|| file_len.saturating_sub(hash_len));
-    if pnam_end <= pnam_off || pnam_end > file_len {
+    let mut offsets: Vec<u64> = chunks.iter().map(|(_, offset)| *offset).collect();
+    offsets.sort_unstable();
+    if offsets
+        .windows(2)
+        .any(|pair| pair.first().zip(pair.get(1)).is_some_and(|(a, b)| a == b))
+    {
         return Err(GitError::InvalidInput(
-            "multi-pack-index: invalid PNAM bounds".into(),
+            "multi-pack-index: duplicate chunk offsets".into(),
         ));
     }
+    for required in [MIDX_PNAM, MIDX_OIDF, MIDX_OIDL, MIDX_OOFF] {
+        if !chunks.iter().any(|(id, _)| *id == required) {
+            return Err(GitError::InvalidInput(format!(
+                "multi-pack-index: missing {} chunk",
+                String::from_utf8_lossy(&required)
+            )));
+        }
+    }
+
+    let chunk_bounds = |id: [u8; 4]| -> Result<(u64, u64), GitError> {
+        let offset = chunks
+            .iter()
+            .find_map(|(chunk_id, offset)| (*chunk_id == id).then_some(*offset))
+            .ok_or_else(|| {
+                GitError::InvalidInput(format!(
+                    "multi-pack-index: missing {} chunk",
+                    String::from_utf8_lossy(&id)
+                ))
+            })?;
+        let end = offsets
+            .iter()
+            .copied()
+            .find(|candidate| *candidate > offset)
+            .unwrap_or(data_end);
+        if end <= offset || end > data_end {
+            return Err(GitError::InvalidInput(format!(
+                "multi-pack-index: invalid {} bounds",
+                String::from_utf8_lossy(&id)
+            )));
+        }
+        Ok((offset, end))
+    };
+
+    let (pnam_off, pnam_end) = chunk_bounds(MIDX_PNAM)?;
     let pnam_len = pnam_end - pnam_off;
     if pnam_len > MIDX_PNAM_MAX_BYTES {
         return Err(GitError::InvalidInput(format!(
             "multi-pack-index: PNAM chunk is too large ({pnam_len} bytes)"
         )));
     }
-    let pnam_len = usize::try_from(pnam_len)
-        .map_err(|_| GitError::InvalidInput("multi-pack-index: PNAM size overflow".into()))?;
-    file.seek(SeekFrom::Start(pnam_off)).map_err(GitError::Io)?;
-    let mut data = vec![0u8; pnam_len];
-    file.read_exact(&mut data).map_err(GitError::Io)?;
+    let data = read_midx_chunk(&mut file, pnam_off, pnam_end)?;
+    let Some((&0, body)) = data.split_last() else {
+        return Err(GitError::InvalidInput(
+            "multi-pack-index: empty PNAM chunk".into(),
+        ));
+    };
     let mut names = Vec::new();
-    for raw in data.split(|b| *b == 0) {
-        if raw.is_empty() {
-            continue;
-        }
+    for raw in body.split(|b| *b == 0) {
         let name = std::str::from_utf8(raw).map_err(|e| {
             GitError::InvalidInput(format!("multi-pack-index: invalid pack name: {e}"))
         })?;
-        if !valid_midx_pack_name(name) {
+        if !valid_midx_pack_name(name, hash_len) {
             return Err(GitError::InvalidInput(format!(
                 "multi-pack-index: invalid pack name {name:?}"
             )));
@@ -3170,7 +3270,138 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
             names.len()
         )));
     }
+
+    let (oidf_off, oidf_end) = chunk_bounds(MIDX_OIDF)?;
+    if oidf_end - oidf_off != 1024 {
+        return Err(GitError::InvalidInput(
+            "multi-pack-index: OIDF chunk must be exactly 1024 bytes".into(),
+        ));
+    }
+    let fanout = read_midx_chunk(&mut file, oidf_off, oidf_end)?;
+    let mut previous = 0u32;
+    for word in fanout.as_chunks::<4>().0 {
+        let value = u32::from_be_bytes(*word);
+        if value < previous {
+            return Err(GitError::InvalidInput(
+                "multi-pack-index: non-monotonic OIDF fanout".into(),
+            ));
+        }
+        previous = value;
+    }
+    let num_objects = u64::from(previous);
+    let oidl_len = (hash_len + 4)
+        .checked_mul(num_objects)
+        .ok_or_else(|| GitError::InvalidInput("multi-pack-index: OIDL size overflow".into()))?;
+    let (oidl_off, oidl_end) = chunk_bounds(MIDX_OIDL)?;
+    if oidl_end - oidl_off != oidl_len {
+        return Err(GitError::InvalidInput(
+            "multi-pack-index: OIDL size does not match OIDF fanout".into(),
+        ));
+    }
+    let ooff_len = 8u64
+        .checked_mul(num_objects)
+        .ok_or_else(|| GitError::InvalidInput("multi-pack-index: OOFF size overflow".into()))?;
+    let (ooff_off, ooff_end) = chunk_bounds(MIDX_OOFF)?;
+    if ooff_end - ooff_off != ooff_len {
+        return Err(GitError::InvalidInput(
+            "multi-pack-index: OOFF size does not match OIDF fanout".into(),
+        ));
+    }
     Ok(names)
+}
+
+fn read_midx_chunk(
+    file: &mut std::fs::File,
+    offset: u64,
+    end: u64,
+) -> Result<Vec<u8>, GitError> {
+    let len = end
+        .checked_sub(offset)
+        .ok_or_else(|| GitError::InvalidInput("multi-pack-index: invalid chunk length".into()))?;
+    let len = usize::try_from(len)
+        .map_err(|_| GitError::InvalidInput("multi-pack-index: chunk length overflow".into()))?;
+    file.seek(SeekFrom::Start(offset)).map_err(GitError::Io)?;
+    let mut data = vec![0u8; len];
+    file.read_exact(&mut data).map_err(GitError::Io)?;
+    Ok(data)
+}
+
+#[cfg(test)]
+mod midx_parser_tests {
+    use super::{MIDX_OOFF, read_midx_pack_names};
+
+    fn fixture(hash_len: usize, pack_hex: &str, omit: Option<[u8; 4]>) -> Vec<u8> {
+        let mut chunks: Vec<([u8; 4], Vec<u8>)> = vec![
+            (*b"PNAM", format!("pack-{pack_hex}.idx\0").into_bytes()),
+            (*b"OIDF", {
+                let mut fanout = vec![0u8; 1024];
+                fanout[1020..].copy_from_slice(&1u32.to_be_bytes());
+                fanout
+            }),
+            (*b"OIDL", vec![0u8; hash_len + 4]),
+            (*b"OOFF", vec![0u8; 8]),
+        ];
+        if let Some(omit) = omit {
+            chunks.retain(|(id, _)| *id != omit);
+        }
+        let table_end = 12 + chunks.len() * 12;
+        let mut offsets = Vec::with_capacity(chunks.len());
+        let mut cursor = table_end;
+        for (_, data) in &chunks {
+            offsets.push(cursor);
+            cursor += data.len();
+        }
+        let mut out = Vec::with_capacity(cursor + hash_len);
+        out.extend_from_slice(b"MIDX");
+        out.push(1);
+        out.push(if hash_len == 32 { 2 } else { 1 });
+        out.push(u8::try_from(chunks.len()).unwrap());
+        out.push(0);
+        out.extend_from_slice(&1u32.to_be_bytes());
+        for ((id, _), offset) in chunks.iter().zip(&offsets) {
+            out.extend_from_slice(id);
+            out.extend_from_slice(&u64::try_from(*offset).unwrap().to_be_bytes());
+        }
+        for (_, data) in &chunks {
+            out.extend_from_slice(data);
+        }
+        out.resize(out.len() + hash_len, 0);
+        out
+    }
+
+    #[test]
+    fn accepts_a_sha256_midx_and_its_32_byte_object_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi-pack-index");
+        let pack_hex = "11".repeat(32);
+        std::fs::write(&path, fixture(32, &pack_hex, None)).unwrap();
+        assert_eq!(
+            read_midx_pack_names(&path).unwrap(),
+            vec![format!("pack-{pack_hex}.idx")]
+        );
+    }
+
+    #[test]
+    fn rejects_empty_truncated_and_missing_required_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = fixture(20, &"22".repeat(20), None);
+
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, []).unwrap();
+        assert!(read_midx_pack_names(&empty).is_err());
+
+        let truncated = dir.path().join("truncated");
+        std::fs::write(&truncated, &valid[..valid.len() - 1]).unwrap();
+        assert!(read_midx_pack_names(&truncated).is_err());
+
+        let missing = dir.path().join("missing-ooff");
+        std::fs::write(
+            &missing,
+            fixture(20, &"22".repeat(20), Some(MIDX_OOFF)),
+        )
+        .unwrap();
+        assert!(read_midx_pack_names(&missing).is_err());
+    }
 }
 
 /// Write the `pack-<checksum>.history` marker via the transient sibling +

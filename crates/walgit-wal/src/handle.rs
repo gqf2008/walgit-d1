@@ -784,7 +784,7 @@ impl RepoHandle {
                 *arc.active_reporter.lock() = None;
                 if let Some(t) = task {
                     match &r {
-                        Ok(()) => {
+                        Ok(_) => {
                             t.finish_ok(
                                 "history pack installed: commits + trees are local".to_string(),
                                 None,
@@ -942,8 +942,8 @@ impl RepoHandle {
             let task_span = task.as_ref().map(super::tasks::TaskHandle::span);
             crate::sync::on_bulk_runtime(async move {
                 let work = async {
-                    crate::sync::reconcile_packs(&arc, &m, level).await?;
-                    arc.local.refresh_async().await?;
+                    let refreshed = crate::sync::reconcile_packs(&arc, &m, level).await?;
+                    crate::sync::refresh_after_reconcile(&arc.local, refreshed).await?;
                     Ok::<(), WalError>(())
                 };
                 match task_span {
@@ -954,8 +954,8 @@ impl RepoHandle {
             .await
         } else {
             let res = async {
-                crate::sync::reconcile_packs(self, &manifest, level).await?;
-                self.local.refresh_async().await?;
+                let refreshed = crate::sync::reconcile_packs(self, &manifest, level).await?;
+                crate::sync::refresh_after_reconcile(&self.local, refreshed).await?;
                 Ok::<(), WalError>(())
             };
             match &task {

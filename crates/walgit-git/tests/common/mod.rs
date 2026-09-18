@@ -75,9 +75,20 @@ pub fn git_pipe(cwd: &std::path::Path, first: &[&str], second: &[&str]) -> std::
 impl SourceRepo {
     /// Create a source repo with one initial commit (`file1`).
     pub fn new() -> Self {
+        Self::new_with_object_format("sha1")
+    }
+
+    /// Create a source repo with a non-default object format, preserving the
+    /// same one-commit shape as [`SourceRepo::new`].
+    pub fn new_with_object_format(object_format: &str) -> Self {
         let tmp = TempDir::new().expect("tmpdir");
         let dir = tmp.path().to_path_buf();
-        run_git(&dir, &["init", "-q", dir.to_str().unwrap()]);
+        if object_format == "sha1" {
+            run_git(&dir, &["init", "-q", dir.to_str().unwrap()]);
+        } else {
+            let object_format = format!("--object-format={object_format}");
+            run_git(&dir, &["init", "-q", &object_format, dir.to_str().unwrap()]);
+        }
         run_git(&dir, &["config", "user.email", "t@t"]);
         run_git(&dir, &["config", "user.name", "t"]);
         run_git(&dir, &["config", "commit.gpgsign", "false"]);

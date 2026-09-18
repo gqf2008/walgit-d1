@@ -518,11 +518,13 @@ async fn ingest_failures_name_the_cause_and_leave_nothing_behind() {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
-async fn history_pack_repo() -> (tempfile::TempDir, LocalRepo, gix_hash::ObjectId) {
+async fn history_pack_repo(
+    format: ObjectFormat,
+) -> (tempfile::TempDir, RepoId, gix_hash::ObjectId) {
     let root = tempfile::TempDir::new().unwrap();
     let id = RepoId::new("acme", "midx").unwrap();
-    let repo = LocalRepo::init(root.path(), &id, ObjectFormat::Sha1).unwrap();
-    let src = cm::SourceRepo::new();
+    let repo = LocalRepo::init(root.path(), &id, format).unwrap();
+    let src = cm::SourceRepo::new_with_object_format(format.as_str());
     let head = src.head();
     let base = repo
         .ingest_pack(
@@ -551,7 +553,11 @@ async fn history_pack_repo() -> (tempfile::TempDir, LocalRepo, gix_hash::ObjectI
     let packs = repo.packs().unwrap();
     assert!(packs.iter().any(|p| p.checksum == base.checksum));
     assert!(packs.iter().any(|p| p.checksum == history.checksum));
-    (root, repo, base.checksum)
+    (root, id, base.checksum)
+}
+
+fn open_history_pack_repo(root: &tempfile::TempDir, id: &RepoId) -> LocalRepo {
+    LocalRepo::open(root.path(), id).unwrap().unwrap()
 }
 
 fn assert_midx_ok(repo: &LocalRepo) {
@@ -582,16 +588,20 @@ fn midx_names_pack(repo: &LocalRepo, checksum: &gix_hash::oid) -> bool {
 
 #[tokio::test]
 async fn removing_midx_covered_base_rewrites_stale_midx() {
-    let (_root, repo, base) = history_pack_repo().await;
+    let (root, id, base) = history_pack_repo(ObjectFormat::Sha1).await;
+    let repo = open_history_pack_repo(&root, &id);
     assert!(midx_names_pack(&repo, &base));
-    repo.remove_pack(&base).unwrap();
+    let before = repo.refs_diag("HEAD").generation;
+    assert!(repo.remove_pack(&base).unwrap());
+    assert_eq!(repo.refs_diag("HEAD").generation, before + 1);
     assert!(!midx_names_pack(&repo, &base));
     assert_midx_ok(&repo);
 }
 
 #[tokio::test]
 async fn refresh_repairs_stale_midx_that_names_a_missing_pack() {
-    let (_root, repo, base) = history_pack_repo().await;
+    let (root, id, base) = history_pack_repo(ObjectFormat::Sha1).await;
+    let repo = open_history_pack_repo(&root, &id);
     assert!(midx_names_pack(&repo, &base));
     std::fs::remove_file(repo.pack_path(&base).with_extension("pack")).unwrap();
     std::fs::remove_file(repo.pack_path(&base).with_extension("idx")).unwrap();
@@ -601,10 +611,115 @@ async fn refresh_repairs_stale_midx_that_names_a_missing_pack() {
 }
 
 #[tokio::test]
-async fn history_midx_never_names_a_pack_without_its_index() {
-    let (_root, repo, base) = history_pack_repo().await;
-    std::fs::remove_file(repo.pack_path(&base).with_extension("idx")).unwrap();
-    repo.write_history_midx().await.unwrap();
-    assert!(!midx_names_pack(&repo, &base));
+async fn refresh_rebuilds_empty_truncated_and_missing_chunk_midx() {
+    for case in ["empty", "truncated", "missing-oidf"] {
+        let (root, id, base) = history_pack_repo(ObjectFormat::Sha1).await;
+        let local_dir = id.local_dir(root.path());
+        let midx = local_dir.join("objects/pack/multi-pack-index");
+        match case {
+            "empty" => std::fs::write(&midx, []).unwrap(),
+            "truncated" => {
+                let bytes = std::fs::read(&midx).unwrap();
+                std::fs::write(&midx, &bytes[..bytes.len() / 2]).unwrap();
+            }
+            "missing-oidf" => {
+                let mut bytes = std::fs::read(&midx).unwrap();
+                let nchunks = usize::from(bytes[6]);
+                let mut found = false;
+                for entry in (12..12 + nchunks * 12).step_by(12) {
+                    if bytes[entry..entry + 4] == *b"OIDF" {
+                        bytes[entry..entry + 4].copy_from_slice(b"NONE");
+                        found = true;
+                        break;
+                    }
+                }
+                assert!(found, "fixture MIDX has an OIDF chunk");
+                std::fs::write(&midx, bytes).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let repo = open_history_pack_repo(&root, &id);
+        repo.refresh().unwrap();
+        assert!(midx.is_file(), "{case}: repair must rebuild, not drop");
+        assert!(midx_names_pack(&repo, &base), "{case}: base missing");
+        assert_midx_ok(&repo);
+    }
+}
+
+#[tokio::test]
+async fn sha256_history_midx_is_rebuilt_after_corruption() {
+    let (root, id, base) = history_pack_repo(ObjectFormat::Sha256).await;
+    assert_eq!(base.to_string().len(), 64);
+    let midx = id.local_dir(root.path()).join("objects/pack/multi-pack-index");
+    std::fs::write(&midx, []).unwrap();
+    let repo = open_history_pack_repo(&root, &id);
+    repo.refresh().unwrap();
+    assert!(midx_names_pack(&repo, &base));
     assert_midx_ok(&repo);
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+fn real_git_path() -> String {
+    let out = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "locate git: {out:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn history_midx_stdin_excludes_a_pack_without_its_index() {
+    if std::env::var_os("WALGIT_MIDX_SHIM_CHILD").is_some() {
+        let (root, id, base) = history_pack_repo(ObjectFormat::Sha1).await;
+        let repo = open_history_pack_repo(&root, &id);
+        std::fs::remove_file(repo.pack_path(&base).with_extension("idx")).unwrap();
+        repo.write_history_midx().await.unwrap();
+        let capture = std::env::var("WALGIT_MIDX_SHIM_CAPTURE").unwrap();
+        let input = std::fs::read_to_string(capture).unwrap();
+        assert!(
+            !input.contains(&format!("pack-{base}.idx")),
+            "missing base was sent to git --stdin-packs: {input:?}"
+        );
+        assert!(!input.trim().is_empty(), "git received no pack names");
+        assert_midx_ok(&repo);
+        return;
+    }
+
+    let real_git = real_git_path();
+    let shim_dir = tempfile::tempdir().unwrap();
+    let capture = shim_dir.path().join("stdin-packs");
+    let shim = shim_dir.path().join("git");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = multi-pack-index ] && [ \"$2\" = write ] && [ \"$3\" = --stdin-packs ]; then\n  tee \"$WALGIT_MIDX_SHIM_CAPTURE\" | {} \"$@\"\nelse\n  exec {} \"$@\"\nfi\n",
+        shell_quote(&real_git),
+        shell_quote(&real_git)
+    );
+    std::fs::write(&shim, script).unwrap();
+    let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&shim, perms).unwrap();
+
+    let old_path = std::env::var("PATH").unwrap();
+    let child_path = format!("{}:{old_path}", shim_dir.path().display());
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "history_midx_stdin_excludes_a_pack_without_its_index",
+            "--nocapture",
+        ])
+        .env("WALGIT_MIDX_SHIM_CHILD", "1")
+        .env("WALGIT_MIDX_SHIM_CAPTURE", &capture)
+        .env("PATH", child_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "shimmed child failed: {status}");
+    let input = std::fs::read_to_string(capture).unwrap();
+    assert!(!input.trim().is_empty(), "git received no pack names");
 }
