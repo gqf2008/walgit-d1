@@ -66,10 +66,7 @@ pub async fn run(action: BundleAction, cfg: &Arc<Config>) -> Result<()> {
             {
                 let m = handle.manifest();
                 let fmt = |t: Option<std::time::SystemTime>| {
-                    t.map_or_else(
-                        || "-".into(),
-                        |t| humantime::format_rfc3339_seconds(t).to_string(),
-                    )
+                    t.map_or_else(|| "-".into(), |t| humantime::format_rfc3339_seconds(t).to_string())
                 };
                 let cp = m.checkpoint.as_ref();
                 println!(
@@ -152,14 +149,12 @@ pub async fn run(action: BundleAction, cfg: &Arc<Config>) -> Result<()> {
                         u.strategy,
                         when,
                         u.unit,
-                        u.host.as_deref().map_or_else(
-                            || "  [no live maintainer]".into(),
-                            |h| if u.unit.contains(h) {
+                        u.host
+                            .as_deref().map_or_else(|| "  [no live maintainer]".into(), |h| if u.unit.contains(h) {
                                 String::new()
                             } else {
                                 format!("  [{h}]")
-                            }
-                        )
+                            })
                     );
                 }
             }
@@ -287,10 +282,9 @@ pub async fn maintainers(
     while let Some(key) = keys.next().await {
         let key = key?;
         if let Some((_, bytes)) = store.get_bytes(&key).await?
-            && let Ok(hb) = walgit_proto::v1::MaintainerHeartbeat::decode(bytes.as_ref())
-        {
-            out.push(hb);
-        }
+            && let Ok(hb) = walgit_proto::v1::MaintainerHeartbeat::decode(bytes.as_ref()) {
+                out.push(hb);
+            }
     }
     Ok(out)
 }

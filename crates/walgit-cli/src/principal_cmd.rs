@@ -98,18 +98,11 @@ fn optional_bearer(token: Option<&str>) -> Option<String> {
         .filter(|t| !t.trim().is_empty())
 }
 
-async fn put(
-    url: &str,
-    principal: &str,
-    key: &Path,
-    token: Option<&str>,
-    verb: &str,
-) -> Result<()> {
+async fn put(url: &str, principal: &str, key: &Path, token: Option<&str>, verb: &str) -> Result<()> {
     ref_segment("principal", principal)?;
     let token = required_bearer(token)?;
     let sk = read_signing_key(key)?;
-    let public_key =
-        base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
+    let public_key = base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
     let resp = reqwest::Client::new()
         .put(format!("{url}/api/v1/principals/{principal}"))
         .bearer_auth(token)
