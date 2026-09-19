@@ -777,8 +777,13 @@ impl RepoHandle {
                 }
                 let arc2 = arc.clone();
                 let r = crate::sync::on_bulk_runtime(async move {
-                    crate::sync::reconcile_packs_inner(&arc2, &manifest, SyncLevel::Serve, true)
-                        .await
+                    let needs_refresh =
+                        crate::sync::reconcile_packs_inner(&arc2, &manifest, SyncLevel::Serve, true)
+                            .await?;
+                    if needs_refresh {
+                        arc2.local.refresh_async().await?;
+                    }
+                    Ok::<(), WalError>(())
                 })
                 .await;
                 *arc.active_reporter.lock() = None;
@@ -911,6 +916,7 @@ impl RepoHandle {
         _span: &tracing::Span,
     ) -> Result<(), WalError> {
         if self.level_satisfied(level) {
+            self.repair_recovered_midx_if_needed().await?;
             return Ok(());
         }
         // A second caller of a running materialize waits here: the task join, measured.
@@ -942,8 +948,10 @@ impl RepoHandle {
             let task_span = task.as_ref().map(super::tasks::TaskHandle::span);
             crate::sync::on_bulk_runtime(async move {
                 let work = async {
-                    crate::sync::reconcile_packs(&arc, &m, level).await?;
-                    arc.local.refresh_async().await?;
+                    let needs_refresh = crate::sync::reconcile_packs(&arc, &m, level).await?;
+                    if needs_refresh {
+                        arc.local.refresh_async().await?;
+                    }
                     Ok::<(), WalError>(())
                 };
                 match task_span {
@@ -954,8 +962,10 @@ impl RepoHandle {
             .await
         } else {
             let res = async {
-                crate::sync::reconcile_packs(self, &manifest, level).await?;
-                self.local.refresh_async().await?;
+                let needs_refresh = crate::sync::reconcile_packs(self, &manifest, level).await?;
+                if needs_refresh {
+                    self.local.refresh_async().await?;
+                }
                 Ok::<(), WalError>(())
             };
             match &task {
@@ -983,6 +993,20 @@ impl RepoHandle {
             }
         }
         res
+    }
+
+    async fn repair_recovered_midx_if_needed(&self) -> Result<(), WalError> {
+        if !self.local.midx_needs_repair().await? {
+            return Ok(());
+        }
+        let _pack_guard = self.pack_mutex.lock().await;
+        if !self.local.midx_needs_repair().await? {
+            return Ok(());
+        }
+        if self.local.repair_stale_midx().await? {
+            self.local.refresh_async().await?;
+        }
+        Ok(())
     }
 
     /// Freshness check + apply, with `sync_mutex` and the write lock held by

@@ -629,7 +629,7 @@ pub(crate) async fn reconcile_packs(
     handle: &super::handle::RepoHandle,
     manifest: &Manifest,
     level: SyncLevel,
-) -> Result<(), WalError> {
+) -> Result<bool, WalError> {
     reconcile_packs_inner(handle, manifest, level, false).await
 }
 
@@ -640,7 +640,7 @@ pub(crate) async fn reconcile_packs_inner(
     manifest: &Manifest,
     level: SyncLevel,
     background_history: bool,
-) -> Result<(), WalError> {
+) -> Result<bool, WalError> {
     let store = &handle.store;
     let local = &handle.local;
     // Pack reconciliation is the proof itself: invalidate the previous
@@ -900,12 +900,13 @@ pub(crate) async fn reconcile_packs_inner(
     let prune_lock = handle.prune_lock();
     let Ok(_prune_guard) = prune_lock.try_lock() else {
         handle.state.lock().packs_dirty = true;
-        return Ok(());
+        return Ok(false);
     };
     let pending = std::mem::take(&mut handle.state.lock().pending_pack_removals);
     let mut removed = 0usize;
     let mut still_pending: Vec<String> = Vec::new();
     let mut deferred_staged: Vec<String> = Vec::new();
+    let mut needs_midx_rebuild = false;
     let mut candidates: std::collections::BTreeSet<String> = pending
         .iter()
         .filter(|s| !live.contains(s.as_str()))
@@ -967,7 +968,7 @@ pub(crate) async fn reconcile_packs_inner(
                 .map(|(_, oid)| *oid)
                 .collect();
             if !existing.is_empty() {
-                local.remove_packs(&existing)?;
+                needs_midx_rebuild = local.remove_packs(&existing)?;
                 tracing::info!(repo = %handle.id, packs = existing.len(), "local packs outside the manifest removed");
             }
             removed = existing.len();
@@ -982,6 +983,13 @@ pub(crate) async fn reconcile_packs_inner(
         handle.state.lock().pending_pack_removals = still_pending;
     }
 
+    // The rw.write guard above is dropped before this point. Build the new
+    // MIDX here rather than under the reader lock; the caller performs the
+    // single final gix reload after this function returns.
+    if needs_midx_rebuild {
+        local.rebuild_history_midx().await?;
+    }
+
     {
         let mut state = handle.state.lock();
         state.packs_revision = manifest.revision;
@@ -991,7 +999,7 @@ pub(crate) async fn reconcile_packs_inner(
     if handle.state.lock().packs_ready() {
         handle.mark_packs_verified();
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Keep the local commit-graph chain current after packs were installed:
@@ -1236,10 +1244,12 @@ pub(crate) async fn materialize_from_scratch(
     apply_delta(handle, manifest, version)
         .instrument(span.clone())
         .await?;
-    reconcile_packs(handle, manifest, SyncLevel::Serve)
+    let needs_refresh = reconcile_packs(handle, manifest, SyncLevel::Serve)
         .instrument(span.clone())
         .await?;
-    handle.local.refresh_async().await?;
+    if needs_refresh {
+        handle.local.refresh_async().await?;
+    }
     Ok(())
 }
 

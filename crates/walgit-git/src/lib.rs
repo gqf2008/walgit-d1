@@ -594,6 +594,8 @@ struct Inner {
     refs_gen: std::sync::atomic::AtomicU64,
     /// How often `packed-refs` + loose refs were parsed (tests assert pushes do not add to it).
     refs_parses: std::sync::atomic::AtomicU64,
+    /// Full ODB reloads, for tests and latency diagnostics.
+    odb_refreshes: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
@@ -718,6 +720,7 @@ impl LocalRepo {
                 refs_cache: parking_lot::Mutex::new(None),
                 refs_gen: std::sync::atomic::AtomicU64::new(0),
                 refs_parses: std::sync::atomic::AtomicU64::new(0),
+                odb_refreshes: std::sync::atomic::AtomicU64::new(0),
             }),
         })
     }
@@ -743,6 +746,7 @@ impl LocalRepo {
                 refs_cache: parking_lot::Mutex::new(None),
                 refs_gen: std::sync::atomic::AtomicU64::new(0),
                 refs_parses: std::sync::atomic::AtomicU64::new(0),
+                odb_refreshes: std::sync::atomic::AtomicU64::new(0),
             }),
         }))
     }
@@ -775,6 +779,9 @@ impl LocalRepo {
     /// Re-open the underlying repository so the odb/refs reflect on-disk
     /// changes from pack/ref writes.
     pub fn refresh(&self) -> Result<(), GitError> {
+        self.inner
+            .odb_refreshes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.refs_changed();
         // A midx is a derived index over a moving local pack set. Repair a
         // stale one before opening gix so a reader can never consult a pack
@@ -1037,8 +1044,9 @@ impl LocalRepo {
     }
 
     /// Delete `.pack/.idx/.rev/.bitmap` for `checksum`. Caller guarantees no
-    /// readers and must reload gix after the write lock is released.
-    pub fn remove_pack(&self, checksum: &gix_hash::oid) -> Result<(), GitError> {
+    /// readers and must reload gix after the write lock is released. `Ok(true)`
+    /// means the caller must rebuild/reload the derived indexes.
+    pub fn remove_pack(&self, checksum: &gix_hash::oid) -> Result<bool, GitError> {
         self.remove_packs(&[checksum.to_owned()])
     }
 
@@ -1049,11 +1057,11 @@ impl LocalRepo {
     /// per pack would invalidate *all* warm maps K times for K packs, then
     /// re-parse the survivors from disk on every subsequent refresh.
     /// Caller guarantees no readers.
-    /// Delete files only. The caller must reload gix after releasing the write
-    /// lock; a full ODB refresh under `rw.write()` can stall every reader for
-    /// minutes on a large repository. MIDX repair remains file-level and runs
-    /// before the caller reloads.
-    pub fn remove_packs(&self, checksums: &[gix_hash::ObjectId]) -> Result<(), GitError> {
+    /// Delete files and remove the now-stale MIDX, but never build a new MIDX
+    /// or reload gix. The caller must do both after releasing the write lock; a
+    /// full ODB refresh or a large `git multi-pack-index write` under
+    /// `rw.write()` can stall every reader for minutes.
+    pub fn remove_packs(&self, checksums: &[gix_hash::ObjectId]) -> Result<bool, GitError> {
         #[cfg(windows)]
         {
             // This process's own refresh() deliberately mmaps every pack index
@@ -1082,14 +1090,14 @@ impl LocalRepo {
         // The history midx covers both history packs and their bases. Removing
         // a base used to leave the base name in the midx, so gix kept
         // consulting a vanished index and reported a present object as
-        // missing. Repair after the whole batch: a stale midx is either
-        // rewritten over the survivors or removed when no history pack
-        // remains.
+        // missing. Drop the stale file now; the caller rebuilds the history
+        // MIDX outside the write lock and then reloads gix once.
         let midx = pack_dir.join("multi-pack-index");
-        if midx.is_file() {
-            self.repair_stale_midx_blocking()?;
+        let removed_midx = midx.is_file();
+        if removed_midx {
+            self.remove_midx_file(&midx)?;
         }
-        Ok(())
+        Ok(!checksums.is_empty() || removed_midx)
     }
 
     #[cfg(unix)]
@@ -1267,6 +1275,13 @@ impl LocalRepo {
     pub fn refs_parses(&self) -> u64 {
         self.inner
             .refs_parses
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Number of full ODB reloads since this handle was opened.
+    pub fn odb_refreshes(&self) -> u64 {
+        self.inner
+            .odb_refreshes
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -2439,7 +2454,7 @@ impl LocalRepo {
     /// remains). `refresh()` calls this before opening gix; the PNAM chunk is
     /// tiny (one filename per pack) and we stat only the names it contains, so
     /// this does not add a LIST or read pack data.
-    fn repair_stale_midx_blocking(&self) -> Result<bool, GitError> {
+    fn midx_needs_repair_blocking(&self) -> Result<bool, GitError> {
         let midx = self.objects_pack_dir().join("multi-pack-index");
         if !midx.is_file() {
             return Ok(false);
@@ -2449,43 +2464,27 @@ impl LocalRepo {
             Err(GitError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(false);
             }
-            Err(e) => {
-                tracing::warn!(repo = %self.inner.path.display(), error = %e, "rebuilding unreadable multi-pack-index");
-                self.remove_midx_file(&midx)?;
-                self.write_history_midx_file_blocking()?;
-                return Ok(true);
-            }
+            Err(_) => return Ok(true),
         };
         let pack_dir = self.objects_pack_dir();
         let names: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let packs = self.packs()?;
-        let mut expected = HashSet::new();
-        for pack in &packs {
-            let Some(base) = pack.history_of.as_deref() else {
-                continue;
-            };
-            if !pack_pair_exists(&pack_dir, &pack.checksum) {
-                continue;
-            }
-            expected.insert(format!("pack-{}.idx", pack.checksum));
-            if let Ok(base_oid) = gix_hash::ObjectId::from_hex(base.as_bytes())
-                && pack_pair_exists(&pack_dir, &base_oid)
-            {
-                expected.insert(format!("pack-{base}.idx"));
-            }
-        }
         let stale_name = names
             .iter()
             .any(|name| !named_pack_pair_exists(&pack_dir, name));
+        let expected = expected_history_midx_names(&pack_dir)?;
         let missing_expected = expected
             .iter()
             .any(|name| !names.contains(name.as_str()));
-        if !stale_name && !missing_expected {
+        Ok(stale_name || missing_expected)
+    }
+
+    fn repair_stale_midx_blocking(&self) -> Result<bool, GitError> {
+        if !self.midx_needs_repair_blocking()? {
             return Ok(false);
         }
+        let midx = self.objects_pack_dir().join("multi-pack-index");
         tracing::warn!(
             repo = %self.inner.path.display(),
-            packs = names.len(),
             "stale multi-pack-index does not match the history pack set; rebuilding"
         );
         // Remove first so a failed rebuild leaves no stale index behind and
@@ -2493,6 +2492,33 @@ impl LocalRepo {
         self.remove_midx_file(&midx)?;
         self.write_history_midx_file_blocking()?;
         Ok(true)
+    }
+
+    /// Cheap mount-recovery probe for the serve path: local stat + PNAM read
+    /// only; no object-store access and no gix reload.
+    pub async fn midx_needs_repair(&self) -> Result<bool, GitError> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.midx_needs_repair_blocking())
+            .await
+            .map_err(|e| GitError::Protocol(format!("midx check task: {e}")))?
+    }
+
+    /// Run the file-level MIDX repair. The caller must already be outside the
+    /// reader write lock; this may invoke `git multi-pack-index write`.
+    pub async fn repair_stale_midx(&self) -> Result<bool, GitError> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.repair_stale_midx_blocking())
+            .await
+            .map_err(|e| GitError::Protocol(format!("midx repair task: {e}")))?
+    }
+
+    /// Rebuild the history MIDX from the current pack set without reloading
+    /// gix. Used after the caller has removed stale packs outside the lock.
+    pub async fn rebuild_history_midx(&self) -> Result<(), GitError> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.write_history_midx_file_blocking())
+            .await
+            .map_err(|e| GitError::Protocol(format!("midx rebuild task: {e}")))?
     }
 
     fn remove_midx_file(&self, midx: &Path) -> Result<(), GitError> {
@@ -3097,6 +3123,45 @@ fn pack_pair_exists(pack_dir: &Path, checksum: &gix_hash::oid) -> bool {
     pack.is_file() && pack.with_extension("idx").is_file()
 }
 
+fn expected_history_midx_names(pack_dir: &Path) -> Result<HashSet<String>, GitError> {
+    let entries = match std::fs::read_dir(pack_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(GitError::Io(e)),
+    };
+    let mut names = HashSet::new();
+    for entry in entries {
+        let path = entry.map_err(GitError::Io)?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let Some(hex) = name
+            .strip_prefix("pack-")
+            .and_then(|name| name.strip_suffix(".history"))
+        else {
+            continue;
+        };
+        let Ok(history) = gix_hash::ObjectId::from_hex(hex.as_bytes()) else {
+            continue;
+        };
+        if !pack_pair_exists(pack_dir, &history) {
+            continue;
+        }
+        names.insert(format!("pack-{history}.idx"));
+        let Ok(base) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(base) = gix_hash::ObjectId::from_hex(base.trim().as_bytes()) else {
+            continue;
+        };
+        if pack_pair_exists(pack_dir, &base) {
+            names.insert(format!("pack-{base}.idx"));
+        }
+    }
+    Ok(names)
+}
+
 fn valid_midx_pack_name(name: &str, hash_len: u64) -> bool {
     let Some(hex) = name
         .strip_prefix("pack-")
@@ -3263,6 +3328,12 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
         .rposition(|byte| *byte != 0)
         .and_then(|last| data.get(..=last))
         .unwrap_or_default();
+    let padding = data.len().saturating_sub(body.len());
+    if padding == 0 || padding > 4 {
+        return Err(GitError::InvalidInput(
+            "multi-pack-index: invalid PNAM padding".into(),
+        ));
+    }
     let mut names = Vec::new();
     if !body.is_empty() {
         for raw in body.split(|byte| *byte == 0) {

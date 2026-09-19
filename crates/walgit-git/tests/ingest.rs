@@ -621,8 +621,13 @@ async fn removing_midx_covered_base_rewrites_stale_midx() {
     let repo = open_history_pack_repo(&root, &id);
     assert!(midx_names_pack(&repo, &base));
     let before = repo.refs_diag("HEAD").generation;
-    repo.remove_pack(&base).unwrap();
+    assert!(repo.remove_pack(&base).unwrap());
     assert_eq!(repo.refs_diag("HEAD").generation, before);
+    assert!(
+        !id.local_dir(root.path()).join("objects/pack/multi-pack-index").exists(),
+        "remove_packs must defer MIDX construction to the caller outside rw.write"
+    );
+    repo.rebuild_history_midx().await.unwrap();
     repo.refresh().unwrap();
     assert_eq!(repo.refs_diag("HEAD").generation, before + 1);
     assert!(!midx_names_pack(&repo, &base));

@@ -954,6 +954,7 @@ async fn reconcile_prunes_local_pack_not_in_manifest() {
 
     let registry2 = Registry::new(store.clone(), Arc::new(make_config(cache2.path(), 0)));
     let handle2 = registry2.open(&id).await.unwrap();
+    let refreshes_before = handle2.local().odb_refreshes();
     let _guard = handle2.sync_full().await.unwrap();
 
     assert!(
@@ -963,6 +964,11 @@ async fn reconcile_prunes_local_pack_not_in_manifest() {
     assert!(
         !handle2.local().pack_path(&extra).exists(),
         "pack outside manifest.packs must be pruned from cache"
+    );
+    assert_eq!(
+        handle2.local().odb_refreshes(),
+        refreshes_before + 1,
+        "the final reconcile refresh must happen after the pruned pack is removed"
     );
 }
 
@@ -1758,19 +1764,6 @@ async fn test_serve_level_links_base_from_store_mount() {
     handle2.local().write_history_midx().await.unwrap();
     assert!(!midx_contains_base());
     std::fs::rename(&hidden_mount_pack, &mounted_pack).unwrap();
-    let ref_only = handle
-        .publish_push(
-            None,
-            make_txn(vec![("refs/heads/mount-recovery", "", top.as_str())]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    assert!(
-        ref_only.per_ref.iter().all(|(_, result)| result.is_ok()),
-        "{:?}",
-        ref_only.per_ref
-    );
     {
         let _g = handle2.sync().await.unwrap();
     }
