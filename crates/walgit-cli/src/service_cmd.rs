@@ -20,6 +20,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+#[cfg(any(windows, test))]
+use base64::Engine as _;
 use clap::Subcommand;
 use walgit_config::Config;
 
@@ -404,6 +406,9 @@ fn credential_env(home: &Path) -> Vec<(String, String)> {
 #[cfg(any(windows, test))]
 const TASK_NAME: &str = "walgit";
 
+#[cfg(any(windows, test))]
+const POWERSHELL_SERVICE_MARKER: &str = "walgit-service-task-v1";
+
 #[cfg(windows)]
 async fn status(listen: &str, _home: &Path) -> Result<()> {
     let version = healthz_body(listen).await.and_then(|b| version_of(&b));
@@ -628,31 +633,27 @@ fn is_our_image(name: &str) -> bool {
 }
 
 /// Is this scheduled-task definition ours? **Only the action counts**: our task
-/// runs `walgit.exe` (through `cmd /c … >> log 2>&1`), so a definition whose
-/// action names that binary is ours — while one that merely mentions walgit in
-/// its description, or runs `walgit-backup.exe`, is not. Getting this wrong
-/// means ending or deleting somebody else's task.
+/// runs `walgit.exe` directly, through the old `cmd /c … >> log 2>&1` wrapper,
+/// or through the hidden encoded PowerShell wrapper that runs that cmd shape.
+/// A definition that merely mentions walgit in its description or arguments, or
+/// runs `walgit-backup.exe`, is not ours. Getting this wrong means ending or
+/// deleting somebody else's task.
 #[cfg(any(windows, test))]
 fn task_is_ours(xml: &str) -> bool {
-    let lower = xml.to_ascii_lowercase();
     // Only the **action** counts, and only where a command lives: a task whose
-    // *description* mentions walgit, or whose action runs `powershell … walgit.exe`,
-    // is somebody else's — and `ensure`/`end` would otherwise `/Create /F` over it
-    // or end it.
+    // *description* mentions walgit, or whose action merely passes its path to
+    // an unrelated program, is somebody else's — and `ensure`/`end` would
+    // otherwise `/Create /F` over it or end it.
+    let lower = xml.to_ascii_lowercase();
     let Some(actions_at) = lower.find("<actions") else {
         return false;
     };
-    let actions = &lower[actions_at..];
-    let commands: Vec<&str> = actions
-        .split("<command>")
-        .skip(1)
-        .filter_map(|rest| rest.split("</command>").next())
-        .collect();
-    let arguments: Vec<&str> = actions
-        .split("<arguments>")
-        .skip(1)
-        .filter_map(|rest| rest.split("</arguments>").next())
-        .collect();
+    // Keep the original text: `-EncodedCommand` is base64, so lowercasing it
+    // would corrupt the very value this parser needs to decode. The lowercased
+    // copy is used only for case-insensitive tag lookup.
+    let actions = &xml[actions_at..];
+    let commands = xml_tag_values(actions, "command");
+    let arguments = xml_tag_values(actions, "arguments");
     commands.iter().enumerate().any(|(i, command)| {
         let command = command.trim();
         // The binary itself…
@@ -664,7 +665,34 @@ fn task_is_ours(xml: &str) -> bool {
             && arguments
                 .get(i)
                 .is_some_and(|args| cmd_runs_our_binary(args))
+            // …or the hidden PowerShell wrapper carries our encoded service
+            // launch command. The old visible cmd shape above stays ours too,
+            // so `ensure` can replace it when this upgrade runs.
+            || (is_powershell_wrapper(command)
+                && arguments
+                    .get(i)
+                    .is_some_and(|args| powershell_runs_our_service(args)))
     })
+}
+
+/// Values of every `<tag>…</tag>` pair in `xml`, found case-insensitively while
+/// preserving the original value bytes (base64 is case-sensitive).
+#[cfg(any(windows, test))]
+fn xml_tag_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let lower = xml.to_ascii_lowercase();
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut values = Vec::new();
+    let mut at = 0;
+    while let Some(found) = lower[at..].find(&open) {
+        let start = at + found + open.len();
+        let Some(end) = lower[start..].find(&close) else {
+            break;
+        };
+        values.push(&xml[start..start + end]);
+        at = start + end + close.len();
+    }
+    values
 }
 
 /// `C:\…\walgit.exe` → true (and `evilwalgit.exe` → false).
@@ -750,6 +778,42 @@ fn is_cmd_wrapper(command: &str) -> bool {
     matches!(base.trim_matches('"'), "cmd.exe" | "cmd")
 }
 
+#[cfg(any(windows, test))]
+fn is_powershell_wrapper(command: &str) -> bool {
+    let base = command.rsplit(['\\', '/']).next().unwrap_or(command);
+    matches!(base.trim_matches('"'), "powershell.exe" | "pwsh.exe")
+}
+
+/// The hidden wrapper is ours only when its encoded script carries the exact
+/// marker emitted by `task_xml`, plus the `cmd /c` logging shape it launches.
+#[cfg(any(windows, test))]
+fn powershell_runs_our_service(args: &str) -> bool {
+    let mut words = args.split_whitespace();
+    if words
+        .find(|w| w.eq_ignore_ascii_case("-EncodedCommand"))
+        .is_none()
+    {
+        return false;
+    }
+    let encoded = words.next().unwrap_or_default().trim_matches('"');
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return false;
+    };
+    if bytes.len() % 2 != 0 {
+        return false;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let Ok(script) = String::from_utf16(&units) else {
+        return false;
+    };
+    script.contains(POWERSHELL_SERVICE_MARKER)
+        && script.contains("serve --config")
+        && script.contains("2>&1")
+}
+
 /// Does a `schtasks /FO CSV /NH` listing contain our task? The first field is
 /// the task name (`"\walgit","N/A","Ready"`), which — unlike the rest of that
 /// output — is not localised.
@@ -791,8 +855,9 @@ mod task {
     use std::process::Command;
 
     use anyhow::{Context, Result, bail};
+    use base64::Engine as _;
 
-    use super::{TASK_NAME, lists_task, task_is_ours};
+    use super::{POWERSHELL_SERVICE_MARKER, TASK_NAME, lists_task, task_is_ours};
 
     fn schtasks(args: &[&str]) -> Result<String> {
         let out = Command::new("schtasks")
@@ -937,14 +1002,14 @@ mod task {
         schtasks(&["/End", "/TN", TASK_NAME]).map(|_| ())
     }
 
-    /// `cmd /c … >> log 2>&1` is a **redirect, not a supervisor**: the scheduler
-    /// gives an `Exec` action no stdout, and losing `server.log` would take away
-    /// the only window into a failed start. `MultipleInstancesPolicy` still
-    /// forbids a second copy.
+    /// The task launches a hidden PowerShell process, which in turn launches
+    /// `cmd /c … >> log 2>&1` with `CreateNoWindow`: PowerShell hides the
+    /// scheduler's interactive console, while cmd keeps the byte-for-byte
+    /// append redirect the scheduler cannot provide itself.
     ///
     /// Do **not** rely on `/End` to stop the server: measured on the CI runner,
-    /// `/End` ended the wrapper while the `walgit.exe` child kept the socket — so
-    /// `stop` kills the port's owner first and only then tidies the task.
+    /// `/End` ended the wrapper while the `walgit.exe` child kept the socket —
+    /// so `stop` kills the port's owner first and only then tidies the task.
     fn task_xml(exe: &Path, config: &Path, log: &Path) -> Result<Vec<u8>> {
         // The scheduler starts the task in `WorkingDirectory`, so a *relative*
         // `--config` (which worked for the caller) would resolve against the
@@ -957,6 +1022,7 @@ mod task {
         let exe = absolute(exe)?;
         let config = absolute(config)?;
         let log = absolute(log)?;
+        let encoded = powershell_service_command(&exe, &config, &log);
         let body = format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -983,7 +1049,7 @@ mod task {
     </IdleSettings>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
+    <Hidden>true</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
@@ -991,19 +1057,14 @@ mod task {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{comspec}</Command>
-      <Arguments>/c ""{exe}" serve --config "{cfg}" &gt;&gt; "{log}" 2&gt;&amp;1"</Arguments>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}</Arguments>
       <WorkingDirectory>{dir}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
 "#,
-            exe = xml_escape(&exe.display().to_string()),
-            cfg = xml_escape(&config.display().to_string()),
-            // The scheduler hands the task no stdout: without this the only
-            // window into a failed start would be gone.
-            log = xml_escape(&log.display().to_string()),
-            comspec = xml_escape(&std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())),
+            encoded = xml_escape(&encoded),
             dir = xml_escape(&exe.parent().unwrap_or(Path::new(".")).display().to_string()),
         );
         // `schtasks /Create /XML` rejects UTF-8 on some builds: emit UTF-16LE
@@ -1016,11 +1077,109 @@ mod task {
         Ok(out)
     }
 
+    /// UTF-16LE/base64 is PowerShell's `-EncodedCommand` transport. It avoids
+    /// the quote-in-quote XML mess for install paths with spaces; the script
+    /// below deliberately keeps `cmd /c` only for its append redirect.
+    fn powershell_service_command(exe: &Path, config: &Path, log: &Path) -> String {
+        let script = format!(
+            r#"$walgitServiceTask = '{POWERSHELL_SERVICE_MARKER}'
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$comspec = $env:ComSpec
+if (-not $comspec) {{ $comspec = Join-Path $env:SystemRoot 'System32\cmd.exe' }}
+$psi.FileName = $comspec
+$psi.Arguments = '/d /s /c ""{exe}" serve --config "{config}" >> "{log}" 2>&1"'
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$p = [System.Diagnostics.Process]::Start($psi)
+$p.WaitForExit()"#,
+            exe = ps_single_quote(&exe.display().to_string()),
+            config = ps_single_quote(&config.display().to_string()),
+            log = ps_single_quote(&log.display().to_string()),
+        );
+        let mut utf16 = Vec::with_capacity(script.len() * 2);
+        for unit in script.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        base64::engine::general_purpose::STANDARD.encode(utf16)
+    }
+
+    fn ps_single_quote(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+
     fn xml_escape(s: &str) -> String {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use base64::Engine as _;
+
+        use super::{powershell_service_command, task_xml};
+
+        fn xml_text(bytes: &[u8]) -> String {
+            assert_eq!(
+                &bytes[..2],
+                &[0xFF, 0xFE],
+                "task XML must carry a UTF-16LE BOM"
+            );
+            let units: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16(&units).expect("task XML is valid UTF-16")
+        }
+
+        #[test]
+        fn task_xml_uses_a_hidden_powershell_wrapper_and_keeps_cmd_logging() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let dir = root.path().join("wal git & user's");
+            std::fs::create_dir_all(&dir).expect("create test dir");
+            let exe = dir.join("walgit.exe");
+            let cfg = dir.join("walgit.toml");
+            let log = dir.join("server.log");
+
+            let xml = xml_text(&task_xml(&exe, &cfg, &log).expect("task XML"));
+            assert!(xml.contains("<Hidden>true</Hidden>"));
+            assert!(xml.contains("<Command>powershell.exe</Command>"));
+            assert!(xml.contains("-WindowStyle Hidden"));
+            assert!(!xml.contains("<Command>cmd.exe</Command>"));
+            assert!(super::super::task_is_ours(&xml));
+            let mixed_case = xml
+                .replace("<Command>", "<COMMAND>")
+                .replace("</Command>", "</COMMAND>")
+                .replace("<Arguments>", "<ARGUMENTS>")
+                .replace("</Arguments>", "</ARGUMENTS>");
+            assert!(super::super::task_is_ours(&mixed_case));
+
+            let encoded = powershell_service_command(&exe, &cfg, &log);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("PowerShell command is base64");
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            let script = String::from_utf16(&units).expect("PowerShell command is UTF-16LE");
+            for expected in [
+                "walgit-service-task-v1",
+                "serve --config",
+                "2>&1",
+                "CreateNoWindow = $true",
+            ] {
+                assert!(
+                    script.contains(expected),
+                    "missing {expected:?} in {script}"
+                );
+            }
+            for path in [&exe, &cfg, &log] {
+                let escaped = path.display().to_string().replace('\'', "''");
+                assert!(script.contains(&escaped), "missing {escaped:?} in {script}");
+            }
+        }
     }
 }
 

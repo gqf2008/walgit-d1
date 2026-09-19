@@ -7,7 +7,8 @@
 #   * `stop` reported success while the port stayed served, so `/healthz` kept
 #     answering with the pre-upgrade build ("reinstalled, still old version");
 #   * a server nobody supervises (an older install, a stray `walgit.exe serve`)
-#     could not be stopped at all.
+#     could not be stopped at all;
+#   * D48's `cmd /c` action made the interactive task show a console window.
 $ErrorActionPreference = 'Stop'
 
 $root = Join-Path $env:TEMP "walgit-service-smoke-$PID"
@@ -37,6 +38,7 @@ dir = "$($root -replace '\\','/')/cache"
 
 $bin = (Resolve-Path 'target/debug/walgit.exe').Path
 $task = 'walgit'   # the name `walgit service` uses; created and removed by this run
+$log = Join-Path $env:USERPROFILE '.walgit\server.log'
 
 function Get-Healthz {
   try { return (Invoke-WebRequest -TimeoutSec 2 "http://$listen/healthz").Content }
@@ -47,6 +49,56 @@ function Get-Listeners {
   # socket rows are two while the server is one.
   return @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique).Count
+}
+
+# The D48 regression was a *shape* bug that a healthy port could not see: the
+# task ran `cmd /c ...` in the interactive session, so Windows showed its
+# console while the service itself worked. Keep this assertion on the scheduler
+# object and exercise it against the old shape in the positive control below.
+function Assert-HiddenServiceTask {
+  param(
+    [Parameter(Mandatory)] $TaskObject,
+    [Parameter(Mandatory)] [string] $ExpectedExe,
+    [Parameter(Mandatory)] [string] $ExpectedConfig,
+    [Parameter(Mandatory)] [string] $ExpectedLog
+  )
+
+  if (-not [bool] $TaskObject.Settings.Hidden) {
+    throw "the task's Hidden setting is false; Windows may show its console"
+  }
+  $actions = @($TaskObject.Actions)
+  if ($actions.Count -ne 1) {
+    throw "expected exactly one task action, got $($actions.Count)"
+  }
+  $action = $actions[0]
+  $actionExe = [System.IO.Path]::GetFileName([string] $action.Execute)
+  if ($actionExe -ine 'powershell.exe') {
+    throw "the task action runs '$actionExe', not powershell.exe"
+  }
+  if ([string] $action.Arguments -notmatch '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)') {
+    throw "the task action does not contain '-WindowStyle Hidden': $($action.Arguments)"
+  }
+  if ([string] $action.Arguments -notmatch '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)') {
+    throw "the task action does not carry an encoded command: $($action.Arguments)"
+  }
+  try {
+    $script = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($Matches[1]))
+  } catch {
+    throw "the task action's encoded command cannot be decoded: $_"
+  }
+  foreach ($needle in @(
+    'walgit-service-task-v1',
+    'serve --config',
+    '2>&1',
+    'CreateNoWindow = $true',
+    $ExpectedExe,
+    $ExpectedConfig,
+    $ExpectedLog
+  )) {
+    if ($script.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+      throw "the hidden task action is missing '$needle': $script"
+    }
+  }
 }
 # "Free" is decided by *connecting*, not by a socket listing: a failing
 # Get-NetTCPConnection returns an empty set, and reading that as "nothing
@@ -110,13 +162,40 @@ try {
   if ($settings.ExecutionTimeLimit -ne 'PT0S') {
     throw "the task's ExecutionTimeLimit is $($settings.ExecutionTimeLimit), not PT0S (unlimited)"
   }
-  Write-Host "task settings: MultipleInstances=$($settings.MultipleInstances) ExecutionTimeLimit=$($settings.ExecutionTimeLimit) LogonType=$($taskObj.Principal.LogonType)"
+  Assert-HiddenServiceTask -TaskObject $taskObj -ExpectedExe $bin -ExpectedConfig $cfg -ExpectedLog $log
+  Write-Host "task settings: MultipleInstances=$($settings.MultipleInstances) ExecutionTimeLimit=$($settings.ExecutionTimeLimit) LogonType=$($taskObj.Principal.LogonType) Hidden=$($settings.Hidden)"
   if ($taskObj.Principal.LogonType -notin @('Interactive', 'InteractiveToken')) {
     throw "the task's LogonType is $($taskObj.Principal.LogonType), not the logged-on user's token"
   }
   if ((Get-Listeners) -ne 1) {
     throw "schtasks /Run started a second instance: $(Get-Listeners) listeners (MultipleInstancesPolicy?)"
   }
+
+  # Positive control: the old visible `cmd /c` shape must fail both halves of
+  # the new assertion. If either object is accepted, this guard is decorative.
+  $oldVisible = [pscustomobject] @{
+    Settings = [pscustomobject] @{ Hidden = $false }
+    Actions = @([pscustomobject] @{ Execute = 'cmd.exe'; Arguments = '/c ""C:\walgit.exe" serve' })
+  }
+  $oldCmdWithHiddenSetting = [pscustomobject] @{
+    Settings = [pscustomobject] @{ Hidden = $true }
+    Actions = @([pscustomobject] @{ Execute = 'cmd.exe'; Arguments = '/c ""C:\walgit.exe" serve' })
+  }
+  foreach ($case in @(
+    [pscustomobject] @{ Name = 'Hidden=false + cmd /c'; Object = $oldVisible },
+    [pscustomobject] @{ Name = 'Hidden=true + cmd /c'; Object = $oldCmdWithHiddenSetting }
+  )) {
+    $rejected = $false
+    try {
+      Assert-HiddenServiceTask -TaskObject $case.Object -ExpectedExe $bin -ExpectedConfig $cfg -ExpectedLog $log
+    } catch {
+      $rejected = $true
+    }
+    if (-not $rejected) {
+      throw "positive control failed: $($case.Name) passed the hidden-console assertion"
+    }
+  }
+  Write-Host 'positive control: old visible cmd task shapes rejected'
 
   Write-Host '--- status'
   $status = (& $bin service status --config $cfg | Out-String)
