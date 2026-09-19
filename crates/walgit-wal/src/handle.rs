@@ -1000,6 +1000,12 @@ impl RepoHandle {
             return Ok(());
         }
         let _pack_guard = self.pack_mutex.lock().await;
+        // A repack/compaction holds prune_guard while it writes packs and the
+        // MIDX. Do not race it: skip this pass and let the next serve retry.
+        let prune_lock = self.prune_lock();
+        let Ok(_prune_guard) = prune_lock.try_lock() else {
+            return Ok(());
+        };
         if !self.local.midx_needs_repair().await? {
             return Ok(());
         }
@@ -1780,6 +1786,39 @@ mod tests {
     use walgit_proto::prost::Message;
     use walgit_store::memory::MemoryStore;
     use walgit_store::{PutBody, PutMode, PutOptions};
+
+    #[tokio::test]
+    async fn recovered_midx_probe_defers_while_prune_guard_is_held() {
+        let store = MemoryStore::shared();
+        let mut cfg = walgit_config::Config::default();
+        cfg.store.backend = walgit_config::StoreBackend::Memory;
+        cfg.store.memory_backend_intentional = true;
+        cfg.cache.dir = tempfile::tempdir().unwrap().keep();
+        let registry = crate::registry::Registry::new(store, Arc::new(cfg));
+        let id = RepoId::new("o", "midx-probe-lock").unwrap();
+        let handle = registry
+            .create(&id, walgit_git::ObjectFormat::Sha1)
+            .await
+            .unwrap();
+        let midx = handle.local().path().join("objects/pack/multi-pack-index");
+        std::fs::create_dir_all(midx.parent().unwrap()).unwrap();
+        std::fs::write(&midx, b"not a midx").unwrap();
+        assert!(handle.local().midx_needs_repair().await.unwrap());
+
+        let held = handle.prune_guard().await;
+        handle.repair_recovered_midx_if_needed().await.unwrap();
+        assert!(
+            midx.is_file(),
+            "recovery probe must skip while prune_guard is held"
+        );
+        drop(held);
+
+        handle.repair_recovered_midx_if_needed().await.unwrap();
+        assert!(
+            !midx.exists(),
+            "the next serve pass must self-heal the stale MIDX"
+        );
+    }
 
     /// #175: the `(manifest, version)` pair a CAS is built on must be installed
     /// and observed *atomically*. Two writers that install their two fields
