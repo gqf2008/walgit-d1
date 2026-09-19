@@ -256,6 +256,27 @@ jobs:
           done
       - name: S3 store contract
         run: just test-s3
+      # The MCP WAL resource probe is store-direct, so exercise it against the
+      # same rustfs bucket with a real server push and a real manifest head
+      # change. The local refs/collab smoke still runs without a server in the
+      # warnings+test job; this leg adds only the WAL-specific case.
+      - name: MCP WAL subscription smoke
+        run: |
+          cargo build -q -p walgit-cli --bin walgit --bin walgit-server
+          AWS_ACCESS_KEY_ID=walgit-dev \
+          AWS_SECRET_ACCESS_KEY=walgit-dev-secret \
+          PORT=18080 \
+            target/debug/walgit-server --config walgit.standalone.toml > mcp-wal-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -sfk https://127.0.0.1:18080/healthz && break
+            sleep 1
+          done
+          curl -sfk https://127.0.0.1:18080/healthz >/dev/null
+          GIT_SSL_NO_VERIFY=1 WALGIT_URL=https://127.0.0.1:18080 \
+            python3 scripts/mcp-subscribe-smoke.py \
+              target/debug/walgit walgit.standalone.toml "owner/repo"
 
   # Known-red until the debt lands (issue #1, ~1300 pre-existing pedantic
   # hits): the gate fails by design, so it is a separate job with

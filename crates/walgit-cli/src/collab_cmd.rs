@@ -40,9 +40,8 @@ pub enum CollabAction {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
-    /// Print only the head entry oid of one thread.
-    ThreadHead {
-        id: String,
+    /// Print the `thread id -> head oid` index in one aggregation pass.
+    ThreadHeads {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
@@ -232,19 +231,11 @@ pub async fn run(action: CollabAction) -> Result<()> {
                 .collect();
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        CollabAction::ThreadHead { id, repo } => {
+        CollabAction::ThreadHeads { repo } => {
             let reader = CollabReader::new(&repo);
             let (entries, _) = reader.load()?;
-            let filtered: Vec<&EntryRef> = entries.iter().filter(|e| e.entry.id == id).collect();
-            if filtered.is_empty() {
-                bail!("no entries for thread {id}");
-            }
-            let ordered = thread(&filtered);
-            let head = ordered
-                .last()
-                .map(|entry| entry.oid.as_str())
-                .ok_or_else(|| anyhow::anyhow!("no entries for thread {id}"))?;
-            println!("{head}");
+            let heads = thread_head_map(&entries);
+            println!("{}", serde_json::to_string(&heads)?);
         }
         CollabAction::Entry {
             repo,
@@ -1305,6 +1296,20 @@ fn run_board(
     Ok(())
 }
 
+fn thread_head_map(entries: &[EntryRef]) -> HashMap<String, String> {
+    let mut grouped: HashMap<&str, Vec<&EntryRef>> = HashMap::new();
+    for entry in entries {
+        grouped.entry(entry.entry.id.as_str()).or_default().push(entry);
+    }
+    let mut heads = HashMap::new();
+    for (id, refs) in grouped {
+        if let Some(head) = thread(&refs).last() {
+            heads.insert(id.to_string(), head.oid.clone());
+        }
+    }
+    heads
+}
+
 // ---- watch: resident change detection + callback ------------------------------
 
 /// Refs that are new or whose oid changed between two snapshots.
@@ -1899,6 +1904,18 @@ mod tests {
         // Dangling parent is treated as a root; order is (ts, actor, oid).
         assert_eq!(ordered[0].oid, "a");
         assert_eq!(ordered[1].oid, "b");
+    }
+
+    #[test]
+    fn thread_head_map_groups_each_thread_and_keeps_its_head() {
+        let entries = vec![
+            entry("t1", "issue", "alice", "", "a1", 1, serde_json::json!({})),
+            entry("t1", "comment", "bob", "a1", "a2", 2, serde_json::json!({})),
+            entry("t2", "issue", "alice", "", "b1", 1, serde_json::json!({})),
+        ];
+        let heads = thread_head_map(&entries);
+        assert_eq!(heads.get("t1").map(String::as_str), Some("a2"));
+        assert_eq!(heads.get("t2").map(String::as_str), Some("b1"));
     }
 
     #[test]

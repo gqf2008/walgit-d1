@@ -14,6 +14,7 @@ import os
 import queue
 import secrets
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,13 @@ from pathlib import Path
 
 
 class Mcp:
-    def __init__(self, binary: Path, config: Path, repo: Path) -> None:
+    def __init__(
+        self,
+        binary: Path,
+        config: Path,
+        repo: Path,
+        env: dict[str, str] | None = None,
+    ) -> None:
         self.proc = subprocess.Popen(
             [
                 str(binary),
@@ -42,6 +49,7 @@ class Mcp:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env={**os.environ, **(env or {})},
         )
         self.pending: list[dict] = []
         self.events: queue.Queue[dict | BaseException] = queue.Queue()
@@ -138,6 +146,16 @@ def git(*args: str, cwd: Path | None = None) -> str:
     return out.stdout
 
 
+def pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def walgit(binary: Path, config: Path, args: list[str], cwd: Path) -> str:
     out = subprocess.run(
         [str(binary), "--config", str(config), *args],
@@ -155,6 +173,13 @@ def commit_and_push(repo: Path, value: str) -> None:
     git("add", "value.txt", cwd=repo)
     git("commit", "-m", f"change {value}", cwd=repo)
     git("push", "origin", "main", cwd=repo)
+
+
+def commit_and_push_url(repo: Path, url: str, value: str) -> None:
+    (repo / "wal.txt").write_text(value, encoding="utf-8")
+    git("add", "wal.txt", cwd=repo)
+    git("commit", "-m", f"wal change {value}", cwd=repo)
+    git("-c", "http.sslVerify=false", "push", url, "main:main", cwd=repo)
 
 
 def collab_entry(
@@ -199,15 +224,22 @@ def collab_entry(
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: mcp-subscribe-smoke.py <walgit-binary> <walgit.toml>", file=sys.stderr)
+    if len(sys.argv) not in (3, 4):
+        print(
+            "usage: mcp-subscribe-smoke.py <walgit-binary> <walgit.toml> [wal-repo]",
+            file=sys.stderr,
+        )
         return 2
     binary = Path(sys.argv[1]).resolve()
     config = Path(sys.argv[2]).resolve()
+    wal_repo = sys.argv[3] if len(sys.argv) == 4 else None
+    server_url = os.environ.get("WALGIT_URL")
     if not binary.is_file():
         raise FileNotFoundError(binary)
     if not config.is_file():
         raise FileNotFoundError(config)
+    if wal_repo is not None and not server_url:
+        raise RuntimeError("WAL smoke requires WALGIT_URL")
 
     with tempfile.TemporaryDirectory(prefix="walgit-mcp-subscribe-") as tmp:
         root = Path(tmp)
@@ -249,7 +281,38 @@ def main() -> int:
             writer,
         )
 
-        mcp = Mcp(binary, config, checkout)
+        fakebin = root / "fakebin"
+        fakebin.mkdir()
+        trigger = root / "fake-git-trigger"
+        fake_git_pids = root / "fake-git-pids"
+        real_git = shutil.which("git")
+        assert real_git is not None
+        fake_git = fakebin / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            "if [ -f \"$WALGIT_FAKE_GIT_TRIGGER\" ]; then\n"
+            "  echo \"$$\" >> \"$WALGIT_FAKE_GIT_PIDS\"\n"
+            "  sleep 300 &\n"
+            "  child=$!\n"
+            "  echo \"$child\" >> \"$WALGIT_FAKE_GIT_PIDS\"\n"
+            "  wait \"$child\"\n"
+            "else\n"
+            "  exec \"$WALGIT_REAL_GIT\" \"$@\"\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        os.chmod(fake_git, 0o755)
+        mcp = Mcp(
+            binary,
+            config,
+            checkout,
+            {
+                "PATH": f"{fakebin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "WALGIT_REAL_GIT": real_git,
+                "WALGIT_FAKE_GIT_TRIGGER": str(trigger),
+                "WALGIT_FAKE_GIT_PIDS": str(fake_git_pids),
+            },
+        )
         refs_uri = "walgit://refs/owner/repo"
         board_uri = "walgit://collab/board/owner/repo"
         thread_uri = "walgit://collab/thread/owner/repo/smoke-thread"
@@ -424,20 +487,105 @@ def main() -> int:
             )
             mcp.wait_method("notifications/resources/list_changed", 10.0)
 
-            # Leave one subscription active and close stdin: shutdown must
-            # cancel the poller and let the MCP process exit promptly.
+            # Real backoff/failure-threshold path: keep the board subscription
+            # alive, make its shared collab puller fail, and require the
+            # subscription to report the failure after three consecutive errors.
             mcp.send(
                 {
                     "jsonrpc": "2.0",
                     "id": 10,
                     "method": "resources/subscribe",
-                    "params": {"uri": refs_uri},
+                    "params": {"uri": board_uri},
                 }
             )
             assert mcp.reply(10)["result"] == {}
+            git("remote", "set-url", "origin", str(root / "missing-origin"), cwd=checkout)
+            failure = mcp.wait_method("notifications/message", 30.0)
+            assert failure["params"]["data"]["uri"] == board_uri, failure
+            assert failure["params"]["level"] == "error", failure
+            git("remote", "set-url", "origin", str(remote), cwd=checkout)
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "resources/unsubscribe",
+                    "params": {"uri": board_uri},
+                }
+            )
+            assert mcp.reply(11)["result"] == {}
+
+            if wal_repo is not None:
+                assert server_url is not None
+                walgit(binary, config, ["repo", "create", wal_repo], root)
+                remote_url = f"{server_url.rstrip('/')}/{wal_repo}.git"
+                commit_and_push_url(checkout, remote_url, "one")
+                wal_uri = f"walgit://wal/{wal_repo}?from=0"
+                mcp.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 12,
+                        "method": "resources/subscribe",
+                        "params": {"uri": wal_uri},
+                    }
+                )
+                assert mcp.reply(12)["result"] == {}
+                time.sleep(1.4)
+                assert mcp.updated_count(wal_uri) == 0, mcp.pending
+
+                commit_and_push_url(checkout, remote_url, "two")
+                mcp.wait_updated(wal_uri, 8.0)
+
+                mcp.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 13,
+                        "method": "resources/read",
+                        "params": {"uri": wal_uri},
+                    }
+                )
+                wal_payload = json.loads(mcp.reply(13)["result"]["contents"][0]["text"])
+                assert wal_payload["data"]["head_seq"] > 0, wal_payload
+                assert wal_payload["data"]["entries"], wal_payload
+
+                mcp.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 14,
+                        "method": "resources/unsubscribe",
+                        "params": {"uri": wal_uri},
+                    }
+                )
+                assert mcp.reply(14)["result"] == {}
+
+            # Leave one subscription active, make its next probe a long-lived
+            # git child, then SIGTERM the MCP process: shutdown must cancel the
+            # poller, kill the whole child tree, and exit promptly.
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 15,
+                    "method": "resources/subscribe",
+                    "params": {"uri": refs_uri},
+                }
+            )
+            assert mcp.reply(15)["result"] == {}
+            trigger.write_text("", encoding="utf-8")
+            for _ in range(100):
+                if fake_git_pids.exists() and len(fake_git_pids.read_text().splitlines()) >= 2:
+                    break
+                time.sleep(0.05)
+            else:
+                raise TimeoutError("fake git probe did not start")
+            probe_pids = [int(pid) for pid in fake_git_pids.read_text().splitlines()]
             mcp.proc.send_signal(signal.SIGTERM)
             mcp.proc.wait(timeout=10)
             assert mcp.proc.returncode == 0, mcp.proc.returncode
+            for pid in probe_pids:
+                for _ in range(100):
+                    if not pid_exists(pid):
+                        break
+                    time.sleep(0.02)
+                assert not pid_exists(pid), f"probe process {pid} survived SIGTERM"
         finally:
             mcp.close()
     print("MCP subscription smoke OK")

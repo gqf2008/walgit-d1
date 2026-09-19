@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -39,7 +40,7 @@ const KNOWN_PROTOCOLS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 const MIN_SUBSCRIBE_INTERVAL_MS: u64 = 1000;
 pub(crate) const DEFAULT_SUBSCRIBE_INTERVAL_MS: u64 = 5000;
 pub(crate) const DEFAULT_MAX_SUBSCRIPTIONS: u64 = 32;
-const SUBSCRIBE_FAILURE_LIMIT: u32 = 5;
+const SUBSCRIBE_FAILURE_LIMIT: u32 = 3;
 const SUBSCRIBE_BACKOFF_MAX_MS: u64 = 60_000;
 const NOTIFY_QUEUE_CAPACITY: usize = 128;
 const REF_SAMPLE_BYTES: usize = 64 * 1024;
@@ -280,6 +281,7 @@ pub async fn run(opts: Options) -> Result<()> {
 }
 
 struct Subscription {
+    collab: bool,
     cancel: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -289,12 +291,14 @@ struct CollabSignal {
     generation: u64,
     digest: String,
     error: Option<String>,
+    thread_heads: Arc<HashMap<String, String>>,
 }
 
 struct CollabPuller {
     signal: watch::Sender<CollabSignal>,
     cancel: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    refs: usize,
 }
 
 struct Session {
@@ -519,9 +523,12 @@ impl Session {
     async fn subscribe(&self, uri: &str) -> Result<(), ResourceError> {
         validate_subscription_options(&self.opts)?;
         let parsed = ResourceUri::parse(uri)?;
+        let finished_collab = self.prune_finished_subscriptions();
+        if finished_collab > 0 {
+            self.release_collab_refs(finished_collab).await;
+        }
         {
-            let mut subscriptions = self.subscriptions.lock();
-            subscriptions.retain(|_, sub| !sub.task.is_finished());
+            let subscriptions = self.subscriptions.lock();
             if subscriptions.contains_key(uri) {
                 return Ok(());
             }
@@ -535,11 +542,11 @@ impl Session {
         }
 
         let version = probe_resource_version_initial(&self.opts, &parsed, None).await?;
-        let collab_rx = matches!(
+        let is_collab = matches!(
             parsed,
             ResourceUri::Board { .. } | ResourceUri::Thread { .. }
-        )
-        .then(|| self.ensure_collab_signal());
+        );
+        let collab_rx = is_collab.then(|| self.ensure_collab_signal());
         let (cancel, cancel_rx) = watch::channel(false);
         let task = spawn_subscription(
             uri.to_string(),
@@ -551,22 +558,34 @@ impl Session {
             collab_rx,
         );
         let mut subscriptions = self.subscriptions.lock();
-        subscriptions.retain(|_, sub| !sub.task.is_finished());
         if subscriptions.contains_key(uri) {
             let _ = cancel.send(true);
             let _ = task.await;
+            if is_collab {
+                self.release_collab_ref().await;
+            }
             return Ok(());
         }
         let live = u64::try_from(subscriptions.len()).unwrap_or(u64::MAX);
         if live >= self.opts.max_subscriptions {
             let _ = cancel.send(true);
             let _ = task.await;
+            if is_collab {
+                self.release_collab_ref().await;
+            }
             return Err(ResourceError::InvalidParams(format!(
                 "`--max-subscriptions` limit ({} live subscriptions) reached",
                 self.opts.max_subscriptions
             )));
         }
-        subscriptions.insert(uri.to_string(), Subscription { cancel, task });
+        subscriptions.insert(
+            uri.to_string(),
+            Subscription {
+                collab: is_collab,
+                cancel,
+                task,
+            },
+        );
         Ok(())
     }
 
@@ -576,6 +595,9 @@ impl Session {
         if let Some(sub) = sub {
             let _ = sub.cancel.send(true);
             let _ = sub.task.await;
+            if sub.collab {
+                self.release_collab_ref().await;
+            }
         }
         Ok(())
     }
@@ -602,7 +624,8 @@ impl Session {
 
     fn ensure_collab_signal(&self) -> watch::Receiver<CollabSignal> {
         let mut guard = self.collab.lock();
-        if let Some(puller) = guard.as_ref() {
+        if let Some(puller) = guard.as_mut() {
+            puller.refs = puller.refs.saturating_add(1);
             return puller.signal.subscribe();
         }
         let (signal, _) = watch::channel(CollabSignal::default());
@@ -613,8 +636,48 @@ impl Session {
             signal,
             cancel,
             task,
+            refs: 1,
         });
         receiver
+    }
+
+    async fn release_collab_ref(&self) {
+        self.release_collab_refs(1).await;
+    }
+
+    async fn release_collab_refs(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let puller = {
+            let mut guard = self.collab.lock();
+            let should_stop = if let Some(puller) = guard.as_mut() {
+                puller.refs = puller.refs.saturating_sub(count);
+                puller.refs == 0
+            } else {
+                false
+            };
+            should_stop.then(|| guard.take()).flatten()
+        };
+        if let Some(puller) = puller {
+            let _ = puller.cancel.send(true);
+            let _ = puller.task.await;
+        }
+    }
+
+    fn prune_finished_subscriptions(&self) -> usize {
+        let mut finished = 0;
+        self.subscriptions.lock().retain(|_, sub| {
+            if sub.task.is_finished() {
+                if sub.collab {
+                    finished += 1;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        finished
     }
 
     async fn resource_list(&self) -> Vec<Value> {
@@ -1440,11 +1503,19 @@ async fn probe_version_for_parsed(
     match parsed {
         ResourceUri::Refs { .. } => probe_refs_version(opts, owner, repo, cancel).await,
         ResourceUri::Wal { .. } => probe_wal_version(opts, owner, repo, cancel).await,
-        ResourceUri::Board { .. } | ResourceUri::Thread { .. } => {
+        ResourceUri::Board { .. } => {
             if refresh_collab {
                 refresh_collab_refs(opts, cancel.clone()).await?;
             }
-            probe_collab_version_local(opts, parsed, cancel).await
+            probe_board_version_local(opts, cancel).await
+        }
+        ResourceUri::Thread { thread, .. } => {
+            refresh_collab_refs(opts, cancel.clone()).await?;
+            let heads = collab_thread_heads(opts, cancel).await?;
+            return heads
+                .get(thread)
+                .cloned()
+                .ok_or_else(|| ResourceError::NotFound(format!("no entries for thread {thread}")));
         }
     }
 }
@@ -1456,9 +1527,6 @@ async fn probe_collab_version_local(
 ) -> Result<String, ResourceError> {
     match parsed {
         ResourceUri::Board { .. } => probe_board_version_local(opts, cancel).await,
-        ResourceUri::Thread { thread, .. } => {
-            probe_thread_version_local(opts, thread, cancel).await
-        }
         _ => Err(ResourceError::InvalidParams(
             "collab probe used for a non-collab resource".into(),
         )),
@@ -1515,30 +1583,6 @@ async fn probe_board_version_local(
         ));
     }
     Ok(hash.to_string())
-}
-
-async fn probe_thread_version_local(
-    opts: &Options,
-    thread: &str,
-    cancel: Option<watch::Receiver<bool>>,
-) -> Result<String, ResourceError> {
-    let argv = vec![
-        "collab".into(),
-        "thread-head".into(),
-        format!("--repo={}", opts.repo.display()),
-        "--".into(),
-        thread.to_string(),
-    ];
-    let out = run_walgit(&argv, &opts.config, cancel)
-        .await
-        .map_err(|e| classify_resource_error(&format!("collab thread {thread}"), e))?;
-    let head = out.trim();
-    if head.is_empty() {
-        return Err(ResourceError::Execution(
-            "collab thread-head reported no head oid".into(),
-        ));
-    }
-    Ok(head.to_string())
 }
 
 async fn read_refs(
@@ -1702,7 +1746,7 @@ async fn refresh_collab_refs(
         "+refs/collab/inbox/*:refs/collab/inbox/*".to_string(),
         "+refs/collab/meta/*:refs/collab/meta/*".to_string(),
     ];
-    run_git(&args, cancel)
+    run_git_with_timeout(&args, cancel, TOOL_TIMEOUT)
         .await
         .map(|_| ())
         .map_err(|e| classify_resource_error("refs/collab/*", e))
@@ -1725,6 +1769,22 @@ async fn collab_remote_digest(
         .await
         .map(|probe| probe.version)
         .map_err(|e| classify_resource_error("refs/collab/*", e))
+}
+
+async fn collab_thread_heads(
+    opts: &Options,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<Arc<HashMap<String, String>>, ResourceError> {
+    let argv = vec![
+        "collab".into(),
+        "thread-heads".into(),
+        format!("--repo={}", opts.repo.display()),
+    ];
+    let out = run_walgit(&argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error("refs/collab/*", e))?;
+    let heads = serde_json::from_str(&out).map_err(resource_execution)?;
+    Ok(Arc::new(heads))
 }
 
 async fn ensure_identity(
@@ -1812,18 +1872,26 @@ async fn run_git(
     args: &[String],
     cancel: Option<watch::Receiver<bool>>,
 ) -> Result<String, ToolError> {
+    run_git_with_timeout(args, cancel, Duration::from_secs(10)).await
+}
+
+async fn run_git_with_timeout(
+    args: &[String],
+    cancel: Option<watch::Receiver<bool>>,
+    timeout: Duration,
+) -> Result<String, ToolError> {
+    run_git_exe_with_timeout(Path::new("git"), args, cancel, timeout).await
+}
+
+async fn run_git_exe_with_timeout(
+    exe: &Path,
+    args: &[String],
+    cancel: Option<watch::Receiver<bool>>,
+    timeout: Duration,
+) -> Result<String, ToolError> {
     match cancel {
-        Some(cancel) => {
-            run_child_with_cancel(
-                Path::new("git"),
-                args,
-                Duration::from_secs(10),
-                64 * 1024,
-                cancel,
-            )
-            .await
-        }
-        None => run_child_with(Path::new("git"), args, Duration::from_secs(10), 64 * 1024).await,
+        Some(cancel) => run_child_with_cancel(exe, args, timeout, 64 * 1024, cancel).await,
+        None => run_child_with(exe, args, timeout, 64 * 1024).await,
     }
 }
 
@@ -2040,7 +2108,19 @@ fn spawn_subscription(
                 if let Some(error) = signal.error {
                     Err(ResourceError::Execution(error))
                 } else {
-                    probe_collab_version_local(&opts, &parsed, Some(cancel.clone())).await
+                    match &parsed {
+                        ResourceUri::Thread { thread, .. } => {
+                            signal.thread_heads.get(thread).cloned().ok_or_else(|| {
+                                ResourceError::NotFound(format!("no entries for thread {thread}"))
+                            })
+                        }
+                        ResourceUri::Board { .. } => {
+                            probe_collab_version_local(&opts, &parsed, Some(cancel.clone())).await
+                        }
+                        _ => Err(ResourceError::InvalidParams(
+                            "collab subscription used for a non-collab resource".into(),
+                        )),
+                    }
                 }
             } else {
                 probe_resource_version(&opts, &uri, Some(cancel.clone())).await
@@ -2093,13 +2173,28 @@ fn spawn_collab_puller(
                     if last_digest.as_deref() != Some(digest.as_str()) {
                         match refresh_collab_refs(&opts, Some(cancel.clone())).await {
                             Ok(()) => {
-                                last_digest = Some(digest.clone());
-                                generation = generation.saturating_add(1);
-                                let _ = signal.send(CollabSignal {
-                                    generation,
-                                    digest,
-                                    error: None,
-                                });
+                                match collab_thread_heads(&opts, Some(cancel.clone())).await {
+                                    Ok(thread_heads) => {
+                                        last_digest = Some(digest.clone());
+                                        generation = generation.saturating_add(1);
+                                        let _ = signal.send(CollabSignal {
+                                            generation,
+                                            digest,
+                                            error: None,
+                                            thread_heads,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        failures = 1;
+                                        generation = generation.saturating_add(1);
+                                        let _ = signal.send(CollabSignal {
+                                            generation,
+                                            digest: last_digest.clone().unwrap_or_default(),
+                                            error: Some(error.message()),
+                                            thread_heads: Arc::new(HashMap::new()),
+                                        });
+                                    }
+                                }
                             }
                             Err(error) => {
                                 failures = 1;
@@ -2108,6 +2203,7 @@ fn spawn_collab_puller(
                                     generation,
                                     digest: last_digest.clone().unwrap_or_default(),
                                     error: Some(error.message()),
+                                    thread_heads: Arc::new(HashMap::new()),
                                 });
                             }
                         }
@@ -2120,6 +2216,7 @@ fn spawn_collab_puller(
                         generation,
                         digest: last_digest.clone().unwrap_or_default(),
                         error: Some(error.message()),
+                        thread_heads: Arc::new(HashMap::new()),
                     });
                 }
             }
@@ -2175,8 +2272,8 @@ mod tests {
     use super::{
         DEFAULT_MAX_SUBSCRIPTIONS, DEFAULT_SUBSCRIBE_INTERVAL_MS, Options, PROTOCOL_VERSION,
         ResourceError, ResourceUri, Session, Subscription, ToolError, VersionTracker, argv_for,
-        handle_line, run_git_refs_streaming, subscription_delay_ms, tool_defs,
-        validate_subscription_options,
+        handle_line, run_git_exe_with_timeout, run_git_refs_streaming, subscription_delay_ms,
+        tool_defs, validate_subscription_options,
     };
     use serde_json::{Value, json};
     #[cfg(unix)]
@@ -2734,6 +2831,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn last_collab_reference_stops_the_shared_puller() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, _rx) = mpsc::channel(1);
+        let mut options = opts(false);
+        options.repo = dir.path().to_path_buf();
+        let session = Session::new(options, tx);
+
+        let _first = session.ensure_collab_signal();
+        {
+            let guard = session.collab.lock();
+            assert_eq!(guard.as_ref().expect("puller").refs, 1);
+        }
+        session.release_collab_ref().await;
+        assert!(session.collab.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_probe_does_not_fall_back_to_the_per_thread_loader() {
+        let parsed = ResourceUri::Thread {
+            owner: "o".into(),
+            repo: "r".into(),
+            thread: "t".into(),
+        };
+        let error = super::probe_collab_version_local(&opts(false), &parsed, None)
+            .await
+            .expect_err("thread probes must use the shared head map");
+        assert!(
+            matches!(error, ResourceError::InvalidParams(_)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn refs_probe_streams_more_than_64_kib() {
         use std::io::Write as _;
         use std::process::Stdio;
@@ -2800,6 +2930,31 @@ mod tests {
         assert!(probe.truncated || probe.lines.len() < probe.count as usize);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_collab_fetch_uses_the_long_timeout_budget() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("git");
+        std::fs::write(&script, "#!/bin/sh\nsleep 0.3\nprintf fetched\n").expect("write");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+
+        let args = Vec::new();
+        let err =
+            run_git_exe_with_timeout(&script, &args, None, std::time::Duration::from_millis(50))
+                .await
+                .expect_err("short budget must time out");
+        assert!(format!("{err:?}").contains("timed out"), "{err:?}");
+
+        let out = run_git_exe_with_timeout(&script, &args, None, std::time::Duration::from_secs(2))
+            .await
+            .expect("long budget must finish");
+        assert_eq!(out, "fetched");
+    }
+
     #[test]
     fn subscription_options_reject_bad_limits_and_backoff_is_bounded() {
         let mut o = opts(false);
@@ -2832,10 +2987,14 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = cancel_rx.changed().await;
         });
-        session
-            .subscriptions
-            .lock()
-            .insert("walgit://refs/o/held".into(), Subscription { cancel, task });
+        session.subscriptions.lock().insert(
+            "walgit://refs/o/held".into(),
+            Subscription {
+                collab: false,
+                cancel,
+                task,
+            },
+        );
 
         let line = json!({
             "jsonrpc": "2.0",
