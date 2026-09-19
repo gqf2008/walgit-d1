@@ -60,7 +60,7 @@ only the refs-level manifest head; collab resources share one session-level `ref
 and only rebuild the board hash or thread head when that ref signal changes. Start with:
 
 ```sh
-walgit mcp --repo /path/to/checkout \
+walgit --config ~/.walgit/walgit.toml mcp --repo /path/to/checkout \
   --subscribe-interval-ms 5000 --max-subscriptions 32
 ```
 
@@ -79,6 +79,27 @@ An observed version change arrives as
 resource arrives as `notifications/resources/list_changed`. Notifications can be missed on process
 restart or instance change, so a durable sidecar must keep its own cursor and use the pull lanes
 (`git ls-remote`, `walgit wal ls`, `walgit collab watch`) as the source of truth.
+
+## Host upgrades (tray)
+
+The tray checks for updates **30 seconds after startup and every 30 minutes**. Detection only
+notifies; installation requires the user to click the tray menu.
+
+- **macOS:** DMG channel — download the release DMG, verify SHA-256 and the signed/notarized app,
+  replace the installed app, run the health check, and roll back on failure.
+- **Windows:** installer channel — download `walgit-setup-<version>-x64.exe`, verify its exact
+  SHA-256, then run the helper's silent install followed by `walgit.exe --version` and `/healthz`
+  checks; failure rolls back. An installation created **before the first build containing this
+  feature** must run the installer once manually before tray upgrades work.
+- **Linux:** no tray upgrade channel is currently provided.
+
+## Host operations
+
+`walgit serve` runs a standalone host; `walgit service start|stop|status|restart` manages the
+installed service. Validate or print the effective configuration with `walgit config check` /
+`walgit config dump`. Cross-repository principals are managed with `walgit principal …`. The
+installed ops skill (`skills/walgit/SKILL.md`, published through the public installer) has the
+full operator lifecycle and maintenance runbooks.
 
 ## Discover
 

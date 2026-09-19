@@ -637,6 +637,11 @@ Decision identifiers are stable; gaps in the numbering are intentional.
 - **No backwards compatibility (pre-1.0, banner at top):** change the shape and delete the old one in the same
   commit — no aliases, shims, deprecated routes/keys/fields. Only bucket formats (WAL, manifest, log, checkpoint
   protos) stay append-only/replayable.
+- **New user-visible surface ships with SKILL.md documentation.** Any new CLI subcommand/flag, MCP
+  method/resource/flag, or user-visible workflow must update the public `web/SKILL.md` and the shipped ops skill
+  `skills/walgit/SKILL.md` in the same change (or the ops skill must point to the web guide when the detail belongs
+  there). `scripts/check-skill-covers-cli.sh` is the machine guard for CLI/MCP coverage; a PR that cannot explain
+  the new surface there is not mergeable.
 - Keep this file current: append decisions with a number and a date; never delete history, replace it with the
   decision that superseded it.
 - **Never block the async runtime**: no blocking git/fs work (repack, midx, commit-graph, gix reopen, large
