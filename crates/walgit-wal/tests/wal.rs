@@ -923,16 +923,24 @@ async fn cold_rematerialize_refreshes_once() {
     let id = repo_id("test", "cold-refresh");
     let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
 
+    // Seed a local pack without publishing it. Rematerialize sees an empty
+    // manifest, prunes the orphan, and must still batch the refs rebuild and
+    // pack reconciliation into one explicit ODB reload. Avoid publish here:
+    // its background prefetch can add an unrelated refresh under CI timing.
     let work = WorkRepo::new();
-    let c1 = work.commit("cold-refresh", "one");
-    let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
+    work.commit("cold-refresh", "one");
     handle
-        .publish_push(
-            Some(ingested),
-            make_txn(vec![("refs/heads/main", "", &c1)]),
-            HashMap::new(),
+        .local()
+        .ingest_pack(
+            std::io::Cursor::new(work.create_pack()),
+            IngestOptions {
+                fsck: false,
+                max_bytes: None,
+                thin: false,
+            },
         )
         .await
+        .unwrap()
         .unwrap();
 
     let before = handle.local().odb_refreshes();
