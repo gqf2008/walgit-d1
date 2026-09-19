@@ -32,6 +32,7 @@ struct Args {
     rollback_version: String,
     install_dir: PathBuf,
     state_dir: PathBuf,
+    update_dir: PathBuf,
     log: PathBuf,
     tray_pid: u32,
     tray_wait: Duration,
@@ -57,6 +58,7 @@ impl Args {
         let mut rollback_version = None;
         let mut install_dir = None;
         let mut state_dir = None;
+        let mut update_dir = None;
         let mut log = None;
         let mut tray_pid = None;
         let mut tray_wait = DEFAULT_TRAY_WAIT;
@@ -92,6 +94,7 @@ impl Args {
                 }
                 "--install-dir" => install_dir = Some(PathBuf::from(value()?)),
                 "--state-dir" => state_dir = Some(PathBuf::from(value()?)),
+                "--update-dir" => update_dir = Some(PathBuf::from(value()?)),
                 "--log" => log = Some(PathBuf::from(value()?)),
                 "--tray-pid" => {
                     let text = value()?.to_string_lossy().into_owned();
@@ -136,6 +139,7 @@ impl Args {
             rollback_version: rollback_version.ok_or_else(|| missing("rollback-version"))?,
             install_dir: install_dir.ok_or_else(|| missing("install-dir"))?,
             state_dir,
+            update_dir: update_dir.ok_or_else(|| missing("update-dir"))?,
             log,
             tray_pid: tray_pid.ok_or_else(|| missing("tray-pid"))?,
             tray_wait,
@@ -205,6 +209,7 @@ fn run(args: &Args) -> Result<(), String> {
     match result {
         Ok(()) => {
             launch_tray(args)?;
+            cleanup_staging(args);
             log(
                 args,
                 &format!("SUCCESS: v{}", normalized(&args.target_version)),
@@ -540,6 +545,71 @@ fn launch_tray(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove the successful staging directory after the helper has exited.
+///
+/// On Windows the helper image itself lives in this directory, so a detached
+/// cmd waits briefly, then removes the whole directory. Failure paths never
+/// call this function: keeping both installers and the helper copy is the
+/// diagnostic evidence for rollback failures.
+fn cleanup_staging(args: &Args) {
+    let update_root = args.state_dir.join("update");
+    if args.update_dir == args.state_dir || !args.update_dir.starts_with(&update_root) {
+        log(
+            args,
+            &format!(
+                "staging cleanup skipped: {} is outside {}",
+                args.update_dir.display(),
+                update_root.display()
+            ),
+        );
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let directory = args.update_dir.display();
+        // Retry because the helper image itself lives in this directory: the
+        // first rmdir may race the helper's own exit on Windows.
+        let script = format!(
+            "@echo off\r\nfor /L %%i in (1,1,30) do (\r\n  rmdir /S /Q \"{directory}\" >NUL 2>&1\r\n  if not exist \"{directory}\" exit /b 0\r\n  ping 127.0.0.1 -n 2 >NUL\r\n)\r\nexit /b 1\r\n"
+        );
+        let script_path = std::env::temp_dir().join("walgit-upgrade-cleanup.cmd");
+        if let Err(error) = std::fs::write(&script_path, script) {
+            log(
+                args,
+                &format!("staging cleanup script write failed: {error}"),
+            );
+            return;
+        }
+        let mut command = command_for(&script_path, &[], true);
+        command
+            .current_dir(&args.state_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match command.spawn() {
+            Ok(_) => log(
+                args,
+                &format!(
+                    "staging cleanup scheduled after helper exit: {}",
+                    args.update_dir.display()
+                ),
+            ),
+            Err(error) => log(args, &format!("staging cleanup spawn failed: {error}")),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        match std::fs::remove_dir_all(&args.update_dir) {
+            Ok(()) => log(
+                args,
+                &format!("staging cleanup removed {}", args.update_dir.display()),
+            ),
+            Err(error) => log(args, &format!("staging cleanup failed: {error}")),
+        }
+    }
+}
+
 fn rollback(args: &Args, why: &str) -> Result<(), String> {
     let _ = stop_service(args);
     run_installer(&args.rollback_installer, "rollback", args)
@@ -618,6 +688,8 @@ mod tests {
                 "C:\\walgit",
                 "--state-dir",
                 "C:\\state",
+                "--update-dir",
+                "C:\\state\\update\\42",
                 "--tray-pid",
                 "42",
             ]

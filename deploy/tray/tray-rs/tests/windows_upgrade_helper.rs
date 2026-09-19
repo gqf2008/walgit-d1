@@ -157,15 +157,17 @@ fn write_tray(base: &Path, marker: &Path) -> PathBuf {
     path
 }
 
-fn run_helper(base: &Path, fail_health: bool) -> std::process::Output {
+fn run_helper(base: &Path, fail_health: bool) -> (std::process::Output, PathBuf) {
     let install = base.join("install");
     let state = base.join("state");
     let calls = state.join("calls.txt");
     let current = state.join("current.txt");
     let health = state.join("health.txt");
     let fail_marker = state.join("fail-health");
+    let update = state.join("update").join("staging");
     fs::create_dir_all(&install).unwrap();
     fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&update).unwrap();
     write(&current, "old\n");
     write(
         &state.join("walgit.toml"),
@@ -175,14 +177,24 @@ fn run_helper(base: &Path, fail_health: bool) -> std::process::Output {
         write(&fail_marker, "1\n");
     }
 
-    let (new_installer, new_sha) = write_installer(base, "new-installer", "new", &current, &calls);
-    let (old_installer, old_sha) = write_installer(base, "old-installer", "old", &current, &calls);
+    let (new_installer, new_sha) =
+        write_installer(&update, "new-installer", "new", &current, &calls);
+    let (old_installer, old_sha) =
+        write_installer(&update, "old-installer", "old", &current, &calls);
     let service = write_service_dispatcher(base, &current, &calls, &health, &fail_marker);
     let health_command = write_health_command(base, &health);
     let tray_marker = state.join("tray-launched.txt");
     let tray = write_tray(base, &tray_marker);
 
-    let mut command = Command::new(bin());
+    let helper = update.join(if cfg!(windows) {
+        "walgit-upgrade-helper.exe"
+    } else {
+        "walgit-upgrade-helper"
+    });
+    fs::copy(bin(), &helper).unwrap();
+    make_executable(&helper);
+
+    let mut command = Command::new(&helper);
     command
         .arg("--new-installer")
         .arg(new_installer)
@@ -200,6 +212,8 @@ fn run_helper(base: &Path, fail_health: bool) -> std::process::Output {
         .arg(&install)
         .arg("--state-dir")
         .arg(&state)
+        .arg("--update-dir")
+        .arg(&update)
         .arg("--log")
         .arg(state.join("tray.log"))
         .arg("--tray-pid")
@@ -234,14 +248,47 @@ fn run_helper(base: &Path, fail_health: bool) -> std::process::Output {
         );
     }
     assert!(calls.exists(), "helper did not invoke service/installer");
-    output
+    (output, update)
+}
+
+fn wait_for_removed(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !path.exists(),
+        "staging directory was not removed: {}",
+        path.display()
+    );
+}
+
+fn assert_staging_retained(path: &Path) {
+    assert!(
+        path.exists(),
+        "failed upgrade must retain staging: {}",
+        path.display()
+    );
+    let names: Vec<String> = fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("new-installer")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.contains("old-installer")),
+        "{names:?}"
+    );
 }
 
 #[test]
 fn helper_sequences_success_and_rollback_with_fake_installers() {
     let success = base("success");
-    let output = run_helper(&success, false);
+    let (output, update) = run_helper(&success, false);
     assert!(output.status.success(), "success helper failed: {output:?}");
+    wait_for_removed(&update);
     let calls = fs::read_to_string(success.join("state/calls.txt")).unwrap();
     let stop = calls.find("service stop").expect("stop");
     let install = calls.find("install new").expect("new installer");
@@ -256,11 +303,13 @@ fn helper_sequences_success_and_rollback_with_fake_installers() {
     );
 
     let rollback = base("rollback");
-    let output = run_helper(&rollback, true);
+    let (output, update) = run_helper(&rollback, true);
     assert!(
         !output.status.success(),
         "rollback case unexpectedly succeeded"
     );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_staging_retained(&update);
     let calls = fs::read_to_string(rollback.join("state/calls.txt")).unwrap();
     let first_stop = calls.find("service stop").expect("first stop");
     let new_install = calls.find("install new").expect("new installer");

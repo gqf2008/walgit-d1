@@ -710,6 +710,8 @@ fn release_upgrade_windows(
         .arg(&install)
         .arg("--state-dir")
         .arg(state_dir())
+        .arg("--update-dir")
+        .arg(&update)
         .arg("--log")
         .arg(state_dir().join("tray.log"))
         .arg("--tray-pid")

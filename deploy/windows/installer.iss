@@ -272,6 +272,10 @@ begin
   // than proceed silently.
   if ResultCode <> 0 then
   begin
+    // 托盘升级使用 /SUPPRESSMSGBOXES；Inno 对 MB_YESNO 取默认 IDYES，
+    // 所以这里不会卡住无人值守升级。真正的失败兜底是安装完成后的
+    // `walgit.exe --version` 与 `/healthz` 双重校验：替换运行中文件、
+    // 服务仍占端口等问题都会在那里失败，并触发旧安装器回滚。
     if MsgBox('walgit: 无法确认服务已停止（端口可能仍被占用）。' + #13#10 +
       '继续安装会替换正在运行的二进制，旧进程会继续占用端口。仍要继续吗？',
       mbConfirmation, MB_YESNO) <> IDYES then

@@ -58,7 +58,16 @@ GitHub API 的 `sha256` digest 缺失/格式错误/与下载文件不等值时�
 全过程写入 `%USERPROFILE%\.walgit\tray.log`。当前安装目录是
 `%LOCALAPPDATA%\Programs\walgit`，同时识别旧 `%USERPROFILE%\walgit` 布局；安装器在
 `{app}` 写的 `.walgit-install` 标记也覆盖自定义安装目录。
-`tray-rs` 的集成测试用临时目录中的假安装器真跑成功与健康失败回滚两条序列。
+升级成功后 helper 会清理 `%USERPROFILE%\.walgit\update\<pid>`（含新版和回滚两份
+安装器）；失败时保留该目录与两份安装器，便于排查。
+
+> **Bootstrap 边界**：本机制从**首个包含 helper 的发布版**开始生效；此前已安装的
+> Windows 装机版需要手动运行一次该版安装器，之后菜单升级才能生效。旧托盘没有
+> Release 通道，无法自举到第一个支持它的版本。
+>
+> **真机验证边界**：UAC / 杀软 / 未签名告警、真实 Inno 安装器替换正在运行的
+> 文件、真实 Task Scheduler 与安装器组合仍需发布后在真 Windows 上验证；当前
+> `tray-rs` 集成测试使用临时目录中的假安装器真跑成功与健康失败回滚两条序列。
 macOS 0.5.x/0.6.0 升级到新布局时，新 tray 会临时建立
 `~/.walgit/walgit -> App Bundle/walgit` 和 `.skeleton-version`，让旧 helper
 完成升级；5 分钟后自动清理，不保留程序副本。
