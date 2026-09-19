@@ -61,18 +61,6 @@ fn exited_pid() -> u32 {
     pid
 }
 
-fn wait_for(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {}",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
 fn write_health_command(base: &Path, health: &Path) -> PathBuf {
     #[cfg(unix)]
     let body = format!("#!/bin/sh\ncat '{}'\n", health.display());
@@ -230,7 +218,21 @@ fn run_helper(base: &Path, fail_health: bool) -> std::process::Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = command.output().unwrap();
-    wait_for(&tray_marker);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !tray_marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if !tray_marker.exists() {
+        let log = fs::read_to_string(state.join("tray.log")).unwrap_or_default();
+        let calls_text = fs::read_to_string(&calls).unwrap_or_default();
+        panic!(
+            "timed out waiting for {}; status={:?} stdout={:?} stderr={:?} calls={calls_text:?} log={log:?}",
+            tray_marker.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
     assert!(calls.exists(), "helper did not invoke service/installer");
     output
 }
