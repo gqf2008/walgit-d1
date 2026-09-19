@@ -67,7 +67,11 @@ jobs:
         # (build.rs prefers WALGIT_BUILD_SHA; dev builds keep sha, issue #121).
         env:
           WALGIT_BUILD_SHA: ${{ env.RELEASE_VERSION }}
-        run: cargo build --release --bin walgit --bin walgit-server
+        # `walgit-service-host` is the Windows scheduled task's action (a
+        # GUI-subsystem launcher, so the task never gets a console). It is built
+        # everywhere because it is a bin of the same package — on unix it is an
+        # inert stub and nothing ships it.
+        run: cargo build --release --bin walgit --bin walgit-server --bin walgit-service-host
       # --target-dir pins the tray exe into the root target/ regardless of how
       # cargo resolves the nested workspace's own [workspace]/.cargo config —
       # the same dir the upload globs and installer.iss expect.

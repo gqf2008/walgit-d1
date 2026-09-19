@@ -9,7 +9,7 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 
 | 项 | 位置 |
 |---|---|
-| `walgit.exe`(服务)/ `walgit-tray.exe`(托盘)/ `walgit-upgrade-helper.exe`(独立升级 helper)/ `.walgit-install`(安装目录标记) | `%LOCALAPPDATA%\Programs\walgit`(可在向导中自定义 `{app}`) |
+| `walgit.exe`(服务)/ `walgit-service-host.exe`(计划任务的无窗口 launcher,GUI 子系统)/ `walgit-tray.exe`(托盘)/ `walgit-upgrade-helper.exe`(独立升级 helper)/ `.walgit-install`(安装目录标记) | `%LOCALAPPDATA%\Programs\walgit`(可在向导中自定义 `{app}`) |
 | `walgit.toml` 初始配置(`walgit.toml.initial`) | `%USERPROFILE%\.walgit\walgit.toml`;**仅在不存在时生成,卸载不删除** |
 | 开始菜单 | 顶层 `walgit`(直接出现在「所有应用」里)+ 文件夹里的「walgit 托盘」「walgit 配置文件 walgit.toml」 |
 | 桌面快捷方式 | **总是创建**(不做成可选项:Inno 的 `checkedonce` 只在首次安装生效,升级会沿用上次选择,老机器永远补不上) |

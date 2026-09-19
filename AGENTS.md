@@ -561,11 +561,22 @@ decision in §4 — or the PR is; never "fix later".
   `cmd /c` wrapper but not the `walgit.exe` child holding the socket, and a task left `Running`
   would make the next `start` a silent no-op under `IgnoreNew`. A listener is killed only when its
   image is exactly `walgit.exe` or `walgit-server.exe` — a prefix match would take
-  `walgit-backup.exe`. A matching `netstat` row whose pid cannot be read is an **error**, never
-  "the port is free". The task action is `cmd /c … >> server.log 2>&1`: a redirect, not a
-  supervisor — the scheduler gives an `Exec` action no stdout to log to — and the definition
-  records **absolute** paths, because the scheduler starts it in `WorkingDirectory` rather than the
-  caller's. The
+  `walgit-backup.exe`, and a row counts as ours only when its **local address** matches the
+  configured `listen` (same address, the `::1` twin of a loopback bind, or a wildcard): a socket on
+  another address of the same port number is somebody else's, and reading it as "the owner of our
+  port" made `stop` refuse to stop a healthy server (cc-ai-win-port-owner-scope, 2026-09-19). A
+  matching `netstat` row whose pid cannot be read is an **error**, never "the port is free". The task
+  action is `walgit-service-host.exe -EncodedCommand <base64>`: a **GUI-subsystem** launcher
+  (`crates/walgit-cli/src/bin/walgit-service-host.rs`) that runs `cmd /d /s /c "<exe>" serve
+  --config <cfg> >> <log> 2>&1` with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` and waits. A
+  scheduled `Exec` action is *always* given a console, and with Windows Terminal as the default
+  terminal that console becomes an on-screen window (or a taskbar button that restores one);
+  `powershell -WindowStyle Hidden` only minimised it, and `DETACHED_PROCESS` is wrong too — with no
+  console to inherit, the console-subsystem server allocates a fresh one and the window is back
+  (cc-ai-win-service-console, 2026-09-19: measured on a real machine). The redirect
+  stays `cmd`'s job — a redirect, not a supervisor, because the scheduler gives an `Exec` action no
+  stdout to log to — and the definition records **absolute** paths, because the scheduler starts it
+  in `WorkingDirectory` rather than the caller's. The
   Windows tray stops spawning and supervising anything: it calls `walgit service`, exactly like
   macOS (Linux keeps its tray-side supervisor — no equivalent scheduler there). The installer ends
   the task, sweeps the *port owner* (not a pidfile) plus both program directories before it

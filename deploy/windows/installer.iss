@@ -56,6 +56,9 @@ Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:Add
 
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
+; 计划任务的动作(见 walgit service 的 task_xml):GUI 子系统的无窗口 launcher。
+; 缺它 service start 会在建任务前就报错,而不是留一个跑不起来任务。
+Source: "..\..\target\release\walgit-service-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-upgrade-helper.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; CI 与安装器共用的任务归属探测。必须作为普通文件装到 {app}；Inno 的临时解压 API
@@ -254,7 +257,7 @@ begin
     'Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | ForEach-Object { ' +
     '$p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
     'if ($p -and $p.ProcessName -match ''^(?i)(walgit|walgit-server)$'') { Stop-Process -Id $p.Id -Force } }; ' +
-    'Get-Process walgit,walgit-tray,walgit-server -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
+    'Get-Process walgit,walgit-tray,walgit-server,walgit-service-host -ErrorAction SilentlyContinue | Where-Object { ($_.Path -like ''' +
     PsQuote(ExpandConstant('{app}')) + '\*'') -or ($_.Path -like ''' +
     PsQuote(LegacyProgramDir) + '\*'') } | Stop-Process -Force; ' +
     // The sweeps above are best-effort (a quietly failing query used to look like

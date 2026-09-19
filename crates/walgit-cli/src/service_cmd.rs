@@ -409,6 +409,12 @@ const TASK_NAME: &str = "walgit";
 #[cfg(any(windows, test))]
 const POWERSHELL_SERVICE_MARKER: &str = "walgit-service-task-v1";
 
+/// The windowless launcher the task action runs. It ships next to `walgit.exe`
+/// and is started as a GUI-subsystem process, so no console is ever created —
+/// see `deploy/tray/tray-rs/src/service_host.rs`.
+#[cfg(any(windows, test))]
+const SERVICE_HOST_IMAGE: &str = "walgit-service-host.exe";
+
 #[cfg(windows)]
 async fn status(listen: &str, _home: &Path) -> Result<()> {
     let version = healthz_body(listen).await.and_then(|b| version_of(&b));
@@ -578,21 +584,36 @@ async fn port_owners(listen: &str) -> Result<Vec<u32>> {
     if !out.status.success() {
         bail!("netstat exited with {}", out.status);
     }
-    listeners_on(&String::from_utf8_lossy(&out.stdout), port).map_err(anyhow::Error::msg)
+    listeners_on(&String::from_utf8_lossy(&out.stdout), listen, port).map_err(anyhow::Error::msg)
 }
 
-/// LISTENING rows for `port` → their owning pids (the last column of
-/// `netstat -ano`). Pure so the parse is unit-tested off-Windows.
+/// LISTENING rows for **our** `listen` address → their owning pids (the last
+/// column of `netstat -ano`). Pure so the parse is unit-tested off-Windows.
+///
+/// Scoping to the address, not just the port number, is load-bearing: a socket
+/// bound to another local address is a *different* socket. Matching on the port
+/// alone meant any unrelated process that happened to use the same port number —
+/// a dev server, a gateway on a VPN address — was reported as "the owner of our
+/// port", and `stop` then refused to stop a perfectly healthy server (and the
+/// installer's port proof never passed). Reported 2026-09-19, thread
+/// `cc-ai-win-port-owner-scope`.
 #[cfg(any(windows, test))]
-fn listeners_on(netstat: &str, port: u16) -> Result<Vec<u32>, String> {
+fn listeners_on(netstat: &str, listen: &str, port: u16) -> Result<Vec<u32>, String> {
     let suffix = format!(":{port}");
+    let ours = listen_host(listen);
     let mut out = Vec::new();
     for line in netstat.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.len() < 4 || !cols[0].eq_ignore_ascii_case("tcp") {
             continue;
         }
-        if !(cols[1].ends_with(&suffix) && cols[3].eq_ignore_ascii_case("listening")) {
+        if !cols[3].eq_ignore_ascii_case("listening") || !cols[1].ends_with(&suffix) {
+            continue;
+        }
+        // `[::1]:8081` → `::1`, `127.0.0.1:8081` → `127.0.0.1`.
+        let host = cols[1][..cols[1].len() - suffix.len()]
+            .trim_matches(['[', ']']);
+        if !same_bind(host, &ours) {
             continue;
         }
         // The row *is* a listener on our port: failing to read its pid means we
@@ -610,6 +631,34 @@ fn listeners_on(netstat: &str, port: u16) -> Result<Vec<u32>, String> {
         }
     }
     Ok(out)
+}
+
+/// The host part of a `host:port` listen address (`[::1]:8081` → `::1`).
+#[cfg(any(windows, test))]
+fn listen_host(listen: &str) -> String {
+    listen
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_matches(['[', ']']).to_ascii_lowercase())
+        .unwrap_or_else(|| listen.trim_matches(['[', ']']).to_ascii_lowercase())
+}
+
+/// Can a socket bound to `row` be holding the port we are about to use on
+/// `ours`? Same address, the other loopback family (`walgit` binds the `::1`
+/// twin of `127.0.0.1`), or a wildcard bind — a wildcard really does own every
+/// address of that port.
+#[cfg(any(windows, test))]
+fn same_bind(row: &str, ours: &str) -> bool {
+    let row = row.to_ascii_lowercase();
+    let ours = ours.to_ascii_lowercase();
+    if row == ours {
+        return true;
+    }
+    let wildcard = |host: &str| matches!(host, "0.0.0.0" | "::" | "*");
+    if wildcard(&row) || wildcard(&ours) {
+        return true;
+    }
+    let loopback = |host: &str| matches!(host, "127.0.0.1" | "::1" | "localhost");
+    loopback(&row) && loopback(&ours)
 }
 
 /// Is `pid` running a walgit image? Refuse to kill anything else — a reused pid
@@ -634,10 +683,10 @@ fn is_our_image(name: &str) -> bool {
 
 /// Is this scheduled-task definition ours? **Only the action counts**: our task
 /// runs `walgit.exe` directly, through the old `cmd /c … >> log 2>&1` wrapper,
-/// or through the hidden encoded PowerShell wrapper that runs that cmd shape.
-/// A definition that merely mentions walgit in its description or arguments, or
-/// runs `walgit-backup.exe`, is not ours. Getting this wrong means ending or
-/// deleting somebody else's task.
+/// through v0.7.7's hidden encoded PowerShell wrapper, or through the windowless
+/// `walgit-service-host.exe` that replaced it. A definition that merely mentions
+/// walgit in its description or arguments, or runs `walgit-backup.exe`, is not
+/// ours. Getting this wrong means ending or deleting somebody else's task.
 #[cfg(any(windows, test))]
 fn task_is_ours(xml: &str) -> bool {
     // Only the **action** counts, and only where a command lives: a task whose
@@ -655,24 +704,56 @@ fn task_is_ours(xml: &str) -> bool {
     let commands = xml_tag_values(actions, "command");
     let arguments = xml_tag_values(actions, "arguments");
     commands.iter().enumerate().any(|(i, command)| {
-        let command = command.trim();
-        // The binary itself…
-        if is_our_image(command) || ends_with_our_image(command) {
-            return true;
-        }
-        // …or our redirect wrapper runs it at the command position after `/c`.
-        is_cmd_wrapper(command)
-            && arguments
-                .get(i)
-                .is_some_and(|args| cmd_runs_our_binary(args))
-            // …or the hidden PowerShell wrapper carries our encoded service
-            // launch command. The old visible cmd shape above stays ours too,
-            // so `ensure` can replace it when this upgrade runs.
-            || (is_powershell_wrapper(command)
-                && arguments
-                    .get(i)
-                    .is_some_and(|args| powershell_runs_our_service(args)))
+        action_is_ours(
+            command.trim(),
+            arguments.get(i).copied().unwrap_or_default().trim(),
+        )
     })
+}
+
+/// One `<Exec>` action: does it launch *our* server?
+///
+/// Every shape we have ever generated stays acceptable — the old visible `cmd /c`
+/// wrapper, v0.7.7's hidden PowerShell wrapper, and the current windowless host —
+/// because `ensure` must be able to `/Create /F` over whatever task a previous
+/// version left behind. Dropping a shape here would leave an upgradable machine
+/// with a task that `ensure` refuses to touch.
+#[cfg(any(windows, test))]
+fn action_is_ours(command: &str, args: &str) -> bool {
+    // The binary itself…
+    if is_our_image(command) || ends_with_our_image(command) {
+        return true;
+    }
+    // …or our redirect wrapper runs it at the command position after `/c`.
+    if is_cmd_wrapper(command) {
+        return cmd_runs_our_binary(args);
+    }
+    if !is_encoded_wrapper(command) {
+        return false;
+    }
+    let Some(payload) = encoded_payload(args) else {
+        return false;
+    };
+    // The payload must be *our* launch command — one of our exact images plus the
+    // `serve --config` and `>> … 2>&1` logging shape — before the wrapper matters.
+    if !(payload.contains("serve --config")
+        && payload.contains("2>&1")
+        && script_has_our_image(&payload))
+    {
+        return false;
+    }
+    if is_powershell_wrapper(command) {
+        // v0.7.7's shape: a PowerShell *script* emitted by `task_xml`, so it
+        // carries the marker. A PowerShell action that merely mentions our path
+        // stays somebody else's.
+        return payload.contains(POWERSHELL_SERVICE_MARKER) && payload.contains("cmd /c");
+    }
+    // The windowless host hands the payload to `cmd /d /s /c`, so the payload is
+    // the *inner* command and the checks above are the whole predicate: one of our
+    // exact images plus the `serve --config … >> … 2>&1` logging shape. Its image
+    // is a name only this product ships, which is why the marker that guards the
+    // generic PowerShell wrapper is not needed for it.
+    true
 }
 
 /// Values of every `<tag>…</tag>` pair in `xml`, found case-insensitively while
@@ -784,38 +865,40 @@ fn is_powershell_wrapper(command: &str) -> bool {
     matches!(base.trim_matches('"'), "powershell.exe" | "pwsh.exe")
 }
 
-/// The hidden wrapper is ours only when its encoded script carries the exact
-/// marker emitted by `task_xml`, the `cmd /c` logging shape it launches, and
-/// one of our exact image names. A PowerShell action that merely mentions our
-/// path is not enough.
+/// The windowless service host — the wrapper the task uses now.
 #[cfg(any(windows, test))]
-fn powershell_runs_our_service(args: &str) -> bool {
+fn is_service_host_wrapper(command: &str) -> bool {
+    let base = command.rsplit(['\\', '/']).next().unwrap_or(command);
+    base.trim_matches('"')
+        .eq_ignore_ascii_case(SERVICE_HOST_IMAGE)
+}
+
+/// Both hidden wrappers carry the launch command as UTF-16LE base64 under
+/// `-EncodedCommand`, so paths with spaces and quotes never face a second round
+/// of command-line parsing.
+#[cfg(any(windows, test))]
+fn is_encoded_wrapper(command: &str) -> bool {
+    is_powershell_wrapper(command) || is_service_host_wrapper(command)
+}
+
+/// The `-EncodedCommand` payload, decoded. `None` when the flag, the base64 or
+/// the UTF-16 is unusable.
+#[cfg(any(windows, test))]
+fn encoded_payload(args: &str) -> Option<String> {
     let mut words = args.split_whitespace();
-    if words
-        .find(|w| w.eq_ignore_ascii_case("-EncodedCommand"))
-        .is_none()
-    {
-        return false;
-    }
-    let encoded = words.next().unwrap_or_default().trim_matches('"');
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-        return false;
-    };
+    words.find(|w| w.eq_ignore_ascii_case("-EncodedCommand"))?;
+    let encoded = words.next()?.trim_matches('"');
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     if bytes.len() % 2 != 0 {
-        return false;
+        return None;
     }
     let units: Vec<u16> = bytes
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
-    let Ok(script) = String::from_utf16(&units) else {
-        return false;
-    };
-    script.contains(POWERSHELL_SERVICE_MARKER)
-        && script.contains("cmd /c")
-        && script_has_our_image(&script)
-        && script.contains("serve --config")
-        && script.contains("2>&1")
+    String::from_utf16(&units).ok()
 }
 
 #[cfg(any(windows, test))]
@@ -874,7 +957,9 @@ mod task {
     use anyhow::{Context, Result, bail};
     use base64::Engine as _;
 
-    use super::{POWERSHELL_SERVICE_MARKER, TASK_NAME, lists_task, task_is_ours};
+    use super::{
+        SERVICE_HOST_IMAGE, TASK_NAME, lists_task, task_is_ours,
+    };
 
     fn schtasks(args: &[&str]) -> Result<String> {
         let out = Command::new("schtasks")
@@ -983,6 +1068,17 @@ mod task {
         // `/Create /F` overwrites by name. Refuse to clobber a task that happens
         // to be called `walgit` but is somebody else's (the same care the port
         // sweep takes before it kills a pid).
+        // The action is the windowless host, so a task written without it would
+        // only fail at logon with the scheduler's own code — say why instead.
+        let host = service_host_path(exe);
+        if !host.exists() {
+            bail!(
+                "walgit: {} is missing next to {} — reinstall walgit. The scheduled task \
+                 launches that host so the service never gets a console window.",
+                host.display(),
+                exe.display()
+            );
+        }
         let existing = probe();
         match &existing {
             Task::Absent | Task::Ours => {}
@@ -1019,14 +1115,29 @@ mod task {
         schtasks(&["/End", "/TN", TASK_NAME]).map(|_| ())
     }
 
-    /// The task launches a hidden PowerShell process, which in turn launches
-    /// `cmd /c … >> log 2>&1` with `CreateNoWindow`: PowerShell hides the
-    /// scheduler's interactive console, while cmd keeps the byte-for-byte
-    /// append redirect the scheduler cannot provide itself.
+    /// The task launches `walgit-service-host.exe` — a **GUI-subsystem** helper
+    /// shipped next to this binary — which starts `cmd /d /s /c … >> log 2>&1`
+    /// with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`.
+    ///
+    /// A scheduled `Exec` action always gets a *console*, and with Windows
+    /// Terminal as the machine's default terminal that console becomes a window
+    /// on screen (or at least a taskbar button) — `-WindowStyle Hidden` only got
+    /// it created minimised, so clicking the taskbar entry brought the black box
+    /// back. A GUI-subsystem launcher is the only shape in which no console is
+    /// ever created; `cmd` still owns the byte-for-byte append redirect.
     ///
     /// Do **not** rely on `/End` to stop the server: measured on the CI runner,
     /// `/End` ended the wrapper while the `walgit.exe` child kept the socket —
     /// so `stop` kills the port's owner first and only then tidies the task.
+    /// `…\walgit.exe` → `…\walgit-service-host.exe`, the launcher the task runs.
+    /// It is installed next to the server binary, and a debug checkout gets it
+    /// from the same `cargo build -p walgit-cli`.
+    fn service_host_path(exe: &Path) -> PathBuf {
+        exe.parent()
+            .unwrap_or(Path::new("."))
+            .join(SERVICE_HOST_IMAGE)
+    }
+
     fn task_xml(exe: &Path, config: &Path, log: &Path) -> Result<Vec<u8>> {
         // The scheduler starts the task in `WorkingDirectory`, so a *relative*
         // `--config` (which worked for the caller) would resolve against the
@@ -1039,7 +1150,8 @@ mod task {
         let exe = absolute(exe)?;
         let config = absolute(config)?;
         let log = absolute(log)?;
-        let encoded = powershell_service_command(&exe, &config, &log);
+        let encoded = encode_command_line(&service_command_line(&exe, &config, &log));
+        let host = service_host_path(&exe);
         let body = format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -1074,14 +1186,15 @@ mod task {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}</Arguments>
+      <Command>{host}</Command>
+      <Arguments>-EncodedCommand {encoded}</Arguments>
       <WorkingDirectory>{dir}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
 "#,
             encoded = xml_escape(&encoded),
+            host = xml_escape(&host.display().to_string()),
             dir = xml_escape(&exe.parent().unwrap_or(Path::new(".")).display().to_string()),
         );
         // `schtasks /Create /XML` rejects UTF-8 on some builds: emit UTF-16LE
@@ -1094,35 +1207,28 @@ mod task {
         Ok(out)
     }
 
-    /// UTF-16LE/base64 is PowerShell's `-EncodedCommand` transport. It avoids
-    /// the quote-in-quote XML mess for install paths with spaces; the script
-    /// below deliberately keeps `cmd /c` only for its append redirect.
-    fn powershell_service_command(exe: &Path, config: &Path, log: &Path) -> String {
-        let script = format!(
-            r#"# walgit-service-task-v1: cmd /c wrapper with append logging
-$walgitServiceTask = '{POWERSHELL_SERVICE_MARKER}'
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$comspec = $env:ComSpec
-if (-not $comspec) {{ $comspec = Join-Path $env:SystemRoot 'System32\cmd.exe' }}
-$psi.FileName = $comspec
-$psi.Arguments = '/d /s /c ""{exe}" serve --config "{config}" >> "{log}" 2>&1"'
-$psi.UseShellExecute = $false
-$psi.CreateNoWindow = $true
-$p = [System.Diagnostics.Process]::Start($psi)
-$p.WaitForExit()"#,
-            exe = ps_single_quote(&exe.display().to_string()),
-            config = ps_single_quote(&config.display().to_string()),
-            log = ps_single_quote(&log.display().to_string()),
-        );
-        let mut utf16 = Vec::with_capacity(script.len() * 2);
-        for unit in script.encode_utf16() {
+    /// `""<exe>" serve --config "<cfg>" >> "<log>" 2>&1"` — the argument the
+    /// launcher hands to `cmd /d /s /c`. `/s` strips the outer quotes, the inner
+    /// `""…""` keeps a path with spaces intact, and `cmd` opens the log itself:
+    /// append, never truncate (the scheduler gives an `Exec` action no stdout).
+    fn service_command_line(exe: &Path, config: &Path, log: &Path) -> String {
+        format!(
+            r#"""{exe}" serve --config "{config}" >> "{log}" 2>&1""#,
+            exe = exe.display(),
+            config = config.display(),
+            log = log.display(),
+        )
+    }
+
+    /// UTF-16LE/base64: the launcher's transport, so install paths with spaces or
+    /// quotes never have to survive a second round of command-line parsing. (WiX
+    /// and `schtasks /XML` both mangle a nested `""…""` in an attribute.)
+    fn encode_command_line(command_line: &str) -> String {
+        let mut utf16 = Vec::with_capacity(command_line.len() * 2);
+        for unit in command_line.encode_utf16() {
             utf16.extend_from_slice(&unit.to_le_bytes());
         }
         base64::engine::general_purpose::STANDARD.encode(utf16)
-    }
-
-    fn ps_single_quote(s: &str) -> String {
-        s.replace('\'', "''")
     }
 
     fn xml_escape(s: &str) -> String {
@@ -1136,7 +1242,7 @@ $p.WaitForExit()"#,
     mod tests {
         use base64::Engine as _;
 
-        use super::{powershell_service_command, task_xml};
+        use super::{encode_command_line, service_command_line, task_xml};
 
         fn xml_text(bytes: &[u8]) -> String {
             assert_eq!(
@@ -1151,28 +1257,45 @@ $p.WaitForExit()"#,
             String::from_utf16(&units).expect("task XML is valid UTF-16")
         }
 
-        fn encode_powershell(script: &str) -> String {
-            let mut utf16 = Vec::with_capacity(script.len() * 2);
-            for unit in script.encode_utf16() {
-                utf16.extend_from_slice(&unit.to_le_bytes());
-            }
-            base64::engine::general_purpose::STANDARD.encode(utf16)
+        fn decode(encoded: &str) -> String {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("encoded command is base64");
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16(&units).expect("encoded command is UTF-16LE")
         }
 
+        /// The action must be the **GUI-subsystem** host, never a console program:
+        /// a scheduled `Exec` action always gets a console, and with Windows
+        /// Terminal as the default terminal that console is a window on screen.
         #[test]
-        fn task_xml_uses_a_hidden_powershell_wrapper_and_keeps_cmd_logging() {
+        fn task_xml_runs_the_windowless_host_with_the_cmd_redirect() {
             let root = tempfile::tempdir().expect("tempdir");
             let dir = root.path().join("wal git & user's");
             std::fs::create_dir_all(&dir).expect("create test dir");
             let exe = dir.join("walgit.exe");
             let cfg = dir.join("walgit.toml");
             let log = dir.join("server.log");
+            let host = dir.join("walgit-service-host.exe");
 
             let xml = xml_text(&task_xml(&exe, &cfg, &log).expect("task XML"));
             assert!(xml.contains("<Hidden>true</Hidden>"));
-            assert!(xml.contains("<Command>powershell.exe</Command>"));
-            assert!(xml.contains("-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden"));
-            assert!(!xml.contains("<Command>cmd.exe</Command>"));
+            // The path is XML-escaped (`&` in the temp dir name), so compare
+            // against the escaped form the same way the XML carries it.
+            let escaped_host = super::xml_escape(&host.display().to_string());
+            assert!(
+                xml.contains(&format!("<Command>{escaped_host}</Command>")),
+                "the action must be the windowless host: {xml}"
+            );
+            for console_image in ["<Command>cmd.exe</Command>", "<Command>powershell.exe</Command>"] {
+                assert!(
+                    !xml.contains(console_image),
+                    "a console-subsystem action can still flash a window: {xml}"
+                );
+            }
             assert!(super::super::task_is_ours(&xml));
             let mixed_case = xml
                 .replace("<Command>", "<COMMAND>")
@@ -1181,39 +1304,74 @@ $p.WaitForExit()"#,
                 .replace("</Arguments>", "</ARGUMENTS>");
             assert!(super::super::task_is_ours(&mixed_case));
 
-            let encoded = powershell_service_command(&exe, &cfg, &log);
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .expect("PowerShell command is base64");
-            let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect();
-            let script = String::from_utf16(&units).expect("PowerShell command is UTF-16LE");
-            for expected in [
-                "walgit-service-task-v1",
-                "cmd /c",
-                "serve --config",
-                "2>&1",
-                "CreateNoWindow = $true",
-            ] {
+            // The launcher receives the whole command line, base64(UTF-16LE), so
+            // the spaces, the `&` and the apostrophe never face another parser.
+            let encoded = xml
+                .split("-EncodedCommand ")
+                .nth(1)
+                .expect("carries an encoded command")
+                .split('<')
+                .next()
+                .expect("value ends at the tag")
+                .trim();
+            let command_line = decode(encoded);
+            assert_eq!(
+                command_line,
+                service_command_line(&exe, &cfg, &log),
+                "the payload is exactly the command the host runs"
+            );
+            assert_eq!(encode_command_line(&command_line), encoded);
+            // `cmd /d /s /c` is the launcher's own doing; the payload is the inner
+            // command, and the redirect it carries is what makes the log append.
+            for expected in ["serve --config", ">>", "2>&1"] {
                 assert!(
-                    script.contains(expected),
-                    "missing {expected:?} in {script}"
+                    command_line.contains(expected),
+                    "missing {expected:?} in {command_line}"
                 );
             }
             for path in [&exe, &cfg, &log] {
-                let escaped = path.display().to_string().replace('\'', "''");
-                assert!(script.contains(&escaped), "missing {escaped:?} in {script}");
+                let path = path.display().to_string();
+                assert!(command_line.contains(&path), "missing {path:?} in {command_line}");
             }
         }
 
+        /// v0.7.7 shipped a hidden PowerShell wrapper. Machines that installed it
+        /// must still be seen as ours, or `ensure` refuses to replace the task and
+        /// the upgrade leaves a dead action behind.
         #[test]
-        fn powershell_wrapper_rejects_a_lookalike_image() {
+        fn the_legacy_powershell_shape_is_still_ours() {
+            let script = "# walgit-service-task-v1: cmd /c wrapper with append logging\n\
+                          $psi.Arguments = '/d /s /c \"\"C:\\walgit\\walgit.exe\" serve --config \
+                          \"C:\\u\\walgit.toml\" >> \"C:\\u\\server.log\" 2>&1\"'";
+            let args = format!("-NoLogo -WindowStyle Hidden -EncodedCommand {}", encode_command_line(script));
+            assert!(super::super::action_is_ours("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", &args));
+        }
+
+        /// Both hidden wrappers stay narrow: a lookalike image (or a payload that
+        /// is not our launch command) is somebody else's task, and `ensure`/`end`
+        /// must never `/F`-over it.
+        #[test]
+        fn hidden_wrappers_reject_a_lookalike_image() {
             let script = "# walgit-service-task-v1: cmd /c wrapper\n\
                           & 'C:\\tools\\walgit-backup.exe' serve --config 'x' >> 'log' 2>&1";
-            let args = format!("-EncodedCommand {}", encode_powershell(script));
-            assert!(!super::super::powershell_runs_our_service(&args));
+            let powershell = format!("-EncodedCommand {}", encode_command_line(script));
+            assert!(!super::super::action_is_ours("powershell.exe", &powershell));
+
+            let host_line = r#"""C:\tools\walgit-backup.exe" serve --config "x" >> "y" 2>&1""#;
+            let host = format!("-EncodedCommand {}", encode_command_line(host_line));
+            assert!(!super::super::action_is_ours(
+                r#"C:\Program Files\walgit\walgit-service-host.exe"#,
+                &host
+            ));
+            // …and a host action whose payload never starts the server is out too.
+            let not_the_service = format!(
+                "-EncodedCommand {}",
+                encode_command_line(r#"""C:\walgit\walgit.exe" --version""#)
+            );
+            assert!(!super::super::action_is_ours(
+                "walgit-service-host.exe",
+                &not_the_service
+            ));
         }
     }
 }
@@ -1242,20 +1400,58 @@ mod listener_parse_tests {
     }
 
     #[test]
-    fn listeners_on_takes_only_the_matching_port() {
-        // Shape of `netstat -ano -p tcp` on a Chinese Windows: v4 + v6 rows for
-        // the port we want, a decoy on another port, and a non-LISTENING row.
+    fn listeners_on_takes_only_our_port_and_address() {
+        // Shape of `netstat -ano -p tcp` on a Chinese Windows: the v4 + v6 rows
+        // for the address we bind, a decoy on another port, a non-LISTENING row —
+        // and the row that stopped a healthy service for real: another process on
+        // the *same port number* but a different local address (FreeSWITCH on the
+        // Clash fake-IP 198.18.0.1; thread cc-ai-win-port-owner-scope).
         let netstat = "\
   TCP    127.0.0.1:8081         0.0.0.0:0              LISTENING       4242\r
   TCP    127.0.0.1:9999         0.0.0.0:0              LISTENING       1111\r
   TCP    127.0.0.1:8081         127.0.0.1:50812        ESTABLISHED     9999\r
-  TCP    [::1]:8081             [::]:0                 LISTENING       4243\r";
-        assert_eq!(listeners_on(netstat, 8081).unwrap(), vec![4242, 4243]);
-        assert!(listeners_on(netstat, 1234).unwrap().is_empty());
+  TCP    [::1]:8081             [::]:0                 LISTENING       4243\r
+  TCP    198.18.0.1:8081        0.0.0.0:0              LISTENING       15772\r
+  TCP    [2409:8a1e:7bd4::681d]:8081 [::]:0            LISTENING       15772\r";
+        // The `::1` twin is ours (walgit binds both loopbacks); the listeners on
+        // the other addresses are somebody else's sockets and are not owners.
+        assert_eq!(
+            listeners_on(netstat, "127.0.0.1:8081", 8081).unwrap(),
+            vec![4242, 4243]
+        );
+        assert!(
+            listeners_on(netstat, "127.0.0.1:1234", 1234)
+                .unwrap()
+                .is_empty()
+        );
+        // Read as a `::1`-only configuration, the v4 row stays out too.
+        assert_eq!(
+            listeners_on(netstat, "[::1]:8081", 8081).unwrap(),
+            vec![4242, 4243]
+        );
+        // A wildcard bind really does own every address of that port.
+        assert_eq!(
+            listeners_on(
+                "  TCP    0.0.0.0:8081    0.0.0.0:0    LISTENING    77\n",
+                "127.0.0.1:8081",
+                8081
+            )
+            .unwrap(),
+            vec![77]
+        );
+        assert!(
+            listeners_on(
+                "  TCP    127.0.0.1:8081    0.0.0.0:0    LISTENING    78\n",
+                "0.0.0.0:8081",
+                8081
+            )
+            .unwrap()
+            .contains(&78)
+        );
         // A *matching* row whose pid we cannot read is an error, never an empty
         // list: "cannot tell who owns it" must not be reported as "port free".
         let malformed = "  TCP    127.0.0.1:8081    0.0.0.0:0    LISTENING    0x10a2\n";
-        assert!(listeners_on(malformed, 8081).is_err());
+        assert!(listeners_on(malformed, "127.0.0.1:8081", 8081).is_err());
     }
 
     #[test]

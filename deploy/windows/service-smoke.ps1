@@ -51,10 +51,14 @@ function Get-Listeners {
     Select-Object -ExpandProperty OwningProcess -Unique).Count
 }
 
-# The D48 regression was a *shape* bug that a healthy port could not see: the
-# task ran `cmd /c ...` in the interactive session, so Windows showed its
-# console while the service itself worked. Keep this assertion on the scheduler
-# object and exercise it against the old shape in the positive control below.
+# The D48 regression was a *shape* bug that a healthy port could not see, and the
+# first fix for it was not enough: the interactive task still got a *console*
+# (cmd, and then `powershell -WindowStyle Hidden`), and with Windows Terminal as
+# the machine's default terminal that console is handed to WT — which puts it on
+# screen, or at least leaves a taskbar button that restores it. The action must
+# therefore be the GUI-subsystem host, which never has a console at all. Keep
+# this assertion on the scheduler object and exercise it against every old shape
+# in the positive control below.
 function Assert-HiddenServiceTask {
   param(
     [Parameter(Mandatory)] $TaskObject,
@@ -72,38 +76,27 @@ function Assert-HiddenServiceTask {
   }
   $action = $actions[0]
   $actionExe = [System.IO.Path]::GetFileName([string] $action.Execute)
-  if ($actionExe -ine 'powershell.exe') {
-    throw "the task action runs '$actionExe', not powershell.exe"
-  }
-  if ([string] $action.Arguments -notmatch '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)') {
-    throw "the task action does not contain '-WindowStyle Hidden': $($action.Arguments)"
-  }
-  foreach ($flag in @('-NoLogo', '-NoProfile', '-NonInteractive')) {
-    if ([string] $action.Arguments -notmatch "(?i)(?:^|\s)$([regex]::Escape($flag))(?:\s|$)") {
-      throw "the task action does not contain '$flag': $($action.Arguments)"
-    }
+  if ($actionExe -ine 'walgit-service-host.exe') {
+    throw "the task action runs '$actionExe', not the windowless walgit-service-host.exe (a console program is handed a console, and Windows Terminal turns that into a window)"
   }
   if ([string] $action.Arguments -notmatch '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)') {
     throw "the task action does not carry an encoded command: $($action.Arguments)"
   }
   try {
-    $script = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($Matches[1]))
+    $commandLine = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($Matches[1]))
   } catch {
     throw "the task action's encoded command cannot be decoded: $_"
   }
   foreach ($needle in @(
-    'walgit-service-task-v1',
-    'cmd /c',
     'serve --config',
     '>>',
     '2>&1',
-    'CreateNoWindow = $true',
     $ExpectedExe,
     $ExpectedConfig,
     $ExpectedLog
   )) {
-    if ($script.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-      throw "the hidden task action is missing '$needle': $script"
+    if ($commandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+      throw "the task's launch command is missing '$needle': $commandLine"
     }
   }
 }
@@ -188,9 +181,22 @@ try {
     Settings = [pscustomobject] @{ Hidden = $true }
     Actions = @([pscustomobject] @{ Execute = 'cmd.exe'; Arguments = '/c ""C:\walgit.exe" serve' })
   }
+  # The shape v0.7.7 shipped: still a console program, so with Windows Terminal
+  # as the default terminal it came back as a minimised window with a taskbar
+  # button. It must fail this assertion too, or the fix is not a fix.
+  $hiddenPowerShell = [pscustomobject] @{
+    Settings = [pscustomobject] @{ Hidden = $true }
+    Actions = @([pscustomobject] @{
+      Execute = 'powershell.exe'
+      Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $(
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('# walgit-service-task-v1: cmd /c wrapper'))
+      )"
+    })
+  }
   foreach ($case in @(
     [pscustomobject] @{ Name = 'Hidden=false + cmd /c'; Object = $oldVisible },
-    [pscustomobject] @{ Name = 'Hidden=true + cmd /c'; Object = $oldCmdWithHiddenSetting }
+    [pscustomobject] @{ Name = 'Hidden=true + cmd /c'; Object = $oldCmdWithHiddenSetting },
+    [pscustomobject] @{ Name = 'Hidden=true + powershell -WindowStyle Hidden (v0.7.7)'; Object = $hiddenPowerShell }
   )) {
     $rejected = $false
     try {
@@ -202,7 +208,7 @@ try {
       throw "positive control failed: $($case.Name) passed the hidden-console assertion"
     }
   }
-  Write-Host 'positive control: old visible cmd task shapes rejected'
+  Write-Host 'positive control: every console-carrying task shape rejected'
 
   Write-Host '--- status'
   $status = (& $bin service status --config $cfg | Out-String)
@@ -214,10 +220,43 @@ try {
     throw "status did not report a running service: $status"
   }
 
+  # A listener on the same *port number* but another local address is a different
+  # socket: it must neither block `stop` nor be killed by it (thread
+  # cc-ai-win-port-owner-scope — a FreeSWITCH on 198.18.0.1:8081 made
+  # `walgit service stop` refuse on a real machine). 127.0.0.2 is a second
+  # loopback address; when this host refuses it the case is reported as skipped
+  # rather than silently dropped.
+  $decoy = $null
+  try {
+    $decoy = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse('127.0.0.2'), $port)
+    $decoy.Start()
+    $probe = [System.Net.Sockets.TcpClient]::new()
+    $probe.Connect('127.0.0.2', $port)
+    $probe.Close()
+    Write-Host "--- decoy: another process holds 127.0.0.2:$port"
+  }
+  catch {
+    if ($decoy) { $decoy.Stop(); $decoy = $null }
+    Write-Host "--- decoy skipped (no second loopback address here): $($_.Exception.Message)"
+  }
+
   Write-Host '--- stop (the port must really go quiet)'
   & $bin service stop --config $cfg
   if ($LASTEXITCODE -ne 0) { throw "service stop exited $LASTEXITCODE" }
   if (-not (Wait-Free)) { throw "stop left $(Get-Listeners) listener(s) behind" }
+  if ($decoy) {
+    $alive = $true
+    try {
+      $probe = [System.Net.Sockets.TcpClient]::new()
+      $probe.Connect('127.0.0.2', $port)
+      $probe.Close()
+    }
+    catch { $alive = $false }
+    $decoy.Stop()
+    $decoy = $null
+    if (-not $alive) { throw 'stop killed the unrelated listener on 127.0.0.2 (it is not ours)' }
+    Write-Host '    the unrelated listener survived, and the service still stopped'
+  }
 
   Write-Host '--- an unsupervised server (not the task) must still be stoppable'
   # Exactly the "an older install is still holding the port" shape: a walgit

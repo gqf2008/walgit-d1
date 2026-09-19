@@ -475,6 +475,7 @@ jobs:
         run: |
           mkdir -p target/release
           : > target/release/walgit.exe
+          : > target/release/walgit-service-host.exe
           : > target/release/walgit-tray.exe
           : > target/release/walgit-upgrade-helper.exe
           iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
@@ -575,6 +576,21 @@ jobs:
               $encoded = Get-EncodedPowerShellScript $fakeScript
               $fakeArgs = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded"
               $fakeAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $fakeArgs
+              Register-ScheduledTask -TaskName $task -Action $fakeAction -Force | Out-Null
+              Assert-Ownership 'foreign' (Get-Ownership $task)
+            }
+
+            # The windowless host shape stays just as narrow: its payload must
+            # start one of our exact binaries through the logging shape, so a
+            # lookalike image (or a payload that never starts the server) is not
+            # ours and `ensure` would refuse to `/F`-over it.
+            $fakeHostPayloads = @(
+              '""C:\tools\walgit-backup.exe" serve --config "x" >> "y" 2>&1"',
+              '""C:\walgit\walgit.exe" --version"'
+            )
+            foreach ($payload in $fakeHostPayloads) {
+              $encoded = Get-EncodedPowerShellScript $payload
+              $fakeAction = New-ScheduledTaskAction -Execute 'walgit-service-host.exe' -Argument "-EncodedCommand $encoded"
               Register-ScheduledTask -TaskName $task -Action $fakeAction -Force | Out-Null
               Assert-Ownership 'foreign' (Get-Ownership $task)
             }

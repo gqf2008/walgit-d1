@@ -17,6 +17,13 @@ path = "src/bin/walgit.rs"
 name = "walgit-server"
 path = "src/bin/walgit-server.rs"
 
+# 计划任务的动作(GUI 子系统,见 src/service_host.rs):只有它不是控制台程序,
+# 任务计划程序才不会给它分配控制台 —— 默认终端是 Windows Terminal 时,
+# 那个控制台会变成一个在屏窗口(thread cc-ai-win-service-console)。
+[[bin]]
+name = "walgit-service-host"
+path = "src/bin/walgit-service-host.rs"
+
 [dependencies]
 walgit-proto.workspace = true
 walgit-store.workspace = true

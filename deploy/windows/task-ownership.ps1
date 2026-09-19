@@ -87,7 +87,7 @@ function Get-PowerShellEncodedCommand {
     return $match.Groups[1].Value
 }
 
-function Get-PowerShellScript {
+function Get-EncodedPayload {
     param([string]$Arguments)
 
     $encoded = Get-PowerShellEncodedCommand $Arguments
@@ -112,7 +112,7 @@ function Get-PowerShellScript {
 function Test-OurPowerShellAction {
     param([string]$Arguments)
 
-    $script = Get-PowerShellScript $Arguments
+    $script = Get-EncodedPayload $Arguments
     if ([string]::IsNullOrWhiteSpace($script)) { return $false }
 
     # Keep the ownership predicate deliberately narrow: the hidden wrapper is
@@ -121,6 +121,26 @@ function Test-OurPowerShellAction {
     if ($script -notmatch '(?i)\bwalgit-service-task-v1\b') { return $false }
     if ($script -notmatch '(?i)\bcmd(?:\.exe)?\s+/c\b') { return $false }
     if ($script -notmatch '(?i)(?<![\w.-])(?:walgit|walgit-server)\.exe(?![\w.-])') { return $false }
+    return $true
+}
+
+# v0.7.9+ runs `walgit-service-host.exe` — a GUI-subsystem launcher, so the
+# scheduled task never gets a console window at all. Its payload is the command
+# line itself (not a PowerShell script), so the predicate checks that shape
+# rather than the marker: the wrapper image is a name only we ship, and the
+# payload must still launch one of our exact binaries through `cmd /c`.
+function Test-OurServiceHostAction {
+    param([string]$Arguments)
+
+    $payload = Get-EncodedPayload $Arguments
+    if ([string]::IsNullOrWhiteSpace($payload)) { return $false }
+
+    # The host hands the payload to `cmd /d /s /c` itself, so the payload is the
+    # inner command: our exact image plus the `serve --config … >> … 2>&1` shape.
+    $text = $payload.TrimStart()
+    if ($text -notmatch '(?i)serve --config') { return $false }
+    if ($text -notmatch '2>&1') { return $false }
+    if ($text -notmatch '(?i)(?<![\w.-])(?:walgit|walgit-server)\.exe(?![\w.-])') { return $false }
     return $true
 }
 
@@ -181,6 +201,12 @@ if ($null -eq $status) {
                     }
                     elseif (@('powershell', 'powershell.exe', 'pwsh', 'pwsh.exe') -contains $base) {
                         if (Test-OurPowerShellAction ([string]$action.Arguments)) {
+                            $ours = $true
+                            continue
+                        }
+                    }
+                    elseif ($base -ieq 'walgit-service-host.exe') {
+                        if (Test-OurServiceHostAction ([string]$action.Arguments)) {
                             $ours = $true
                             continue
                         }
