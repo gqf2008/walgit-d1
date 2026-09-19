@@ -175,9 +175,11 @@ fn run(args: &Args) -> Result<(), String> {
             args.rollback_version, args.target_version
         ),
     );
-    if let Err(error) = verify_sha256_file(&args.new_installer, &args.new_sha256)
-        .and_then(|_| verify_sha256_file(&args.rollback_installer, &args.rollback_sha256))
-    {
+    log(args, "verify new installer hash");
+    let new_hash = verify_sha256_file(&args.new_installer, &args.new_sha256);
+    log(args, "verify rollback installer hash");
+    let rollback_hash = verify_sha256_file(&args.rollback_installer, &args.rollback_sha256);
+    if let Err(error) = new_hash.and(rollback_hash) {
         // Nothing was replaced yet: restore the user's entry point and fail
         // without invoking either installer.
         let _ = launch_tray(args);
@@ -185,11 +187,17 @@ fn run(args: &Args) -> Result<(), String> {
     }
 
     let result = (|| -> Result<(), String> {
+        log(args, &format!("wait for tray pid {}", args.tray_pid));
         wait_for_pid(args.tray_pid, args.tray_wait)?;
+        log(args, "stop service");
         stop_service(args)?;
+        log(args, "run new installer");
         run_installer(&args.new_installer, "new", args)?;
+        log(args, "verify installed version");
         verify_install_version(args, &args.target_version)?;
+        log(args, "start service");
         start_service(args)?;
+        log(args, "wait for health");
         wait_for_health(args, &args.target_version)?;
         Ok(())
     })();
@@ -237,7 +245,9 @@ fn log(args: &Args, message: &str) {
 pub fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Heap-backed: Windows' default 1 MiB main-thread stack cannot hold a
+    // 1 MiB array once debug frames are counted (observed as 0xC00000FD).
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
