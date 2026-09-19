@@ -1485,6 +1485,9 @@ struct App {
     /// Last service-action failure, shown in the status line until the next one
     /// succeeds (a failed start must not look like a no-op).
     service_note: String,
+    /// `启动中` / `停止中` while a service action is in flight. The row is disabled
+    /// for exactly that window, so a second click cannot race the first one.
+    pending: String,
     busy: u8,                // 0 idle, 1 service action in flight, 2 upgrading
     state: u8,               // 升级状态机(ST_*)
     version: String,         // 托盘/App 版本(#183:升级判断的唯一依据)
@@ -1615,13 +1618,15 @@ impl App {
         } else {
             "已停止".to_string()
         };
-        let note = if self.service_note.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", self.service_note)
-        };
+        let mut tail = String::new();
+        if !self.pending.is_empty() {
+            tail.push_str(&format!(" · {}…", self.pending));
+        }
+        if !self.service_note.is_empty() {
+            tail.push_str(&format!(" · {}", self.service_note));
+        }
         h.status
-            .set_text(format!("walgit 服务:{state}{backend_note}{note}"));
+            .set_text(format!("walgit 服务:{state}{backend_note}{tail}"));
         // One row, labelled with the **next action**. The verb is decided from live
         // liveness at click time (see the handler), never from this cached label
         // and never from the item's id, so label and action always agree and the
@@ -1629,7 +1634,10 @@ impl App {
         // stopped one reads 启动服务 and starts. No 「切换中…」 text either — the row
         // keeps saying what it will do while a call is in flight.
         h.toggle.set_text(if running { "停止服务" } else { "启动服务" });
-        h.toggle.set_enabled(self.busy != 2);
+        // Disabled for the whole in-flight window (`busy == 1`) and while an
+        // upgrade owns the lifecycle (`busy == 2`): repeating the click would
+        // race the first call and leave the label and the real state disagreeing.
+        h.toggle.set_enabled(self.busy == 0);
         // 升级通道:macOS/Windows 装好的 Release 不需要源码仓库;
         // 开发机与 Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
         let can_upgrade = release_channel() || has_source_repo() || self.release.is_some();
@@ -1682,7 +1690,12 @@ impl ApplicationHandler<Msg> for App {
             }
             Msg::Note(n) => self.note = n,
             Msg::ServiceNote(n) => self.service_note = n,
-            Msg::Busy(b) => self.busy = b,
+            Msg::Busy(b) => {
+                self.busy = b;
+                if b == 0 {
+                    self.pending.clear();
+                }
+            }
             // 升级结束必须是一次原子状态转换:不能先把 busy 清掉、等下一
             // 条消息才落 ST_FAILED,否则在途检测会从窗口里穿过去。
             Msg::UpgradeFinished { ok } => {
@@ -1716,10 +1729,15 @@ impl ApplicationHandler<Msg> for App {
                         // is the whole fix. The old code took the verb from the
                         // item's id, which was hardcoded `"stop"`, so every click ran
                         // `service stop`, including the clicks on 「启动服务」.
+                        let verb = if port_open() { "stop" } else { "start" };
                         self.busy = 1;
+                        self.pending = if verb == "start" {
+                            "启动中".to_string()
+                        } else {
+                            "停止中".to_string()
+                        };
                         self.rebuild_menu();
                         std::thread::spawn(move || {
-                            let verb = if port_open() { "stop" } else { "start" };
                             let r = if verb == "start" {
                                 service_start()
                             } else {
@@ -1923,6 +1941,7 @@ fn main() {
         running: port_open(),
         healthy: healthz().is_some(),
         service_note: String::new(),
+        pending: String::new(),
         busy: 0,
         state: ST_IDLE,
         version: app_version(),
