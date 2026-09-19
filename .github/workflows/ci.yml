@@ -485,10 +485,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          cargo build -p walgit-cli
+          if ($LASTEXITCODE -ne 0) { throw "cargo build -p walgit-cli exited $LASTEXITCODE" }
           $probe = (Resolve-Path './deploy/windows/task-ownership.ps1').Path
+          $bin = (Resolve-Path './target/debug/walgit.exe').Path
           $task = 'walgit'
           $out = Join-Path $env:TEMP "walgit-task-ownership-$PID.txt"
           $app = $null
+          $serviceRoot = $null
+          $serviceCfg = $null
 
           function Get-Ownership {
             param([string]$Name)
@@ -503,6 +508,11 @@ jobs:
           function Assert-Ownership {
             param([string]$Expected, [string]$Actual)
             if ($Actual -ne $Expected) { throw "expected '$Expected', got '$Actual'" }
+          }
+
+          function Get-EncodedPowerShellScript {
+            param([string]$Script)
+            return [System.Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Script))
           }
 
           try {
@@ -524,14 +534,63 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Create ours exited $LASTEXITCODE" }
             Assert-Ownership 'ours' (Get-Ownership $task)
 
+            # Use the real generated XML: service start rewrites the old cmd
+            # shape above through task_xml(), creates the task and runs it.
+            $serviceRoot = Join-Path $env:TEMP "walgit-task-ownership-service-$PID"
+            New-Item -ItemType Directory -Force -Path $serviceRoot | Out-Null
+            $servicePort = Get-Random -Minimum 20000 -Maximum 60000
+            $serviceCfg = Join-Path $serviceRoot 'walgit.toml'
+            $cfgLines = @(
+              '[server]'
+              ('listen = "127.0.0.1:{0}"' -f $servicePort)
+              'roles = []'
+              ''
+              '[server.auth]'
+              'mode = "none"'
+              ''
+              '[store]'
+              'backend = "memory"'
+              'memory_backend_intentional = true'
+              ''
+              '[cache]'
+              ('dir = "{0}/cache"' -f ($serviceRoot -replace '\\','/'))
+            )
+            $cfgLines | Set-Content -Path $serviceCfg -Encoding ascii
+            & $bin service start --config $serviceCfg
+            if ($LASTEXITCODE -ne 0) { throw "service start exited $LASTEXITCODE" }
+            Assert-Ownership 'ours' (Get-Ownership $task)
+            & $bin service stop --config $serviceCfg
+            if ($LASTEXITCODE -ne 0) { throw "service stop exited $LASTEXITCODE" }
+
+            Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue |
+              Unregister-ScheduledTask -Confirm:$false
+
+            # Forged PowerShell actions must not be mistaken for ours. One has
+            # no marker; the other has marker + cmd /c but a lookalike binary.
+            $fakeScripts = @(
+              "Write-Output 'not walgit'",
+              "# walgit-service-task-v1: cmd /c wrapper`n& 'C:\tools\walgit-backup.exe' serve"
+            )
+            foreach ($fakeScript in $fakeScripts) {
+              $encoded = Get-EncodedPowerShellScript $fakeScript
+              $fakeArgs = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded"
+              $fakeAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $fakeArgs
+              Register-ScheduledTask -TaskName $task -Action $fakeAction -Force | Out-Null
+              Assert-Ownership 'foreign' (Get-Ownership $task)
+            }
+
             $bytes = [System.IO.File]::ReadAllBytes($out)
             if ($bytes -contains [byte]0) { throw 'ownership output contains NUL bytes' }
           }
           finally {
+            if ($serviceCfg -and (Test-Path -LiteralPath $serviceCfg)) {
+              & $bin service stop --config $serviceCfg 2>$null
+            }
             Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue |
               Unregister-ScheduledTask -Confirm:$false
             Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
             if ($app) { Remove-Item -LiteralPath $app -Recurse -Force -ErrorAction SilentlyContinue }
+            if ($serviceRoot) { Remove-Item -LiteralPath $serviceRoot -Recurse -Force -ErrorAction SilentlyContinue }
           }
       - name: Tray (Windows branch) compiles
         # tray-rs is its own workspace, so the root `cargo check --all-targets`

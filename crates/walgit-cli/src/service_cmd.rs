@@ -785,7 +785,9 @@ fn is_powershell_wrapper(command: &str) -> bool {
 }
 
 /// The hidden wrapper is ours only when its encoded script carries the exact
-/// marker emitted by `task_xml`, plus the `cmd /c` logging shape it launches.
+/// marker emitted by `task_xml`, the `cmd /c` logging shape it launches, and
+/// one of our exact image names. A PowerShell action that merely mentions our
+/// path is not enough.
 #[cfg(any(windows, test))]
 fn powershell_runs_our_service(args: &str) -> bool {
     let mut words = args.split_whitespace();
@@ -810,8 +812,23 @@ fn powershell_runs_our_service(args: &str) -> bool {
         return false;
     };
     script.contains(POWERSHELL_SERVICE_MARKER)
+        && script.contains("cmd /c")
+        && script_has_our_image(&script)
         && script.contains("serve --config")
         && script.contains("2>&1")
+}
+
+#[cfg(any(windows, test))]
+fn script_has_our_image(script: &str) -> bool {
+    let script = script.to_ascii_lowercase();
+    [
+        "\\walgit.exe",
+        "/walgit.exe",
+        "\\walgit-server.exe",
+        "/walgit-server.exe",
+    ]
+    .iter()
+    .any(|image| script.contains(image))
 }
 
 /// Does a `schtasks /FO CSV /NH` listing contain our task? The first field is
@@ -1082,7 +1099,8 @@ mod task {
     /// below deliberately keeps `cmd /c` only for its append redirect.
     fn powershell_service_command(exe: &Path, config: &Path, log: &Path) -> String {
         let script = format!(
-            r#"$walgitServiceTask = '{POWERSHELL_SERVICE_MARKER}'
+            r#"# walgit-service-task-v1: cmd /c wrapper with append logging
+$walgitServiceTask = '{POWERSHELL_SERVICE_MARKER}'
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $comspec = $env:ComSpec
 if (-not $comspec) {{ $comspec = Join-Path $env:SystemRoot 'System32\cmd.exe' }}
@@ -1133,6 +1151,14 @@ $p.WaitForExit()"#,
             String::from_utf16(&units).expect("task XML is valid UTF-16")
         }
 
+        fn encode_powershell(script: &str) -> String {
+            let mut utf16 = Vec::with_capacity(script.len() * 2);
+            for unit in script.encode_utf16() {
+                utf16.extend_from_slice(&unit.to_le_bytes());
+            }
+            base64::engine::general_purpose::STANDARD.encode(utf16)
+        }
+
         #[test]
         fn task_xml_uses_a_hidden_powershell_wrapper_and_keeps_cmd_logging() {
             let root = tempfile::tempdir().expect("tempdir");
@@ -1145,7 +1171,7 @@ $p.WaitForExit()"#,
             let xml = xml_text(&task_xml(&exe, &cfg, &log).expect("task XML"));
             assert!(xml.contains("<Hidden>true</Hidden>"));
             assert!(xml.contains("<Command>powershell.exe</Command>"));
-            assert!(xml.contains("-WindowStyle Hidden"));
+            assert!(xml.contains("-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden"));
             assert!(!xml.contains("<Command>cmd.exe</Command>"));
             assert!(super::super::task_is_ours(&xml));
             let mixed_case = xml
@@ -1166,6 +1192,7 @@ $p.WaitForExit()"#,
             let script = String::from_utf16(&units).expect("PowerShell command is UTF-16LE");
             for expected in [
                 "walgit-service-task-v1",
+                "cmd /c",
                 "serve --config",
                 "2>&1",
                 "CreateNoWindow = $true",
@@ -1179,6 +1206,14 @@ $p.WaitForExit()"#,
                 let escaped = path.display().to_string().replace('\'', "''");
                 assert!(script.contains(&escaped), "missing {escaped:?} in {script}");
             }
+        }
+
+        #[test]
+        fn powershell_wrapper_rejects_a_lookalike_image() {
+            let script = "# walgit-service-task-v1: cmd /c wrapper\n\
+                          & 'C:\\tools\\walgit-backup.exe' serve --config 'x' >> 'log' 2>&1";
+            let args = format!("-EncodedCommand {}", encode_powershell(script));
+            assert!(!super::super::powershell_runs_our_service(&args));
         }
     }
 }

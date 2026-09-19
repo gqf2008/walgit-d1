@@ -76,6 +76,54 @@ function Get-ImageBase {
     return ($trimmed -split '[\\/]')[-1]
 }
 
+function Get-PowerShellEncodedCommand {
+    param([string]$Arguments)
+
+    $match = [regex]::Match(
+        $Arguments,
+        '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)'
+    )
+    if (-not $match.Success) { return $null }
+    return $match.Groups[1].Value
+}
+
+function Get-PowerShellScript {
+    param([string]$Arguments)
+
+    $encoded = Get-PowerShellEncodedCommand $Arguments
+    if ([string]::IsNullOrWhiteSpace($encoded)) { return $null }
+
+    try {
+        $bytes = [System.Convert]::FromBase64String($encoded)
+    }
+    catch {
+        return $null
+    }
+    if (($bytes.Length % 2) -ne 0) { return $null }
+
+    try {
+        return [System.Text.Encoding]::Unicode.GetString($bytes)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-OurPowerShellAction {
+    param([string]$Arguments)
+
+    $script = Get-PowerShellScript $Arguments
+    if ([string]::IsNullOrWhiteSpace($script)) { return $false }
+
+    # Keep the ownership predicate deliberately narrow: the hidden wrapper is
+    # ours only if it is the generated cmd /c launcher for one of our exact
+    # executables. A PowerShell task that merely mentions our path is foreign.
+    if ($script -notmatch '(?i)\bwalgit-service-task-v1\b') { return $false }
+    if ($script -notmatch '(?i)\bcmd(?:\.exe)?\s+/c\b') { return $false }
+    if ($script -notmatch '(?i)(?<![\w.-])(?:walgit|walgit-server)\.exe(?![\w.-])') { return $false }
+    return $true
+}
+
 $status = $null
 try {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -127,6 +175,12 @@ if ($null -eq $status) {
                             continue
                         }
                         if (Test-OurImage $token) {
+                            $ours = $true
+                            continue
+                        }
+                    }
+                    elseif (@('powershell', 'powershell.exe', 'pwsh', 'pwsh.exe') -contains $base) {
+                        if (Test-OurPowerShellAction ([string]$action.Arguments)) {
                             $ours = $true
                             continue
                         }

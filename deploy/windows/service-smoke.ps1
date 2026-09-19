@@ -78,6 +78,11 @@ function Assert-HiddenServiceTask {
   if ([string] $action.Arguments -notmatch '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)') {
     throw "the task action does not contain '-WindowStyle Hidden': $($action.Arguments)"
   }
+  foreach ($flag in @('-NoLogo', '-NoProfile', '-NonInteractive')) {
+    if ([string] $action.Arguments -notmatch "(?i)(?:^|\s)$([regex]::Escape($flag))(?:\s|$)") {
+      throw "the task action does not contain '$flag': $($action.Arguments)"
+    }
+  }
   if ([string] $action.Arguments -notmatch '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)') {
     throw "the task action does not carry an encoded command: $($action.Arguments)"
   }
@@ -88,7 +93,9 @@ function Assert-HiddenServiceTask {
   }
   foreach ($needle in @(
     'walgit-service-task-v1',
+    'cmd /c',
     'serve --config',
+    '>>',
     '2>&1',
     'CreateNoWindow = $true',
     $ExpectedExe,
