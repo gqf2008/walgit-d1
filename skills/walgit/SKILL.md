@@ -26,7 +26,49 @@ walgit service restart
 The `walgit` CLI is a symlink to the installed binary (app bundle / install dir); user state lives in
 `~/.walgit/` (`walgit.toml`, `cache/`, `keys/`, `server.log`). Never copy the binary into the state dir.
 
-## 2. What this host stores (read from config, never hardcode)
+## 2. Host upgrades (tray)
+
+The tray checks for updates **30 seconds after startup and every 30 minutes**; detection only
+notifies, and installation always requires the user to click the tray menu.
+
+- **macOS:** DMG channel — download the release DMG, verify SHA-256 and the signed/notarized app,
+  replace the installed app, run the health check, and roll back on failure.
+- **Windows:** installer channel — download `walgit-setup-<version>-x64.exe`, verify its exact
+  SHA-256, then run the helper's silent install followed by `walgit.exe --version` and `/healthz`
+  checks; failure rolls back. An installation created **before the first build containing this
+  feature** must run the installer once manually before tray upgrades work.
+- **Linux:** no tray upgrade channel is currently provided; upgrade through the package/service
+  workflow used to install the host.
+
+## 3. MCP subscriptions (optional)
+
+`walgit mcp` is a client-side stdio adapter. A minimal host-spawned configuration is:
+
+```sh
+walgit --config ~/.walgit/walgit.toml mcp --repo /path/to/checkout \
+  --subscribe-interval-ms 5000 --max-subscriptions 32
+```
+
+Subscribe and read over JSON-RPC (newline-delimited on stdio):
+
+```jsonc
+{"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+ "params":{"uri":"walgit://collab/board/acme/repo"}}
+{"jsonrpc":"2.0","id":2,"method":"resources/read",
+ "params":{"uri":"walgit://collab/board/acme/repo"}}
+{"jsonrpc":"2.0","id":3,"method":"resources/unsubscribe",
+ "params":{"uri":"walgit://collab/board/acme/repo"}}
+```
+
+Subscriptions are client-side polling, **per-instance** and **best-effort** (D52), rather than a
+server push channel. Version changes arrive as `notifications/resources/updated` with the resource
+`uri`; disappearance arrives as `notifications/resources/list_changed`. `--subscribe-interval-ms`
+defaults to `5000` and must be at least `1000`; `--max-subscriptions` defaults to `32` and excess
+subscriptions are rejected. The four URI forms and the full `resources/list|read|subscribe|unsubscribe`
+semantics are documented in the public host `/SKILL.md` under **MCP (optional, client-side)**; use
+that as the single detailed reference.
+
+## 4. What this host stores (read from config, never hardcode)
 
 `walgit.toml` (`~/.walgit/walgit.toml` by default) is the single source of truth: `[server]` (listen,
 auth mode, roles), `[store]` / `[store.<backend>]` (bucket, prefix, endpoint, credential env var
@@ -40,7 +82,7 @@ walgit repo list                                     # repos visible in the conf
 Credentials come from the env vars the config names (e.g. `R2_ACCESS_KEY` / `R2_SECRET_KEY`) or the
 installer-managed credentials file; never print them.
 
-## 3. D1 collaboration bookkeeping (`walgit collab …`)
+## 5. D1 collaboration bookkeeping (`walgit collab …`)
 
 Issues, PRs, reviews, status and the board are **append-only signed entries** in `refs/collab/*`; the
 Web UI, `walgit collab` views and the board are deterministic projections. Work done without entries
@@ -111,7 +153,7 @@ locally & pushes → `merge_result` with the oid → `merge_result {"merged":tru
 Remove the worktree after closure. Keep the board and the thread as the single record; never edit
 state files by hand.
 
-## 4. Listening for events (pull, never push)
+## 6. Listening for events (pull, never push)
 
 The event source is the **WAL** (`PUSH` / `REF_UPDATE` / `COMPACT` / `CHECKPOINT` / `SETTINGS`, strictly
 increasing `seq`, replayable). The server does not push: the events bridge, `[events]` config,
@@ -135,13 +177,13 @@ The pull lanes are **at-least-once**: be idempotent and dedupe by `seq` (WAL) or
 (collab). Duplicates are possible; a fact you can still read is never lost. For push semantics
 (webhook/IM/queue), add a sidecar that forwards from a pull lane — never from SSE.
 
-## 5. Decentralized CI
+## 7. Decentralized CI
 
 The server holds no CI logic: `.walgit/ci.toml` in the tested commit declares tasks; a runner claims
 them with signed `ci_claim` entries and publishes signed results into `ci-*` threads
 (`walgit ci validate`, `walgit ci run --once`, `walgit ci status`).
 
-## 6. Known pitfalls
+## 8. Known pitfalls
 
 - Keep the binary path free of non-UTF-8 characters (`env::args()` panics).
 - Long-running watchers (mirror loops, `collab watch`) need `screen`/`nohup`: the service lifecycle does
