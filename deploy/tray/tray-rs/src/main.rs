@@ -862,6 +862,31 @@ fn healthz() -> Option<String> {
     body.contains("ok").then(|| body.trim().to_string())
 }
 
+/// Is something *listening* on the configured address? That is **liveness** —
+/// "the service is started" — and it is what the start/stop rows follow.
+/// `/healthz` answering is a different fact (see [`healthz`]): a started server
+/// that is still warming up, or one that is wedged, must not be reported as
+/// stopped, and nothing about the verbs may depend on it.
+fn port_open() -> bool {
+    let (host, _, _) = deploy_config();
+    let target = match host.strip_prefix("0.0.0.0:") {
+        Some(rest) => format!("127.0.0.1:{rest}"),
+        None => host,
+    };
+    TcpStream::connect(&target).is_ok()
+}
+
+/// One probe of both facts — the poller and every service action use this, so the
+/// two are always read together and never inferred from each other.
+fn status_probe() -> Msg {
+    let body = healthz();
+    Msg::Status {
+        running: port_open(),
+        healthy: body.is_some(),
+        version: body.as_deref().map(version_of).unwrap_or_default(),
+    }
+}
+
 /// 从 healthz 响应体提取 `version` 字段(与 release-install.sh 的
 /// `health_version` 同口径)。用 JSON 解析而不是字符串包含:v0.5.1 不能匹配
 /// v0.5.10,排版带空格(手写/再序列化过的 JSON)也要能读。
@@ -1423,8 +1448,19 @@ fn icon_rgba(size: usize, color: [u8; 3]) -> Vec<u8> {
 
 #[derive(Debug, Clone)]
 enum Msg {
-    Status(bool, String),
+    /// **Two independent facts**: is the service started (`running`), and does it
+    /// answer `/healthz` (`healthy`). The menu's verbs follow `running`; `healthy`
+    /// is a diagnostic. Treating one as the other is what made a healthy-looking
+    /// tray show the wrong verb.
+    Status {
+        running: bool,
+        healthy: bool,
+        version: String,
+    },
     Note(String),
+    /// Last service-action failure (empty clears it). A failed 启动 must not look
+    /// like a no-op, which is exactly what "exit 0, nothing happens" looked like.
+    ServiceNote(String),
     Busy(u8),
     UpgradeFinished { ok: bool },
     Detected { generation: u64, detected: Detected },
@@ -1432,7 +1468,8 @@ enum Msg {
 
 struct MenuHandles {
     status: MenuItem,
-    toggle: MenuItem,
+    start: MenuItem,
+    stop: MenuItem,
     upgrade: MenuItem,
     quit: MenuItem,
 }
@@ -1441,8 +1478,15 @@ struct App {
     tray: Option<TrayIcon>,
     items: Option<MenuHandles>,
     proxy: Option<Arc<EventLoopProxy<Msg>>>,
+    /// Started or not: the task is `Running` / the process is alive. What the
+    /// 启动服务 /停止服务 rows do is fixed; this only drives the status line.
     running: bool,
-    busy: u8,                // 0 idle, 1 switching, 2 upgrading
+    /// `/healthz` answered: a diagnostic shown next to `running`, never a verb.
+    healthy: bool,
+    /// Last service-action failure, shown in the status line until the next one
+    /// succeeds (a failed start must not look like a no-op).
+    service_note: String,
+    busy: u8,                // 0 idle, 1 service action in flight, 2 upgrading
     state: u8,               // 升级状态机(ST_*)
     version: String,         // 托盘/App 版本(#183:升级判断的唯一依据)
     service_version: String, // healthz 报的服务进程版本,只作展示
@@ -1562,25 +1606,30 @@ impl App {
         } else {
             ""
         };
-        h.status.set_text(if self.busy == 1 {
-            "walgit 服务:切换中…".into()
+        // **运行态与健康分开说**: the verbs below follow `running` (is it
+        // started), while `/healthz` answering is a diagnostic printed here — a
+        // started-but-unresponsive service is 运行中 · 无响应, not 已停止.
+        let state = if running && self.healthy {
+            format!("运行中 · 健康 {}", self.current_version())
         } else if running {
-            format!(
-                "walgit 服务:运行中 · {}{}",
-                self.current_version(),
-                backend_note
-            )
+            "运行中 · /healthz 无响应".to_string()
         } else {
-            format!("walgit 服务:已停止{}", backend_note)
-        });
-        h.toggle.set_text(if self.busy == 1 {
-            "切换中…"
-        } else if running {
-            "停止服务"
+            "已停止".to_string()
+        };
+        let note = if self.service_note.is_empty() {
+            String::new()
         } else {
-            "启动服务"
-        });
-        h.toggle.set_enabled(self.busy == 0);
+            format!(" · {}", self.service_note)
+        };
+        h.status
+            .set_text(format!("walgit 服务:{state}{backend_note}{note}"));
+        // Two fixed verbs, never a guess: the row you click says what it does.
+        // They stay enabled (both CLI verbs are idempotent) so a click is never
+        // silently swallowed; only an upgrade in flight disables them.
+        h.start.set_text("启动服务");
+        h.stop.set_text("停止服务");
+        h.start.set_enabled(self.busy != 2);
+        h.stop.set_enabled(self.busy != 2);
         // 升级通道:macOS/Windows 装好的 Release 不需要源码仓库;
         // 开发机与 Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
         let can_upgrade = release_channel() || has_source_repo() || self.release.is_some();
@@ -1620,13 +1669,19 @@ impl ApplicationHandler<Msg> for App {
 
     fn user_event(&mut self, _loop: &ActiveEventLoop, msg: Msg) {
         match msg {
-            Msg::Status(up, service_version) => {
-                self.running = up;
-                if up {
-                    self.service_version = service_version;
+            Msg::Status {
+                running,
+                healthy,
+                version,
+            } => {
+                self.running = running;
+                self.healthy = healthy;
+                if healthy {
+                    self.service_version = version;
                 }
             }
             Msg::Note(n) => self.note = n,
+            Msg::ServiceNote(n) => self.service_note = n,
             Msg::Busy(b) => self.busy = b,
             // 升级结束必须是一次原子状态转换:不能先把 busy 清掉、等下一
             // 条消息才落 ST_FAILED,否则在途检测会从窗口里穿过去。
@@ -1657,18 +1712,25 @@ impl ApplicationHandler<Msg> for App {
             match id.as_str() {
                 "start" | "stop" => {
                     if self.busy == 0 {
+                        // Explicit verbs: the row says what it does, and the state
+                        // is not consulted to pick one (that is how a stale,
+                        // health-derived flag made every click a `stop`).
+                        let verb = if id == "start" { "start" } else { "stop" };
                         self.busy = 1;
                         self.rebuild_menu();
                         std::thread::spawn(move || {
-                            let r = if id == "start" {
+                            let r = if verb == "start" {
                                 service_start()
                             } else {
                                 service_stop()
                             };
-                            log_line(&format!("{id} -> {r:?}"));
+                            log_line(&format!("{verb} -> {r:?}"));
+                            let _ = proxy.send_event(Msg::ServiceNote(match &r {
+                                Ok(()) => String::new(),
+                                Err(e) => format!("{verb} 失败: {e}"),
+                            }));
                             let _ = proxy.send_event(Msg::Busy(0));
-                            let _ = proxy
-                                .send_event(Msg::Status(healthz().is_some(), service_version()));
+                            let _ = proxy.send_event(status_probe());
                         });
                     }
                 }
@@ -1698,8 +1760,7 @@ impl ApplicationHandler<Msg> for App {
                                 std::process::exit(0);
                             }
                             let _ = proxy.send_event(Msg::UpgradeFinished { ok: r.is_ok() });
-                            let _ = proxy
-                                .send_event(Msg::Status(healthz().is_some(), service_version()));
+                            let _ = proxy.send_event(status_probe());
                             log_line(&format!("upgrade -> {r:?}"));
                         });
                     }
@@ -1817,13 +1878,19 @@ fn main() {
         .expect("icon rgba");
     let menu = Menu::new();
     let status = MenuItem::with_id("status", "walgit 服务:检查中…", false, None);
-    let toggle = MenuItem::with_id("stop", "停止服务", true, None);
+    // Two rows with fixed verbs — 启动 is 启动, 停止 is 停止. One row whose text
+    // flipped while its id stayed `"stop"` is exactly how every click came to run
+    // `service stop`, even the clicks on 「启动服务」; nothing here consults a
+    // cached state to choose a verb any more.
+    let start = MenuItem::with_id("start", "启动服务", true, None);
+    let stop = MenuItem::with_id("stop", "停止服务", true, None);
     let upgrade = MenuItem::with_id("upgrade", "版本 … · 检查更新…", true, None);
     let web = MenuItem::with_id("web", "打开 Web UI", true, None);
     let quit = MenuItem::with_id("quit", "退出托盘(服务保持运行)", true, None);
     let _ = menu.append_items(&[
         &status,
-        &toggle,
+        &start,
+        &stop,
         &PredefinedMenuItem::separator(),
         &upgrade,
         &PredefinedMenuItem::separator(),
@@ -1851,12 +1918,15 @@ fn main() {
         tray: Some(tray),
         items: Some(MenuHandles {
             status,
-            toggle,
+            start,
+            stop,
             upgrade,
             quit,
         }),
         proxy: Some(proxy.clone()),
-        running: healthz().is_some(),
+        running: port_open(),
+        healthy: healthz().is_some(),
+        service_note: String::new(),
         busy: 0,
         state: ST_IDLE,
         version: app_version(),
@@ -1869,13 +1939,10 @@ fn main() {
     };
     app.rebuild_menu();
 
-    // 状态轮询线程(5s):status + 服务版本
+    // 状态轮询线程(5s):运行态(端口) + 健康(/healthz) + 服务版本
     let poll_proxy = proxy;
     std::thread::spawn(move || loop {
-        let body = healthz();
-        let up = body.is_some();
-        let version = body.as_deref().map(version_of).unwrap_or_default();
-        let _ = poll_proxy.send_event(Msg::Status(up, version));
+        let _ = poll_proxy.send_event(status_probe());
         std::thread::sleep(Duration::from_secs(5));
     });
 
