@@ -587,6 +587,14 @@ pub enum PolicyAction {
 
 #[derive(Subcommand)]
 enum WalAction {
+    /// Print a repository's refs-level WAL head sequence without syncing packs.
+    Head {
+        /// `owner/name`.
+        repo: String,
+        /// Always revalidate the manifest instead of honoring freshness TTL.
+        #[arg(long)]
+        fresh: bool,
+    },
     /// List WAL entries for a repo.
     Ls {
         /// `owner/name`.

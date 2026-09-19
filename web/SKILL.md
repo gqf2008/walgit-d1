@@ -55,7 +55,9 @@ MCP resources expose read-only, `walgit://`-addressed views for the configured `
 stable `_meta.version` (refs digest, WAL head seq, board hash, or thread head oid). Subscriptions
 are **adapter-side polling, not server push** (D46): each is `per-instance` and **best-effort**, the
 poller asks only for a cheap version probe, and the client decides whether to call `resources/read`
-after an update. Start with:
+after an update. Refs are hashed as a stream and returned as a bounded summary; WAL probes read
+only the refs-level manifest head; collab resources share one session-level `refs/collab/*` fetch
+and only rebuild the board hash or thread head when that ref signal changes. Start with:
 
 ```sh
 walgit mcp --repo /path/to/checkout \

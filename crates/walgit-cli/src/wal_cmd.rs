@@ -19,6 +19,17 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
     let registry = Registry::new(store, cfg.clone());
 
     match action {
+        WalAction::Head { repo, fresh } => {
+            let (owner, name) = parse_repo_id(&repo)?;
+            let id = walgit_git::RepoId::new(owner, name)?;
+            let handle = registry.open(&id).await?;
+            if fresh {
+                handle.sync_refs_fresh().await?;
+            } else {
+                handle.sync_refs().await?;
+            }
+            println!("{}", handle.manifest().head_seq);
+        }
         WalAction::Ls { repo, from, to } => {
             let (owner, name) = parse_repo_id(&repo)?;
             let id = walgit_git::RepoId::new(owner, name)?;

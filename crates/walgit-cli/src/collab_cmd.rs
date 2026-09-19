@@ -40,6 +40,12 @@ pub enum CollabAction {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Print only the head entry oid of one thread.
+    ThreadHead {
+        id: String,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     /// Print the aggregated PR view + merge rule evaluation as JSON.
     Pr {
         id: String,
@@ -144,7 +150,7 @@ pub enum CollabAction {
     Board {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        /// Output format: text (default), markdown, json.
+        /// Output format: text (default), markdown, json, hash.
         #[arg(long, default_value = "text")]
         format: String,
         /// Board definition override — previews an uncommitted
@@ -225,6 +231,20 @@ pub async fn run(action: CollabAction) -> Result<()> {
                 })
                 .collect();
             println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        CollabAction::ThreadHead { id, repo } => {
+            let reader = CollabReader::new(&repo);
+            let (entries, _) = reader.load()?;
+            let filtered: Vec<&EntryRef> = entries.iter().filter(|e| e.entry.id == id).collect();
+            if filtered.is_empty() {
+                bail!("no entries for thread {id}");
+            }
+            let ordered = thread(&filtered);
+            let head = ordered
+                .last()
+                .map(|entry| entry.oid.as_str())
+                .ok_or_else(|| anyhow::anyhow!("no entries for thread {id}"))?;
+            println!("{head}");
         }
         CollabAction::Entry {
             repo,
@@ -1275,7 +1295,12 @@ fn run_board(
         // The wire form: exactly the bytes `GET /{o}/{r}/api/collab/board`
         // returns, so the two independent clients can be diffed byte-for-byte.
         "json" => std::io::stdout().write_all(&serde_json::to_vec(&board)?)?,
-        other => bail!("unknown board format {other} (text|markdown|json)"),
+        "hash" => {
+            use sha2::Digest as _;
+            let bytes = serde_json::to_vec(&board)?;
+            println!("{}", hex::encode(sha2::Sha256::digest(&bytes)));
+        }
+        other => bail!("unknown board format {other} (text|markdown|json|hash)"),
     }
     Ok(())
 }

@@ -618,9 +618,11 @@ decision in §4 — or the PR is; never "fix later".
   `resources/list` / `resources/read` / `resources/subscribe` / `resources/unsubscribe` for
   `walgit://refs/…`, `walgit://wal/…?from=…`, `walgit://collab/board/…` and
   `walgit://collab/thread/…`. A subscription runs a bounded, cancellable, per-process poller over
-  the existing pull primitives: refs use `git ls-remote --refs`, WAL uses the manifest head seq,
-  and collab resources use their local deterministic projection/head. The poller computes only a
-  stable version probe; `resources/read` remains the client's opt-in content read. A version change
+  the existing pull primitives: refs use a streaming `git ls-remote --refs` digest, WAL uses the
+  refs-only manifest head seq, and collab resources share one session-level ref-level puller for
+  `refs/collab/*`; board/thread versions are recomputed only after that shared ref signal changes.
+  The poller computes only a stable version probe; `resources/read` remains the client's opt-in
+  content read, and refs reads return a bounded digest sample rather than the whole ref list. A version change
   emits `notifications/resources/updated` (URI only), disappearance emits
   `notifications/resources/list_changed`, and repeated failures back off then cancel with a logging
   notification. This is `per-instance` and `best-effort`, matching the SSE/pull-lane semantics of

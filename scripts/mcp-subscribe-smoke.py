@@ -2,13 +2,18 @@
 """End-to-end smoke for `walgit mcp` resource subscriptions.
 
 The test uses a local bare repository as `origin`, so it exercises the same
-client-side pull lane an MCP host uses without needing a server or bucket.
+client-side pull lane an MCP host uses without needing a server or bucket. It
+covers refs, cross-checkout collab board/thread updates, disappearance
+notifications, unsubscribe, and active-subscription shutdown.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import queue
+import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -61,9 +66,20 @@ class Mcp:
         self.proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
         self.proc.stdin.flush()
 
+    def drain_queued_events(self) -> None:
+        while True:
+            try:
+                item = self.events.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            self.pending.append(item)
+
     def _take_matching(self, predicate, timeout: float) -> dict:
         deadline = time.monotonic() + timeout
         while True:
+            self.drain_queued_events()
             for index, item in enumerate(self.pending):
                 if predicate(item):
                     return self.pending.pop(index)
@@ -79,6 +95,7 @@ class Mcp:
         return self._take_matching(lambda item: item.get("id") == request_id, timeout)
 
     def updated_count(self, uri: str) -> int:
+        self.drain_queued_events()
         return sum(
             1
             for item in self.pending
@@ -92,6 +109,9 @@ class Mcp:
             and item.get("params", {}).get("uri") == uri,
             timeout,
         )
+
+    def wait_method(self, method: str, timeout: float) -> dict:
+        return self._take_matching(lambda item: item.get("method") == method, timeout)
 
     def close(self) -> None:
         if self.proc.stdin is not None:
@@ -118,11 +138,64 @@ def git(*args: str, cwd: Path | None = None) -> str:
     return out.stdout
 
 
+def walgit(binary: Path, config: Path, args: list[str], cwd: Path) -> str:
+    out = subprocess.run(
+        [str(binary), "--config", str(config), *args],
+        cwd=cwd,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return out.stdout
+
+
 def commit_and_push(repo: Path, value: str) -> None:
     (repo / "value.txt").write_text(value, encoding="utf-8")
     git("add", "value.txt", cwd=repo)
     git("commit", "-m", f"change {value}", cwd=repo)
     git("push", "origin", "main", cwd=repo)
+
+
+def collab_entry(
+    binary: Path,
+    config: Path,
+    writer: Path,
+    key: Path,
+    *,
+    kind: str,
+    thread: str,
+    parent: str,
+    body: dict,
+) -> tuple[str, str]:
+    out = walgit(
+        binary,
+        config,
+        [
+            "collab",
+            "entry",
+            "--repo",
+            str(writer),
+            "--kind",
+            kind,
+            "--id",
+            thread,
+            "--actor",
+            "smoke",
+            "--parent",
+            parent,
+            "--body",
+            json.dumps(body, ensure_ascii=False),
+            "--key",
+            str(key),
+            "--push",
+            "origin",
+        ],
+        writer,
+    )
+    line = next(line for line in reversed(out.splitlines()) if line.strip())
+    ref, oid = line.split()
+    return ref, oid
 
 
 def main() -> int:
@@ -140,6 +213,7 @@ def main() -> int:
         root = Path(tmp)
         remote = root / "owner" / "repo.git"
         checkout = root / "checkout"
+        writer = root / "writer"
         remote.parent.mkdir(parents=True)
         git("init", "--bare", str(remote))
         git("init", "-b", "main", str(checkout))
@@ -151,8 +225,34 @@ def main() -> int:
         git("remote", "add", "origin", str(remote), cwd=checkout)
         git("push", "-u", "origin", "main", cwd=checkout)
 
+        git("clone", str(remote), str(writer))
+        git("config", "user.name", "MCP Smoke Writer", cwd=writer)
+        git("config", "user.email", "mcp-smoke-writer@example.invalid", cwd=writer)
+        key = root / "smoke.ed25519"
+        key.write_text(secrets.token_hex(32), encoding="ascii")
+        os.chmod(key, 0o600)
+        walgit(
+            binary,
+            config,
+            [
+                "collab",
+                "principal-register",
+                "--repo",
+                str(writer),
+                "--principal",
+                "smoke",
+                "--key",
+                str(key),
+                "--push",
+                "origin",
+            ],
+            writer,
+        )
+
         mcp = Mcp(binary, config, checkout)
-        uri = "walgit://refs/owner/repo"
+        refs_uri = "walgit://refs/owner/repo"
+        board_uri = "walgit://collab/board/owner/repo"
+        thread_uri = "walgit://collab/thread/owner/repo/smoke-thread"
         try:
             mcp.send(
                 {
@@ -168,14 +268,15 @@ def main() -> int:
             mcp.send({"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}})
             listed = mcp.reply(2)
             uris = [item["uri"] for item in listed["result"]["resources"]]
-            assert uri in uris, listed
+            assert refs_uri in uris, listed
+            assert board_uri in uris, listed
 
             mcp.send(
                 {
                     "jsonrpc": "2.0",
                     "id": 3,
                     "method": "resources/read",
-                    "params": {"uri": uri},
+                    "params": {"uri": refs_uri},
                 }
             )
             read = mcp.reply(3)
@@ -188,30 +289,155 @@ def main() -> int:
                     "jsonrpc": "2.0",
                     "id": 4,
                     "method": "resources/subscribe",
-                    "params": {"uri": uri},
+                    "params": {"uri": refs_uri},
                 }
             )
             assert mcp.reply(4)["result"] == {}
             time.sleep(1.4)
-            assert mcp.updated_count(uri) == 0, mcp.pending
+            assert mcp.updated_count(refs_uri) == 0, mcp.pending
 
             commit_and_push(checkout, "two\n")
-            mcp.wait_updated(uri, 6.0)
+            mcp.wait_updated(refs_uri, 6.0)
             time.sleep(1.3)
-            assert mcp.updated_count(uri) == 0, f"duplicate update: {mcp.pending!r}"
+            assert mcp.updated_count(refs_uri) == 0, f"duplicate update: {mcp.pending!r}"
 
             mcp.send(
                 {
                     "jsonrpc": "2.0",
                     "id": 5,
                     "method": "resources/unsubscribe",
-                    "params": {"uri": uri},
+                    "params": {"uri": refs_uri},
                 }
             )
             assert mcp.reply(5)["result"] == {}
             commit_and_push(checkout, "three\n")
             time.sleep(1.5)
-            assert mcp.updated_count(uri) == 0, mcp.pending
+            assert mcp.updated_count(refs_uri) == 0, mcp.pending
+
+            # A second checkout creates the collab thread and pushes it. The
+            # MCP checkout has not fetched it when the subscription starts.
+            root_ref, root_oid = collab_entry(
+                binary,
+                config,
+                writer,
+                key,
+                kind="issue",
+                thread="smoke-thread",
+                parent="",
+                body={
+                    "title": "smoke thread",
+                    "status": "in-progress",
+                    "owner": "smoke",
+                    "worktree": "writer",
+                    "branch": "main",
+                },
+            )
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "resources/subscribe",
+                    "params": {"uri": board_uri},
+                }
+            )
+            assert mcp.reply(6)["result"] == {}
+            time.sleep(1.4)
+            assert mcp.updated_count(board_uri) == 0, mcp.pending
+
+            comment_ref, comment_oid = collab_entry(
+                binary,
+                config,
+                writer,
+                key,
+                kind="comment",
+                thread="smoke-thread",
+                parent=root_oid,
+                body={"text": "cross-checkout board update"},
+            )
+            mcp.wait_updated(board_uri, 8.0)
+
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "resources/read",
+                    "params": {"uri": board_uri},
+                }
+            )
+            board_content = mcp.reply(7)["result"]["contents"][0]
+            board_payload = json.loads(board_content["text"])
+            assert board_payload["_meta"]["version"] == board_content["_meta"]["version"]
+            board = board_payload["data"]["board"]
+            card = next(
+                card
+                for column in board["columns"]
+                for card in column["cards"]
+                if card["id"] == "smoke-thread"
+            )
+            assert card["entries"] >= 2, card
+
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "resources/unsubscribe",
+                    "params": {"uri": board_uri},
+                }
+            )
+            assert mcp.reply(8)["result"] == {}
+
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "resources/subscribe",
+                    "params": {"uri": thread_uri},
+                }
+            )
+            assert mcp.reply(9)["result"] == {}
+            time.sleep(1.4)
+            assert mcp.updated_count(thread_uri) == 0, mcp.pending
+
+            second_ref, second_oid = collab_entry(
+                binary,
+                config,
+                writer,
+                key,
+                kind="comment",
+                thread="smoke-thread",
+                parent=comment_oid,
+                body={"text": "thread head update"},
+            )
+            mcp.wait_updated(thread_uri, 8.0)
+
+            # Delete the whole thread from the writer and push the deletions:
+            # the shared ref-level puller prunes them locally, so the thread
+            # resource disappears and the subscription reports list_changed.
+            refs = (root_ref, comment_ref, second_ref)
+            for ref in refs:
+                git("update-ref", "-d", ref, cwd=writer)
+            git(
+                "push",
+                "origin",
+                *[f":{ref}" for ref in refs],
+                cwd=writer,
+            )
+            mcp.wait_method("notifications/resources/list_changed", 10.0)
+
+            # Leave one subscription active and close stdin: shutdown must
+            # cancel the poller and let the MCP process exit promptly.
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "resources/subscribe",
+                    "params": {"uri": refs_uri},
+                }
+            )
+            assert mcp.reply(10)["result"] == {}
+            mcp.proc.send_signal(signal.SIGTERM)
+            mcp.proc.wait(timeout=10)
+            assert mcp.proc.returncode == 0, mcp.proc.returncode
         finally:
             mcp.close()
     print("MCP subscription smoke OK")
