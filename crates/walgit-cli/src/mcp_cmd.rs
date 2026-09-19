@@ -2272,8 +2272,8 @@ mod tests {
     use super::{
         DEFAULT_MAX_SUBSCRIPTIONS, DEFAULT_SUBSCRIBE_INTERVAL_MS, Options, PROTOCOL_VERSION,
         ResourceError, ResourceUri, Session, Subscription, ToolError, VersionTracker, argv_for,
-        handle_line, run_git_exe_with_timeout, run_git_refs_streaming, subscription_delay_ms,
-        tool_defs, validate_subscription_options,
+        handle_line, run_git_refs_streaming, subscription_delay_ms, tool_defs,
+        validate_subscription_options,
     };
     use serde_json::{Value, json};
     #[cfg(unix)]
@@ -2943,15 +2943,24 @@ mod tests {
         std::fs::set_permissions(&script, permissions).expect("chmod");
 
         let args = Vec::new();
-        let err =
-            run_git_exe_with_timeout(&script, &args, None, std::time::Duration::from_millis(50))
-                .await
-                .expect_err("short budget must time out");
+        let err = super::run_git_exe_with_timeout(
+            &script,
+            &args,
+            None,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("short budget must time out");
         assert!(format!("{err:?}").contains("timed out"), "{err:?}");
 
-        let out = run_git_exe_with_timeout(&script, &args, None, std::time::Duration::from_secs(2))
-            .await
-            .expect("long budget must finish");
+        let out = super::run_git_exe_with_timeout(
+            &script,
+            &args,
+            None,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .expect("long budget must finish");
         assert_eq!(out, "fetched");
     }
 

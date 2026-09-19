@@ -263,10 +263,9 @@ jobs:
       - name: MCP WAL subscription smoke
         run: |
           cargo build -q -p walgit-cli --bin walgit --bin walgit-server
-          AWS_ACCESS_KEY_ID=walgit-dev \
-          AWS_SECRET_ACCESS_KEY=walgit-dev-secret \
-          PORT=18080 \
-            target/debug/walgit-server --config walgit.standalone.toml > mcp-wal-server.log 2>&1 &
+          export AWS_ACCESS_KEY_ID=walgit-dev
+          export AWS_SECRET_ACCESS_KEY=walgit-dev-secret
+          PORT=18080 target/debug/walgit-server --config walgit.standalone.toml > mcp-wal-server.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           for _ in $(seq 1 30); do
