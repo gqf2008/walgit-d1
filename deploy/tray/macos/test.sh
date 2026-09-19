@@ -8,7 +8,46 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd ../../.. && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/walgit-tray-test.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+
+# The release-detect fixture starts the real tray entry point, whose macOS
+# bootstrap has two HOME-derived write paths: the legacy bridge (`~/walgit`)
+# and the CLI-link fallback (`~/.local/bin/walgit`). Keep an injected symlink
+# that mirrors that fallback and verify it on every exit; if the fixture ever
+# loses its HOME/WALGIT_CLI_LINK isolation, this turns the leak into a failure
+# even when the polluted path is outside the fixture's own tree.
+ENTRY_GUARD_HOME="$TMP/user-home-guard"
+ENTRY_GUARD_LINK="$ENTRY_GUARD_HOME/.local/bin/walgit"
+ENTRY_GUARD_TARGET="$ENTRY_GUARD_HOME/original-walgit"
+mkdir -p "$ENTRY_GUARD_HOME/.local/bin"
+printf '#!/bin/sh\nexit 0\n' >"$ENTRY_GUARD_TARGET"
+chmod +x "$ENTRY_GUARD_TARGET"
+# Force the primary candidate to fail so a missing WALGIT_CLI_LINK injection
+# deterministically falls through to the guarded user entry instead of
+# creating an unrelated fixture-local primary link.
+: >"$ENTRY_GUARD_HOME/not-a-dir"
+ln -s "$ENTRY_GUARD_TARGET" "$ENTRY_GUARD_LINK"
+ENTRY_GUARD_BEFORE="$(readlink "$ENTRY_GUARD_LINK")"
+ENTRY_GUARD_CHECKED=0
+
+entry_guard_unchanged() {
+    [ "$ENTRY_GUARD_CHECKED" = 0 ] || return 0
+    ENTRY_GUARD_CHECKED=1
+    local after
+    after="$(readlink "$ENTRY_GUARD_LINK" 2>/dev/null || true)"
+    if [ "$after" != "$ENTRY_GUARD_BEFORE" ]; then
+        echo "FAIL(release-detect isolation): injected user CLI link changed: $ENTRY_GUARD_BEFORE -> ${after:-<missing>}" >&2
+        return 1
+    fi
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    entry_guard_unchanged || status=1
+    rm -rf "$TMP"
+    exit "$status"
+}
+trap cleanup EXIT
 
 # 无 WALGIT_TRAY_BIN(=本地跑)时**每次**都构建:只判"文件在不在"会拿旧产物
 # 跑 fixture(实测踩过:改完源码后 WALGIT_DETECT_ONCE 没生效,托盘照常起
@@ -265,9 +304,10 @@ bootstrap_fixture() {
     local app="$base/walgit-tray.app"
     local res="$app/Contents/Resources"
     local state="$base/state"
+    local home="$base/home"
     local port
     port="$(free_port)"
-    mkdir -p "$app/Contents/MacOS" "$res" "$state/cache"
+    mkdir -p "$app/Contents/MacOS" "$res" "$state/cache" "$home"
     pkginfo "$app" 0.5.0
     cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
     cat >"$res/walgit" <<'EOF'
@@ -285,7 +325,7 @@ EOF
         chmod +x "$state/$stale"
     done
 
-    WALGIT_BOOTSTRAP_ONLY=1 WALGIT_STATE_DIR="$state" WALGIT_DEPLOY_DIR="$state" \
+    HOME="$home" WALGIT_BOOTSTRAP_ONLY=1 WALGIT_STATE_DIR="$state" WALGIT_DEPLOY_DIR="$state" \
         WALGIT_CLI_LINK="$base/bin/walgit" \
         "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1
     [ -f "$state/walgit.toml" ] || { echo "FAIL(bootstrap): config not initialized" >&2; return 1; }
@@ -451,7 +491,7 @@ PYS
     local srv_pid=$!
     sleep 0.5
 
-    WALGIT_STATE_DIR="$new" WALGIT_LEGACY_DIR="$old" WALGIT_DEPLOY_DIR="$new" \
+    HOME="$home" WALGIT_STATE_DIR="$new" WALGIT_LEGACY_DIR="$old" WALGIT_DEPLOY_DIR="$new" \
     WALGIT_BOOTSTRAP_ONLY=1 WALGIT_CLI_LINK="$base/bin/walgit" \
         "$app/Contents/MacOS/walgit-tray" >/dev/null 2>&1 || true
     ( kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null ) || true
@@ -471,13 +511,14 @@ release_detect_fixture() {
     local app="$base/walgit-tray.app"
     local res="$app/Contents/Resources"
     local state="$base/state"
+    local home="$base/home"
     local arch
     case "$(uname -m)" in
         arm64) arch=arm64 ;;
         x86_64) arch=x86_64 ;;
         *) echo "skip(release-detect): unsupported arch" >&2; return 0 ;;
     esac
-    mkdir -p "$app/Contents/MacOS" "$res" "$state"
+    mkdir -p "$app/Contents/MacOS" "$res" "$state" "$home"
     pkginfo "$app" 0.5.0
     cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
     printf '#!/bin/sh\n[ "${1:-}" = "--version" ] && echo "walgit v0.5.0"\n' >"$res/walgit"
@@ -494,7 +535,8 @@ release_detect_fixture() {
 
     write_release_fixture "$base/newer.json" 0.9.9
     local out
-    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/newer.json" \
+    out="$(HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/newer.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
         *"⬆️ 下载并升级到 v0.9.9"*"当前 0.5.0"*) ;;
@@ -505,7 +547,8 @@ release_detect_fixture() {
 
     # 同版本 → 已是最新(不能自己提示升级到自己)。
     write_release_fixture "$base/same.json" 0.5.0
-    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/same.json" \
+    out="$(HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/same.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
         *"已是最新"*) ;;
@@ -516,7 +559,8 @@ release_detect_fixture() {
     mkdir -p "$base/no-repo"
     printf '{"tag_name":"v0.9.9","assets":[{"name":"walgit-0.9.9-%s.dmg","browser_download_url":"https://example.invalid/w.dmg","digest":null}]}\n' \
         "$arch" >"$base/no-digest.json"
-    out="$(WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
+    out="$(HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
         WALGIT_RELEASE_FIXTURE="$base/no-digest.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
@@ -531,7 +575,8 @@ release_detect_fixture() {
 
     # assets 为空：同样是检查失败，不是已是最新。
     printf '{"tag_name":"v0.9.9","assets":[]}\n' >"$base/no-assets.json"
-    out="$(WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
+    out="$(HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
         WALGIT_RELEASE_FIXTURE="$base/no-assets.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
@@ -540,7 +585,8 @@ release_detect_fixture() {
     esac
 
     # 无源码仓库 + lookup 失败：两条通道都不可用，必须报检查失败。
-    out="$(WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
+    out="$(HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" WALGIT_REPO="$base/no-repo" \
         WALGIT_RELEASE_API="http://127.0.0.1:1/latest" WALGIT_DETECT_ONCE=1 \
         "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
@@ -566,7 +612,8 @@ esac
 exit 1
 GIT
     chmod +x "$base/fetch-fail-bin/git"
-    out="$(PATH="$base/fetch-fail-bin:$PATH" WALGIT_STATE_DIR="$state" \
+    out="$(PATH="$base/fetch-fail-bin:$PATH" HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" \
         WALGIT_REPO="$base/fetch-repo" WALGIT_RELEASE_FIXTURE="$base/no-digest.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
@@ -596,7 +643,8 @@ esac
 exit 1
 GIT
     chmod +x "$base/source-bin/git"
-    out="$(PATH="$base/source-bin:$PATH" WALGIT_STATE_DIR="$state" \
+    out="$(PATH="$base/source-bin:$PATH" HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" \
         WALGIT_REPO="$base/source-repo" WALGIT_RELEASE_FIXTURE="$base/no-digest.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
@@ -606,7 +654,8 @@ GIT
 
     # 旧版本 → 已是最新(降级提示是 bug)。
     write_release_fixture "$base/older.json" 0.4.0
-    out="$(WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/older.json" \
+    out="$(HOME="$home" WALGIT_CLI_LINK="$base/bin/walgit" \
+        WALGIT_STATE_DIR="$state" WALGIT_RELEASE_FIXTURE="$base/older.json" \
         WALGIT_DETECT_ONCE=1 "$app/Contents/MacOS/walgit-tray")"
     case "$out" in
         *"已是最新"*) ;;
@@ -623,7 +672,8 @@ reopen_hook_fixture() {
     local app="$base/walgit-tray.app"
     local res="$app/Contents/Resources"
     local state="$base/state"
-    mkdir -p "$app/Contents/MacOS" "$res" "$state"
+    local home="$base/home"
+    mkdir -p "$app/Contents/MacOS" "$res" "$state" "$home"
     pkginfo "$app" 0.6.4
     cp "$TRAY_BIN" "$app/Contents/MacOS/walgit-tray"
     printf '#!/bin/sh\nexit 0\n' >"$res/walgit"
@@ -640,7 +690,7 @@ reopen_hook_fixture() {
     # there instead of launching a browser — the fixture asserts *that*, so
     # deleting `open_web()` from the hook cannot stay green, and CI never pops a
     # browser window.
-    WALGIT_STATE_DIR="$state" WALGIT_CLI_LINK="$base/bin/walgit" \
+    HOME="$home" WALGIT_STATE_DIR="$state" WALGIT_CLI_LINK="$base/bin/walgit" \
         WALGIT_REOPEN_SELFTEST=1 WALGIT_OPEN_URL_FILE="$base/open-url.txt" \
         "$app/Contents/MacOS/walgit-tray" >"$base/out.txt" 2>&1 &
     local pid=$!
@@ -912,10 +962,16 @@ bootstrap_fixture
 cli_link_fallback_fixture
 legacy_migration_fixture
 manual_legacy_migration_fixture
-release_detect_fixture
+(
+    export HOME="$ENTRY_GUARD_HOME"
+    export WALGIT_CLI_LINK_PRIMARY="$ENTRY_GUARD_HOME/not-a-dir/walgit"
+    export WALGIT_CLI_LINK_FALLBACK="$ENTRY_GUARD_LINK"
+    release_detect_fixture
+)
 reopen_hook_fixture
 release_install_fixture success
 release_install_fixture rollback
 release_service_fixture
 bash -n release-install.sh
+entry_guard_unchanged
 echo "tray macos tests: ok"
