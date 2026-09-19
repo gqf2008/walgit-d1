@@ -264,7 +264,13 @@ begin
     // "nothing to kill"); the last word is a *verified* check, so any non-zero
     // exit means we could not prove the port is free and the caller must not
     // replace files over a live server.
-    'if ($port -match ''^\d+$'') { $still = Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction Stop; ' +
+    // 端口号的占用者只算**我们自己的**进程:同号端口上别人的监听(另一个 dev server、
+    // 网关地址上的服务)不是"服务没停",把它当占用者会让这一步在这类机器上永远 exit 3
+    // (静默安装按默认值继续,但会留下一条假的"无法确认服务已停止";走 UI 安装则是弹窗)。
+    // 与 `walgit service stop` 的判据一致:先看端口,再看进程名是不是 walgit。
+    'if ($port -match ''^\d+$'') { $still = Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction Stop | ' +
+    'Where-Object { $p2 = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
+    '$p2 -and $p2.ProcessName -match ''^(?i)(walgit|walgit-server)$'' }; ' +
     'if ($still) { exit 3 } }';
   Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -Command "' + Script + '"',
