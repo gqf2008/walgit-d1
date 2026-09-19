@@ -466,6 +466,14 @@ jobs:
             echo 'task-ownership.ps1 must be installed as a normal {app} file' >&2
             exit 1
           }
+          # `/SUPPRESSMSGBOXES` only auto-answers **SuppressibleMsgBox**; a bare
+          # `MsgBox` in [Code] shows a modal even under /VERYSILENT, which hangs a
+          # silent install (and the tray's upgrade path) forever — measured on a
+          # real machine 2026-09-19 with the released installer.
+          if grep -nE '(^|[^A-Za-z_])MsgBox\(' deploy/windows/installer.iss; then
+            echo 'installer.iss uses MsgBox: silent installs block on it (use SuppressibleMsgBox)' >&2
+            exit 1
+          fi
       - name: Type-check the Windows installer
         # `installer.iss` only ever compiles on a release tag otherwise, so a
         # Pascal slip (or a missing Source file) would surface as a broken
@@ -480,6 +488,34 @@ jobs:
           : > target/release/walgit-upgrade-helper.exe
           iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
           "$iscc" "-DMyAppVersion=0.0.0-ci" deploy/windows/installer.iss
+      - name: Silent install and uninstall must not block
+        # ISCC only *type-checks* [Code]; the failure that reached a release was a
+        # modal dialog under `/VERYSILENT` (a proof that could not be established
+        # was asked about instead of assumed). Run the real setup.exe end to end
+        # with a timeout, so a silent install that waits forever is a red step.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem deploy/windows/Output/walgit-setup-*-x64.exe | Select-Object -First 1).FullName
+          if (-not $setup) { throw 'the type-check step produced no installer' }
+          $dir = Join-Path $env:TEMP "walgit-ci-install-$PID"
+          $log = Join-Path $env:TEMP "walgit-ci-install-$PID.log"
+          function Invoke-Silent {
+            param([string] $Exe, [string] $Arguments, [int] $Seconds)
+            $p = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru
+            if (-not $p.WaitForExit($Seconds * 1000)) {
+              try { $p.Kill() } catch {}
+              throw "$([System.IO.Path]::GetFileName($Exe)) did not exit within ${Seconds}s — a modal dialog under /SUPPRESSMSGBOXES?"
+            }
+            return $p.ExitCode
+          }
+          $code = Invoke-Silent $setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$dir`" /LOG=`"$log`"" 180
+          if ($code -ne 0) { throw "silent install exited $code (see $log)" }
+          if (-not (Test-Path -LiteralPath (Join-Path $dir 'unins000.exe'))) { throw "the silent install left no uninstaller under $dir" }
+          if (Select-String -Path $log -Pattern 'Message box' -Quiet) { throw "the silent install showed a message box; see $log" }
+          $code = Invoke-Silent (Join-Path $dir 'unins000.exe') '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' 180
+          if ($code -ne 0) { throw "silent uninstall exited $code" }
+          Write-Host 'silent install + uninstall completed without a prompt'
       - name: Task ownership runtime smoke
         # The installer consumes this same script. Exercise real Task Scheduler
         # objects here so a parser/encoding change cannot pass only ISCC.

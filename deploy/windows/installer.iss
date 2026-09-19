@@ -234,16 +234,19 @@ begin
     if EndOk and (ResultCode <> 0) then
       Log('WARNING: schtasks /End exited ' + IntToStr(ResultCode));
     if not TaskIsStopped then
-      if MsgBox('walgit: /End 后无法确认计划任务已经停止；任务可能仍在运行。' + #13#10 +
+      // SuppressibleMsgBox,不是 MsgBox:`/SUPPRESSMSGBOXES` 只对付它,`MsgBox` 会在
+      // 静默安装里**真的弹窗并永久等待**(2026-09-19 实测:正式安装器 /VERYSILENT 卡死,
+      // 托盘的自动升级同样会卡在那一步)。第四个参数是无人值守时用的答案。
+      if SuppressibleMsgBox('walgit: /End 后无法确认计划任务已经停止；任务可能仍在运行。' + #13#10 +
         '继续安装可能让下一次 start 被 IgnoreNew 挡住。仍要继续吗？',
-        mbConfirmation, MB_YESNO) <> IDYES then
+        mbConfirmation, MB_YESNO, IDYES) <> IDYES then
         Abort;
   end;
   if Ownership = TaskStateUnknown then
   begin
     if AskAboutUnknown then
-      if MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器不会自动结束它。' + #13#10 +
-        '是否继续安装/升级？', mbConfirmation, MB_YESNO) <> IDYES then
+      if SuppressibleMsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序，安装器不会自动结束它。' + #13#10 +
+        '是否继续安装/升级？', mbConfirmation, MB_YESNO, IDYES) <> IDYES then
         Abort;
   end;
   Script :=
@@ -265,12 +268,15 @@ begin
     // exit means we could not prove the port is free and the caller must not
     // replace files over a live server.
     // 端口号的占用者只算**我们自己的**进程:同号端口上别人的监听(另一个 dev server、
-    // 网关地址上的服务)不是"服务没停",把它当占用者会让这一步在这类机器上永远 exit 3
-    // (静默安装按默认值继续,但会留下一条假的"无法确认服务已停止";走 UI 安装则是弹窗)。
-    // 与 `walgit service stop` 的判据一致:先看端口,再看进程名是不是 walgit。
-    'if ($port -match ''^\d+$'') { $still = Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction Stop | ' +
-    'Where-Object { $p2 = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
-    '$p2 -and $p2.ProcessName -match ''^(?i)(walgit|walgit-server)$'' }; ' +
+    // 网关地址上的服务)不是"服务没停"。与 `walgit service stop` 的判据一致。
+    //
+    // `Get-NetTCPConnection` 在"一条都没有"时抛 NotFound —— 也就是说端口**越干净**
+    // 越会抛,而这个脚本的非零退出会被当成"无法确认服务已停止"。必须把这一种错误
+    // 读成"端口是空的",其余查询失败仍旧宁可 exit 3(旧的"查不到就当没事"是另一个坑)。
+    'if ($port -match ''^\d+$'') { try { $rows = @(Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction Stop) } ' +
+    'catch { if ($_.FullyQualifiedErrorId -like ''CmdletizationQuery_NotFound*'') { $rows = @() } else { exit 3 } }; ' +
+    '$still = @($rows | Where-Object { $p2 = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; ' +
+    '$p2 -and $p2.ProcessName -match ''^(?i)(walgit|walgit-server)$'' }); ' +
     'if ($still) { exit 3 } }';
   Exec(ExpandConstant('{cmd}'),
     '/C powershell -NoProfile -Command "' + Script + '"',
@@ -285,9 +291,9 @@ begin
     // 所以这里不会卡住无人值守升级。真正的失败兜底是安装完成后的
     // `walgit.exe --version` 与 `/healthz` 双重校验：替换运行中文件、
     // 服务仍占端口等问题都会在那里失败，并触发旧安装器回滚。
-    if MsgBox('walgit: 无法确认服务已停止（端口可能仍被占用）。' + #13#10 +
+    if SuppressibleMsgBox('walgit: 无法确认服务已停止（端口可能仍被占用）。' + #13#10 +
       '继续安装会替换正在运行的二进制，旧进程会继续占用端口。仍要继续吗？',
-      mbConfirmation, MB_YESNO) <> IDYES then
+      mbConfirmation, MB_YESNO, IDYES) <> IDYES then
       Abort;
   end;
   // 托盘升级管线留的备份:安装器换装后它已无意义,留着会在托盘某次升级
@@ -334,8 +340,8 @@ begin
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if Ownership = TaskStateUnknown then
     begin
-      if MsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序。' + #13#10 +
-        '是否仍然删除同名任务？', mbConfirmation, MB_YESNO) <> IDYES then
+      if SuppressibleMsgBox('walgit: 无法确认计划任务 walgit 是否属于本程序。' + #13#10 +
+        '是否仍然删除同名任务？', mbConfirmation, MB_YESNO, IDYES) <> IDYES then
         Abort;
       Exec(ExpandConstant('{cmd}'),
         '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
