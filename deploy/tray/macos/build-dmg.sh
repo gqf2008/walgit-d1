@@ -16,6 +16,9 @@
 #   WALGIT_CLEAN_TARGET_AFTER_APP=1
 #                         CI：app 组装后删除 $ROOT/target，给 DMG 腾空间
 #   WALGIT_TEST_ROOT      可选：测试时覆盖 ROOT（仅配合 WALGIT_SKIP_BUILD）
+#   WALGIT_HDIUTIL_BIN    可选：覆盖 hdiutil 路径（测试注入）
+#   WALGIT_HDIUTIL_RETRY_DELAY
+#                         可选：create 失败后的重试间隔秒数，默认 5
 #
 # 产物：dist/walgit-<版本>-<架构>.dmg
 set -euo pipefail
@@ -113,6 +116,77 @@ notary_submit() {
     return 1
 }
 
+stale_dmg_mountpoint() {
+    local image="$1"
+    local hdiutil_bin="$2"
+    local info
+
+    # Only inspect the host when a volume named like our temporary DMG exists.
+    # The image-path match below ensures we never detach an unrelated volume
+    # that merely shares the same volume name.
+    [ -d /Volumes/walgit ] || return 0
+    command -v plutil >/dev/null 2>&1 || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    info="$("$hdiutil_bin" info -plist 2>/dev/null)" || return 0
+    printf '%s\n' "$info" | plutil -convert json -o - - 2>/dev/null \
+        | python3 -c '
+import json, sys
+want = sys.argv[1]
+try:
+    images = json.load(sys.stdin).get("images", [])
+except Exception:
+    raise SystemExit(0)
+for image in images:
+    if image.get("image-path") != want:
+        continue
+    for entity in image.get("system-entities", []):
+        if entity.get("mount-point") == "/Volumes/walgit":
+            print("/Volumes/walgit")
+            raise SystemExit(0)
+' "$image" 2>/dev/null || true
+}
+
+detach_stale_dmg_mount() {
+    local image="$1"
+    local hdiutil_bin="$2"
+    local mountpoint
+
+    mountpoint="$(stale_dmg_mountpoint "$image" "$hdiutil_bin")"
+    [ -n "$mountpoint" ] || return 0
+    echo "detaching stale DMG mount from this build: $mountpoint" >&2
+    "$hdiutil_bin" detach "$mountpoint" >&2 \
+        || echo "warning: failed to detach $mountpoint; retrying create anyway" >&2
+}
+
+create_dmg_with_retry() {
+    local stage="$1"
+    local output="$2"
+    local hdiutil_bin="${WALGIT_HDIUTIL_BIN:-hdiutil}"
+    local retry_delay="${WALGIT_HDIUTIL_RETRY_DELAY:-5}"
+    local attempt
+
+    # Resource busy is transient on shared macOS runners. Keep the log instead
+    # of swallowing stdout: a persistent cause must still be diagnosable.
+    for attempt in 1 2 3; do
+        if "$hdiutil_bin" create -volname walgit -srcfolder "$stage" -ov -format UDZO "$output" >&2; then
+            return 0
+        fi
+
+        # hdiutil create is not resumable, so a failed attempt must not leave a
+        # partial image behind for the next one.
+        rm -f "$output"
+        if [ "$attempt" -eq 3 ]; then
+            echo "hdiutil create failed after 3 attempts: $output" >&2
+            return 1
+        fi
+
+        echo "hdiutil create failed (attempt $attempt/3); retrying in ${retry_delay}s" >&2
+        sync
+        detach_stale_dmg_mount "$output" "$hdiutil_bin"
+        sleep "$retry_delay"
+    done
+}
+
 unlock_codesign_keychain() {
     if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
         [ -n "${CODESIGN_KEYCHAIN_PASSWORD:-}" ] || {
@@ -135,6 +209,9 @@ case "${1:-}" in
         exit 0 ;;
     --check-notary-mode)
         notary_mode
+        exit $? ;;
+    --check-hdiutil-retry)
+        create_dmg_with_retry "${2:?stage}" "${3:?output}"
         exit $? ;;
     -h|--help)
         usage
@@ -250,7 +327,7 @@ ln -s /Applications "$STAGE/Applications"
 check_tree "$STAGE"
 TMP_DMG="$WORK/walgit-${VERSION}-${ARCH}.dmg"
 df -h "$WORK" || true
-hdiutil create -volname walgit -srcfolder "$STAGE" -ov -format UDZO "$TMP_DMG" >/dev/null
+create_dmg_with_retry "$STAGE" "$TMP_DMG"
 
 echo "== [6/8] sign DMG =="
 unlock_codesign_keychain

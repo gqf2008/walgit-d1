@@ -820,6 +820,92 @@ PYS
     return 0
 }
 
+hdiutil_retry_fixture() {
+    local base="$TMP/hdiutil-retry"
+    local stage="$base/stage"
+    local output="$base/walgit-test.dmg"
+    local stub="$base/hdiutil"
+    local state="$base/attempts"
+    mkdir -p "$stage"
+    printf 'payload\n' >"$stage/file"
+
+    cat >"$stub" <<'STUB'
+#!/bin/bash
+set -eu
+state="${WALGIT_HDIUTIL_STUB_STATE:?}"
+always_fail="${WALGIT_HDIUTIL_STUB_ALWAYS_FAIL:-0}"
+
+if [ "${1:-}" = "info" ]; then
+    printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>images</key><array/></dict></plist>\n'
+    exit 0
+fi
+
+if [ "${1:-}" != "create" ]; then
+    echo "unexpected hdiutil invocation: $*" >&2
+    exit 2
+fi
+
+attempt=0
+[ ! -f "$state" ] || attempt="$(cat "$state")"
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$state"
+
+output=""
+for arg in "$@"; do
+    case "$arg" in
+        *.dmg) output="$arg" ;;
+    esac
+done
+[ -n "$output" ] || { echo "stub hdiutil: missing output path" >&2; exit 2; }
+
+# Leave a half-written image on failures. The third attempt must only see a
+# clean path, proving the production retry removed the failed output.
+if [ "$attempt" -eq 3 ] && [ -e "$output" ]; then
+    echo "stub hdiutil: stale output was not removed" >&2
+    exit 3
+fi
+printf 'partial\n' >"$output"
+if [ "$attempt" -lt 3 ] || [ "$always_fail" = 1 ]; then
+    echo "hdiutil: create failed - Resource busy" >&2
+    exit 1
+fi
+printf 'complete\n' >"$output"
+STUB
+    chmod +x "$stub"
+
+    WALGIT_HDIUTIL_STUB_STATE="$state" WALGIT_HDIUTIL_BIN="$stub" \
+        WALGIT_HDIUTIL_RETRY_DELAY=0 \
+        ./build-dmg.sh --check-hdiutil-retry "$stage" "$output" \
+        >"$base/stdout" 2>"$base/stderr" \
+        || { echo "FAIL(hdiutil-retry): create still failed" >&2; cat "$base/stderr" >&2; return 1; }
+
+    [ "$(cat "$state")" = 3 ] \
+        || { echo "FAIL(hdiutil-retry): expected 3 attempts, got $(cat "$state")" >&2; return 1; }
+    [ "$(cat "$output")" = complete ] \
+        || { echo "FAIL(hdiutil-retry): final image is not complete" >&2; return 1; }
+    [ "$(grep -c 'Resource busy' "$base/stderr")" = 2 ] \
+        || { echo "FAIL(hdiutil-retry): expected two surfaced failures" >&2; cat "$base/stderr" >&2; return 1; }
+
+    # The retry budget must stay bounded even when every attempt fails, and the
+    # final failed attempt must not leave a partial image behind.
+    rm -f "$state" "$output"
+    if WALGIT_HDIUTIL_STUB_STATE="$state" WALGIT_HDIUTIL_STUB_ALWAYS_FAIL=1 \
+        WALGIT_HDIUTIL_BIN="$stub" WALGIT_HDIUTIL_RETRY_DELAY=0 \
+        ./build-dmg.sh --check-hdiutil-retry "$stage" "$output" \
+        >"$base/persistent.stdout" 2>"$base/persistent.stderr"; then
+        echo "FAIL(hdiutil-retry): persistent failure unexpectedly succeeded" >&2
+        return 1
+    fi
+    [ "$(cat "$state")" = 3 ] \
+        || { echo "FAIL(hdiutil-retry): expected bounded 3 attempts, got $(cat "$state")" >&2; return 1; }
+    [ ! -e "$output" ] \
+        || { echo "FAIL(hdiutil-retry): partial image remains after final failure" >&2; return 1; }
+    grep -Fq 'hdiutil create failed after 3 attempts' "$base/persistent.stderr" \
+        || { echo "FAIL(hdiutil-retry): missing final failure message" >&2; cat "$base/persistent.stderr" >&2; return 1; }
+    return 0
+}
+
+hdiutil_retry_fixture
 bash_compat_smoke
 layout_fixture
 bootstrap_fixture
