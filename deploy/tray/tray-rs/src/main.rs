@@ -1623,13 +1623,16 @@ impl App {
         };
         h.status
             .set_text(format!("walgit 服务:{state}{backend_note}{note}"));
-        // Two fixed verbs, never a guess: the row you click says what it does.
-        // They stay enabled (both CLI verbs are idempotent) so a click is never
-        // silently swallowed; only an upgrade in flight disables them.
+        // Two fixed verbs, never a guess — and only the one that would *do*
+        // something is clickable: 启动服务 is for a stopped service, 停止服务 for a
+        // running one. The CLI verbs stay idempotent (the autostart path and every
+        // script rely on that), but a menu must not offer a no-op. Only `busy == 2`
+        // (an upgrade owns the service lifecycle) overrides the pairing.
         h.start.set_text("启动服务");
         h.stop.set_text("停止服务");
-        h.start.set_enabled(self.busy != 2);
-        h.stop.set_enabled(self.busy != 2);
+        let upgrading = self.busy == 2;
+        h.start.set_enabled(!running && !upgrading);
+        h.stop.set_enabled(running && !upgrading);
         // 升级通道:macOS/Windows 装好的 Release 不需要源码仓库;
         // 开发机与 Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
         let can_upgrade = release_channel() || has_source_repo() || self.release.is_some();
