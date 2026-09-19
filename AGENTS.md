@@ -641,7 +641,8 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   method/resource/flag, or user-visible workflow must update the public `web/SKILL.md` and the shipped ops skill
   `skills/walgit/SKILL.md` in the same change (or the ops skill must point to the web guide when the detail belongs
   there). `scripts/check-skill-covers-cli.sh` is the machine guard for CLI/MCP coverage; a PR that cannot explain
-  the new surface there is not mergeable.
+  the new surface there is not mergeable. The guard currently covers top-level CLI commands and `walgit mcp`
+  flags only; nested subcommands/flags and non-CLI MCP methods/resources still require review discipline.
 - Keep this file current: append decisions with a number and a date; never delete history, replace it with the
   decision that superseded it.
 - **Never block the async runtime**: no blocking git/fs work (repack, midx, commit-graph, gix reopen, large

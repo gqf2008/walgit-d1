@@ -37,8 +37,10 @@ notifies, and installation always requires the user to click the tray menu.
   SHA-256, then run the helper's silent install followed by `walgit.exe --version` and `/healthz`
   checks; failure rolls back. An installation created **before the first build containing this
   feature** must run the installer once manually before tray upgrades work.
-- **Linux:** no tray upgrade channel is currently provided; upgrade through the package/service
-  workflow used to install the host.
+- **Linux:** no packaged Release auto-update channel. If the tray runs with a configured source
+  checkout (`WALGIT_REPO`, default `~/walgit-repo`), it offers **source upgrade** (ff-merge,
+  build, health check, rollback); otherwise upgrade through the package/service workflow used to
+  install the host.
 
 ## 3. MCP subscriptions (optional)
 
