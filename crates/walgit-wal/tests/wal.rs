@@ -916,6 +916,35 @@ async fn checkpoint_refuses_unreplayable_or_stale_refs() {
 }
 
 #[tokio::test]
+async fn cold_rematerialize_refreshes_once() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let registry = Registry::new(store, Arc::new(make_config(cache.path(), 0)));
+    let id = repo_id("test", "cold-refresh");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+
+    let work = WorkRepo::new();
+    let c1 = work.commit("cold-refresh", "one");
+    let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
+    handle
+        .publish_push(
+            Some(ingested),
+            make_txn(vec![("refs/heads/main", "", &c1)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let before = handle.local().odb_refreshes();
+    handle.rematerialize().await.unwrap();
+    assert_eq!(
+        handle.local().odb_refreshes(),
+        before + 1,
+        "cold materialize must defer refs refresh until reconciliation finishes"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_prunes_local_pack_not_in_manifest() {
     let cache = tempfile::tempdir().unwrap();
     let store = MemoryStore::shared();

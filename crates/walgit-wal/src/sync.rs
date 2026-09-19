@@ -525,6 +525,19 @@ pub(crate) async fn apply_delta_with_rebuild(
     new_version: &Version,
     force_refs_rebuild: bool,
 ) -> Result<(), WalError> {
+    apply_delta_inner(handle, new_manifest, new_version, force_refs_rebuild, true).await
+}
+
+/// Apply the delta and optionally refresh gix. Cold materialization defers the
+/// refresh until pack reconciliation finishes, so refs and packs become
+/// visible in one ODB reload instead of one before and one after the packs.
+async fn apply_delta_inner(
+    handle: &super::handle::RepoHandle,
+    new_manifest: &Manifest,
+    new_version: &Version,
+    force_refs_rebuild: bool,
+    refresh: bool,
+) -> Result<(), WalError> {
     let store = &handle.store;
     let local = &handle.local;
     let current_state = handle.state.lock().clone();
@@ -617,7 +630,9 @@ pub(crate) async fn apply_delta_with_rebuild(
         state.revision = new_manifest.revision;
     }
     crate::state::save_state(local.path(), &handle.state.lock().clone())?;
-    local.refresh_async().await?;
+    if refresh {
+        local.refresh_async().await?;
+    }
     Ok(())
 }
 
@@ -1241,15 +1256,17 @@ pub(crate) async fn materialize_from_scratch(
     }
 
     // Apply delta from scratch (checkpoint + all log entries), then packs.
-    apply_delta(handle, manifest, version)
+    // Defer the gix reload until both phases are complete: reconciliation
+    // installs the packs, and one final refresh makes the whole cold copy
+    // visible atomically.
+    apply_delta_inner(handle, manifest, version, true, false)
         .instrument(span.clone())
         .await?;
-    let needs_refresh = reconcile_packs(handle, manifest, SyncLevel::Serve)
+    reconcile_packs(handle, manifest, SyncLevel::Serve)
         .instrument(span.clone())
         .await?;
-    if needs_refresh {
-        handle.local.refresh_async().await?;
-    }
+    handle.local.refresh_async().await?;
+    handle.mark_refs_verified();
     Ok(())
 }
 
