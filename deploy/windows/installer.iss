@@ -57,6 +57,7 @@ Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:Add
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\target\release\walgit-upgrade-helper.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; CI 与安装器共用的任务归属探测。必须作为普通文件装到 {app}；Inno 的临时解压 API
 ; 注册为 sfNoUninstall，而卸载路径也会调用归属探测，不能在安装器里依赖它。
 Source: "task-ownership.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -292,6 +293,9 @@ begin
     StopWalgit(True);
   end;
   if CurStep = ssPostInstall then
+    // 安装目录标记:托盘据此识别自定义 {app}(默认目录另有路径判据)。这个
+    // 标记是只读部署信息，不写用户状态。
+    SaveStringToFile(ExpandConstant('{app}\.walgit-install'), '{#MyAppVersion}', False);
     // 自启勾选承诺的是「部署开机可用」,不是只把托盘拉起来:写标记文件,
     // 托盘启动时发现它 + 服务未运行,就把服务一并拉起(tray-rs 读它)。
     if WizardIsTaskSelected('autostart') then
@@ -325,5 +329,6 @@ begin
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
+    DeleteFile(ExpandConstant('{app}\.walgit-install'));
   end;
 end;

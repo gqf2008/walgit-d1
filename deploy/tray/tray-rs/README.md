@@ -12,8 +12,11 @@
   写到 `~/.walgit`。程序文件不复制到状态目录。
 - **⬆️ 发现新版本 — 点击升级**:升级**只由用户点击触发**。macOS App Bundle
   走 Release 管线:下载 DMG → 校验 sha256/签名/公证/版本 → 交给
-  `release-install.sh` 换装(失败回滚旧 bundle);开发机与 Windows/Linux 走
-  源码管线:ff-merge main → `cargo build --release -p walgit-cli` →
+  `release-install.sh` 换装(失败回滚旧 bundle)。Windows 安装目录走 Release
+  管线:只选 `walgit-setup-<version>-x64.exe`，精确校验 GitHub sha256，下载
+  新版+当前版本安装器，复制 `walgit-upgrade-helper.exe` 到状态目录后由 helper
+  完成停服务、静默安装、起服务、`/healthz` 版本校验和失败回滚。开发机与
+  Linux 走源码管线:ff-merge main → `cargo build --release -p walgit-cli` →
   备份(`walgit.bak-tray`)→ 停 → 热换 → 起服务 → 15s 健康验证,失败回滚
 - **自动检测新版本:开/关**:开着时每 30 分钟(+启动 30 秒)`fetch` 比对;
   发现新版本仅提示(菜单 ⬆️ 项 + 图标状态),不自动升级
@@ -38,7 +41,8 @@ Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统
   回退到 `~/.local/bin/walgit`，不再把正常的回退写成权限错误。显式
   `WALGIT_CLI_LINK` 仍保持单目标、失败即报错
 - Windows:在 Windows 主机上 `cargo build --release`；安装目录放
-  `walgit.exe` + `walgit-tray.exe`，状态目录是 `%USERPROFILE%\.walgit`
+  `walgit.exe` + `walgit-tray.exe` + `walgit-upgrade-helper.exe`，状态目录是
+  `%USERPROFILE%\.walgit`
 - Linux:同 Windows 形态，状态目录是 `~/.walgit`，桌面环境需支持 appindicator
 
 ### Windows 说明(issue #68 修复后的行为)

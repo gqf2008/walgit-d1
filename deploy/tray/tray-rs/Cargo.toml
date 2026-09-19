@@ -13,6 +13,10 @@ winit = "0.30"
 # 只用 Value 导航,不引 derive。
 serde_json = "1"
 
+# Exact SHA-256 verification is part of the update trust boundary. Keep it in
+#-process instead of depending on a platform utility's output format.
+sha2 = "0.10"
+
 [profile.release]
 opt-level = "z"
 strip = true

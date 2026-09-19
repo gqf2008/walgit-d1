@@ -455,6 +455,7 @@ jobs:
           mkdir -p target/release
           : > target/release/walgit.exe
           : > target/release/walgit-tray.exe
+          : > target/release/walgit-upgrade-helper.exe
           iscc="$(command -v ISCC.exe || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
           "$iscc" "-DMyAppVersion=0.0.0-ci" deploy/windows/installer.iss
       - name: Task ownership runtime smoke
@@ -518,6 +519,59 @@ jobs:
         # platform leg stays self-contained.
         shell: bash
         run: cargo check --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
+      - name: Tray Windows release detection fixture
+        # Assert the actual menu line, not merely that cfg(windows) compiles:
+        # a real Windows tray binary runs from the installer directory against a
+        # local release fixture and must offer the x64 setup asset.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
+          $root = Join-Path $env:RUNNER_TEMP "walgit-tray-detection"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $oldLocal = $env:LOCALAPPDATA
+          $oldProfile = $env:USERPROFILE
+          try {
+            $env:LOCALAPPDATA = Join-Path $root "LocalAppData"
+            $env:USERPROFILE = Join-Path $root "User"
+            $install = Join-Path $root "CustomInstall\walgit"
+            New-Item -ItemType Directory -Force -Path $install | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".walgit") | Out-Null
+            Copy-Item target\debug\walgit-tray.exe (Join-Path $install "walgit-tray.exe") -Force
+            Set-Content -LiteralPath (Join-Path $install ".walgit-install") -Value "0.5.0" -NoNewline
+
+            $digest = -join (1..64 | ForEach-Object { 'a' })
+            $fixture = Join-Path $root "latest.json"
+            $body = '{"tag_name":"v0.9.9","assets":[{"name":"walgit-setup-0.9.9-x64.exe","browser_download_url":"https://example.invalid/setup.exe","digest":"sha256:' + $digest + '"}]}'
+            Set-Content -LiteralPath $fixture -Value $body -NoNewline
+            $lineFile = Join-Path $root "detected-line.txt"
+
+            $env:WALGIT_APP_VERSION = "0.5.0"
+            $env:WALGIT_RELEASE_FIXTURE = $fixture
+            $env:WALGIT_REPO = Join-Path $root "no-source-repo"
+            $env:WALGIT_DETECT_ONCE = "1"
+            $env:WALGIT_DETECT_ONCE_FILE = $lineFile
+            & (Join-Path $install "walgit-tray.exe")
+            if ($LASTEXITCODE -ne 0) { throw "tray fixture exited $LASTEXITCODE" }
+            $line = Get-Content -LiteralPath $lineFile -Raw
+            if ($line -notmatch "下载并升级到 v0\.9\.9") {
+              throw "windows release detection did not offer upgrade: $line"
+            }
+            $log = Get-Content -LiteralPath (Join-Path $env:USERPROFILE ".walgit\tray.log") -Raw
+            if ($log -notmatch "app=0\.5\.0 release=v0\.9\.9") {
+              throw "windows release detection was not logged: $log"
+            }
+          }
+          finally {
+            $env:LOCALAPPDATA = $oldLocal
+            $env:USERPROFILE = $oldProfile
+            Remove-Item Env:WALGIT_APP_VERSION -ErrorAction SilentlyContinue
+            Remove-Item Env:WALGIT_RELEASE_FIXTURE -ErrorAction SilentlyContinue
+            Remove-Item Env:WALGIT_REPO -ErrorAction SilentlyContinue
+            Remove-Item Env:WALGIT_DETECT_ONCE -ErrorAction SilentlyContinue
+            Remove-Item Env:WALGIT_DETECT_ONCE_FILE -ErrorAction SilentlyContinue
+          }
+
       - name: Service lifecycle smoke (scheduled task, D48)
         # The real binary, the real task and the real port: `start` twice (must
         # not fork), then `stop` (the port must go quiet). This is the level the

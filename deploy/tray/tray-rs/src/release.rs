@@ -8,9 +8,11 @@
 //! 来源:macOS Swift 托盘的 release 解析/版本比较与菜单文本
 //! (`menuVersionLine`/`upgradeLine`);issue #183 把它迁到跨平台 tray-rs。
 //!
-//! 生产调用点只有 macOS 的 Release 通道;三平台都跑 `cargo test`,所以非
-//! macOS 的 release 构建里"没人用"是预期,不是死代码。
-#![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+//! 生产调用点是 macOS 与 Windows 的 Release 通道;三平台都跑 `cargo test`。
+#![cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", test)),
+    allow(dead_code)
+)]
 
 use serde_json::Value;
 
@@ -35,6 +37,13 @@ pub struct ReleaseInfo {
     pub tag: String,
     pub version: String,
     pub asset: ReleaseAsset,
+}
+
+/// Release 资产绑定的目标平台。版本相同但平台不同，绝不能互相回退。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseTarget {
+    Macos,
+    Windows,
 }
 
 /// 当前架构的资产后缀。未知架构返回 `unknown`——此时永远匹配不到 asset,
@@ -63,11 +72,50 @@ pub fn strip_version_prefix(value: &str) -> String {
     }
 }
 
+/// Parse the last token of `walgit --version` / equivalent installer output.
+/// This accepts both `walgit v0.6.4` and a bare `v0.6.4`.
+pub fn parse_tool_version(output: &str) -> Option<String> {
+    let token = output.split_whitespace().last()?;
+    let version = strip_version_prefix(token);
+    (!version.is_empty()).then_some(version)
+}
+
+/// 当前平台的 release 资产名。
+///
+/// Windows 只发布 Inno 安装器 `walgit-setup-<version>-x64.exe`；尚未发布
+/// arm64 安装器，因此 arm64 明确报错而不是回退到 x64。macOS 保持 DMG
+/// 命名不变。
+pub fn release_asset_name(
+    target: ReleaseTarget,
+    arch: &str,
+    version: &str,
+) -> Result<String, String> {
+    let version = strip_version_prefix(version);
+    if version.is_empty() {
+        return Err("empty release version".into());
+    }
+    if version == "." || version == ".." || version.chars().any(|c| c == '/' || c == '\\') {
+        return Err(format!("invalid release version: {version}"));
+    }
+    match (target, arch) {
+        (ReleaseTarget::Macos, "arm64" | "x86_64") => Ok(format!("walgit-{version}-{arch}.dmg")),
+        (ReleaseTarget::Windows, "x86_64") => Ok(format!("walgit-setup-{version}-x64.exe")),
+        (ReleaseTarget::Windows, other) => Err(format!(
+            "release has no Windows {other} installer (only x64 is published)"
+        )),
+        (ReleaseTarget::Macos, other) => Err(format!("release has no macOS {other} asset")),
+    }
+}
+
 /// 解析 GitHub `releases/latest` 响应。
 ///
-/// 只接受**与本 release 版本严格同名**、目标架构的 DMG:按后缀回退会把旧
-/// 版本 asset 挂到新 tag 上(菜单误报升级、下载后才失败)。
-pub fn parse_latest_release(json: &str, arch: &str) -> Result<ReleaseInfo, String> {
+/// 只接受**与本 release 版本严格同名**、目标平台/架构的资产:按后缀回退
+/// 会把旧版本 asset 挂到新 tag 上(菜单误报升级、下载后才失败)。
+pub fn parse_latest_release(
+    json: &str,
+    target: ReleaseTarget,
+    arch: &str,
+) -> Result<ReleaseInfo, String> {
     let root: Value =
         serde_json::from_str(json).map_err(|e| format!("malformed release JSON: {e}"))?;
     let tag = root
@@ -83,11 +131,11 @@ pub fn parse_latest_release(json: &str, arch: &str) -> Result<ReleaseInfo, Strin
         .get("assets")
         .and_then(Value::as_array)
         .ok_or_else(|| "malformed release JSON: missing assets array".to_string())?;
-    let expected = format!("walgit-{version}-{arch}.dmg");
+    let expected = release_asset_name(target, arch, &version)?;
     let asset = assets
         .iter()
         .find(|a| a.get("name").and_then(Value::as_str) == Some(expected.as_str()))
-        .ok_or_else(|| format!("release has no macOS asset {expected}"))?;
+        .ok_or_else(|| format!("release has no asset {expected}"))?;
     let url = asset
         .get("browser_download_url")
         .and_then(Value::as_str)
@@ -277,7 +325,8 @@ mod tests {
       "tag_name": "v0.5.0",
       "assets": [
         {"name":"walgit-0.5.0-x86_64.dmg","browser_download_url":"https://example.invalid/x86.dmg","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        {"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/arm.dmg","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        {"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/arm.dmg","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+        {"name":"walgit-setup-0.5.0-x64.exe","browser_download_url":"https://example.invalid/setup.exe","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
       ]
     }"#;
 
@@ -293,7 +342,7 @@ mod tests {
 
     #[test]
     fn parses_arch_specific_asset() {
-        let info = parse_latest_release(FIXTURE, "arm64").expect("parse");
+        let info = parse_latest_release(FIXTURE, ReleaseTarget::Macos, "arm64").expect("parse");
         assert_eq!(info.tag, "v0.5.0");
         assert_eq!(info.version, "0.5.0");
         assert_eq!(info.asset.name, "walgit-0.5.0-arm64.dmg");
@@ -302,39 +351,72 @@ mod tests {
     }
 
     #[test]
+    fn selects_windows_installer_by_exact_release_and_arch() {
+        let info = parse_latest_release(FIXTURE, ReleaseTarget::Windows, "x86_64").expect("parse");
+        assert_eq!(info.asset.name, "walgit-setup-0.5.0-x64.exe");
+        assert_eq!(info.asset.url, "https://example.invalid/setup.exe");
+        assert_eq!(info.asset.sha256, "c".repeat(64));
+
+        let x64_only = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-setup-0.5.0-x64.exe","browser_download_url":"https://example.invalid/setup.exe","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}"#;
+        assert!(parse_latest_release(x64_only, ReleaseTarget::Windows, "arm64").is_err());
+        assert!(parse_latest_release(x64_only, ReleaseTarget::Windows, "unknown").is_err());
+        let no_digest = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-setup-0.5.0-x64.exe","browser_download_url":"https://example.invalid/setup.exe"}]}"#;
+        assert!(parse_latest_release(no_digest, ReleaseTarget::Windows, "x86_64").is_err());
+        assert!(release_asset_name(ReleaseTarget::Windows, "x86_64", "v../escape").is_err());
+        assert_eq!(
+            release_asset_name(ReleaseTarget::Windows, "x86_64", "v0.5.0").unwrap(),
+            "walgit-setup-0.5.0-x64.exe"
+        );
+    }
+
+    #[test]
+    fn version_output_parser_accepts_tool_prefix() {
+        assert_eq!(
+            parse_tool_version("walgit v0.6.4\n").as_deref(),
+            Some("0.6.4")
+        );
+        assert_eq!(parse_tool_version("v0.6.4\n").as_deref(), Some("0.6.4"));
+        assert_eq!(parse_tool_version(""), None);
+    }
+
+    #[test]
     fn rejects_malformed_release_json() {
-        assert!(parse_latest_release("{}", "arm64").is_err(), "empty object");
         assert!(
-            parse_latest_release(r#"{"tag_name":""}"#, "arm64").is_err(),
+            parse_latest_release("{}", ReleaseTarget::Macos, "arm64").is_err(),
+            "empty object"
+        );
+        assert!(
+            parse_latest_release(r#"{"tag_name":""}"#, ReleaseTarget::Macos, "arm64").is_err(),
             "empty tag"
         );
         assert!(
-            parse_latest_release(r#"{"tag_name":"v0.5.0"}"#, "arm64").is_err(),
+            parse_latest_release(r#"{"tag_name":"v0.5.0"}"#, ReleaseTarget::Macos, "arm64")
+                .is_err(),
             "missing assets"
         );
-        assert!(parse_latest_release("not json", "arm64").is_err());
+        assert!(parse_latest_release("not json", ReleaseTarget::Macos, "arm64").is_err());
     }
 
     #[test]
     fn rejects_asset_without_usable_digest() {
         let missing = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/a.dmg"}]}"#;
-        assert!(parse_latest_release(missing, "arm64").is_err());
+        assert!(parse_latest_release(missing, ReleaseTarget::Macos, "arm64").is_err());
         // GitHub 会在拿不到 digest 时给 null(而不是缺 key):同一个失败面。
         let null_digest = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/a.dmg","digest":null}]}"#;
-        assert!(parse_latest_release(null_digest, "arm64").is_err());
+        assert!(parse_latest_release(null_digest, ReleaseTarget::Macos, "arm64").is_err());
         let short = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/a.dmg","digest":"sha256:deadbeef"}]}"#;
-        assert!(parse_latest_release(short, "arm64").is_err());
+        assert!(parse_latest_release(short, ReleaseTarget::Macos, "arm64").is_err());
         let non_hex = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/a.dmg","digest":"sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}]}"#;
-        assert!(parse_latest_release(non_hex, "arm64").is_err());
+        assert!(parse_latest_release(non_hex, ReleaseTarget::Macos, "arm64").is_err());
     }
 
     #[test]
     fn rejects_other_arch_and_stale_assets() {
         let x86_only = r#"{"tag_name":"v0.5.0","assets":[{"name":"walgit-0.5.0-x86_64.dmg","browser_download_url":"https://example.invalid/x.dmg","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}"#;
-        assert!(parse_latest_release(x86_only, "arm64").is_err());
+        assert!(parse_latest_release(x86_only, ReleaseTarget::Macos, "arm64").is_err());
         // 后缀回退会让新 tag 挂上旧版本 asset——必须拒绝。
         let stale = r#"{"tag_name":"v0.6.0","assets":[{"name":"walgit-0.5.0-arm64.dmg","browser_download_url":"https://example.invalid/old.dmg","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]}"#;
-        assert!(parse_latest_release(stale, "arm64").is_err());
+        assert!(parse_latest_release(stale, ReleaseTarget::Macos, "arm64").is_err());
     }
 
     #[test]
@@ -429,7 +511,7 @@ mod tests {
             "service version used as app: {line}"
         );
 
-        let release = parse_latest_release(FIXTURE, "arm64").expect("parse");
+        let release = parse_latest_release(FIXTURE, ReleaseTarget::Macos, "arm64").expect("parse");
         let line = upgrade_line(ST_AVAILABLE, "0.5.0", "", Some(&release), "", "");
         assert_eq!(line, "⬆️ 下载并升级到 v0.5.0(当前 0.5.0)");
 

@@ -10,8 +10,9 @@
 //!          不复制进 ~/.walgit，状态、配置和日志才属于那里。
 //! 健康检查:内置裸 HTTP(loopback),零额外依赖。
 //! 打开 Web UI:直接开新页面(三平台一致)。
-//! macOS 升级:Release 感知(检测 GitHub latest release → 下载 DMG →
-//!          校验 sha256/签名/公证 → 交给 release-install.sh 换装回滚)。
+//! Release 升级:macOS 下载 DMG → 校验 sha256/签名/公证 → 交给
+//! release-install.sh 换装回滚;Windows 下载 Inno 安装器 → 交给独立
+//! walgit-upgrade-helper 静默安装/健康检查/回滚。
 //!
 //! 版本比较、release 解析与菜单文本在 `release.rs`(纯函数 + 单测)。
 
@@ -20,7 +21,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bootstrap;
-mod release;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -28,18 +28,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use release::{
-    upgrade_line, ReleaseInfo, ST_AVAILABLE, ST_CHECKING, ST_CHECK_FAILED, ST_FAILED, ST_IDLE,
-    ST_INSTALLING, ST_LATEST,
-};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
+use walgit_tray::release::{
+    self, upgrade_line, ReleaseInfo, ReleaseTarget, ST_AVAILABLE, ST_CHECKING, ST_CHECK_FAILED,
+    ST_FAILED, ST_IDLE, ST_INSTALLING, ST_LATEST,
+};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
-#[cfg(target_os = "macos")]
 const DEFAULT_RELEASE_API: &str = "https://api.github.com/repos/gqf2008/walgit-d1/releases/latest";
+#[cfg(target_os = "windows")]
+const WINDOWS_HELPER_EXE: &str = "walgit-upgrade-helper.exe";
+#[cfg(target_os = "windows")]
+const WINDOWS_INSTALL_MARKER: &str = ".walgit-install";
 
 fn home() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -127,13 +130,13 @@ fn app_bundle() -> Option<PathBuf> {
     Some(bundle.to_path_buf())
 }
 
-/// 托盘/App 版本。macOS 取 bundle 的 `CFBundleShortVersionString`(升级判断
-/// 与菜单显示都以它为准,与服务进程版本分开);其他平台允许安装器用
-/// `WALGIT_APP_VERSION` 注入,未注入时回退服务版本(见 `App::current_version`)。
+/// 托盘/App 版本。macOS 取 bundle 的 `CFBundleShortVersionString`;Windows
+/// 优先取测试注入，否则运行安装目录的 `walgit.exe --version`。菜单在没有
+/// app 版本时才回退服务版本（见 `App::current_version`）。
 fn app_version() -> String {
     #[cfg(target_os = "macos")]
     {
-        use release::parse_bundle_version;
+        use walgit_tray::release::parse_bundle_version;
 
         if let Some(bundle) = app_bundle() {
             if let Ok(plist) = std::fs::read_to_string(bundle.join("Contents/Info.plist")) {
@@ -144,29 +147,49 @@ fn app_version() -> String {
         }
         String::new()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(version) = std::env::var("WALGIT_APP_VERSION") {
+            let version = release::strip_version_prefix(&version);
+            if !version.is_empty() {
+                return version;
+            }
+        }
+        let bin = walgit_binary();
+        let (code, out) = run(None, &bin.to_string_lossy(), &["--version"], &[]);
+        if code == 0 {
+            return release::parse_tool_version(&out).unwrap_or_default();
+        }
+        String::new()
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         std::env::var("WALGIT_APP_VERSION").unwrap_or_default()
     }
 }
 
-/// GitHub latest release(或 `WALGIT_RELEASE_FIXTURE` 指向的本地 JSON)。
-/// 只信 API 里的 sha256 digest:拿不到就返回失败原因,由调用方决定回退
-/// 源码检测还是向用户显示「更新检查失败」,绝不安装未校验的包。
-/// 只有 macOS 的 Release 通道会用它。
-#[cfg(target_os = "macos")]
-fn latest_release() -> Result<ReleaseInfo, String> {
-    use release::{arch_slug, parse_latest_release};
-
-    if let Ok(fixture) = std::env::var("WALGIT_RELEASE_FIXTURE") {
-        if !fixture.is_empty() {
-            let body = std::fs::read_to_string(&fixture)
-                .map_err(|e| format!("cannot read fixture {fixture}: {e}"))?;
-            return parse_latest_release(&body, arch_slug());
-        }
+/// 当前平台对应的 Release 资产族。
+fn release_target() -> Result<ReleaseTarget, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(ReleaseTarget::Macos)
     }
-    let endpoint =
-        std::env::var("WALGIT_RELEASE_API").unwrap_or_else(|_| DEFAULT_RELEASE_API.to_string());
+    #[cfg(target_os = "windows")]
+    {
+        Ok(ReleaseTarget::Windows)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err("release updates are not enabled on this platform".into())
+    }
+}
+
+/// Query one GitHub release endpoint. The asset name is chosen by target and
+/// `sha256` is mandatory; a missing digest never falls back to an unverified
+/// download.
+fn fetch_release(endpoint: &str, label: &str) -> Result<ReleaseInfo, String> {
+    use walgit_tray::release::{arch_slug, parse_latest_release};
+
     let (code, body) = run(
         None,
         "curl",
@@ -182,17 +205,62 @@ fn latest_release() -> Result<ReleaseInfo, String> {
             "Accept: application/vnd.github+json",
             "-H",
             "User-Agent: walgit-tray",
-            &endpoint,
+            endpoint,
         ],
         &[],
     );
     if code != 0 {
         return Err(format!(
-            "latest lookup failed {}",
+            "{label} lookup failed {}: {}",
+            endpoint,
             body.trim().chars().take(160).collect::<String>()
         ));
     }
-    parse_latest_release(&body, arch_slug())
+    parse_latest_release(&body, release_target()?, arch_slug())
+}
+
+/// GitHub latest release(或 `WALGIT_RELEASE_FIXTURE` 指向的本地 JSON)。
+fn latest_release() -> Result<ReleaseInfo, String> {
+    use walgit_tray::release::{arch_slug, parse_latest_release};
+
+    if let Ok(fixture) = std::env::var("WALGIT_RELEASE_FIXTURE") {
+        if !fixture.is_empty() {
+            let body = std::fs::read_to_string(&fixture)
+                .map_err(|e| format!("cannot read fixture {fixture}: {e}"))?;
+            return parse_latest_release(&body, release_target()?, arch_slug());
+        }
+    }
+    let endpoint =
+        std::env::var("WALGIT_RELEASE_API").unwrap_or_else(|_| DEFAULT_RELEASE_API.to_string());
+    fetch_release(&endpoint, "latest")
+}
+
+/// The installer for the currently installed version, used only for rollback.
+/// This is deliberately a fresh API lookup: an installer kept inside the
+/// version being replaced would already have lost the rollback copy.
+#[cfg(target_os = "windows")]
+fn release_for_version(version: &str) -> Result<ReleaseInfo, String> {
+    use walgit_tray::release::{arch_slug, parse_latest_release};
+
+    if let Ok(fixture) = std::env::var("WALGIT_ROLLBACK_RELEASE_FIXTURE") {
+        if !fixture.is_empty() {
+            let body = std::fs::read_to_string(&fixture)
+                .map_err(|e| format!("cannot read rollback fixture {fixture}: {e}"))?;
+            return parse_latest_release(&body, release_target()?, arch_slug());
+        }
+    }
+    let version = release::strip_version_prefix(version);
+    let endpoint = if let Ok(endpoint) = std::env::var("WALGIT_RELEASE_TAG_API") {
+        endpoint
+    } else {
+        let base =
+            std::env::var("WALGIT_RELEASE_API").unwrap_or_else(|_| DEFAULT_RELEASE_API.to_string());
+        let prefix = base.strip_suffix("/latest").ok_or_else(|| {
+            format!("cannot derive tag release endpoint from {base}; set WALGIT_RELEASE_TAG_API")
+        })?;
+        format!("{prefix}/tags/v{version}")
+    };
+    fetch_release(&endpoint, "release")
 }
 
 /// 检测结果:菜单状态机据此选「下载并升级(Release)」还是「从源码升级」。
@@ -201,7 +269,6 @@ enum Detected {
     Nothing,
     Source(String),
     Failed,
-    #[cfg(target_os = "macos")]
     Release(ReleaseInfo),
 }
 
@@ -210,32 +277,90 @@ fn has_source_repo() -> bool {
     repo_dir().join(".git").exists()
 }
 
-/// 是否跑在 DMG 装出来的 App Bundle 里(Release 升级通道)。
+/// Normalize a Windows path for case-insensitive, separator-insensitive
+/// comparison. Kept platform-neutral so the install-layout predicate is tested
+/// on every CI leg.
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+/// Windows installer locations that are release-managed. The current installer
+/// uses `%LOCALAPPDATA%\\Programs\\walgit`; the older `%USERPROFILE%\\walgit`
+/// remains recognized because the installer explicitly migrates that layout.
+#[cfg(any(target_os = "windows", test))]
+fn windows_install_dir_matches(
+    dir: &std::path::Path,
+    local_app_data: Option<&str>,
+    user_profile: Option<&str>,
+) -> bool {
+    let dir = normalize_windows_path(dir);
+    let mut candidates = Vec::new();
+    if let Some(base) = local_app_data.filter(|base| !base.is_empty()) {
+        candidates.push(std::path::Path::new(base).join("Programs").join("walgit"));
+    }
+    if let Some(base) = user_profile.filter(|base| !base.is_empty()) {
+        candidates.push(std::path::Path::new(base).join("walgit"));
+    }
+    candidates
+        .iter()
+        .any(|candidate| normalize_windows_path(candidate) == dir)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_install_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let local = std::env::var("LOCALAPPDATA").ok();
+    let profile = std::env::var("USERPROFILE").ok();
+    let managed = windows_install_dir_matches(dir, local.as_deref(), profile.as_deref())
+        || dir.join(WINDOWS_INSTALL_MARKER).is_file();
+    managed.then(|| dir.to_path_buf())
+}
+
+/// Whether the running tray is a release-managed installation. macOS uses the
+/// App Bundle shape; Windows uses the installer directory. A source checkout
+/// therefore stays on the source-upgrade path on both platforms.
 fn release_channel() -> bool {
     #[cfg(target_os = "macos")]
     {
         app_bundle().is_some()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_install_dir().is_some()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
 }
 
-/// 检测可用更新。macOS 优先 Release(装好的 DMG 机器不需要源码仓库);
-/// Release 通道不可用(无网/无 bundle/资产缺失)且本机有源码仓库时退回源码检测。
+/// Detect an available update. Installed Release builds do not need a source
+/// checkout; a release lookup failure falls back to source only when that
+/// checkout exists.
 fn detected_update() -> Detected {
     // 每条检测都留痕:菜单为什么写「可升级/已最新」要能从 tray.log 倒推,
     // 否则现场只能猜(原 Swift 托盘同样打 detect 行)。
-    #[cfg(target_os = "macos")]
-    {
-        use release::is_version_newer;
-
-        if app_bundle().is_some() {
-            let current = app_version();
+    if release_channel() {
+        let app = app_version();
+        let current = if app.is_empty() {
+            service_version()
+        } else {
+            app
+        };
+        if current.is_empty() {
+            log_line("detect: current app version is unknown");
+            if !has_source_repo() {
+                return Detected::Failed;
+            }
+        } else {
             match latest_release() {
                 Ok(info) => {
-                    let newer = is_version_newer(&info.version, &current);
+                    let newer = release::is_version_newer(&info.version, &current);
                     log_line(&format!(
                         "detect: app={current} release=v{} → {}",
                         info.version,
@@ -336,7 +461,7 @@ fn auto_detect_allowed(busy: u8, state: u8) -> bool {
 /// 成功返回后调用方立即退出托盘进程,把 bundle 让给辅助脚本。
 #[cfg(target_os = "macos")]
 fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<String, String> {
-    use release::parse_bundle_version;
+    use walgit_tray::release::parse_bundle_version;
 
     let bundle =
         app_bundle().ok_or_else(|| "不是 App Bundle 安装,无法走 Release 升级".to_string())?;
@@ -368,13 +493,8 @@ fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<Str
     }
 
     report("校验安装包…".into());
-    let (code, out) = run(None, "shasum", &["-a", "256", &dmg.to_string_lossy()], &[]);
-    let got = out
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_lowercase();
-    if code != 0 || got != release.asset.sha256 {
+    let got = walgit_tray::upgrade_helper::sha256_file(&dmg)?;
+    if got != release.asset.sha256 {
         return Err("SHA-256 校验失败".into());
     }
 
@@ -472,6 +592,147 @@ fn release_upgrade(report: &dyn Fn(String), release: &ReleaseInfo) -> Result<Str
     Ok(format!("v{}", release.version))
 }
 
+/// Download and verify one release asset into the update staging directory.
+#[cfg(target_os = "windows")]
+fn download_release_asset(
+    report: &dyn Fn(String),
+    directory: &std::path::Path,
+    release: &ReleaseInfo,
+) -> Result<PathBuf, String> {
+    let path = directory.join(&release.asset.name);
+    report(format!("下载安装包 v{}…", release.version));
+    let path_text = path.to_string_lossy().to_string();
+    let (code, out) = run(
+        None,
+        "curl",
+        &[
+            "-fL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "600",
+            "-o",
+            &path_text,
+            &release.asset.url,
+        ],
+        &[],
+    );
+    if code != 0 {
+        return Err(format!("下载安装包失败: {}", tail(&out, 200)));
+    }
+    report("校验安装包…".into());
+    let got = walgit_tray::upgrade_helper::sha256_file(&path)?;
+    if got != release.asset.sha256 {
+        return Err(format!("SHA-256 校验失败: {}", release.asset.name));
+    }
+    Ok(path)
+}
+
+/// Windows Release upgrade: download the new and rollback installers, copy the
+/// helper out of the installation directory, then hand the sequence to it. The
+/// tray exits immediately after the helper is running so the installer can
+/// replace both tray and service binaries.
+#[cfg(target_os = "windows")]
+fn release_upgrade_windows(
+    report: &dyn Fn(String),
+    release: &ReleaseInfo,
+) -> Result<String, String> {
+    let install =
+        windows_install_dir().ok_or_else(|| "不是安装器布局,无法走 Release 升级".to_string())?;
+    let app = app_version();
+    let current = if app.is_empty() {
+        service_version()
+    } else {
+        app
+    };
+    let current = release::strip_version_prefix(&current);
+    if current.is_empty() {
+        return Err("无法读取当前版本,拒绝在无法回滚时升级".into());
+    }
+    if !release::is_version_newer(&release.version, &current) {
+        return Err(format!(
+            "release v{} 不比当前 v{current} 新",
+            release.version
+        ));
+    }
+
+    let update = state_dir()
+        .join("update")
+        .join(std::process::id().to_string());
+    std::fs::create_dir_all(&update).map_err(|e| format!("创建升级目录失败: {e}"))?;
+    let new_installer = download_release_asset(report, &update, release)?;
+
+    report("准备回滚包…".into());
+    let rollback = release_for_version(&current)?;
+    if release::strip_version_prefix(&rollback.version) != current {
+        return Err(format!(
+            "回滚资产版本不匹配(需要 {current},release 为 {})",
+            rollback.version
+        ));
+    }
+    let rollback_installer = download_release_asset(report, &update, &rollback)?;
+
+    let helper_source = install.join(WINDOWS_HELPER_EXE);
+    if !helper_source.is_file() {
+        return Err(format!("缺少升级 helper: {}", helper_source.display()));
+    }
+    let helper = update.join(format!(
+        "walgit-upgrade-helper-{}-{}.exe",
+        release.version,
+        std::process::id()
+    ));
+    std::fs::copy(&helper_source, &helper).map_err(|e| format!("复制升级 helper 失败: {e}"))?;
+
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir().join("tray.log"))
+        .map_err(|e| format!("打开升级日志失败: {e}"))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| format!("打开升级日志失败: {e}"))?;
+    let mut cmd = std::process::Command::new(&helper);
+    cmd.arg("--new-installer")
+        .arg(&new_installer)
+        .arg("--rollback-installer")
+        .arg(&rollback_installer)
+        .arg("--new-sha256")
+        .arg(&release.asset.sha256)
+        .arg("--rollback-sha256")
+        .arg(&rollback.asset.sha256)
+        .arg("--target-version")
+        .arg(&release.version)
+        .arg("--rollback-version")
+        .arg(&current)
+        .arg("--install-dir")
+        .arg(&install)
+        .arg("--state-dir")
+        .arg(state_dir())
+        .arg("--log")
+        .arg(state_dir().join("tray.log"))
+        .arg("--tray-pid")
+        .arg(std::process::id().to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err));
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    cmd.spawn()
+        .map_err(|e| format!("启动升级 helper 失败: {e}"))?;
+    log_line(&format!(
+        "release: windows updater spawned for v{}",
+        release.version
+    ));
+    Ok(format!("v{}", release.version))
+}
+
 /// attach 成功后,任何返回路径都必须 detach——用 RAII 而不是在每个 `?`/`return`
 /// 前手写一次(审查指出:`OpenOptions::open` / `spawn` 的失败分支漏了 detach)。
 /// 交棒给 `release-install.sh` 前 `disarm()`:换装脚本自己负责卸载。
@@ -502,7 +763,7 @@ impl Drop for MountGuard {
 }
 
 /// 错误串只带尾部若干字符:命令输出可能很长,菜单/日志只需要线索。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn tail(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     let skip = trimmed.chars().count().saturating_sub(max);
@@ -795,12 +1056,7 @@ fn service_cmd(verb: &str) -> Result<(), String> {
     let cfg = state_dir().join("walgit.toml");
     let bin_s = bin.display().to_string();
     let cfg_s = cfg.display().to_string();
-    let (code, out) = run(
-        None,
-        &bin_s,
-        &["service", verb, "--config", &cfg_s],
-        &[],
-    );
+    let (code, out) = run(None, &bin_s, &["service", verb, "--config", &cfg_s], &[]);
     if code == 0 {
         Ok(())
     } else {
@@ -929,7 +1185,7 @@ fn service_version() -> String {
     healthz().map(|body| version_of(&body)).unwrap_or_default()
 }
 
-/// 升级入口:选择了 Release(macOS App Bundle)走 DMG 管线,否则走源码管线。
+/// 升级入口:选择了 Release 走平台安装器管线,否则走源码管线。
 fn run_upgrade(report: &dyn Fn(String), release: Option<&ReleaseInfo>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
@@ -937,7 +1193,13 @@ fn run_upgrade(report: &dyn Fn(String), release: Option<&ReleaseInfo>) -> Result
             return release_upgrade(report, release);
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(release) = release {
+            return release_upgrade_windows(report, release);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = release;
     upgrade_pipeline(report)
 }
@@ -1268,7 +1530,6 @@ impl App {
                 self.available_sha.clear();
                 self.state = ST_CHECK_FAILED;
             }
-            #[cfg(target_os = "macos")]
             Detected::Release(info) => {
                 self.available_sha.clear();
                 self.release = Some(info);
@@ -1318,8 +1579,8 @@ impl App {
             "启动服务"
         });
         h.toggle.set_enabled(self.busy == 0);
-        // 升级通道:macOS 装好的 DMG 走 Release(不需要源码仓库);开发机
-        // 与 Windows/Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
+        // 升级通道:macOS/Windows 装好的 Release 不需要源码仓库;
+        // 开发机与 Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
         let can_upgrade = release_channel() || has_source_repo() || self.release.is_some();
         if !can_upgrade {
             h.upgrade
@@ -1428,9 +1689,8 @@ impl ApplicationHandler<Msg> for App {
                                 },
                                 release.as_ref(),
                             );
-                            // macOS Release 交棒成功:辅助脚本要替换正在运行的
-                            // bundle(它先等本 pid 消失),这里直接退场——不再
-                            // 做 healthz 探测/状态回灌,免得拖过它的等待窗口。
+                            // Release 交棒成功:辅助进程会替换/安装新版本并等待
+                            // 本 pid 退出;这里直接退场,不再做状态回灌。
                             if r.is_ok() && release.is_some() {
                                 log_line(&format!("upgrade -> {r:?}"));
                                 std::process::exit(0);
@@ -1501,29 +1761,32 @@ fn main() {
         return;
     }
 
-    // 检测一次就退出(WALGIT_DETECT_ONCE=1):CI 的 macOS leg 没有可靠窗口
-    // 服务器,但"菜单说升级到哪个版本"是 Release 通道最该被守住的语义。
-    // 与 fixture(WALGIT_RELEASE_FIXTURE)配合即可离线断言。
+    // 检测一次就退出(WALGIT_DETECT_ONCE=1):CI 没有可靠窗口服务器,但
+    // “菜单说升级到哪个版本”是 Release 通道最该被守住的语义。与 fixture
+    // (WALGIT_RELEASE_FIXTURE)配合即可离线断言;Windows 无控制台，可把
+    // 菜单行同时写到 WALGIT_DETECT_ONCE_FILE。
     if std::env::var("WALGIT_DETECT_ONCE").as_deref() == Ok("1") {
         let detected = detected_update();
         let (state, release, sha) = match detected {
             Detected::Nothing => (ST_LATEST, None, String::new()),
             Detected::Source(sha) => (ST_AVAILABLE, None, sha),
             Detected::Failed => (ST_CHECK_FAILED, None, String::new()),
-            #[cfg(target_os = "macos")]
             Detected::Release(info) => (ST_AVAILABLE, Some(info), String::new()),
         };
-        println!(
-            "{}",
-            upgrade_line(
-                state,
-                &app_version(),
-                &service_version(),
-                release.as_ref(),
-                &sha,
-                ""
-            )
+        let line = upgrade_line(
+            state,
+            &app_version(),
+            &service_version(),
+            release.as_ref(),
+            &sha,
+            "",
         );
+        println!("{line}");
+        if let Ok(path) = std::env::var("WALGIT_DETECT_ONCE_FILE") {
+            if !path.is_empty() {
+                let _ = std::fs::write(path, format!("{line}\n"));
+            }
+        }
         return;
     }
 
@@ -1623,6 +1886,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_release_channel_uses_installer_directories_only() {
+        let current = std::path::Path::new(r"C:\Users\me\AppData\Local\Programs\walgit");
+        assert!(windows_install_dir_matches(
+            current,
+            Some(r"C:\Users\me\AppData\Local"),
+            Some(r"C:\Users\me")
+        ));
+        let legacy = std::path::Path::new(r"C:\Users\me\walgit");
+        assert!(windows_install_dir_matches(
+            legacy,
+            Some(r"C:\Users\me\AppData\Local"),
+            Some(r"C:\Users\me")
+        ));
+        let source = std::path::Path::new(r"C:\src\walgit\target\release");
+        assert!(!windows_install_dir_matches(
+            source,
+            Some(r"C:\Users\me\AppData\Local"),
+            Some(r"C:\Users\me")
+        ));
+    }
 
     #[test]
     fn stale_detection_cannot_overwrite_newer_result() {

@@ -8,7 +8,7 @@
 | 目录 | 平台 | 技术 |
 |---|---|---|
 | `macos/` | macOS | 打包:`build.sh` 组 App Bundle、`build-dmg.sh` 签名+公证+出 DMG;`release-install.sh` 换装回滚 |
-| `tray-rs/` | macOS / Windows / Linux | Rust + tray-icon + winit(独立 crate,**不加入** walgit workspace;macOS 的托盘本体就是它) |
+| `tray-rs/` | macOS / Windows / Linux | Rust + tray-icon + winit(独立 crate,**不加入** walgit workspace);Windows 更新 helper 也从这里构建并随安装器分发 |
 
 ## 菜单(三平台一致)
 
@@ -34,18 +34,32 @@
 
 ## 升级语义
 
-自动的只有「检测」:启动 30 秒后、此后每 30 分钟检查一次。macOS 装好的
-App Bundle 比对已安装 app 版本与 GitHub latest release(机器上不需要源码
-仓库)；开发机(非 bundle 运行)与 Windows/Linux 比对源码仓库 `HEAD` 与
-`origin/main`——源码已对齐 main 时,新的 Release 仍会提示。
+自动的只有「检测」:启动 30 秒后、此后每 30 分钟检查一次。macOS App Bundle
+与 Windows 安装目录用已安装 app 版本比对 GitHub latest release(机器上不需要
+源码仓库)；开发机与 Linux 比对源码仓库 `HEAD` 与 `origin/main`——源码已
+对齐 main 时,新的 Release 仍会提示。
 发现更新 → 菜单行变「⬆️ 下载并升级」或「⬆️ 从源码升级」+ 系统通知；
 **升级必须由用户点击**。
 
-Release 升级管线:下载 DMG → 校验 GitHub `sha256`(精确等值)→ 校验
+macOS Release 升级管线:下载 DMG → 校验 GitHub `sha256`(精确等值)→ 校验
 签名/公证/版本(精确 token)→ 停服务 → 备份并替换 App Bundle → 从新
 Bundle 启动服务 → 健康验证；失败恢复旧 App Bundle。`~/.walgit` 里的
 配置、cache、keys、日志和凭证不参与换装或回滚。
-0.5.x/0.6.0 升级到新布局时，新 tray 会临时建立
+
+Windows Release 升级管线:从安装目录运行且 `walgit.exe --version` 可读时进入
+Release 通道(不需要源码仓库)。只选择 `walgit-setup-<version>-x64.exe`；
+GitHub API 的 `sha256` digest 缺失/格式错误/与下载文件不等值时拒绝安装。
+下载新版和当前版本两个安装器后，托盘把同目录的 `walgit-upgrade-helper.exe`
+复制到 `%USERPROFILE%\.walgit\update\<pid>`，启动 helper 后退出。helper
+等待旧托盘 PID 退出 → 用旧安装目录的 `walgit service stop`（D48 任务收尾）→ 静默运行新版安装器
+(`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`) → 校验安装目录的二进制版本
+→ `walgit service start` → 轮询 `/healthz` 的 `version` 等于目标版本。任一步
+失败都运行旧版本安装器回滚，再启动旧服务、校验旧版本健康并重启旧托盘；
+全过程写入 `%USERPROFILE%\.walgit\tray.log`。当前安装目录是
+`%LOCALAPPDATA%\Programs\walgit`，同时识别旧 `%USERPROFILE%\walgit` 布局；安装器在
+`{app}` 写的 `.walgit-install` 标记也覆盖自定义安装目录。
+`tray-rs` 的集成测试用临时目录中的假安装器真跑成功与健康失败回滚两条序列。
+macOS 0.5.x/0.6.0 升级到新布局时，新 tray 会临时建立
 `~/.walgit/walgit -> App Bundle/walgit` 和 `.skeleton-version`，让旧 helper
 完成升级；5 分钟后自动清理，不保留程序副本。
 健康检查与 `[server].listen` 同源,自定义端口不会被误判成服务已停止。

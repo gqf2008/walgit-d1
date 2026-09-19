@@ -598,6 +598,21 @@ decision in §4 — or the PR is; never "fix later".
   that matrix (or download-only); until then this decision, not a claim of proof, is what the code
   rests on. A PDF stays otherwise inert on our origin: `application/pdf` + `nosniff`, and it is not
   in the active-content set for the CSP clause.
+- **D51** **Windows tray upgrades run a copied helper, not an in-place self-update (2026-09-19,
+  cc-ai-win-tray-upgrade).** An installed Windows tray detects updates only when it runs from the
+  installer directory (`%LOCALAPPDATA%\Programs\walgit`, with `%USERPROFILE%\walgit` recognized for
+  the installer's legacy migration, or the `.walgit-install` marker written by the installer for a
+  custom `{app}`) and compares `walgit.exe --version` with GitHub latest. The only
+  accepted asset is `walgit-setup-<version>-x64.exe`, selected by exact release version and exact
+  GitHub `sha256` digest; no digest means no install. The tray downloads both the new and the current
+  release's installer, copies `walgit-upgrade-helper.exe` into `%USERPROFILE%\.walgit\update\<pid>`
+  so the running image is outside the directory Inno Setup replaces, then exits. The helper waits for
+  the tray PID, runs `walgit service stop` (D48), invokes the installer with
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, checks the installed `walgit.exe --version`, starts the
+  service, and requires `/healthz` to report the target version. Any failure runs the old installer,
+  verifies the old version and health, and relaunches the old tray; the sequence and rollback are
+  exercised with fake installers in `tray-rs` tests.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

@@ -383,8 +383,8 @@ mod macos {
             ));
             if code == 0 && !body.trim().is_empty() {
                 let running = crate::version_of(&body);
-                if crate::release::strip_version_prefix(&running)
-                    != crate::release::strip_version_prefix(&bundled_version)
+                if walgit_tray::release::strip_version_prefix(&running)
+                    != walgit_tray::release::strip_version_prefix(&bundled_version)
                 {
                     let result = crate::service_cmd("restart");
                     log_line(&format!(
