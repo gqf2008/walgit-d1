@@ -1045,7 +1045,7 @@ impl LocalRepo {
 
     /// Delete `.pack/.idx/.rev/.bitmap` for `checksum`. Caller guarantees no
     /// readers and must reload gix after the write lock is released. `Ok(true)`
-    /// means the caller must rebuild/reload the derived indexes.
+    /// means the MIDX named a removed pack and was deleted for rebuild.
     pub fn remove_pack(&self, checksum: &gix_hash::oid) -> Result<bool, GitError> {
         self.remove_packs(&[checksum.to_owned()])
     }
@@ -1057,10 +1057,12 @@ impl LocalRepo {
     /// per pack would invalidate *all* warm maps K times for K packs, then
     /// re-parse the survivors from disk on every subsequent refresh.
     /// Caller guarantees no readers.
-    /// Delete files and remove the now-stale MIDX, but never build a new MIDX
-    /// or reload gix. The caller must do both after releasing the write lock; a
-    /// full ODB refresh or a large `git multi-pack-index write` under
-    /// `rw.write()` can stall every reader for minutes.
+    /// Delete files and remove the MIDX only when its PNAM names a removed
+    /// pack, but never build a new MIDX or reload gix. The caller must reload
+    /// gix after releasing the write lock; a full ODB refresh or a large
+    /// `git multi-pack-index write` under `rw.write()` can stall every reader
+    /// for minutes. `Ok(true)` means a stale MIDX was removed and the caller
+    /// must rebuild it after releasing the write lock.
     pub fn remove_packs(&self, checksums: &[gix_hash::ObjectId]) -> Result<bool, GitError> {
         #[cfg(windows)]
         {
@@ -1090,14 +1092,37 @@ impl LocalRepo {
         // The history midx covers both history packs and their bases. Removing
         // a base used to leave the base name in the midx, so gix kept
         // consulting a vanished index and reported a present object as
-        // missing. Drop the stale file now; the caller rebuilds the history
-        // MIDX outside the write lock and then reloads gix once.
+        // missing. Only drop the MIDX when it actually names one of the
+        // removed packs: a legal full MIDX over unrelated packs must survive.
+        // The caller rebuilds a dropped history MIDX outside the write lock
+        // and then reloads gix once.
         let midx = pack_dir.join("multi-pack-index");
-        let removed_midx = midx.is_file();
-        if removed_midx {
-            self.remove_midx_file(&midx)?;
+        let mut removed_midx = false;
+        if !checksums.is_empty() && midx.is_file() {
+            match read_midx_pack_names(&midx) {
+                Ok(names) => {
+                    let removed_names: HashSet<String> = checksums
+                        .iter()
+                        .map(|checksum| format!("pack-{}.idx", checksum.to_hex()))
+                        .collect();
+                    if names.iter().any(|name| removed_names.contains(name)) {
+                        self.remove_midx_file(&midx)?;
+                        removed_midx = true;
+                    }
+                }
+                Err(e) => {
+                    // Leave an unreadable MIDX in place: a later refresh sees
+                    // the parse failure and repairs it without guessing that a
+                    // deleted pack was covered.
+                    tracing::warn!(
+                        repo = %self.inner.path.display(),
+                        error = %e,
+                        "unreadable multi-pack-index left for refresh repair"
+                    );
+                }
+            }
         }
-        Ok(!checksums.is_empty() || removed_midx)
+        Ok(removed_midx)
     }
 
     #[cfg(unix)]
