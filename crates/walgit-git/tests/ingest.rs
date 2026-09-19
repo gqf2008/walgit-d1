@@ -635,6 +635,43 @@ async fn removing_midx_covered_base_rewrites_stale_midx() {
 }
 
 #[tokio::test]
+async fn removing_unrelated_pack_preserves_legal_full_midx() {
+    let (root, id, base) = full_midx_repo(ObjectFormat::Sha1).await;
+    let repo = LocalRepo::open(root.path(), &id).unwrap().unwrap();
+    let other = cm::SourceRepo::new();
+    other.commit_file("unrelated.txt", "unrelated pack\n", "unrelated");
+    let unrelated = repo
+        .ingest_pack(
+            cm::cursor(other.pack(&["HEAD"], &[], false)),
+            IngestOptions {
+                fsck: false,
+                max_bytes: None,
+                thin: false,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .checksum;
+    let midx = id.local_dir(root.path()).join("objects/pack/multi-pack-index");
+    let before = std::fs::read(&midx).unwrap();
+    assert!(midx_names_pack(&repo, &base));
+    assert!(!midx_names_pack(&repo, &unrelated));
+
+    repo.remove_pack(&unrelated).unwrap();
+    assert!(
+        midx.is_file(),
+        "removing a pack outside the MIDX must not delete the legal full MIDX"
+    );
+    assert_eq!(
+        std::fs::read(&midx).unwrap(),
+        before,
+        "removing a pack outside the MIDX must not rewrite it"
+    );
+    assert_midx_ok(&repo);
+}
+
+#[tokio::test]
 async fn real_git_full_midx_survives_refresh_for_sha1_and_sha256() {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let (root, id, base) = full_midx_repo(format).await;
