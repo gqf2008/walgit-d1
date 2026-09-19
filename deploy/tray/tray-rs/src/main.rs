@@ -1468,8 +1468,7 @@ enum Msg {
 
 struct MenuHandles {
     status: MenuItem,
-    start: MenuItem,
-    stop: MenuItem,
+    toggle: MenuItem,
     upgrade: MenuItem,
     quit: MenuItem,
 }
@@ -1623,16 +1622,14 @@ impl App {
         };
         h.status
             .set_text(format!("walgit 服务:{state}{backend_note}{note}"));
-        // Two fixed verbs, never a guess — and only the one that would *do*
-        // something is clickable: 启动服务 is for a stopped service, 停止服务 for a
-        // running one. The CLI verbs stay idempotent (the autostart path and every
-        // script rely on that), but a menu must not offer a no-op. Only `busy == 2`
-        // (an upgrade owns the service lifecycle) overrides the pairing.
-        h.start.set_text("启动服务");
-        h.stop.set_text("停止服务");
-        let upgrading = self.busy == 2;
-        h.start.set_enabled(!running && !upgrading);
-        h.stop.set_enabled(running && !upgrading);
+        // One row, labelled with the **next action**. The verb is decided from live
+        // liveness at click time (see the handler), never from this cached label
+        // and never from the item's id, so label and action always agree and the
+        // row cannot offer a no-op: a running service reads 停止服务 and stops, a
+        // stopped one reads 启动服务 and starts. No 「切换中…」 text either — the row
+        // keeps saying what it will do while a call is in flight.
+        h.toggle.set_text(if running { "停止服务" } else { "启动服务" });
+        h.toggle.set_enabled(self.busy != 2);
         // 升级通道:macOS/Windows 装好的 Release 不需要源码仓库;
         // 开发机与 Linux 走源码仓库(#73:都没有时菜单禁点并指路)。
         let can_upgrade = release_channel() || has_source_repo() || self.release.is_some();
@@ -1713,15 +1710,16 @@ impl ApplicationHandler<Msg> for App {
                 continue;
             };
             match id.as_str() {
-                "start" | "stop" => {
+                "toggle" => {
                     if self.busy == 0 {
-                        // Explicit verbs: the row says what it does, and the state
-                        // is not consulted to pick one (that is how a stale,
-                        // health-derived flag made every click a `stop`).
-                        let verb = if id == "start" { "start" } else { "stop" };
+                        // Read the state **now**, not the label's memory of it — that
+                        // is the whole fix. The old code took the verb from the
+                        // item's id, which was hardcoded `"stop"`, so every click ran
+                        // `service stop`, including the clicks on 「启动服务」.
                         self.busy = 1;
                         self.rebuild_menu();
                         std::thread::spawn(move || {
+                            let verb = if port_open() { "stop" } else { "start" };
                             let r = if verb == "start" {
                                 service_start()
                             } else {
@@ -1881,19 +1879,15 @@ fn main() {
         .expect("icon rgba");
     let menu = Menu::new();
     let status = MenuItem::with_id("status", "walgit 服务:检查中…", false, None);
-    // Two rows with fixed verbs — 启动 is 启动, 停止 is 停止. One row whose text
-    // flipped while its id stayed `"stop"` is exactly how every click came to run
-    // `service stop`, even the clicks on 「启动服务」; nothing here consults a
-    // cached state to choose a verb any more.
-    let start = MenuItem::with_id("start", "启动服务", true, None);
-    let stop = MenuItem::with_id("stop", "停止服务", true, None);
+    // One row; `rebuild_menu` rewrites its text from the live state, and the id is
+    // deliberately verb-less so nothing can pick a verb out of it again.
+    let toggle = MenuItem::with_id("toggle", "启动服务", true, None);
     let upgrade = MenuItem::with_id("upgrade", "版本 … · 检查更新…", true, None);
     let web = MenuItem::with_id("web", "打开 Web UI", true, None);
     let quit = MenuItem::with_id("quit", "退出托盘(服务保持运行)", true, None);
     let _ = menu.append_items(&[
         &status,
-        &start,
-        &stop,
+        &toggle,
         &PredefinedMenuItem::separator(),
         &upgrade,
         &PredefinedMenuItem::separator(),
@@ -1921,8 +1915,7 @@ fn main() {
         tray: Some(tray),
         items: Some(MenuHandles {
             status,
-            start,
-            stop,
+            toggle,
             upgrade,
             quit,
         }),
