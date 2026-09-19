@@ -20,11 +20,14 @@
 //! nor a hand-written `tools/call` can reach them. Writing (a signed collab
 //! entry) is opt-in via `--allow-write`.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use tokio::sync::{mpsc, watch};
 
 use crate::proc_group::{kill_tree, spawn_in_own_group};
 
@@ -33,6 +36,11 @@ use crate::proc_group::{kill_tree, spawn_in_own_group};
 /// decide).
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const KNOWN_PROTOCOLS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
+const MIN_SUBSCRIBE_INTERVAL_MS: u64 = 1000;
+pub(crate) const DEFAULT_SUBSCRIBE_INTERVAL_MS: u64 = 5000;
+pub(crate) const DEFAULT_MAX_SUBSCRIPTIONS: u64 = 32;
+const SUBSCRIBE_FAILURE_LIMIT: u32 = 5;
+const SUBSCRIBE_BACKOFF_MAX_MS: u64 = 60_000;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -46,6 +54,12 @@ pub struct Options {
     pub key: Option<PathBuf>,
     /// Remote the entry is pushed to (default `origin`).
     pub remote: String,
+    /// Poll interval for resource subscriptions. Values below one second are
+    /// rejected on `resources/subscribe` with `-32602`.
+    pub subscribe_interval_ms: u64,
+    /// Maximum live resource subscriptions. Zero is rejected; attempts to add
+    /// more than this many live subscriptions fail rather than being dropped.
+    pub max_subscriptions: u64,
 }
 
 /// One tool: what the host sees, plus the flag that keeps it out of the
@@ -209,170 +223,379 @@ pub async fn run(opts: Options) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     tracing::debug!("mcp stdio ready");
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        let mut out = tokio::io::stdout();
+        while let Some(line) = rx.recv().await {
+            if out.write_all(line.as_bytes()).await.is_err()
+                || out.write_all(b"\n").await.is_err()
+                || out.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    });
+    let session = Session::new(opts, tx.clone());
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
     while let Some(line) = lines.next_line().await.context("reading stdin")? {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = handle_line(&line, &opts).await {
-            out.write_all(reply.as_bytes()).await?;
-            out.write_all(b"\n").await?;
-            out.flush().await?;
+        if let Some(reply) = session.handle_line(&line).await
+            && tx.send(reply).is_err()
+        {
+            break;
         }
     }
+    session.shutdown().await;
+    drop(session);
+    drop(tx);
+    let _ = writer.await;
     Ok(())
 }
 
-/// One request line → one reply line (`None` for notifications). Split out from
-/// the transport so the protocol is testable without spawning anything.
-async fn handle_line(line: &str, opts: &Options) -> Option<String> {
-    let req: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(e) => {
+struct Subscription {
+    cancel: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct Session {
+    opts: Options,
+    notify_tx: mpsc::UnboundedSender<String>,
+    subscriptions: parking_lot::Mutex<HashMap<String, Subscription>>,
+}
+
+impl Session {
+    fn new(opts: Options, notify_tx: mpsc::UnboundedSender<String>) -> Self {
+        Self {
+            opts,
+            notify_tx,
+            subscriptions: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// One request line → one reply line (`None` for notifications). Split out
+    /// from the transport so the protocol is testable without spawning anything.
+    async fn handle_line(&self, line: &str) -> Option<String> {
+        let opts = &self.opts;
+        let req: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some(error_reply(
+                    Value::Null,
+                    -32700,
+                    &format!("parse error: {e}"),
+                ));
+            }
+        };
+        // Envelope first: a request that is not JSON-RPC 2.0 is `-32600`, not "an
+        // unknown method" (which would send the caller hunting for a typo).
+        if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
             return Some(error_reply(
                 Value::Null,
-                -32700,
-                &format!("parse error: {e}"),
+                -32600,
+                "invalid request: `jsonrpc` must be \"2.0\"",
             ));
         }
-    };
-    // Envelope first: a request that is not JSON-RPC 2.0 is `-32600`, not "an
-    // unknown method" (which would send the caller hunting for a typo).
-    if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Some(error_reply(
-            Value::Null,
-            -32600,
-            "invalid request: `jsonrpc` must be \"2.0\"",
-        ));
-    }
-    let id = req.get("id").cloned();
-    if let Some(i) = &id
-        && !(i.is_string() || i.is_number() || i.is_null())
-    {
-        return Some(error_reply(
-            Value::Null,
-            -32600,
-            "invalid request: `id` must be a string or a number",
-        ));
-    }
-    let Some(method) = req.get("method").and_then(Value::as_str) else {
-        // A *missing or non-string* method is an invalid request, not a
-        // notification — JSON-RPC 2.0 requires a method even for notifications.
-        // Staying silent would leave the client waiting for a reply that never
-        // comes, so answer with `id: null` as the spec prescribes.
-        return Some(error_reply(
-            id.unwrap_or(Value::Null),
-            -32600,
-            "invalid request: `method` must be a string",
-        ));
-    };
-    // Notifications (no id) never get a reply — including `notifications/*`.
-    id.as_ref()?;
-    let id = id.unwrap_or(Value::Null);
-    let params = req.get("params").cloned().unwrap_or(Value::Null);
-    match method {
-        "initialize" => {
-            if !params.is_object() {
-                return Some(error_reply(
-                    id,
-                    -32602,
-                    "invalid params: `params` must be an object",
-                ));
-            }
-            let asked = match params.get("protocolVersion") {
-                None => None,
-                Some(Value::String(version)) => Some(version.as_str()),
-                Some(_) => {
+        let id = req.get("id").cloned();
+        if let Some(i) = &id
+            && !(i.is_string() || i.is_number() || i.is_null())
+        {
+            return Some(error_reply(
+                Value::Null,
+                -32600,
+                "invalid request: `id` must be a string or a number",
+            ));
+        }
+        let Some(method) = req.get("method").and_then(Value::as_str) else {
+            // A *missing or non-string* method is an invalid request, not a
+            // notification — JSON-RPC 2.0 requires a method even for notifications.
+            // Staying silent would leave the client waiting for a reply that never
+            // comes, so answer with `id: null` as the spec prescribes.
+            return Some(error_reply(
+                id.unwrap_or(Value::Null),
+                -32600,
+                "invalid request: `method` must be a string",
+            ));
+        };
+        // Notifications (no id) never get a reply — including `notifications/*`.
+        id.as_ref()?;
+        let id = id.unwrap_or(Value::Null);
+        let params = req.get("params").cloned().unwrap_or(Value::Null);
+        match method {
+            "initialize" => {
+                if !params.is_object() {
                     return Some(error_reply(
                         id,
                         -32602,
-                        "invalid params: `protocolVersion` must be a string",
+                        "invalid params: `params` must be an object",
                     ));
                 }
-            };
-            let version = match asked {
-                Some(version) if KNOWN_PROTOCOLS.contains(&version) => version,
-                _ => PROTOCOL_VERSION,
-            };
-            Some(result_reply(
-                id,
-                json!({
-                    "protocolVersion": version,
-                    "capabilities": {"tools": {"listChanged": false}},
-                    // `instructions` sits next to `serverInfo`, not inside it —
-                    // that is where hosts read it.
-                    "instructions":
-                        "Tools are the walgit CLI (one implementation, no second schema). Read-only \
-                         unless the server was started with `--allow-write`; destructive operations \
-                         are not exposed at all.",
-                    "serverInfo": {"name": "walgit", "version": env!("CARGO_PKG_VERSION")}
-                }),
-            ))
-        }
-        "ping" => Some(result_reply(id, json!({}))),
-        "tools/list" => {
-            if !params.is_null() && !params.is_object() {
-                return Some(error_reply(
+                let asked = match params.get("protocolVersion") {
+                    None => None,
+                    Some(Value::String(version)) => Some(version.as_str()),
+                    Some(_) => {
+                        return Some(error_reply(
+                            id,
+                            -32602,
+                            "invalid params: `protocolVersion` must be a string",
+                        ));
+                    }
+                };
+                let version = match asked {
+                    Some(version) if KNOWN_PROTOCOLS.contains(&version) => version,
+                    _ => PROTOCOL_VERSION,
+                };
+                Some(result_reply(
                     id,
-                    -32602,
-                    "invalid params: `params` must be an object",
-                ));
+                    json!({
+                        "protocolVersion": version,
+                        "capabilities": {
+                            "tools": {"listChanged": false},
+                            "resources": {"subscribe": true, "listChanged": true},
+                            "logging": {}
+                        },
+                        // `instructions` sits next to `serverInfo`, not inside it —
+                        // that is where hosts read it.
+                        "instructions":
+                            "Tools are the walgit CLI (one implementation, no second schema). Read-only \
+                             unless the server was started with `--allow-write`; destructive operations \
+                             are not exposed at all. Resource subscriptions are client-side polling: \
+                             per-instance and best-effort, so keep durable cursors in the caller.",
+                        "serverInfo": {"name": "walgit", "version": env!("CARGO_PKG_VERSION")}
+                    }),
+                ))
             }
-            let tools: Vec<Value> = tool_defs()
-                .iter()
-                .filter(|t| opts.allow_write || !t.write)
-                .map(|t| {
-                    json!({"name": t.name, "description": t.description, "inputSchema": t.schema})
+            "ping" => Some(result_reply(id, json!({}))),
+            "tools/list" => {
+                if !params.is_null() && !params.is_object() {
+                    return Some(error_reply(
+                        id,
+                        -32602,
+                        "invalid params: `params` must be an object",
+                    ));
+                }
+                let tools: Vec<Value> = tool_defs()
+                    .iter()
+                    .filter(|t| opts.allow_write || !t.write)
+                    .map(|t| {
+                        json!({"name": t.name, "description": t.description, "inputSchema": t.schema})
+                    })
+                    .collect();
+                Some(result_reply(id, json!({"tools": tools})))
+            }
+            "tools/call" => {
+                if !params.is_object() {
+                    return Some(error_reply(
+                        id,
+                        -32602,
+                        "invalid params: `params` must be an object",
+                    ));
+                }
+                let Some(name) = params.get("name").and_then(Value::as_str) else {
+                    return Some(error_reply(
+                        id,
+                        -32602,
+                        "invalid params: `name` must be a string",
+                    ));
+                };
+                // `arguments` is defined as an object; an array or scalar used to
+                // execute the tool with the value silently ignored.
+                let args = match params.get("arguments") {
+                    None => json!({}),
+                    Some(v) if v.is_object() => v.clone(),
+                    Some(_) => {
+                        return Some(error_reply(
+                            id,
+                            -32602,
+                            "invalid params: `arguments` must be an object",
+                        ));
+                    }
+                };
+                Some(match call_tool(name, &args, opts).await {
+                    Ok(text) => {
+                        result_reply(id, json!({"content": [{"type": "text", "text": text}]}))
+                    }
+                    // A request the model can repair is a protocol error; a tool that
+                    // ran and failed is content with `isError`.
+                    Err(ToolError::InvalidParams(m)) => error_reply(id, -32602, &m),
+                    Err(ToolError::Execution(m)) => result_reply(
+                        id,
+                        json!({"content": [{"type": "text", "text": m}], "isError": true}),
+                    ),
                 })
-                .collect();
-            Some(result_reply(id, json!({"tools": tools})))
-        }
-        "tools/call" => {
-            if !params.is_object() {
-                return Some(error_reply(
-                    id,
-                    -32602,
-                    "invalid params: `params` must be an object",
-                ));
             }
-            let Some(name) = params.get("name").and_then(Value::as_str) else {
-                return Some(error_reply(
-                    id,
-                    -32602,
-                    "invalid params: `name` must be a string",
-                ));
-            };
-            // `arguments` is defined as an object; an array or scalar used to
-            // execute the tool with the value silently ignored.
-            let args = match params.get("arguments") {
-                None => json!({}),
-                Some(v) if v.is_object() => v.clone(),
-                Some(_) => {
+            "resources/list" => {
+                if !params.is_null() && !params.is_object() {
                     return Some(error_reply(
                         id,
                         -32602,
-                        "invalid params: `arguments` must be an object",
+                        "invalid params: `params` must be an object",
                     ));
                 }
-            };
-            Some(match call_tool(name, &args, opts).await {
-                Ok(text) => result_reply(id, json!({"content": [{"type": "text", "text": text}]})),
-                // A request the model can repair is a protocol error; a tool that
-                // ran and failed is content with `isError`.
-                Err(ToolError::InvalidParams(m)) => error_reply(id, -32602, &m),
-                Err(ToolError::Execution(m)) => result_reply(
+                Some(result_reply(
                     id,
-                    json!({"content": [{"type": "text", "text": m}], "isError": true}),
-                ),
-            })
+                    json!({"resources": self.resource_list().await}),
+                ))
+            }
+            "resources/read" => {
+                let uri = match resource_uri_param(&params) {
+                    Ok(uri) => uri,
+                    Err(e) => return Some(error_reply(id, e.code(), &e.message())),
+                };
+                match read_resource_uri(opts, &uri, None).await {
+                    Ok(snapshot) => Some(result_reply(id, snapshot.response(&uri))),
+                    Err(e) => Some(error_reply(id, e.code(), &e.message())),
+                }
+            }
+            "resources/subscribe" => {
+                let uri = match resource_uri_param(&params) {
+                    Ok(uri) => uri,
+                    Err(e) => return Some(error_reply(id, e.code(), &e.message())),
+                };
+                match self.subscribe(&uri).await {
+                    Ok(()) => Some(result_reply(id, json!({}))),
+                    Err(e) => Some(error_reply(id, e.code(), &e.message())),
+                }
+            }
+            "resources/unsubscribe" => {
+                let uri = match resource_uri_param(&params) {
+                    Ok(uri) => uri,
+                    Err(e) => return Some(error_reply(id, e.code(), &e.message())),
+                };
+                match self.unsubscribe(&uri).await {
+                    Ok(()) => Some(result_reply(id, json!({}))),
+                    Err(e) => Some(error_reply(id, e.code(), &e.message())),
+                }
+            }
+            other => Some(error_reply(
+                id,
+                -32601,
+                &format!("method not found: {other}"),
+            )),
         }
-        other => Some(error_reply(
-            id,
-            -32601,
-            &format!("method not found: {other}"),
-        )),
     }
+
+    async fn subscribe(&self, uri: &str) -> Result<(), ResourceError> {
+        validate_subscription_options(&self.opts)?;
+        ResourceUri::parse(uri)?;
+        {
+            let mut subscriptions = self.subscriptions.lock();
+            subscriptions.retain(|_, sub| !sub.task.is_finished());
+            if subscriptions.contains_key(uri) {
+                return Ok(());
+            }
+            let live = u64::try_from(subscriptions.len()).unwrap_or(u64::MAX);
+            if live >= self.opts.max_subscriptions {
+                return Err(ResourceError::InvalidParams(format!(
+                    "`--max-subscriptions` limit ({} live subscriptions) reached",
+                    self.opts.max_subscriptions
+                )));
+            }
+        }
+
+        let version = probe_resource_version(&self.opts, uri, None).await?;
+        let (cancel, cancel_rx) = watch::channel(false);
+        let task = spawn_subscription(
+            uri.to_string(),
+            self.opts.clone(),
+            self.notify_tx.clone(),
+            cancel_rx,
+            version,
+        );
+        let mut subscriptions = self.subscriptions.lock();
+        subscriptions.retain(|_, sub| !sub.task.is_finished());
+        if subscriptions.contains_key(uri) {
+            let _ = cancel.send(true);
+            let _ = task.await;
+            return Ok(());
+        }
+        let live = u64::try_from(subscriptions.len()).unwrap_or(u64::MAX);
+        if live >= self.opts.max_subscriptions {
+            let _ = cancel.send(true);
+            let _ = task.await;
+            return Err(ResourceError::InvalidParams(format!(
+                "`--max-subscriptions` limit ({} live subscriptions) reached",
+                self.opts.max_subscriptions
+            )));
+        }
+        subscriptions.insert(uri.to_string(), Subscription { cancel, task });
+        Ok(())
+    }
+
+    async fn unsubscribe(&self, uri: &str) -> Result<(), ResourceError> {
+        ResourceUri::parse(uri)?;
+        let sub = self.subscriptions.lock().remove(uri);
+        if let Some(sub) = sub {
+            let _ = sub.cancel.send(true);
+            let _ = sub.task.await;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) {
+        let subscriptions = {
+            let mut guard = self.subscriptions.lock();
+            std::mem::take(&mut *guard)
+        };
+        for sub in subscriptions.values() {
+            let _ = sub.cancel.send(true);
+        }
+        for sub in subscriptions.into_values() {
+            let _ = sub.task.await;
+        }
+    }
+
+    async fn resource_list(&self) -> Vec<Value> {
+        let Some((owner, repo)) = discover_repo_identity(&self.opts, None).await else {
+            return Vec::new();
+        };
+        let mut resources = vec![
+            resource_item(
+                &format!("walgit://refs/{owner}/{repo}"),
+                &format!("Refs for {owner}/{repo}"),
+                "Refs observed by `git ls-remote --refs`; `_meta.version` is a digest of the ref set.",
+            ),
+            resource_item(
+                &format!("walgit://wal/{owner}/{repo}?from=0"),
+                &format!("WAL for {owner}/{repo}"),
+                "Retained WAL entries at or after `from`; `_meta.version` is the manifest head seq.",
+            ),
+            resource_item(
+                &format!("walgit://collab/board/{owner}/{repo}"),
+                &format!("Collab board for {owner}/{repo}"),
+                "The deterministic board projection; `_meta.version` hashes the board bytes.",
+            ),
+        ];
+        let repo_path = self.opts.repo.display().to_string();
+        let argv = vec![
+            "collab".to_string(),
+            "ls".to_string(),
+            format!("--repo={repo_path}"),
+        ];
+        if let Ok(list) = run_walgit(&argv, &self.opts.config, None).await {
+            for id in list.lines().map(str::trim).filter(|id| !id.is_empty()) {
+                resources.push(resource_item(
+                    &format!("walgit://collab/thread/{owner}/{repo}/{id}"),
+                    &format!("Collab thread {id}"),
+                    "One parent-ordered thread; `_meta.version` is the head entry oid.",
+                ));
+            }
+        }
+        resources
+    }
+}
+
+/// One request line → one reply line (`None` for notifications). Kept as a
+/// free function for the stateless protocol tests; production owns one
+/// `Session` for the lifetime of the stdio loop.
+#[cfg(test)]
+async fn handle_line(line: &str, opts: &Options) -> Option<String> {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let session = Session::new(opts.clone(), tx);
+    let reply = session.handle_line(line).await;
+    session.shutdown().await;
+    reply
 }
 
 /// Build the child argv for `name`. Unknown names — including every destructive
@@ -517,6 +740,29 @@ async fn run_child_with(
     timeout: std::time::Duration,
     cap: usize,
 ) -> Result<String, ToolError> {
+    run_child_with_cancel_inner(exe, argv, timeout, cap, None).await
+}
+
+async fn run_child_with_cancel(
+    exe: &std::path::Path,
+    argv: &[String],
+    timeout: std::time::Duration,
+    cap: usize,
+    cancel: watch::Receiver<bool>,
+) -> Result<String, ToolError> {
+    run_child_with_cancel_inner(exe, argv, timeout, cap, Some(cancel)).await
+}
+
+async fn run_child_with_cancel_inner(
+    exe: &std::path::Path,
+    argv: &[String],
+    timeout: std::time::Duration,
+    cap: usize,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ToolError> {
+    let (keep_cancel_tx, local_cancel_rx) = watch::channel(false);
+    let mut cancel_rx = cancel.unwrap_or(local_cancel_rx);
+    let _keep_cancel_tx = keep_cancel_tx;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(argv)
         // Never the MCP stream: the child's stdin must not be able to consume it.
@@ -556,6 +802,11 @@ async fn run_child_with(
                     stderr = buf;
                     got_err = true;
                     over |= exceeded;
+                }
+                () = wait_cancelled(&mut cancel_rx) => {
+                    kill_tree(&mut child);
+                    let _ = child.wait().await;
+                    return Err(ToolError::Execution(format!("`{shown}` was cancelled")));
                 }
                 () = tokio::time::sleep_until(deadline) => {
                     kill_tree(&mut child);
@@ -832,13 +1083,724 @@ fn error_reply(id: Value, code: i64, message: &str) -> String {
     Value::Object(body).to_string()
 }
 
+fn resource_uri_param(params: &Value) -> Result<String, ResourceError> {
+    let Some(params) = params.as_object() else {
+        return Err(ResourceError::InvalidParams(
+            "invalid params: `params` must be an object".into(),
+        ));
+    };
+    match params.get("uri").and_then(Value::as_str) {
+        Some(uri) if !uri.trim().is_empty() => Ok(uri.to_string()),
+        _ => Err(ResourceError::InvalidParams(
+            "invalid params: `uri` must be a non-empty string".into(),
+        )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResourceUri {
+    Refs {
+        owner: String,
+        repo: String,
+    },
+    Wal {
+        owner: String,
+        repo: String,
+        from: u64,
+    },
+    Board {
+        owner: String,
+        repo: String,
+    },
+    Thread {
+        owner: String,
+        repo: String,
+        thread: String,
+    },
+}
+
+impl ResourceUri {
+    fn parse(uri: &str) -> Result<Self, ResourceError> {
+        let raw = uri.strip_prefix("walgit://").ok_or_else(|| {
+            ResourceError::InvalidParams("resource uri must start with `walgit://`".into())
+        })?;
+        let (path, query) = raw
+            .split_once('?')
+            .map_or((raw, None), |(p, q)| (p, Some(q)));
+        let mut parts = path.split('/');
+        match parts.next() {
+            Some("refs") => {
+                let owner = valid_component(parts.next())?;
+                let repo = valid_component(parts.next())?;
+                if parts.next().is_some() || query.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "invalid refs resource uri".into(),
+                    ));
+                }
+                Ok(Self::Refs { owner, repo })
+            }
+            Some("wal") => {
+                let owner = valid_component(parts.next())?;
+                let repo = valid_component(parts.next())?;
+                if parts.next().is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "invalid WAL resource uri".into(),
+                    ));
+                }
+                let from = parse_from_query(query)?;
+                Ok(Self::Wal { owner, repo, from })
+            }
+            Some("collab") => {
+                let kind = parts.next();
+                let owner = valid_component(parts.next())?;
+                let repo = valid_component(parts.next())?;
+                if query.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "invalid collab resource uri".into(),
+                    ));
+                }
+                match kind {
+                    Some("board") if parts.next().is_none() => Ok(Self::Board { owner, repo }),
+                    Some("thread") => {
+                        let thread = valid_component(parts.next())?;
+                        if parts.next().is_some() {
+                            return Err(ResourceError::InvalidParams(
+                                "invalid collab thread uri".into(),
+                            ));
+                        }
+                        Ok(Self::Thread {
+                            owner,
+                            repo,
+                            thread,
+                        })
+                    }
+                    _ => Err(ResourceError::InvalidParams(
+                        "invalid collab resource uri".into(),
+                    )),
+                }
+            }
+            _ => Err(ResourceError::InvalidParams(
+                "unknown walgit resource uri".into(),
+            )),
+        }
+    }
+
+    fn owner_repo(&self) -> (&str, &str) {
+        match self {
+            Self::Refs { owner, repo }
+            | Self::Wal { owner, repo, .. }
+            | Self::Board { owner, repo }
+            | Self::Thread { owner, repo, .. } => (owner, repo),
+        }
+    }
+}
+
+fn valid_component(value: Option<&str>) -> Result<String, ResourceError> {
+    let Some(value) = value.filter(|v| !v.is_empty() && *v != "." && *v != "..") else {
+        return Err(ResourceError::InvalidParams(
+            "resource uri contains an invalid path component".into(),
+        ));
+    };
+    Ok(value.to_string())
+}
+
+fn parse_from_query(query: Option<&str>) -> Result<u64, ResourceError> {
+    let Some(query) = query else {
+        return Ok(0);
+    };
+    let Some(value) = query.strip_prefix("from=") else {
+        return Err(ResourceError::InvalidParams(
+            "WAL resource query must be `?from=<seq>`".into(),
+        ));
+    };
+    if value.contains('&') {
+        return Err(ResourceError::InvalidParams(
+            "WAL resource accepts only the `from` query parameter".into(),
+        ));
+    }
+    value.parse::<u64>().map_err(|_| {
+        ResourceError::InvalidParams("WAL resource `from` must be a non-negative integer".into())
+    })
+}
+
+fn validate_subscription_options(opts: &Options) -> Result<(), ResourceError> {
+    if opts.subscribe_interval_ms < MIN_SUBSCRIBE_INTERVAL_MS {
+        return Err(ResourceError::InvalidParams(format!(
+            "`--subscribe-interval-ms` must be >= {MIN_SUBSCRIBE_INTERVAL_MS}"
+        )));
+    }
+    if opts.max_subscriptions == 0 {
+        return Err(ResourceError::InvalidParams(
+            "`--max-subscriptions` must be >= 1".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn subscription_delay_ms(interval_ms: u64, failures: u32) -> u64 {
+    if failures == 0 {
+        return interval_ms;
+    }
+    let shift = failures.min(16);
+    interval_ms
+        .saturating_mul(1_u64 << shift)
+        .min(SUBSCRIBE_BACKOFF_MAX_MS)
+}
+
+struct VersionTracker {
+    last: String,
+}
+
+impl VersionTracker {
+    fn new(last: String) -> Self {
+        Self { last }
+    }
+
+    fn changed(&mut self, version: &str) -> bool {
+        if self.last == version {
+            return false;
+        }
+        self.last = version.to_string();
+        true
+    }
+}
+
+struct ResourceSnapshot {
+    body: Value,
+    version: String,
+}
+
+impl ResourceSnapshot {
+    fn response(&self, uri: &str) -> Value {
+        let text = json!({
+            "data": self.body,
+            "_meta": {"version": self.version}
+        })
+        .to_string();
+        json!({
+            "contents": [{
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": text,
+                "_meta": {"version": self.version}
+            }]
+        })
+    }
+}
+
+#[derive(Debug)]
+enum ResourceError {
+    InvalidParams(String),
+    NotFound(String),
+    Execution(String),
+}
+
+impl ResourceError {
+    fn code(&self) -> i64 {
+        match self {
+            Self::InvalidParams(_) | Self::NotFound(_) => -32602,
+            Self::Execution(_) => -32603,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::InvalidParams(message) | Self::NotFound(message) | Self::Execution(message) => {
+                message.clone()
+            }
+        }
+    }
+}
+
+async fn read_resource_uri(
+    opts: &Options,
+    uri: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<ResourceSnapshot, ResourceError> {
+    let parsed = ResourceUri::parse(uri)?;
+    let (owner, repo) = parsed.owner_repo();
+    ensure_identity(opts, owner, repo, cancel.clone()).await?;
+    match parsed {
+        ResourceUri::Refs { .. } => read_refs(opts, owner, repo, cancel).await,
+        ResourceUri::Wal { from, .. } => read_wal(opts, owner, repo, from, cancel).await,
+        ResourceUri::Board { .. } => read_board(opts, cancel).await,
+        ResourceUri::Thread { thread, .. } => read_thread(opts, &thread, cancel).await,
+    }
+}
+
+/// The subscription loop's cheap probe. It deliberately does **not** call
+/// `read_resource_uri`: a subscription only needs the stable version, while
+/// `resources/read` is the client's opt-in, potentially heavier, content read.
+async fn probe_resource_version(
+    opts: &Options,
+    uri: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ResourceError> {
+    let parsed = ResourceUri::parse(uri)?;
+    let (owner, repo) = parsed.owner_repo();
+    ensure_identity(opts, owner, repo, cancel.clone()).await?;
+    match parsed {
+        ResourceUri::Refs { .. } => probe_refs_version(opts, owner, repo, cancel).await,
+        ResourceUri::Wal { .. } => probe_wal_version(opts, owner, repo, cancel).await,
+        ResourceUri::Board { .. } => probe_board_version(opts, cancel).await,
+        ResourceUri::Thread { thread, .. } => probe_thread_version(opts, &thread, cancel).await,
+    }
+}
+
+async fn probe_refs_version(
+    opts: &Options,
+    owner: &str,
+    repo: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ResourceError> {
+    let args = vec![
+        "-C".to_string(),
+        opts.repo.display().to_string(),
+        "ls-remote".to_string(),
+        "--refs".to_string(),
+        opts.remote.clone(),
+    ];
+    let out = run_git(&args, cancel)
+        .await
+        .map_err(|e| classify_resource_error(&format!("walgit://refs/{owner}/{repo}"), e))?;
+    let mut refs: Vec<(&str, &str)> = out
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    refs.sort_unstable_by_key(|(name, _)| *name);
+    let digest_input = refs
+        .into_iter()
+        .map(|(name, oid)| format!("{name}\0{oid}\n"))
+        .collect::<String>();
+    Ok(sha256_hex(digest_input.as_bytes()))
+}
+
+async fn probe_wal_version(
+    opts: &Options,
+    owner: &str,
+    repo: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ResourceError> {
+    let id = format!("{owner}/{repo}");
+    let uri = format!("walgit://wal/{id}");
+    let argv = vec!["repo".into(), "info".into(), "--".into(), id];
+    let info = run_walgit(&argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error(&uri, e))?;
+    parse_head_seq(&info)
+        .map(|seq| seq.to_string())
+        .ok_or_else(|| ResourceError::Execution("walgit repo info did not report head_seq".into()))
+}
+
+async fn probe_board_version(
+    opts: &Options,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ResourceError> {
+    let argv = vec![
+        "collab".into(),
+        "board".into(),
+        format!("--repo={}", opts.repo.display()),
+        "--format=json".into(),
+    ];
+    let out = run_walgit(&argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error("walgit://collab/board", e))?;
+    let board: Value = serde_json::from_str(&out).map_err(resource_execution)?;
+    Ok(sha256_hex(
+        &serde_json::to_vec(&board).map_err(resource_execution)?,
+    ))
+}
+
+async fn probe_thread_version(
+    opts: &Options,
+    thread: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ResourceError> {
+    let argv = vec![
+        "collab".into(),
+        "thread".into(),
+        format!("--repo={}", opts.repo.display()),
+        "--".into(),
+        thread.to_string(),
+    ];
+    let out = run_walgit(&argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error(&format!("collab thread {thread}"), e))?;
+    let entries: Value = serde_json::from_str(&out).map_err(resource_execution)?;
+    entries
+        .as_array()
+        .and_then(|entries| entries.last())
+        .and_then(|entry| entry.get("oid"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| ResourceError::Execution("collab thread reported no head oid".into()))
+}
+
+async fn read_refs(
+    opts: &Options,
+    owner: &str,
+    repo: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<ResourceSnapshot, ResourceError> {
+    let args = vec![
+        "-C".to_string(),
+        opts.repo.display().to_string(),
+        "ls-remote".to_string(),
+        "--refs".to_string(),
+        opts.remote.clone(),
+    ];
+    let out = run_git(&args, cancel)
+        .await
+        .map_err(|e| classify_resource_error(&format!("walgit://refs/{owner}/{repo}"), e))?;
+    let mut refs = Vec::new();
+    for line in out.lines() {
+        let Some((oid, name)) = line.split_once('\t') else {
+            continue;
+        };
+        refs.push(json!({"name": name, "oid": oid}));
+    }
+    refs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let digest_input = refs
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}\0{}\n",
+                entry["name"].as_str().unwrap_or_default(),
+                entry["oid"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<String>();
+    let body = json!({"remote": opts.remote, "refs": refs});
+    let version = sha256_hex(digest_input.as_bytes());
+    Ok(ResourceSnapshot { body, version })
+}
+
+async fn read_wal(
+    opts: &Options,
+    owner: &str,
+    repo: &str,
+    from: u64,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<ResourceSnapshot, ResourceError> {
+    let id = format!("{owner}/{repo}");
+    let uri = format!("walgit://wal/{id}?from={from}");
+    let info_argv = vec!["repo".into(), "info".into(), "--".into(), id.clone()];
+    let info = run_walgit(&info_argv, &opts.config, cancel.clone())
+        .await
+        .map_err(|e| classify_resource_error(&uri, e))?;
+    let head_seq = parse_head_seq(&info).ok_or_else(|| {
+        ResourceError::Execution("walgit repo info did not report head_seq".into())
+    })?;
+    let ls_argv = vec![
+        "wal".into(),
+        "ls".into(),
+        format!("--from={from}"),
+        "--".into(),
+        id,
+    ];
+    let out = run_walgit(&ls_argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error(&uri, e))?;
+    let entries: Vec<Value> = out
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let seq = fields.next()?.parse::<u64>().ok()?;
+            let kind = fields.next().unwrap_or_default();
+            Some(json!({"seq": seq, "kind": kind, "summary": fields.collect::<Vec<_>>().join(" ")}))
+        })
+        .collect();
+    let body = json!({"from": from, "head_seq": head_seq, "entries": entries, "text": out});
+    Ok(ResourceSnapshot {
+        body,
+        version: head_seq.to_string(),
+    })
+}
+
+async fn read_board(
+    opts: &Options,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<ResourceSnapshot, ResourceError> {
+    let argv = vec![
+        "collab".into(),
+        "board".into(),
+        format!("--repo={}", opts.repo.display()),
+        "--format=json".into(),
+    ];
+    let out = run_walgit(&argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error("walgit://collab/board", e))?;
+    let board: Value = serde_json::from_str(&out).map_err(resource_execution)?;
+    let version = sha256_hex(&serde_json::to_vec(&board).map_err(resource_execution)?);
+    Ok(ResourceSnapshot {
+        body: json!({"board": board}),
+        version,
+    })
+}
+
+async fn read_thread(
+    opts: &Options,
+    thread: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<ResourceSnapshot, ResourceError> {
+    let argv = vec![
+        "collab".into(),
+        "thread".into(),
+        format!("--repo={}", opts.repo.display()),
+        "--".into(),
+        thread.to_string(),
+    ];
+    let out = run_walgit(&argv, &opts.config, cancel)
+        .await
+        .map_err(|e| classify_resource_error(&format!("collab thread {thread}"), e))?;
+    let entries: Value = serde_json::from_str(&out).map_err(resource_execution)?;
+    let version = entries
+        .as_array()
+        .and_then(|entries| entries.last())
+        .and_then(|entry| entry.get("oid"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| ResourceError::Execution("collab thread reported no head oid".into()))?;
+    Ok(ResourceSnapshot {
+        body: json!({"thread_id": thread, "entries": entries}),
+        version,
+    })
+}
+
+async fn ensure_identity(
+    opts: &Options,
+    owner: &str,
+    repo: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<(), ResourceError> {
+    if let Some((actual_owner, actual_repo)) = discover_repo_identity(opts, cancel).await
+        && (actual_owner != owner || actual_repo != repo)
+    {
+        return Err(ResourceError::InvalidParams(format!(
+            "resource uri names {owner}/{repo}, but --repo's `{}` remote is {actual_owner}/{actual_repo}",
+            opts.remote
+        )));
+    }
+    Ok(())
+}
+
+async fn discover_repo_identity(
+    opts: &Options,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Option<(String, String)> {
+    let args = vec![
+        "-C".to_string(),
+        opts.repo.display().to_string(),
+        "remote".to_string(),
+        "get-url".to_string(),
+        opts.remote.clone(),
+    ];
+    let remote = run_git(&args, cancel).await.ok()?;
+    parse_remote_identity(remote.trim())
+}
+
+fn parse_remote_identity(remote: &str) -> Option<(String, String)> {
+    let remote = remote.trim().trim_end_matches('/');
+    let remote = remote.strip_suffix(".git").unwrap_or(remote);
+    let path = if let Some((_, rest)) = remote.split_once("://") {
+        rest.split_once('/').map_or(rest, |(_, path)| path)
+    } else if let Some((_, path)) = remote
+        .split_once('@')
+        .and_then(|(_, rest)| rest.split_once(':'))
+    {
+        path
+    } else {
+        remote
+    };
+    let mut parts = path.rsplit('/').filter(|part| !part.is_empty());
+    let repo = parts.next()?.to_string();
+    let owner = parts.next()?.to_string();
+    if owner.is_empty()
+        || repo.is_empty()
+        || owner == "."
+        || owner == ".."
+        || repo == "."
+        || repo == ".."
+    {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+async fn run_walgit(
+    argv: &[String],
+    config: &Path,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ToolError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| ToolError::Execution(format!("locating walgit: {e}")))?;
+    let mut args = vec![format!("--config={}", config.display())];
+    args.extend_from_slice(argv);
+    match cancel {
+        Some(cancel) => {
+            run_child_with_cancel(&exe, &args, TOOL_TIMEOUT, TOOL_OUTPUT_MAX, cancel).await
+        }
+        None => run_child_with(&exe, &args, TOOL_TIMEOUT, TOOL_OUTPUT_MAX).await,
+    }
+}
+
+async fn run_git(
+    args: &[String],
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<String, ToolError> {
+    match cancel {
+        Some(cancel) => {
+            run_child_with_cancel(
+                Path::new("git"),
+                args,
+                Duration::from_secs(10),
+                64 * 1024,
+                cancel,
+            )
+            .await
+        }
+        None => run_child_with(Path::new("git"), args, Duration::from_secs(10), 64 * 1024).await,
+    }
+}
+
+fn classify_resource_error(uri: &str, err: ToolError) -> ResourceError {
+    let message = match err {
+        ToolError::InvalidParams(message) | ToolError::Execution(message) => message,
+    };
+    let lower = message.to_ascii_lowercase();
+    let missing = lower.contains("404")
+        || lower.contains("not found")
+        || lower.contains("no entries for thread")
+        || lower.contains("does not appear to be a git repository");
+    if missing {
+        ResourceError::NotFound(format!("{uri}: {message}"))
+    } else {
+        ResourceError::Execution(message)
+    }
+}
+
+fn parse_head_seq(info: &str) -> Option<u64> {
+    info.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        match (fields.next(), fields.next()) {
+            (Some("head_seq"), Some(seq)) => seq.parse().ok(),
+            _ => None,
+        }
+    })
+}
+
+fn resource_execution(error: serde_json::Error) -> ResourceError {
+    ResourceError::Execution(format!("serializing resource: {error}"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+fn resource_item(uri: &str, name: &str, description: &str) -> Value {
+    json!({
+        "uri": uri,
+        "name": name,
+        "description": description,
+        "mimeType": "application/json"
+    })
+}
+
+fn notification(method: &str, params: Option<Value>) -> String {
+    let mut body = json!({"jsonrpc": "2.0", "method": method});
+    if let Some(params) = params {
+        body["params"] = params;
+    }
+    body.to_string()
+}
+
+fn updated_notification(uri: &str) -> String {
+    notification("notifications/resources/updated", Some(json!({"uri": uri})))
+}
+
+fn subscription_failure_notification(uri: &str, error: &str) -> String {
+    notification(
+        "notifications/message",
+        Some(json!({
+            "level": "error",
+            "logger": "walgit.mcp",
+            "data": {"uri": uri, "error": error}
+        })),
+    )
+}
+
+fn spawn_subscription(
+    uri: String,
+    opts: Options,
+    notify_tx: mpsc::UnboundedSender<String>,
+    mut cancel: watch::Receiver<bool>,
+    initial_version: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tracker = VersionTracker::new(initial_version);
+        let mut failures = 0_u32;
+        loop {
+            let delay =
+                Duration::from_millis(subscription_delay_ms(opts.subscribe_interval_ms, failures));
+            tokio::select! {
+                () = wait_cancelled(&mut cancel) => break,
+                () = tokio::time::sleep(delay) => {}
+            }
+            if *cancel.borrow() {
+                break;
+            }
+            let result = probe_resource_version(&opts, &uri, Some(cancel.clone())).await;
+            if *cancel.borrow() {
+                break;
+            }
+            match result {
+                Ok(version) => {
+                    failures = 0;
+                    if tracker.changed(&version)
+                        && notify_tx.send(updated_notification(&uri)).is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(ResourceError::NotFound(_)) => {
+                    let _ =
+                        notify_tx.send(notification("notifications/resources/list_changed", None));
+                    break;
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    if failures >= SUBSCRIBE_FAILURE_LIMIT {
+                        let _ = notify_tx
+                            .send(subscription_failure_notification(&uri, &error.message()));
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn wait_cancelled(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    let _ = cancel.changed().await;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Options, PROTOCOL_VERSION, ToolError, argv_for, handle_line, tool_defs};
+    use super::{
+        DEFAULT_MAX_SUBSCRIPTIONS, DEFAULT_SUBSCRIBE_INTERVAL_MS, Options, PROTOCOL_VERSION,
+        ResourceError, ResourceUri, Session, Subscription, ToolError, VersionTracker, argv_for,
+        handle_line, subscription_delay_ms, tool_defs, validate_subscription_options,
+    };
     use serde_json::{Value, json};
     #[cfg(unix)]
     use std::path::Path;
     use std::path::PathBuf;
+    use tokio::sync::{mpsc, watch};
 
     fn opts(allow_write: bool) -> Options {
         Options {
@@ -847,6 +1809,8 @@ mod tests {
             allow_write,
             key: Some(PathBuf::from("/nonexistent/key")),
             remote: "origin".into(),
+            subscribe_interval_ms: DEFAULT_SUBSCRIBE_INTERVAL_MS,
+            max_subscriptions: DEFAULT_MAX_SUBSCRIPTIONS,
         }
     }
 
@@ -1194,6 +2158,34 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn cancelling_a_wedged_tool_kills_the_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("pids");
+        let args = pid_command(&pid_file, false);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let watched_pid_file = pid_file.clone();
+        tokio::spawn(async move {
+            while !watched_pid_file.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = cancel_tx.send(true);
+        });
+        let err = super::run_child_with_cancel(
+            std::path::Path::new("sh"),
+            &args,
+            std::time::Duration::from_secs(30),
+            4096,
+            cancel_rx,
+        )
+        .await
+        .expect_err("cancelled");
+        assert!(format!("{err:?}").contains("cancelled"), "{err:?}");
+        assert_processes_are_gone(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_quick_tool_under_both_limits_succeeds() {
         let args = vec!["-c".to_string(), "printf hello".to_string()];
         let out = super::run_child_with(
@@ -1267,5 +2259,100 @@ mod tests {
             matches!(err, ToolError::InvalidParams(_)),
             "should be a protocol error"
         );
+    }
+
+    #[test]
+    fn resource_uri_parses_the_wire_shape() {
+        assert_eq!(
+            ResourceUri::parse("walgit://refs/acme/repo").expect("refs"),
+            ResourceUri::Refs {
+                owner: "acme".into(),
+                repo: "repo".into()
+            }
+        );
+        assert_eq!(
+            ResourceUri::parse("walgit://wal/acme/repo?from=42").expect("wal"),
+            ResourceUri::Wal {
+                owner: "acme".into(),
+                repo: "repo".into(),
+                from: 42
+            }
+        );
+        assert!(matches!(
+            ResourceUri::parse("walgit://wal/acme/repo?from=nope"),
+            Err(ResourceError::InvalidParams(_))
+        ));
+    }
+
+    #[test]
+    fn version_tracker_only_reports_changes() {
+        let mut tracker = VersionTracker::new("v1".into());
+        assert!(!tracker.changed("v1"));
+        assert!(tracker.changed("v2"));
+        assert!(!tracker.changed("v2"));
+        assert!(tracker.changed("v1"));
+    }
+
+    #[test]
+    fn version_hash_is_stable_and_content_sensitive() {
+        assert_eq!(super::sha256_hex(b"same"), super::sha256_hex(b"same"));
+        assert_ne!(super::sha256_hex(b"same"), super::sha256_hex(b"different"));
+    }
+
+    #[test]
+    fn subscription_options_reject_bad_limits_and_backoff_is_bounded() {
+        let mut o = opts(false);
+        o.subscribe_interval_ms = 999;
+        assert!(matches!(
+            validate_subscription_options(&o),
+            Err(ResourceError::InvalidParams(message)) if message.contains("subscribe-interval-ms")
+        ));
+
+        o.subscribe_interval_ms = 1000;
+        o.max_subscriptions = 0;
+        assert!(matches!(
+            validate_subscription_options(&o),
+            Err(ResourceError::InvalidParams(message)) if message.contains("max-subscriptions")
+        ));
+
+        assert_eq!(subscription_delay_ms(1000, 0), 1000);
+        assert_eq!(subscription_delay_ms(1000, 1), 2000);
+        assert_eq!(subscription_delay_ms(1000, 2), 4000);
+        assert_eq!(subscription_delay_ms(1000, 99), 60_000);
+    }
+
+    #[tokio::test]
+    async fn subscription_count_over_the_limit_is_rejected() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut o = opts(false);
+        o.max_subscriptions = 1;
+        let session = Session::new(o, tx);
+        let (cancel, mut cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _ = cancel_rx.changed().await;
+        });
+        session
+            .subscriptions
+            .lock()
+            .insert("walgit://refs/o/held".into(), Subscription { cancel, task });
+
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/subscribe",
+            "params": {"uri": "walgit://refs/o/new"}
+        })
+        .to_string();
+        let reply: Value =
+            serde_json::from_str(&session.handle_line(&line).await.expect("reply")).expect("json");
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("max-subscriptions"),
+            "{reply}"
+        );
+        session.shutdown().await;
     }
 }

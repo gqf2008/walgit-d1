@@ -93,6 +93,12 @@ enum Command {
         /// Remote `collab_entry` pushes to.
         #[arg(long, default_value = "origin")]
         remote: String,
+        /// Poll interval for MCP resource subscriptions (milliseconds, >= 1000).
+        #[arg(long, default_value_t = mcp_cmd::DEFAULT_SUBSCRIBE_INTERVAL_MS)]
+        subscribe_interval_ms: u64,
+        /// Maximum number of live MCP resource subscriptions.
+        #[arg(long, default_value_t = mcp_cmd::DEFAULT_MAX_SUBSCRIPTIONS)]
+        max_subscriptions: u64,
     },
     /// Trigger compaction (geometric repack) for one repo or all.
     Compact {
@@ -790,6 +796,8 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
             allow_write,
             key,
             remote,
+            subscribe_interval_ms,
+            max_subscriptions,
         } => {
             mcp_cmd::run(mcp_cmd::Options {
                 repo,
@@ -797,6 +805,8 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
                 allow_write,
                 key,
                 remote,
+                subscribe_interval_ms,
+                max_subscriptions,
             })
             .await
         }

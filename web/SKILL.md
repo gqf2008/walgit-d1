@@ -48,6 +48,36 @@ exists only with `--allow-write`. Destructive operations (GC, compaction, import
 writes, ref deletion) are not exposed at all — and bytes never travel over MCP: clone/fetch/push
 stay git + bundle-uri.
 
+MCP resources expose read-only, `walgit://`-addressed views for the configured `--repo` checkout:
+`walgit://refs/<owner>/<repo>`, `walgit://wal/<owner>/<repo>?from=<seq>`,
+`walgit://collab/board/<owner>/<repo>`, and
+`walgit://collab/thread/<owner>/<repo>/<thread-id>`. `resources/read` returns the content plus a
+stable `_meta.version` (refs digest, WAL head seq, board hash, or thread head oid). Subscriptions
+are **adapter-side polling, not server push** (D46): each is `per-instance` and **best-effort**, the
+poller asks only for a cheap version probe, and the client decides whether to call `resources/read`
+after an update. Start with:
+
+```sh
+walgit mcp --repo /path/to/checkout \
+  --subscribe-interval-ms 5000 --max-subscriptions 32
+```
+
+```jsonc
+{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"resources/read",
+ "params":{"uri":"walgit://refs/acme/repo"}}
+{"jsonrpc":"2.0","id":3,"method":"resources/subscribe",
+ "params":{"uri":"walgit://collab/board/acme/repo"}}
+{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe",
+ "params":{"uri":"walgit://collab/board/acme/repo"}}
+```
+
+An observed version change arrives as
+`{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"…"}}`; a vanished
+resource arrives as `notifications/resources/list_changed`. Notifications can be missed on process
+restart or instance change, so a durable sidecar must keep its own cursor and use the pull lanes
+(`git ls-remote`, `walgit wal ls`, `walgit collab watch`) as the source of truth.
+
 ## Discover
 
 - `GET /api/v1` — the discovery document (lanes, endpoint list).

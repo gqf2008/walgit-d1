@@ -180,6 +180,7 @@ jobs:
           assert unknown["error"]["code"] == -32601, unknown
           print(f"MCP smoke OK - {len(names)} read-only tools")
           PY
+          python3 scripts/mcp-subscribe-smoke.py target/debug/walgit walgit.example.toml
       - name: Assemble and inspect the linux .deb
         run: |
           sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
