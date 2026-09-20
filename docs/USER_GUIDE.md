@@ -320,7 +320,7 @@ walgit wal show <owner>/<repo> <seq>
 - **manifest**：仓库 refs/pack 集的一次 CAS 快照
 - **principal**：协作身份名，绑一把 Ed25519 公钥
 - **entry**：`refs/collab/inbox/<principal>/<uuid>` 指向的签名 JSON 对象
-- **thread**：相同 `id` 的条目集合，按 `(parent, ts)` 排序
+- **thread**：相同 `id` 的条目集合；序见 `docs/D1_PROTOCOL.md` §6.2（排序键 `(ts, actor, oid)`，`parent` 只决定就绪）
 - **board**：线程集合按 `.walgit/board.toml` 列定义的投影
 - **runner**：`walgit ci run` 的客户端算力
 

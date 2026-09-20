@@ -12,7 +12,7 @@ use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use walgit_git::ObjectFormat;
 
-// ---- §4.2 entry schema -------------------------------------------------------
+// ---- docs/D1_PROTOCOL.md §5 entry schema -------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Entry {
@@ -63,7 +63,7 @@ impl EntryRef {
     }
 }
 
-// ---- §4.2 canonical form (the signed bytes) ----------------------------------
+// ---- docs/D1_PROTOCOL.md §5.3 canonical form (the signed bytes) ----------------------------------
 
 /// Recursive key-sorted, whitespace-free JSON: objects sorted by key bytes,
 /// arrays in order, strings JSON-escaped, numbers as JSON numbers. This must
@@ -155,7 +155,7 @@ pub fn sign_entry(entry: &mut Entry, key: &SigningKey) -> String {
     )
 }
 
-// ---- §11.4 the fold: a signed snapshot of the inbox (D45) ---------------------
+// ---- docs/D1_PROTOCOL.md §9 the fold: a signed snapshot of the inbox (D45) ---------------------
 //
 // The append-only inbox namespace hits two walls as it grows (the per-request
 // aggregation budget and the clone/fetch advertisement size), so the inbox
@@ -174,7 +174,7 @@ pub const SNAPSHOT_REF: &str = "refs/collab/meta/snapshot";
 /// found in, and the raw entry bytes, verbatim. The record is the digest
 /// manifest that keeps the per-entry signature chain verifiable after the
 /// inbox ref is pruned — entry trust never derives from the snapshot's own
-/// signature; every folded entry still verifies per §4.2.
+/// signature; every folded entry still verifies per docs/D1_PROTOCOL.md §5.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SnapshotRecord {
     pub oid: String,
@@ -202,7 +202,7 @@ impl SnapshotRecord {
 
 /// The snapshot document at `SNAPSHOT_REF`: the folded entries plus fold
 /// provenance (`actor`, `ts`, `sig`). The signature covers the canonical form
-/// of the document without `sig` (the §4.2 canonical contract) and attests who
+/// of the document without `sig` (the docs/D1_PROTOCOL.md §5.3 canonical contract) and attests who
 /// folded, when; readers verify contained entries independently.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Snapshot {
@@ -250,7 +250,7 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Snapshot, String> {
 }
 
 /// The canonical bytes the snapshot's signature covers: the document without
-/// `sig`, under the §4.2 canonical contract.
+/// `sig`, under the docs/D1_PROTOCOL.md §5.3 canonical contract.
 pub fn snapshot_canonical(snap: &Snapshot) -> String {
     let mut unsigned = snap.clone();
     unsigned.sig.clear();
@@ -360,7 +360,7 @@ impl EntrySet {
     }
 }
 
-// ---- §4.3 deterministic aggregation ------------------------------------------
+// ---- docs/D1_PROTOCOL.md §6/§7 deterministic aggregation ------------------------------------------
 
 /// One issue/thread: entries referencing the same `id`, topologically ordered
 /// by the `parent` chain (deterministic: ts as the tie-break).
@@ -638,7 +638,7 @@ pub struct ReportPr {
     pub merge_reason: String,
 }
 
-/// One CI run, projected by the §7 aggregation (`docs/D1_CI_PROTOCOL.md` §8.3 —
+/// One CI run, projected by the D1-CI §7 aggregation (`docs/D1_CI_PROTOCOL.md` §8.3 —
 /// the report's CI section; pure-CI threads are not board cards, but the
 /// report and the SPA need to find them: the guide's claim-race diagram and
 /// `walgit collab report`'s CI section both read this).
@@ -666,7 +666,7 @@ pub struct Report {
     /// `open` first, then `merged`, then `closed`; within a status newest
     /// activity first, id ascending breaks ties.
     pub prs: Vec<ReportPr>,
-    /// CI runs (§8.3) — pure-CI threads are skipped above and projected here
+    /// CI runs (D1-CI §8.3) — pure-CI threads are skipped above and projected here
     /// by `ci::collect_runs` instead.
     pub runs: Vec<ReportRun>,
     pub total_entries: usize,
@@ -702,7 +702,7 @@ pub fn build_report(
     let mut report = Report::default();
     for (id, group) in &by_thread {
         // CI run threads are not work-unit cards (docs/D1_CI_PROTOCOL.md
-        // §8.3): their surfaces are `walgit ci status`, the report's CI
+        // D1-CI §8.3): their surfaces are `walgit ci status`, the report's CI
         // section and the SPA thread badge — on a board they would only ever
         // be untitled "open" cards.
         if group
@@ -789,8 +789,8 @@ pub fn build_report(
     }
     report.by_actor = by_actor.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     report.by_kind = by_kind.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    // §8.3: the skipped pure-CI threads are the report's CI section — one
-    // summary per run, straight from the §7 aggregation (only verified,
+    // D1-CI §8.3: the skipped pure-CI threads are the report's CI section — one
+    // summary per run, straight from the D1-CI §7 aggregation (only verified,
     // well-formed entries drive it; unverified stay visible in by_kind).
     report.runs = crate::ci::collect_runs(entries, principals, now)
         .into_iter()
@@ -1022,7 +1022,7 @@ pub struct Board {
 /// last match wins — every `status` entry sets its `body.status`, a
 /// `merge_result` with `merged = true` sets "merged" (a later `status` entry
 /// still overrides it); default "open". Deliberately wider than `pr_view`'s
-/// open/merged/closed state machine: the board tracks the work unit (§4.2
+/// open/merged/closed state machine: the board tracks the work unit (docs/D1_PROTOCOL.md §5.2
 /// names in-progress / needs-review / blocked / needs-human), the PR view
 /// tracks merge state.
 fn card_status(ordered: &[&EntryRef]) -> String {
@@ -1168,7 +1168,7 @@ pub fn build_board(
         .collect();
     for (id, group) in &by_thread {
         // CI run threads are not work-unit cards (docs/D1_CI_PROTOCOL.md
-        // §8.3): their surfaces are `walgit ci status`, the report's CI
+        // D1-CI §8.3): their surfaces are `walgit ci status`, the report's CI
         // section and the SPA thread badge — on a board they would only ever
         // be untitled "open" cards.
         if group

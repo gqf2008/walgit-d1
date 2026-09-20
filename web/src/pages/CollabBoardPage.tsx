@@ -33,7 +33,7 @@ function fmtTime(ts: number): string {
 
 /**
  * Live refresh over SSE: reopen the collab refs stream (`GET …/refs/collab`
- * with `Accept: text/event-stream` — refs-level reads are cheap, D1 §7) and
+ * with `Accept: text/event-stream` — refs-level reads are cheap, docs/D1_PROTOCOL.md §11) and
  * invalidate the collab views when the namespace's (name, sha) set moved.
  * Reopening with a backoff is the same reconnection semantics an EventSource
  * would apply; the first pass only seeds the digest, so mounting never

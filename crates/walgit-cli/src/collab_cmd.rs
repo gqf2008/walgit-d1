@@ -1,6 +1,6 @@
 //! `walgit collab` — the D1 collaboration layer (`docs/D1_PROTOCOL.md`).
 //!
-//! Deterministic aggregation over `refs/collab/*` (§4.3): every client that
+//! Deterministic aggregation over `refs/collab/*` (docs/D1_PROTOCOL.md §6/§7): every client that
 //! reads the same refs and verifies the same signatures computes the same
 //! `thread` / `pr` / `merge_rule_eval` answer. The read commands run against a
 //! local git checkout that has the collab refs (clone/fetch them), so no
@@ -54,7 +54,7 @@ pub enum CollabAction {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
-    /// Construct + sign + deliver a collab entry (§4.2). Writes the inbox ref
+    /// Construct + sign + deliver a collab entry (docs/D1_PROTOCOL.md §5). Writes the inbox ref
     /// locally; `--push <remote>` additionally pushes it to a walgit server.
     #[allow(clippy::large_enum_variant)] // CLI 参数结构,进程一次构建,无热路径
     Entry {
@@ -839,7 +839,7 @@ fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>) -> Resu
     let reader = CollabReader::new(repo);
     let format = reader.object_format()?;
     // The snapshot's own signature is only verifiable against a *registered*
-    // key (§4.2) — folding as an unregistered principal would strand every
+    // key (docs/D1_PROTOCOL.md §4.3) — folding as an unregistered principal would strand every
     // reader with an unverifiable snapshot.
     let principals = reader.principals()?;
     let Some(registered_public_key) = principals.get(actor) else {
@@ -856,7 +856,7 @@ fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>) -> Resu
         );
     }
     // The baseline the snapshot push leases against: the snapshot ref's value
-    // as this gc read it (§11.4). `None` is `--force-with-lease=ref:` (an
+    // as this gc read it (docs/D1_PROTOCOL.md §9). `None` is `--force-with-lease=ref:` (an
     // explicitly empty <expect>), Git's portable "the ref must not exist";
     // the zero OID is not equivalent on current Git.
     let (baseline, mut records): (Option<String>, Vec<SnapshotRecord>) =
@@ -1147,7 +1147,7 @@ fn run_report(repo: &Path, format: &str, rules_path: Option<&Path>) -> Result<()
     };
     let report = build_report(&refs, &principals, &rules, chrono::Utc::now().timestamp());
     // The CI section rides the same loaded log and the same aggregation core
-    // as `walgit ci status` (§8.3) — one answer, no second semantics.
+    // as `walgit ci status` (D1-CI §8.3) — one answer, no second semantics.
     let ci = walgit_wal::ci::ci_entries(&refs);
     let runs = walgit_wal::ci::collect_runs(&ci, &principals, chrono::Utc::now().timestamp());
     match format {
@@ -1405,7 +1405,7 @@ pub(crate) fn git_fetch_collab(repo: &Path, remote: &str) -> Result<()> {
     Ok(())
 }
 
-/// On-demand pull of one D1-CI object (§8.2). The result entry names the
+/// On-demand pull of one D1-CI object (D1-CI §8.2). The result entry names the
 /// publisher and content address, so fetching the whole artifact namespace
 /// would turn one log download into an unbounded transfer.
 pub(crate) fn git_fetch_ci_artifact(
@@ -1699,7 +1699,7 @@ impl CollabReader {
 
     /// The raw snapshot blob at `refs/collab/meta/snapshot`, when present
     /// (D45 fold), paired with the ref's current oid — the fold baseline the
-    /// snapshot push leases against (§11.4: a gc must CAS the ref from the
+    /// snapshot push leases against (docs/D1_PROTOCOL.md §9: a gc must CAS the ref from the
     /// value it actually read, or a concurrent fold's snapshot can be lost).
     fn snapshot_blob(&self) -> Result<Option<(String, Vec<u8>)>> {
         let out = self.git(&["for-each-ref", "--format=%(objectname)", SNAPSHOT_REF])?;
@@ -2050,7 +2050,7 @@ mod tests {
 
     #[test]
     fn report_projects_ci_runs_not_board_cards() {
-        // §8.3: a pure-CI thread is no board card, but the report's CI section
+        // D1-CI §8.3: a pure-CI thread is no board card, but the report's CI section
         // (Report.runs) still finds it — the SPA guide and `collab report` read it.
         const RUN: &str = "ci-0123456789abcdef";
         const TS: i64 = 1_700_000_000;
@@ -2118,7 +2118,7 @@ mod tests {
         let r = build_report(&refs, &principals, &rules, TS + 3);
         assert_eq!(r.runs.len(), 1);
         assert_eq!(r.runs[0].state, "claimed");
-        // Expired claims read as stale — the TTL sight (§6.3).
+        // Expired claims read as stale — the TTL sight (D1-CI §6.3).
         let r = build_report(&refs, &principals, &rules, TS + 301);
         assert_eq!(r.runs[0].state, "stale");
     }

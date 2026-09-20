@@ -821,7 +821,7 @@ async fn gc_fold_keeps_aggregation_byte_identical_and_the_tail_stays_live() -> T
     Ok(())
 }
 
-/// §11.4 fold CAS: the snapshot push leases against the baseline the gc
+/// docs/D1_PROTOCOL.md §9 fold CAS: the snapshot push leases against the baseline the gc
 /// actually read (`--force-with-lease`, never a `+` refspec — which silently
 /// short-circuits the lease). Two checks:
 /// ① a stale-baseline fold (a second gc whose checkout predates the first

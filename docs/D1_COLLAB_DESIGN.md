@@ -119,7 +119,7 @@
 
 ### 4.3 确定性聚合（视图即纯函数）
 
-- `thread(id)` = 按 (parent, ts) 排序的、引用该 id 的条目序列。
+- `thread(id)` = 引用该 id 的条目序列；排序见 `docs/D1_PROTOCOL.md` §6.2（`(ts, actor, oid)`，`parent` 只决定就绪）。
 - `pr(id)` = {base, head, 状态机（open/merged/closed）, reviews[], approvals[], 规则求值}。
 - `merge_rule_eval(rule, log)` → `{allowed, reason, satisfied_by[]}`。
 

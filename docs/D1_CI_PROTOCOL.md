@@ -42,7 +42,7 @@
   拒绝对非 commit ref 的非 force 更新，所以 `walgit ci run` 仅在该 ref 不存在时创建；
   轮换密钥是显式的 `walgit collab principal-register`，不是 runner 的副作用。
 - 写路径与人类/agent 完全同构：签名条目 → 自己的收件箱 ref → receive-pack。仓库若用
-  `policy.json` 保护 `refs/collab/*`（docs/D1_PROTOCOL.md §7.3），CI 条目同样受其约束——CI 没有特权路径。
+  `policy.json` 保护 `refs/collab/*`（docs/D1_PROTOCOL.md §12/§14），CI 条目同样受其约束——CI 没有特权路径。
 - 同一仓库可以并存任意多个 runner；同一 principal 也可以有多个 runner 进程（认领以
   principal 为身份，见 §6.4 崩溃恢复）。
 
@@ -128,7 +128,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
   S)` 的执行单元，run id 用 §5 的定时变体——与同一 tip 的 ref 触发运行是**两个平行线程**。
   条目 schema、认领算法、收敛规则、状态机一概不变（§6–§8 对 run id 的来源不可知）。
 - **合并（coalesce），不补跑**：错过的槽位折叠为最新到期的一个——离线一周回来只对当前
-  tip 跑一次，与 §4.1 轮询的合并哲学一致。积压深过扫描界（4096 个 fire）时该 pass 只推进
+  tip 跑一次，与 §4 轮询的合并哲学一致。积压深过扫描界（4096 个 fire）时该 pass 只推进
   簿记不触发（burst 防护），后续 pass 每轮消化一段直到最新槽位。
 - **簿记（runner 侧）**：状态文件增加 `"cron": {"<ref>\u{1f}<task>": <slot epoch>}`。
   首次见到某 (ref, task) 的 schedule 以**当前时刻为基线**（first sight = now）——给旧 ref
@@ -172,7 +172,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
 
 `kind = "ci_claim"`，`id = run_id`，`actor = runner principal`，`ts = 认领时刻（entry 的
 签名字段，收敛用它）`，`parent = ""`（认领不是对前一条目的回复，而是对运行的新一轮
-竞争；多个认领 = 同一线程的多个根，线程排序按 §4.3 的 (ts, actor, oid)）：
+竞争；多个认领 = 同一线程的多个根，线程排序按 `docs/D1_PROTOCOL.md` §6.2 的 (ts, actor, oid)）：
 
 ```json
 {
@@ -412,7 +412,7 @@ done    : effective 存在                               → Settled(conclusion)
 
 ## 11. 安全与滥用
 
-- 收件箱模型 + `policy.json` 与 docs/D1_PROTOCOL.md §7.3/§14 完全一致：CI 条目可被冻结（保护
+- 收件箱模型 + `policy.json` 与 docs/D1_PROTOCOL.md §4/§12/§14 完全一致：CI 条目可被冻结（保护
   `refs/collab/*`），恶意 runner 可 tombstone 吊销（其后续条目全部验签失败 = 不参与收敛）。
 - 竞争成本：认领竞争的最坏代价是重复执行（at-least-once），不是状态破坏；没有可被
   垄断的中心队列。恶意抢认领（超早 ts）只赢得执行权，输给后来者唯一途径是交不出

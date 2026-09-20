@@ -169,7 +169,7 @@ export interface CollabReportPr {
   merge_reason: string;
 }
 /** One CI run in the report's CI section (D1-CI §8.3): a pure-CI thread
-    projected by the §7 aggregation — not a board card, but visible here. */
+    projected by the D1-CI §7 aggregation — not a board card, but visible here. */
 export interface CollabReportRun {
   id: string;
   task: string;
@@ -1099,7 +1099,7 @@ export class RepoClient {
       this is how a browser fetches what a result entry addresses. */
   readonly ci = {
     /**
-     * Download one CI log/artifact object by its content address (§8.2
+     * Download one CI log/artifact object by its content address (D1-CI §8.2
      * storage convention, issue #161): the bytes the runner pushed to
      * `refs/collab/ci-artifacts/<actor>/<sha256>`. The server verifies the
      * payload against the address before serving (a mismatch is a 404), caps

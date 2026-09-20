@@ -1957,7 +1957,7 @@ async fn collab_ci_artifact_size(
 /// `walgit collab` CLI computes offline — over the collab state, under the
 /// board definition versioned at `.walgit/board.toml` (HEAD).
 ///
-/// The render cache (`cache/api/v1/*.json`, docs/D1_PROTOCOL.md §12 open question 3) is
+/// The render cache (`cache/api/v1/*.json`, docs/D1_COLLAB_DESIGN.md §11 item 3) is
 /// deliberately **not** used: it exists for sha-addressed immutable answers,
 /// while the projection's input is the live collab refs, which move with every
 /// entry push — keying it would need a second cache with its own invalidation
