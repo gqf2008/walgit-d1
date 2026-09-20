@@ -581,7 +581,11 @@ async function signedEntry(input: {
   };
   if (input.refs) entry.refs = input.refs;
   entry.body = input.body;
-  const sig = `ed25519:${await input.sign(canonicalize(entry))}`;
+  // The signed bytes are the Rust verifier's `entry_canonical`: the entry with
+  // `sig` present but empty (docs/D1_PROTOCOL.md §5.3). Signing the object
+  // without the key produces different bytes and every entry would aggregate
+  // as unverified (golden vector pinned by src/collab-canonical.test.ts).
+  const sig = `ed25519:${await input.sign(canonicalize({ ...entry, sig: "" }))}`;
   return { ...entry, sig };
 }
 

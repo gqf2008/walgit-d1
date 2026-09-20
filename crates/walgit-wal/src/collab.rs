@@ -51,7 +51,7 @@ pub struct EntryRef {
 impl EntryRef {
     /// Whether the entry counts as verified: the signature checks against the
     /// actor's registered key **and** the inbox it was found in names the
-    /// entry's own principal. The inbox model (docs/D1_PROTOCOL.md §4.5) shards write access by
+    /// entry's own principal. The inbox model (`docs/D1_PROTOCOL.md` §4.5) shards write access by
     /// principal; a policy that lets anyone write any inbox must not smuggle
     /// an entry across principals — the signature alone only proves the actor
     /// signed it, not that it belongs in this inbox.
@@ -174,7 +174,7 @@ pub const SNAPSHOT_REF: &str = "refs/collab/meta/snapshot";
 /// found in, and the raw entry bytes, verbatim. The record is the digest
 /// manifest that keeps the per-entry signature chain verifiable after the
 /// inbox ref is pruned — entry trust never derives from the snapshot's own
-/// signature; every folded entry still verifies per docs/D1_PROTOCOL.md §5.
+/// signature; every folded entry still verifies per `docs/D1_PROTOCOL.md` §5.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SnapshotRecord {
     pub oid: String,
@@ -202,7 +202,7 @@ impl SnapshotRecord {
 
 /// The snapshot document at `SNAPSHOT_REF`: the folded entries plus fold
 /// provenance (`actor`, `ts`, `sig`). The signature covers the canonical form
-/// of the document without `sig` (the docs/D1_PROTOCOL.md §5.3 canonical contract) and attests who
+/// of the document without `sig` (the `docs/D1_PROTOCOL.md` §5.3 canonical contract) and attests who
 /// folded, when; readers verify contained entries independently.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Snapshot {
@@ -250,7 +250,7 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Snapshot, String> {
 }
 
 /// The canonical bytes the snapshot's signature covers: the document without
-/// `sig`, under the docs/D1_PROTOCOL.md §5.3 canonical contract.
+/// `sig`, under the `docs/D1_PROTOCOL.md` §5.3 canonical contract.
 pub fn snapshot_canonical(snap: &Snapshot) -> String {
     let mut unsigned = snap.clone();
     unsigned.sig.clear();
@@ -428,9 +428,15 @@ pub fn thread<'a>(entries: &[&'a EntryRef]) -> Vec<&'a EntryRef> {
         (a.entry.ts, a.entry.actor.as_str(), a.oid.as_str())
             .cmp(&(b.entry.ts, b.entry.actor.as_str(), b.oid.as_str()))
     });
-    let mut guard = 0usize;
-    while !pending.is_empty() && guard < pending.len() * 2 + 1 {
-        guard += 1;
+    // Ready entries always emit; a round with no emission means every remaining
+    // entry waits on another pending one. Content addressing makes a real parent
+    // cycle unconstructible, so that is malformed input — exit defensively and
+    // emit the remainder in sorted order (deterministic). The round-bounded
+    // guard this replaces was evaluated against the shrinking pending list, so
+    // long chains whose ts descends along the chain truncated and reordered
+    // their tail (cc-ai-d1-protocol-followups P0).
+    while !pending.is_empty() {
+        let before = pending.len();
         let mut next: Vec<&EntryRef> = Vec::new();
         for e in pending {
             let ready = e.entry.parent.is_empty()
@@ -444,8 +450,11 @@ pub fn thread<'a>(entries: &[&'a EntryRef]) -> Vec<&'a EntryRef> {
             }
         }
         pending = next;
+        if pending.len() == before {
+            break;
+        }
     }
-    out.extend(pending); // cycles or dangling parents: emit the rest deterministically
+    out.extend(pending); // no-progress remainder: emit the rest deterministically
     out
 }
 
@@ -549,7 +558,7 @@ pub fn pr_view(
 // ---- merge rule evaluation ---------------------------------------------------
 
 /// A minimal merge rule document (stored at `refs/collab/meta/rules` or given
-/// on the CLI). docs/D1_PROTOCOL.md §7.3: merge rules are deterministic functions of the log.
+/// on the CLI). `docs/D1_PROTOCOL.md` §7.3: merge rules are deterministic functions of the log.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MergeRules {
     /// Ref patterns whose merges require human approvals (e.g.
@@ -1022,7 +1031,7 @@ pub struct Board {
 /// last match wins — every `status` entry sets its `body.status`, a
 /// `merge_result` with `merged = true` sets "merged" (a later `status` entry
 /// still overrides it); default "open". Deliberately wider than `pr_view`'s
-/// open/merged/closed state machine: the board tracks the work unit (docs/D1_PROTOCOL.md §5.2
+/// open/merged/closed state machine: the board tracks the work unit (`docs/D1_PROTOCOL.md` §5.2
 /// names in-progress / needs-review / blocked / needs-human), the PR view
 /// tracks merge state.
 fn card_status(ordered: &[&EntryRef]) -> String {
@@ -1086,7 +1095,7 @@ fn card_work_context(ordered: &[&EntryRef]) -> BoardWorkContext {
     ctx
 }
 
-/// First-match-wins against the column predicate (docs/D1_PROTOCOL.md §7.4/§8).
+/// First-match-wins against the column predicate (`docs/D1_PROTOCOL.md` §7.4/§8).
 fn card_matches(card: &BoardCard, col: &BoardColumnDef) -> bool {
     if !col.kind.is_empty() && !card.kinds.iter().any(|k| k == &col.kind) {
         return false;
@@ -1730,11 +1739,82 @@ name = "everything else"
             "open before merged before closed, then newest activity"
         );
     }
+
+    /// A chain built in chain order: each entry's `parent` is the previous
+    /// entry's content-derived oid. `descending_ts` makes the root the newest
+    /// entry, so the sort key `(ts, actor, oid)` is the exact reverse of the
+    /// parent chain — the input class the old shrinking guard truncated.
+    fn chain(n: usize, descending_ts: bool) -> Vec<EntryRef> {
+        let mut out: Vec<EntryRef> = Vec::new();
+        let mut parent = String::new();
+        for i in 0..n {
+            let ts = if descending_ts { (n - i) as i64 } else { i as i64 };
+            let e = entry("t-chain", "comment", "alice", &parent, ts, serde_json::json!({}));
+            let oid = test_oid(&e);
+            out.push(EntryRef {
+                oid: oid.clone(),
+                principal: "alice".into(),
+                entry: e,
+            });
+            parent = oid;
+        }
+        out
+    }
+
+    /// cc-ai-d1-protocol-followups P0: the guard evaluated against the
+    /// shrinking pending list truncated at n>=7 and appended the tail in
+    /// sort order, reversing the chain. The progress-based loop resolves it.
+    #[test]
+    fn thread_resolves_descending_ts_chains_without_truncation() {
+        for n in [6usize, 7, 10, 12] {
+            let refs = chain(n, true);
+            let borrowed: Vec<&EntryRef> = refs.iter().collect();
+            let ordered = thread(&borrowed);
+            let got: Vec<&str> = ordered.iter().map(|e| e.oid.as_str()).collect();
+            let want: Vec<&str> = refs.iter().map(|e| e.oid.as_str()).collect();
+            assert_eq!(got, want, "n={n}: descending-ts chain must stay in parent order");
+            assert_eq!(
+                ordered.last().map(|e| e.oid.as_str()),
+                Some(refs.last().expect("chain is non-empty").oid.as_str()),
+                "n={n}: the chain tip is last"
+            );
+        }
+    }
+
+    /// Under the old guard this appended child reordered an already-emitted
+    /// entry to the tail; the fixed order is the pure chain order and the
+    /// child stays the tip.
+    #[test]
+    fn thread_keeps_chain_order_for_entries_appended_after_a_long_chain() {
+        let refs = chain(10, true);
+        let tip = refs.last().expect("chain is non-empty").oid.clone();
+        let follow = entry(
+            "t-chain",
+            "status",
+            "alice",
+            &tip,
+            1,
+            serde_json::json!({"status": "needs-review"}),
+        );
+        let follow_oid = test_oid(&follow);
+        let mut all = refs.clone();
+        all.push(EntryRef {
+            oid: follow_oid,
+            principal: "alice".into(),
+            entry: follow,
+        });
+        let borrowed: Vec<&EntryRef> = all.iter().collect();
+        let ordered = thread(&borrowed);
+        let got: Vec<&str> = ordered.iter().map(|e| e.oid.as_str()).collect();
+        let want: Vec<&str> = all.iter().map(|e| e.oid.as_str()).collect();
+        assert_eq!(got, want);
+        assert_eq!(ordered.last().expect("non-empty").entry.kind, "status");
+    }
 }
 
 #[cfg(test)]
 mod snapshot_tests {
-    //! D45 / docs/D1_PROTOCOL.md §9: the fold. A snapshot carries every folded entry
+    //! D45 / `docs/D1_PROTOCOL.md` §9: the fold. A snapshot carries every folded entry
     //! verbatim (oid + inbox principal + raw signed bytes); aggregation over
     //! `snapshot ∪ tail` must be byte-identical to aggregation over the
     //! unfolded inbox — that equality is the acceptance property.
@@ -2174,5 +2254,48 @@ mod transition_tests {
             entry_prose(&serde_json::json!({"text": "  trimmed  "})),
             "trimmed"
         );
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    //! Cross-language golden vector for the canonical signature
+    //! (`docs/D1_PROTOCOL.md` §5.3). The same constants are asserted by
+    //! `web/src/collab-canonical.test.ts` (SDK/WebCrypto) and posted through
+    //! the thin API by the server test `collab_sdk_golden_entry_verifies_end_to_end`,
+    //! so the SDK, the verifier and the aggregation are pinned to one byte
+    //! string (cc-ai-d1-protocol-followups P0).
+    use super::*;
+    use base64::Engine as _;
+
+    const GOLDEN_CANONICAL: &str = r#"{"actor":"alice","body":{"title":"golden vector"},"id":"golden","kind":"issue","parent":"","sig":"","ts":1786500000,"version":1}"#;
+    const GOLDEN_SIG_B64: &str = "VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==";
+    const GOLDEN_PUB_B64: &str = "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
+
+    fn golden_entry() -> Entry {
+        Entry {
+            version: 1,
+            kind: "issue".into(),
+            id: "golden".into(),
+            actor: "alice".into(),
+            ts: 1_786_500_000,
+            parent: String::new(),
+            refs: None,
+            body: serde_json::json!({"title": "golden vector"}),
+            sig: String::new(),
+        }
+    }
+
+    #[test]
+    fn sdk_and_rust_sign_the_same_golden_bytes() {
+        let mut e = golden_entry();
+        assert_eq!(entry_canonical(&e), GOLDEN_CANONICAL);
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
+        assert_eq!(pub_b64, GOLDEN_PUB_B64);
+        e.sig = sign_entry(&mut e, &sk);
+        assert_eq!(e.sig, format!("ed25519:{GOLDEN_SIG_B64}"));
+        assert!(verify_entry(&e, GOLDEN_PUB_B64).is_ok());
     }
 }

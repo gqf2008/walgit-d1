@@ -254,23 +254,19 @@ canonicalize 前丢弃值为 `undefined` 的键（SDK 已如此），其它语�
 {"actor":"alice","body":{"title":"x"},"id":"t","kind":"issue","parent":"","sig":"","ts":1,"version":1}
 ```
 
-#### 5.3.1 已知跨语言偏差（待修，勿再复制）
+#### 5.3.1 跨语言一致性（金标锚点）
 
-**现状**：Rust `entry_canonical`（`walgit-wal/src/collab.rs`）把 `sig` 清空后**保留键**，
-canonical 形含 `"sig":""`；而 SDK `web/sdk/repos.ts` 的 `signedEntry` 在加入 `sig` **之前**
-对对象调 `canonicalize(entry)`，字节串**不含** `sig` 键。两者签名输入不同：
+`"sig":""` 是双方共同覆盖的字节串。三处测试共用同一组金标常量（固定 key + 固定 entry →
+精确 canonical 与签名字节）：`web/src/collab-canonical.test.ts`（SDK/WebCrypto 侧）、
+`walgit-wal/src/collab.rs::golden_tests`（验签端）、
+`crates/walgit-server/tests/web_api.rs::collab_sdk_golden_entry_verifies_end_to_end`（薄 API →
+聚合端到端 verified）。任何一侧改动 canonical 契约都会红。
 
-- 用 SDK/浏览器 WebCrypto 签的条目，Rust 聚合（`verify_entry`）验不过 → 恒为 unverified；
-- 用 CLI/agent（Rust `sign_entry`）签的条目是历史现网行为，全部覆盖「含 `"sig":""`」的字节。
-
-**证据**（可复跑）：同版本 serde_json 1.0.151 的探针输出
-`{"actor":"alice",…,"parent":"","sig":"","ts":1,"version":1}`；Node 交叉验签中
-「SDK 签名字节 vs Rust canonical」= FAIL、「Rust 签名字节 vs Rust canonical」= PASS。
-
-**修复方向（需项目决策并同批测试）**：为不使既有全部签名失效（协作 refs 是桶内追加式数据），
-应改 **SDK 侧**：签名 `canonicalize({...entry, sig: ""})`，使浏览器/CLI 覆盖同一字节串；
-反向修改 Rust（真正「不含 sig」）会作废全部历史签名，只能作为显式迁移处理，不能顺手改。
-在该偏差修复前，本文 §5.3 的规则（含 `"sig":""`）以**验证端行为**为准。
+**历史缺陷（已修，cc-ai-d1-protocol-followups P0）**：SDK 曾在加入 `sig` **之前**签名
+（字节串少 `,"sig":""`）——浏览器写的 issue/review/status 全部恒 unverified，浏览器 approve
+永不进 `human_approvals`，受保护分支合并判定永远 blocked。修复 = SDK 改签
+`canonicalize({...entry, sig:""})`（保持既有全部 CLI 签名有效）；反向修改 Rust 会作废历史签名，
+不作为选项。第三方实现必须复现含 `"sig":""` 的字节串，并以金标向量自检。
 
 ### 5.4 签名与验签
 
@@ -307,30 +303,30 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
 
 1. 建 `oid → entry` 索引。
 2. 待处理列表按 `(ts, actor, oid)` 升序排序（字节序比较）。
-3. 循环（**守卫条件按每轮开始时的当前待处理长度求值**）：
+3. 循环（**无进展即退出**）：
    ```text
-   guard = 0
-   while pending 非空 and guard < pending.len() * 2 + 1:
-       guard += 1
+   while pending 非空:
+       before = pending.len()
        顺序扫描 pending；一条条目「就绪」= parent == ""
          或 parent 不在集合里（悬空父视作根）
          或 parent 已发射（本轮前序或更早的轮次）
        就绪者（含本轮前序条目刚解锁的级联）按扫描顺序发射；未就绪者进下一轮
        pending = 未就绪者
+       if pending.len() == before: 退出   # 无进展（畸形输入：parent 环）
    ```
-4. 循环退出后，**剩余待处理条目**（无论是否还有就绪者）按第 2 步的相对顺序直接追加在尾部。
+4. 循环退出后，剩余待处理条目（只可能是无进展的畸形输入）按第 2 步的相对顺序追加在尾部。
 
 性质与边界（实现事实）：
 
 - **确定序**：算法是集合的纯函数——同一集合、任意输入顺序，输出一致（轮内 `(ts, actor, oid)`）。
 - **链序**：当 `ts` 沿链**非递减**（常规写入：后写的 `ts` 不早于前写）时，单链在第一轮按
   `ts` 顺序级联发射，输出即完整链序。
-- **守卫会提前截断（实现缺陷，非设计特性）**：第 3 步的界用的是**当前** pending 长度（随发射
-  收缩），触发点很低——沿链严格递减的 `ts` 下，7 条链即截断（n=7 输出 `o0…o4, o6, o5`；n=10 输出 `o0…o6, o9, o8, o7`）。一旦截断不会恢复：后续追加条目不再
-  链序，`last_oid` 也不再是链头（后续以它为 `parent` 的条目全部挂错）。同一集合仍字节确定
-  （确定序成立），但**拓扑序不成立**。修复方向（后续 issue）：界相对**初始**集合大小求值
-  （或去掉全局上限），并加沿链递减 `ts`、n≥7 的回归测试。读方在修复前不应假定输出是拓扑序；
-  需要严格链序时以 `parent` 自行重排。
+- **收敛保证**：父指针构成 DAG（内容寻址下真正的 parent 环不可构造），正常输入必然全量解析，
+  输出即完整链序；第 4 步的兜底只对畸形输入生效。历史缺陷（已修，cc-ai-d1-protocol-followups
+  P0）：旧实现按收缩后的 pending 求值轮数上限，沿链严格递减的 `ts` 下 n≥7 即截断并把尾部
+  乱序追加，后续追加条目会重排既有条目、`last_oid` 失真；回归测试
+  `thread_resolves_descending_ts_chains_without_truncation` /
+  `thread_keeps_chain_order_for_entries_appended_after_a_long_chain` 锁死新行为。
 - **排序不由签名保真**：`ts` 与 `parent` 都是条目作者可控的字段（签名只证「作者这么写了」，
   不证「时间真实 / parent 属实」），顺序是协作约定、不是可依赖的安全边界；`done` 门禁与看板
   都读这个顺序（§7.5/§8.2），威胁模型见 §14。具体后果：卡片的身份字段（`title`/`prose`/
@@ -638,7 +634,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 层 | 键 | 语义 |
 |---|---|---|
 | 条目集合 | oid（内容寻址） | 同 oid = 一条；重放/折叠重复无害 |
-| 线程顺序 | 排序键 `(ts, actor, oid)`（`parent` 只决定就绪，不参与排序）；不保证拓扑序，见 §6.2 | 确定序，任何客户端一致 |
+| 线程顺序 | 排序键 `(ts, actor, oid)`（`parent` 只决定就绪，不参与排序）；正常输入输出即拓扑链序，见 §6.2 | 确定序，任何客户端一致 |
 | ref 事件 | `(refname, oid)` | watch 状态文件对比 |
 | CI 触发 | `(ref, tip oid)` | runner 状态文件 processed |
 | WAL | `(repo, seq)` | 游标回放 |
@@ -687,7 +683,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 快照文档损坏/超大 | fail-closed，读整体报错；超 64 MiB 拒绝物化 |
 | 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端的 fetch **不带 prune** → 长寿命 checkout 里被删的注册 ref 可能残留，验签仍信旧 key——需 `git fetch --prune`（或删本地 ref）后聚合；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
 | 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份，服务端只能人工 tombstone；升级路径 = 不可导出密钥 + 服务端登记确认（已知取舍） |
-| 排序投毒（`ts`/`parent` 不被认证） | 线程顺序、卡片状态与 `done` 门禁都依赖 `(ts, actor, oid)` 顺序与作者自报的 `parent`；参与者可回拨 `ts`、制造孤儿条目影响投影（§6.2 的守卫截断让少量条目即可稳定触发）。当前防线：**无**（顺序是协作约定）——不得把顺序当安全判定；代码修复（守卫改界 / 链上 ts 回退处理）见后续 issue |
+| 排序投毒（`ts`/`parent` 不被认证） | 线程顺序、卡片状态与 `done` 门禁都依赖 `(ts, actor, oid)` 顺序与作者自报的 `parent`；参与者可回拨 `ts`、往任意线程追加低 `ts` 根条目来影响投影与卡片身份（§6.2/§8.2）。当前防线：**无**（顺序是协作约定）——不得把顺序当安全判定；链上 ts 回退处理见后续 issue（守卫截断本身已修，见 §6.2） |
 | 自审/重复批准 | merge 规则按 approve **条目数**计，不去重 principal；patch 作者可自 approve，`done` 门禁同理。当前防线：**无**——写权限与签名身份才是边界，`require_human_approvals` 是流程门禁；是否收紧见后续 issue |
 | gc 写出超限快照 | CLI 写侧无 64 MiB 检查；超限后服务端全部聚合 `503`。恢复：先导出快照记录（`walgit wal materialize` / 持有快照的克隆）再移动该 ref，禁止直接删；修复见后续 issue |
 | 时钟 | `ts` 不被认证；只影响排序/展示（及 CI TTL 活性），不参与签名/身份等安全判定；但投影顺序依赖它，见上一行 |
@@ -709,7 +705,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 | 锚点 | 锁死的性质 |
 |---|---|
-| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`） |
+| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`）；长链递减 `ts` 全量解析（`thread_resolves_descending_ts_chains_without_truncation`）与截断后追加（`thread_keeps_chain_order_for_entries_appended_after_a_long_chain`） |
+| `walgit-wal/src/collab.rs::golden_tests` + `web/src/collab-canonical.test.ts` + `crates/walgit-server/tests/web_api.rs::collab_sdk_golden_entry_verifies_end_to_end` | 跨语言金标向量：SDK/WebCrypto 与 Rust 覆盖同一 canonical 字节串（含 `"sig":""`），且浏览器式条目经薄 API 聚合 verified |
 | `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好 |
 | `…::transition_tests` | `done` 门禁（needs-review + verified approve）；先 thread() 后判定；card prose 抽取 |
 | `walgit-cli/src/collab_cmd.rs` 测试 | canonicalize 紧凑键序；签名/验签/篡改；gc key 匹配；折叠记录属主偏好；thread 链序/悬空；merge 只计非 `svc-`；report 确定性与计数；changed_refs；错收件箱不算 verified |

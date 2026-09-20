@@ -1539,6 +1539,73 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
     Ok(())
 }
 
+/// Cross-language golden vector (cc-ai-d1-protocol-followups P0): the exact
+/// bytes the SDK signs (`web/src/collab-canonical.test.ts`; Rust twin in
+/// `walgit-wal`'s `golden_tests`) verify end-to-end through the thin API and
+/// the aggregation. Before the SDK canonical fix, browser-signed entries
+/// landed here unverified forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collab_sdk_golden_entry_verifies_end_to_end() -> TestResult {
+    const GOLDEN_CANONICAL: &str = r#"{"actor":"alice","body":{"title":"golden vector"},"id":"golden","kind":"issue","parent":"","sig":"","ts":1786500000,"version":1}"#;
+    const GOLDEN_SIG_B64: &str = "VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==";
+    const GOLDEN_PUB_B64: &str = "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
+
+    let server = Server::start_with_tweak(|c| {
+        c.server.auth.mode = walgit_config::AuthMode::Token;
+        c.server.auth.anonymous_read = false;
+        c.server.auth.tokens = vec![walgit_config::StaticToken {
+            principal: "alice".into(),
+            token: "alice-token".into(),
+            token_env: None,
+            write: true,
+            admin: false,
+        }];
+    })
+    .await?;
+    let client = reqwest::Client::new();
+    let put = client
+        .put(format!("{}/o/r", server.base_url))
+        .bearer_auth("alice-token")
+        .send()
+        .await?;
+    assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
+
+    let resp = client
+        .post(format!("{}/o/r/api/collab/principal", server.base_url))
+        .bearer_auth("alice-token")
+        .json(&serde_json::json!({ "principal": "alice", "public_key": GOLDEN_PUB_B64 }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200, "register golden principal");
+
+    // The stored entry is the canonical document with `sig` filled in —
+    // exactly what the SDK's `collab.buildEntry` returns.
+    let mut entry: serde_json::Value = serde_json::from_str(GOLDEN_CANONICAL)?;
+    entry["sig"] = serde_json::json!(format!("ed25519:{GOLDEN_SIG_B64}"));
+    let resp = client
+        .post(format!("{}/o/r/api/collab/entries", server.base_url))
+        .bearer_auth("alice-token")
+        .json(&serde_json::json!({ "entry": entry }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200, "post golden entry");
+
+    let (st, text, _) = get_h(
+        &server,
+        "/o/r/api/collab/report",
+        &[("Authorization", "Bearer alice-token")],
+    )
+    .await?;
+    assert_eq!(st, 200);
+    let report: serde_json::Value = serde_json::from_str(&text)?;
+    assert_eq!(
+        report["verified_entries"], 1,
+        "the SDK's golden bytes must verify: {report}"
+    );
+    assert_eq!(report["unverified_entries"], 0);
+    Ok(())
+}
+
 /// The thin API must honor `policy.json` exactly like receive-pack: a frozen
 /// collab namespace blocks the browser path too (one ref, one guard level —
 /// review finding MJ3 on PR #27). The refusal reason is logged; the answer is
@@ -1703,7 +1770,7 @@ async fn collab_board_projects_threads_under_the_default_definition() -> TestRes
     Ok(())
 }
 
-/// docs/D1_CI_PROTOCOL.md §8.2 storage convention (issue #161): the HTTP read side of
+/// `docs/D1_CI_PROTOCOL.md` §8.2 storage convention (issue #161): the HTTP read side of
 /// `refs/collab/ci-artifacts/<actor>/<sha256>` — exact bytes, immutable
 /// caching, sha256-verified, 400/404 shapes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
