@@ -195,6 +195,7 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
 /// macOS/Linux only: on Windows the *Task Scheduler* creates the process (D48),
 /// so there is nothing to detach.
 #[cfg(not(windows))]
+#[allow(unsafe_code)] // setsid in pre_exec — the same platform-seam exception as `proc_group.rs`.
 fn detach_process(cmd: &mut std::process::Command) {
     {
         use std::os::unix::process::CommandExt;
@@ -1623,6 +1624,7 @@ mod tests {
     use super::detach_process;
 
     #[test]
+    #[allow(unsafe_code)] // getsid on the child we just spawned, checked to fit pid_t below.
     fn detached_child_gets_its_own_session() {
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg("5");

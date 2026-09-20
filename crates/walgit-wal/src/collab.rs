@@ -2266,7 +2266,6 @@ mod golden_tests {
     //! so the SDK, the verifier and the aggregation are pinned to one byte
     //! string (cc-ai-d1-protocol-followups P0).
     use super::*;
-    use base64::Engine as _;
 
     const GOLDEN_CANONICAL: &str = r#"{"actor":"alice","body":{"title":"golden vector"},"id":"golden","kind":"issue","parent":"","sig":"","ts":1786500000,"version":1}"#;
     const GOLDEN_SIG_B64: &str = "VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==";
