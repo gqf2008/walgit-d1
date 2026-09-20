@@ -150,7 +150,7 @@ export const api = {
       ready for `collab.post` — the browser write path. */
   collabBuildEntry: (repo: string, input: {
     principal: string;
-    kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result" | "agent_action";
+    kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result";
     id: string;
     actor: string;
     parent: string;

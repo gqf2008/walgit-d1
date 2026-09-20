@@ -10,6 +10,7 @@ import { CollabWriteBox } from "../components/CollabWrite";
 import { useI18n, kindLabel, type TFunc } from "../i18n";
 import { Markdown } from "../components/Markdown";
 import { fmtSize } from "../format";
+import { collabEntryText } from "../collab-text";
 
 /** One attachment (`--attach`, issue #75 ④): `{filename, sha256, content_b64}`
     embedded in the signed entry body. Materialized to a Blob on demand —
@@ -229,13 +230,9 @@ function EntryBox({ e, n }: { e: CollabEntryRef; n: number }) {
   // 对话正文：兼容 CLI（issue body.body / review·merge_result body.note / patch
   // body.message）与 Web 写入口（issue·comment body.text / patch body.message）。
   // 除纯机器条目外都渲染 Markdown，让线程页可见 agent/人写的实际内容。
-  // trim 后返回:与投影端 entry_prose(issue #112)同文,看板卡片与线程页一致。
+  // `collabEntryText` 与投影端 entry_prose 是同一张表（双向金标，issue #112）。
   const proseKinds = new Set(["issue", "comment", "review", "status", "patch"]);
-  const prose = proseKinds.has(kind)
-    ? [body.text, body.body, body.note, body.message, body.summary]
-        .find((v): v is string => typeof v === "string" && v.trim() !== "")
-        ?.trim() ?? ""
-    : "";
+  const prose = proseKinds.has(kind) ? collabEntryText(body) : "";
   const title =
     kind === "issue" ? String(body.title ?? t("entry.issue.untitled"))
     : kind === "review" ? String(body.decision ?? "comment")

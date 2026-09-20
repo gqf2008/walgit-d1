@@ -794,7 +794,7 @@ thread id.
 {
   "id": "t1",
   "entries": [ { "oid": "…", "principal": "alice", "verified": true, "entry": { "kind": "issue", "actor": "alice", "ts": 1786500000, "parent": "", "refs": null, "body": {}, "sig": "ed25519:…" } } ],
-  "pr": { "pr": { "id": "t1", "base": "refs/heads/main", "head": "refs/heads/topic", "status": "open", "reviews": [], "human_approvals": [], "unverified": [] }, "merge": { "allowed": true, "reason": "base is not protected", "satisfied_by": [] } }
+  "pr": { "pr": { "id": "t1", "base": "refs/heads/main", "head": "refs/heads/topic", "status": "open", "reviews": [], "human_approvals": [], "authors": [], "unverified": [] }, "merge": { "allowed": true, "reason": "base is not protected", "satisfied_by": [] } }
 }
 ```
 
@@ -859,7 +859,8 @@ blobs are read locally when packs fit, faulted through the remote reader
 otherwise (one batched fault, one `git cat-file --batch` — never one read or
 one process per entry). The namespace is budgeted at 20 000 refs per request:
 past it the answer is a `503` pointing at the `walgit collab` CLI, which
-aggregates offline. SWR caching (stale-while-revalidate=60), never
+aggregates offline. SWR caching (stale-while-revalidate=60) with a body-digest ETag
+(conditional requests answer `304`), never
 immutable — collab state changes with every push.
 
 #### `GET /{owner}/{repo}/api/collab/ci-artifacts/{sha256}`

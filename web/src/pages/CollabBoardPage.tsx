@@ -19,8 +19,9 @@ import { useI18n, statusLabel } from "../i18n";
  */
 
 /** The statuses the move-menu offers. Values are free-form on the wire (any
-    `status` entry value works); these are the ones D1 names. */
-const STATUSES = ["open", "in-progress", "needs-review", "blocked", "needs-human", "merged", "closed"] as const;
+    `status` entry value works); these are the canonical ones from
+    docs/D1_PROTOCOL.md §5.2 / `.walgit/board.toml`. */
+const STATUSES = ["open", "in-progress", "needs-review", "blocked", "needs-human", "merged", "done", "closed"] as const;
 
 /** Columns shown by the default board view: non-empty only, unless asked. */
 export function visibleBoardColumns(columns: CollabBoardColumn[], showEmpty: boolean): CollabBoardColumn[] {

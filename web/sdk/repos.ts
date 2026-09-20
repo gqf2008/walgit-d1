@@ -1011,7 +1011,7 @@ export class RepoClient {
      */
     entry: async (input: {
       principal: string;
-      kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result" | "agent_action";
+      kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result";
       id: string;
       actor: string;
       parent: string;
@@ -1030,7 +1030,7 @@ export class RepoClient {
      */
     buildEntry: (input: {
       principal: string;
-      kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result" | "agent_action";
+      kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result";
       id: string;
       actor: string;
       parent: string;

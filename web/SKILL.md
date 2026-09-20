@@ -347,13 +347,14 @@ Parallel work is a topology, not simply "use more agents." Start from this defau
   principal other than the patch author (and, for the final review, other than the
   merger). Treat the author's own `approve` as invalid: do not merge on it. The
   `review.body.agent` field is descriptive; the verified `actor` and key are the
-  identities the coordinator must compare. The merge rule counts verified approvals
-  but does not infer authorship, so this is a coordinator gate, not an automatic one.
+  identities the coordinator must compare. The merge rule counts **distinct
+  non-author** verified approvals (a patch author's own approve and duplicate
+  approves never count), so the automated gate agrees with this paragraph.
 - **The coordinator merges and archives.** After approval, the coordinator merges the
-  branch locally and pushes the result. Record the merged oid first, then move the card:
-  1. `merge_result` with `{"oid":"<sha>","result":"merged","note":"..."}` (record the oid);
-  2. `merge_result` with `{"merged":true,"oid":"<sha>","note":"..."}` (move to `merged`);
-  3. `status` with `{"status":"closed","owner":"<proj>-coordinator","worktree":"...","branch":"main","work":"..."}`.
+  branch locally and pushes the result. Record the merge with **one** entry, which also
+  moves the card:
+  1. `merge_result` with `{"merged":true,"oid":"<sha>","result":"merged","note":"..."}`;
+  2. `status` with `{"status":"closed","owner":"<proj>-coordinator","worktree":"...","branch":"main","work":"..."}`.
 - **Move cards only through signed entries.** Use `status` for normal moves; the
   projector also treats `merge_result {"merged":true}` as the terminal `merged` move.
   Never edit the board, a state file, or another agent's inbox to move a card.
@@ -482,9 +483,9 @@ look productive while its rows cannot answer the only questions it exists to ans
 - After approval: merge locally (fast-forward preferred), push the result to this host. Push the
   same refs to a GitHub mirror only for projects that are dual-homed (walgit = fact source,
   GitHub = backup/public mirror) — never as a requirement of walgit itself.
-- The coordinator merges locally and pushes the result. First write `merge_result`
-  `{"oid": "<sha>", "result": "merged"}`; then write `merge_result`
-  `{"merged": true, "oid": "<sha>"}`; then move the card with `status` `closed`.
+- The coordinator merges locally and pushes the result. Write **one** `merge_result`
+  `{"merged": true, "oid": "<sha>", "result": "merged"}` (it records the oid and moves the
+  card); then move the card to `closed` with a `status` entry.
 - Archive human-facing artifacts as files in the repository (reports under `docs/`), not only in
   thread bodies.
 
