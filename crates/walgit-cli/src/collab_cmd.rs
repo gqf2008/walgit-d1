@@ -2569,7 +2569,6 @@ mod gc_tests {
         String::from_utf8_lossy(&out.stdout).lines().count()
     }
 
-    #[test]
     /// A pre-existing over-cap snapshot with an EMPTY inbox tail is exactly the
     /// recovery case the server 503 points at: `gc --truncate` must rebuild it
     /// in place (marked incomplete), and a plain `gc` must refuse with the hint
@@ -2639,6 +2638,7 @@ mod gc_tests {
         assert!(snap.dropped_entries >= 1);
     }
 
+    #[test]
     fn push_prune_only_never_deletes_without_a_snapshot_on_the_remote() {
         let tmp = tempfile::tempdir().unwrap();
         let remote = tmp.path().join("remote.git");
@@ -2983,7 +2983,6 @@ mod capped_snapshot_tests {
     //! The gc write-side snapshot cap (docs/D1_PROTOCOL.md §9.3): over-cap is
     //! refused unless truncation is asked for, and truncation drops the oldest
     //! records and marks the snapshot incomplete.
-    use super::*;
     use super::*;
 
     fn keypair() -> (SigningKey, String) {

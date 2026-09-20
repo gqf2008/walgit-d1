@@ -211,9 +211,9 @@ impl RepoPolicy {
                         r.name
                     ));
                 }
-                let idx = p.find("{principal}").unwrap_or(0);
-                let prefix = &p[..idx];
-                let suffix = &p[idx + "{principal}".len()..];
+                let Some((prefix, suffix)) = p.split_once("{principal}") else {
+                    continue;
+                };
                 if (!prefix.is_empty() && !prefix.ends_with('/'))
                     || (!suffix.is_empty() && !suffix.starts_with('/'))
                 {
@@ -614,12 +614,14 @@ fn deny_reason(
 /// pattern's prefix and suffix, e.g. `refs/collab/inbox/{principal}/**` on
 /// `refs/collab/inbox/alice/123` captures `alice`. That is what lets one rule
 /// say "every inbox, bypass its own owner" (`bypass: ["{principal}"]`).
+#[allow(
+    clippy::option_option,
+    reason = "outer Option = pattern matched; inner Option = it captured a principal"
+)]
 pub fn ref_pattern_capture(pattern: &str, text: &str) -> Option<Option<String>> {
-    let Some(idx) = pattern.find("{principal}") else {
+    let Some((prefix, suffix)) = pattern.split_once("{principal}") else {
         return glob_match(pattern, text).then_some(None);
     };
-    let prefix = &pattern[..idx];
-    let suffix = &pattern[idx + "{principal}".len()..];
     // The placeholder must be a whole segment: the capture is unambiguous.
     if !prefix.is_empty() && !prefix.ends_with('/') {
         return None;
@@ -629,7 +631,7 @@ pub fn ref_pattern_capture(pattern: &str, text: &str) -> Option<Option<String>> 
     }
     let rest = text.strip_prefix(prefix)?;
     let (captured, tail) = match rest.split_once('/') {
-        Some((head, _)) if !head.is_empty() => (head, &rest[head.len()..]),
+        Some((head, _)) if !head.is_empty() => (head, rest.get(head.len()..).unwrap_or_default()),
         None if !rest.is_empty() && suffix.is_empty() => (rest, ""),
         _ => return None,
     };

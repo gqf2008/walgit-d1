@@ -229,17 +229,25 @@ pub const COLLAB_SNAPSHOT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Upper bound for one collab entry blob read through aggregation. Larger
 /// blobs are skipped (visible degradation) instead of materialized — the
-/// per-request budget counts refs, not bytes (docs/D1_PROTOCOL.md §13).
+/// per-request budget counts refs, not bytes (`docs/D1_PROTOCOL.md` §13).
 pub const COLLAB_ENTRY_MAX_BYTES: usize = 256 * 1024;
 
 fn snapshot_complete_default() -> bool {
     true
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates take &T"
+)]
 fn is_true(v: &bool) -> bool {
     *v
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates take &T"
+)]
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
@@ -328,7 +336,7 @@ pub fn verify_snapshot(snap: &Snapshot, public_key_b64: &str) -> Result<(), Stri
 pub fn build_snapshot(
     actor: &str,
     ts: i64,
-    mut entries: Vec<SnapshotRecord>,
+    entries: Vec<SnapshotRecord>,
     key: &SigningKey,
 ) -> Snapshot {
     build_snapshot_with(actor, ts, entries, true, 0, key)
@@ -2512,6 +2520,36 @@ mod transition_tests {
         let review = signed_entry(&key2, "review", "t9", "bob", "r2", 5, serde_json::json!({"decision": "approve"}));
         let refs = vec![&issue, &status, &patch, &self_review, &review];
         assert!(validate_status_transition(&refs, &principals).is_ok(), "a second, non-author reviewer unblocks it");
+    }
+
+    /// `ReportPr.approvals` is the same countable set the merge rule uses:
+    /// verified, non-`svc-`, distinct, and never the patch author.
+    #[test]
+    fn report_approvals_use_the_countable_set() {
+        let key = make_key();
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pub_b64);
+        let key2 = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let pub2 =
+            base64::engine::general_purpose::STANDARD.encode(key2.verifying_key().to_bytes());
+        principals.insert("bob".to_string(), pub2);
+        let entries = [
+            signed_entry(&key, "issue", "r1", "alice", "i", 1, serde_json::json!({"title": "x"})),
+            signed_entry(&key, "patch", "r1", "alice", "p", 2, serde_json::json!({"message": "x"})),
+            signed_entry(&key, "review", "r1", "alice", "ra", 3, serde_json::json!({"decision": "approve"})),
+            signed_entry(&key2, "review", "r1", "bob", "rb1", 4, serde_json::json!({"decision": "approve"})),
+            signed_entry(&key2, "review", "r1", "bob", "rb2", 5, serde_json::json!({"decision": "approve"})),
+        ];
+        let refs: Vec<&EntryRef> = entries.iter().collect();
+        let report = build_report(&refs, &principals, &MergeRules::default(), 10);
+        assert_eq!(report.prs.len(), 1);
+        assert_eq!(
+            report.prs[0].approvals, 1,
+            "author self-approval and duplicate approves are not countable: {:?}",
+            report.prs[0]
+        );
     }
 }
 

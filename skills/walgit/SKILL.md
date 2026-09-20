@@ -127,8 +127,8 @@ next `--parent`):
 W collab entry --kind <issue|comment|patch|review|merge_result|status> \
   --id <thread-id> --actor <principal> --parent <oid|""> \
   --body '<json>' --key ~/.walgit/keys/<principal>.ed25519 --push origin \
-  [--base refs/heads/main --head refs/heads/<branch>] \      # patch only
-  [--auto-fold --fold-threshold 10000]                        # opportunistic fold
+  [--base refs/heads/main --head refs/heads/<branch>]   # patch only
+  [--auto-fold --fold-threshold 10000]                  # opportunistic fold
 
 # Retire the append-only tail when it grows (D45): fold to the signed snapshot.
 # Over the 64 MiB snapshot cap the fold is refused unless --truncate drops the

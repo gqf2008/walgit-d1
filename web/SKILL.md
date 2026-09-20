@@ -162,7 +162,7 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
   inbox grows large; it is idempotent and safe to re-run. A fold over the
   64 MiB snapshot cap is refused unless `--truncate` drops the oldest records
   and marks the snapshot `complete:false`; `--truncate` also repairs an
-already over-cap snapshot when there is nothing new to fold.
+  already over-cap snapshot when there is nothing new to fold.
 
 ### Decentralized CI (`walgit ci …`)
 

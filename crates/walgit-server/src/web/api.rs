@@ -461,7 +461,7 @@ pub(crate) fn json_swr<T: Serialize>(value: &T, etag: Option<&str>) -> Rendered 
 
 /// SWR + a strong ETag taken from the body digest: ref-dependent answers change
 /// with every push, but identical bytes still deserve a 304. Used by the three
-/// D1 aggregation endpoints (D1_PROTOCOL §12).
+/// D1 aggregation endpoints (`docs/D1_PROTOCOL.md` §12).
 fn json_swr_hashed<T: Serialize>(value: &T) -> Rendered {
     let body = json_bytes(value);
     let digest = <sha2::Sha256 as sha2::Digest>::digest(&body);
