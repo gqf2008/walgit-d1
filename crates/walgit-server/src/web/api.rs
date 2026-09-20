@@ -1777,7 +1777,7 @@ async fn collab_thread(
     .await
 }
 
-/// §8.2 storage convention (issue #161): a CI log/artifact's bytes are a
+/// D1-CI §8.2 storage convention (issue #161): a CI log/artifact's bytes are a
 /// plain git blob at `refs/collab/ci-artifacts/<actor>/<sha256>`, pushed
 /// through receive-pack like any collab object. This is the HTTP read side
 /// for SDK and browser: refs-level scan of the namespace, the blob faulted

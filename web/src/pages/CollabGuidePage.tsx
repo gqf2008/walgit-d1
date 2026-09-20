@@ -28,7 +28,7 @@ export function CollabGuidePage() {
     const board = await api.collab(full).board();
     const featuredId = report.threads.find((th) => th.entries >= 2)?.id ?? null;
     const thread = featuredId ? await api.collab(full).thread(featuredId) : null;
-    // The claim-race example (§8.3 runs): prefer a real race (≥2 claims on one
+    // The claim-race example (D1-CI §8.3 runs): prefer a real race (≥2 claims on one
     // run), else the newest run at all — the steps stay illustrative without one.
     const raceRun =
       report.runs.find((r) => r.claims >= 2) ?? report.runs[report.runs.length - 1] ?? null;
@@ -138,7 +138,7 @@ function MiniBoard({ board, caption, sub }: { board: CollabBoard; caption: strin
 
 /** ③ The claim race: both may run, one deterministic winner — on the repo's
     real race thread when it has one (issue #38: 三张图用真实数据渲染). The
-    effective result is picked by the §7.2 rule (claims valid at `now`; when
+    effective result is picked by the D1-CI §7.2 rule (claims valid at `now`; when
     every claim has expired, the earliest result wins — display only; the
     authoritative computation lives in `walgit-wal::ci`). */
 function ClaimSection({ full, race }: { full: string; race: CollabThread | null }) {
@@ -203,7 +203,7 @@ function ClaimSection({ full, race }: { full: string; race: CollabThread | null 
   );
 }
 
-/** Earliest by the §7.2 order (ts, actor, oid). */
+/** Earliest by the D1-CI §7.2 order (ts, actor, oid). */
 const minByWinnerOrder = (list: CollabEntryRef[]) =>
   list.toSorted(
     (a, b) => a.entry.ts - b.entry.ts || a.entry.actor.localeCompare(b.entry.actor) || a.oid.localeCompare(b.oid),

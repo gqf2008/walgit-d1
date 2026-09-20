@@ -169,7 +169,7 @@
 1. **触发**：对 `refs/collab/*` 做 refs 级轮询（便宜，O(1)，无 pack；`(repo, seq, ref)` 去重、
    at-least-once、可回放）；`walgit collab watch` 把它变成事件循环。
 2. **行动**：构造签名条目（review / patch / comment / status）→ push 自己的收件箱。
-   幂等：条目内容寻址 + `(id, kind, actor, parent)` 去重；事件按 seq 去重。
+   幂等：条目按 **oid**（内容寻址）去重，重复/重投递无害；事件按 seq 去重。
 3. **上下文**：walgit API（tree/blob/commits/resolve）+ blobless bundle（全量上下文、字节走桶）。
 4. **求助**：`status: needs-human` 条目 + `review: request_changes` 把球踢回人；dashboard/订阅者展示。
 5. **留痕**：`agent_action` 条目记录模型/置信度/耗时（可选），供 dashboard 与审计。

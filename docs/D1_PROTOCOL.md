@@ -27,6 +27,7 @@
 > | 薄 API 写路径 + 服务端聚合 | `crates/walgit-server/src/web/api.rs`（`collab_*`、`collab_load`） |
 > | host 注册表服务端 | `crates/walgit-server/src/web/v1.rs`（`/api/v1/principals`） |
 > | SDK（canonical / 签名 / post） | `web/sdk/repos.ts` |
+> | MCP 客户端面（工具 + `walgit://` 资源） | `crates/walgit-cli/src/mcp_cmd.rs`（说明见 `web/SKILL.md`） |
 >
 > 一致性验收锚点（§16 列全）：`crates/walgit-wal/src/collab.rs` 的内嵌测试、
 > `crates/walgit-cli/tests/collab_e2e.rs`、`crates/walgit-server/tests/web_api.rs` 的
@@ -42,7 +43,9 @@
 3. **签名覆盖 canonical 形，与存储格式无关。** 条目可以 pretty JSON（CLI）或紧凑 JSON
    （薄 API）落盘；验签只依赖 canonical 字节（§5.3）。
 4. **聚合是纯函数。** 输入 = 条目**集合**（同一 oid 去重）+ 注册表 + 规则；输出与 refs 的读取
-   顺序、分页边界、是否正处于折叠中途无关——同一输入必须字节一致。
+   顺序、分页边界、是否正处于折叠中途无关——同一输入必须字节一致。注册表是输入的一部分：
+   仓库本地注册表 + host 注册表（§4.4）与仓库 refs 一起构成「输入」；**同一个仓库在两个 host
+   上若注册表不同，聚合可以不同**（跨 host 一致性不在本协议范围内，§14）。
 5. **追加式、不可变。** 条目一经发布不改不删（注册表 tombstone 是唯一删除语义）；纠正 =
    追加一条新的条目。折叠只移动引用与删除 ref，被折叠条目的字节由快照逐字携带（§9）。
 6. **写永远经 receive-pack（或共享同一 WAL 发布路径的薄 API）。** manifest CAS 是唯一提交点；
@@ -330,7 +333,9 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
   需要严格链序时以 `parent` 自行重排。
 - **排序不由签名保真**：`ts` 与 `parent` 都是条目作者可控的字段（签名只证「作者这么写了」，
   不证「时间真实 / parent 属实」），顺序是协作约定、不是可依赖的安全边界；`done` 门禁与看板
-  都读这个顺序（§7.5/§8.2），威胁模型见 §14。
+  都读这个顺序（§7.5/§8.2），威胁模型见 §14。具体后果：卡片的身份字段（`title`/`prose`/
+  `actor`）取自**序首**（§8.2），任何 writer 往任意线程追加一条低 `ts` 的（根）条目即可改写
+  卡片身份；`status` 上下文按序重放，同样可被覆盖。
 - **链头**（tip）= 输出末条，`last_oid`；后续条目以它为 `parent`。
 
 ### 6.3 链完整性（运维须知）
@@ -525,6 +530,9 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
   读取整体报错（静默跳过等于改写历史）。服务端在物化 body 前先查 size，超 64 MiB → `503`。
 - 折叠前后聚合逐字节一致（快照 ∪ 尾部 == 原收件箱），这是本设计的验收等式：空尾部全折叠、
   部分折叠、折叠中途（快照已更新、删除未完成 → 重复输入）三种状态答案相同。
+- **快照没有完整性标记**（只有 `version/kind/actor/ts/entries/sig`）：读者必须按 §3.2 同时取
+  `meta/*`（含快照）再聚合——只读 inbox 的读者在折叠后会看到不完整的账本。把「已折叠下界」
+  写进快照（让读者能察觉自己缺了折叠历史）是后续 issue 的改进项。
 
 ### 9.3 `collab gc` 写侧算法（normative）
 
@@ -618,6 +626,12 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   `seq + 1`（或定义为「下一条待读」）。
 - **HTTP SSE**：`text/event-stream` 信封，best-effort（可能丢包）；要无损 push 语义必须自建
   sidecar 从 pull 车道转发（D46）。
+- **MCP 客户端面**：`walgit mcp`（stdio，host 拉起）把同一离线聚合暴露为工具与 `walgit://`
+  资源：只读工具 `collab_ls/thread/pr/board/report`、`ci_status`；唯一写工具 `collab_entry`
+  （需 `--allow-write` + key）。资源 `walgit://collab/board/<o>/<r>`、
+  `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
+  **adapter 侧轮询、best-effort**（同 D46，不是服务端推送）；字节不过 MCP（clone/fetch/push
+  仍走 git/bundle-uri）。实现：`crates/walgit-cli/src/mcp_cmd.rs`，说明见 `web/SKILL.md`。
 
 ### 11.3 去重与幂等（汇总）
 
@@ -644,7 +658,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | `GET /api/v1/principals`、`PUT`/`DELETE /api/v1/principals/{principal}` | host 注册表（§4.4） | 读需读权限；写 self-only |
 
 预算与缓存：collab 聚合端点受 §9.4 的 20k/64MiB 预算保护，超限 `503` 指向 gc / 离线 CLI；
-三个聚合读端点一律 **SWR + ETag、永不 immutable**（输入是活跃 refs，不存在可缓存的不可变答案）。
+三个聚合读端点一律 **SWR、永不 immutable**（输入是活跃 refs，不存在可缓存的不可变答案）；
+当前实现不返回 ETag（`json_swr(…, None)`），加 ETag/304 属后续优化（见后续 issue）。
 
 ## 13. 限额与预算（汇总）
 
