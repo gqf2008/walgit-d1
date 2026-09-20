@@ -1,5 +1,5 @@
 //! `walgit principal` — host-global principal registry commands (issue #76):
-//! register / list / revoke / rotate against `/api/v1/principals` (docs/D1_PROTOCOL.md §4.4
+//! register / list / revoke / rotate against `/api/v1/principals` (`docs/D1_PROTOCOL.md` §4.4
 //! cross-repo extension). HTTP-only, no bucket access.
 
 use std::path::{Path, PathBuf};

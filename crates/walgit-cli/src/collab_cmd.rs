@@ -1,6 +1,6 @@
 //! `walgit collab` — the D1 collaboration layer (`docs/D1_PROTOCOL.md`).
 //!
-//! Deterministic aggregation over `refs/collab/*` (docs/D1_PROTOCOL.md §6/§7): every client that
+//! Deterministic aggregation over `refs/collab/*` (`docs/D1_PROTOCOL.md` §6/§7): every client that
 //! reads the same refs and verifies the same signatures computes the same
 //! `thread` / `pr` / `merge_rule_eval` answer. The read commands run against a
 //! local git checkout that has the collab refs (clone/fetch them), so no
@@ -54,7 +54,7 @@ pub enum CollabAction {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
-    /// Construct + sign + deliver a collab entry (docs/D1_PROTOCOL.md §5). Writes the inbox ref
+    /// Construct + sign + deliver a collab entry (`docs/D1_PROTOCOL.md` §5). Writes the inbox ref
     /// locally; `--push <remote>` additionally pushes it to a walgit server.
     #[allow(clippy::large_enum_variant)] // CLI 参数结构,进程一次构建,无热路径
     Entry {
@@ -96,7 +96,7 @@ pub enum CollabAction {
         attach: Vec<PathBuf>,
     },
     /// First-use registration of a principal's public key at
-    /// `refs/collab/meta/principals/<principal>` (docs/D1_PROTOCOL.md §4.3).
+    /// `refs/collab/meta/principals/<principal>` (`docs/D1_PROTOCOL.md` §4.3).
     PrincipalRegister {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -131,7 +131,7 @@ pub enum CollabAction {
         #[arg(long)]
         token: Option<String>,
     },
-    /// Read-only observability dashboard (docs/D1_PROTOCOL.md §7.4/§8): aggregate all collab state
+    /// Read-only observability dashboard (`docs/D1_PROTOCOL.md` §7.4/§8): aggregate all collab state
     /// into a summary — threads, PR status, verification health, activity.
     Report {
         #[arg(long, default_value = ".")]
@@ -143,7 +143,7 @@ pub enum CollabAction {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
-    /// The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): the threads projected under the board
+    /// The work-unit board (`docs/D1_PROTOCOL.md` §7.4/§8): the threads projected under the board
     /// definition at `.walgit/board.toml` (HEAD). Read-only: moving a card is
     /// an ordinary signed `status` entry (`collab entry --kind status`).
     Board {
@@ -162,7 +162,7 @@ pub enum CollabAction {
         rules: Option<PathBuf>,
     },
     /// Fold the append-only inbox into the signed aggregate snapshot
-    /// (D45 / docs/D1_PROTOCOL.md §9): `refs/collab/meta/snapshot` moves first, then the
+    /// (D45 / `docs/D1_PROTOCOL.md` §9): `refs/collab/meta/snapshot` moves first, then the
     /// folded inbox refs are deleted. Aggregation reads snapshot ∪ tail and
     /// is byte-identical across the fold. Idempotent; safe to re-run.
     Gc {
@@ -1699,7 +1699,7 @@ impl CollabReader {
 
     /// The raw snapshot blob at `refs/collab/meta/snapshot`, when present
     /// (D45 fold), paired with the ref's current oid — the fold baseline the
-    /// snapshot push leases against (docs/D1_PROTOCOL.md §9: a gc must CAS the ref from the
+    /// snapshot push leases against (`docs/D1_PROTOCOL.md` §9: a gc must CAS the ref from the
     /// value it actually read, or a concurrent fold's snapshot can be lost).
     fn snapshot_blob(&self) -> Result<Option<(String, Vec<u8>)>> {
         let out = self.git(&["for-each-ref", "--format=%(objectname)", SNAPSHOT_REF])?;

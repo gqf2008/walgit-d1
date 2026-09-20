@@ -278,7 +278,7 @@ async fn watch_reports_new_collab_entries_via_callback() -> TestResult {
     Ok(())
 }
 
-/// The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): two independent clients — the CLI's offline
+/// The work-unit board (`docs/D1_PROTOCOL.md` §7.4/§8): two independent clients — the CLI's offline
 /// aggregation over a fetched clone and the server's `GET …/collab/board` —
 /// must project the same collab refs to **byte-identical** output, and moving
 /// a card (an ordinary signed `status` entry) must move the projection for
@@ -493,7 +493,7 @@ async fn board_projection_is_byte_identical_across_clients_and_moves_with_status
     Ok(())
 }
 
-/// D45 / docs/D1_PROTOCOL.md §9 (issue #160): the fold. A mixed history (issue/patch/
+/// D45 / `docs/D1_PROTOCOL.md` §9 (issue #160): the fold. A mixed history (issue/patch/
 /// review/status/comment + `ci_claim`/`ci_result`, with an unregistered actor and
 /// a wrong-key signature among them) is folded by `walgit collab gc --push`:
 /// the inbox refs are deleted, `refs/collab/meta/snapshot` carries every entry
@@ -821,7 +821,7 @@ async fn gc_fold_keeps_aggregation_byte_identical_and_the_tail_stays_live() -> T
     Ok(())
 }
 
-/// docs/D1_PROTOCOL.md §9 fold CAS: the snapshot push leases against the baseline the gc
+/// `docs/D1_PROTOCOL.md` §9 fold CAS: the snapshot push leases against the baseline the gc
 /// actually read (`--force-with-lease`, never a `+` refspec — which silently
 /// short-circuits the lease). Two checks:
 /// ① a stale-baseline fold (a second gc whose checkout predates the first

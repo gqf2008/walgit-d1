@@ -1213,7 +1213,7 @@ async fn git_pack_object(local: &walgit_git::LocalRepo, oid: &str) -> Result<Vec
 
 /// Accept a signed collab entry, materialize it as a one-object bucket pack and
 /// publish `refs/collab/inbox/<actor>/<uuid>` through the WAL — the
-/// receive-pack-equivalent that lets a browser write (docs/D1_PROTOCOL.md §12 thin API).
+/// receive-pack-equivalent that lets a browser write (`docs/D1_PROTOCOL.md` §12 thin API).
 /// Verification is client-side (signatures over the canonical form); the
 /// server enforces identity (actor == the authenticated principal) and that
 /// the ref lands in the actor's own inbox.
@@ -1287,7 +1287,7 @@ async fn collab_entries(
 }
 
 /// Upper bound on the collab namespace one aggregation request may read: the
-/// inbox is folded by `walgit collab gc` (D45 / docs/D1_PROTOCOL.md §9), so this counts only
+/// inbox is folded by `walgit collab gc` (D45 / `docs/D1_PROTOCOL.md` §9), so this counts only
 /// the **unfolded** tail plus the principals registry — past this size the
 /// answer is a 503 pointing at gc / the CLI, not an unbounded fan-out of
 /// faults and objects. The snapshot itself is one ref + one bounded blob
@@ -1391,7 +1391,7 @@ async fn object_size(r: &Repo, oid: &str) -> Result<Option<u64>, ApiError> {
 }
 
 /// Materialize a JSON blob as a one-object bucket pack and publish one ref
-/// through the WAL (docs/D1_PROTOCOL.md §12 thin API). Shared by inbox entries and principal
+/// through the WAL (`docs/D1_PROTOCOL.md` §12 thin API). Shared by inbox entries and principal
 /// registration; returns `(oid, seq)`.
 async fn publish_collab_ref(
     st: &Arc<AppState>,
@@ -1482,7 +1482,7 @@ async fn publish_collab_ref(
 }
 
 /// First-use self-registration of the authenticated principal's Ed25519 public
-/// key at `refs/collab/meta/principals/<principal>` (docs/D1_PROTOCOL.md §4.3): the token binds
+/// key at `refs/collab/meta/principals/<principal>` (`docs/D1_PROTOCOL.md` §4.3): the token binds
 /// the principal, this ref binds the key. Registration is one-directional
 /// (the tombstone is `revokePrincipal` via git); re-registration overwrites
 /// with the new key.
@@ -1531,7 +1531,7 @@ async fn collab_principal(
 // ---- D1 collab aggregation API (read path; docs/D1_PROTOCOL.md §7.4/§8 dashboard + thread views) -----
 
 /// The collab state a read request needs: every inbox entry, the principals
-/// registry and the merge-rule document (`refs/collab/meta/rules`, docs/D1_PROTOCOL.md §7.3).
+/// registry and the merge-rule document (`refs/collab/meta/rules`, `docs/D1_PROTOCOL.md` §7.3).
 /// Entries that do not parse are skipped — one corrupt inbox entry must not
 /// take the dashboard down; the deterministic aggregation over the rest is
 /// identical to what the `walgit collab` CLI computes locally.
@@ -1687,7 +1687,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     })
 }
 
-/// The full observability report (docs/D1_PROTOCOL.md §7.4/§8): thread summaries, PR status + merge
+/// The full observability report (`docs/D1_PROTOCOL.md` §7.4/§8): thread summaries, PR status + merge
 /// rule evaluation, verification health and per-actor/per-kind activity.
 async fn collab_report(
     State(st): State<Arc<AppState>>,
@@ -1953,11 +1953,11 @@ async fn collab_ci_artifact_size(
     .await
 }
 
-/// The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): `build_board` — the same projection the
+/// The work-unit board (`docs/D1_PROTOCOL.md` §7.4/§8): `build_board` — the same projection the
 /// `walgit collab` CLI computes offline — over the collab state, under the
 /// board definition versioned at `.walgit/board.toml` (HEAD).
 ///
-/// The render cache (`cache/api/v1/*.json`, docs/D1_COLLAB_DESIGN.md §11 item 3) is
+/// The render cache (`cache/api/v1/*.json`, `docs/D1_COLLAB_DESIGN.md` §11 item 3) is
 /// deliberately **not** used: it exists for sha-addressed immutable answers,
 /// while the projection's input is the live collab refs, which move with every
 /// entry push — keying it would need a second cache with its own invalidation

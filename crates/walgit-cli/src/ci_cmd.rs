@@ -1771,7 +1771,7 @@ impl Runner {
         Ok(Some(out.stdout))
     }
 
-    /// Sign an entry into the runner's inbox and push it (docs/D1_PROTOCOL.md §5 write path).
+    /// Sign an entry into the runner's inbox and push it (`docs/D1_PROTOCOL.md` §5 write path).
     fn publish(
         &self,
         kind: &str,
