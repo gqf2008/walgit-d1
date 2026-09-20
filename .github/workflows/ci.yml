@@ -93,6 +93,18 @@ jobs:
         run: |
           cargo build -q -p walgit-cli --bin walgit
           bash scripts/check-skill-covers-cli.sh
+          # Positive control: the guard must go red when the guide stops
+          # documenting a command, otherwise it is decoration. Mutate a COPY so
+          # the real guide is untouched.
+          tmp_skill="$(mktemp)"
+          sed 's/walgit service/walgit serviX/g' web/SKILL.md > "$tmp_skill"
+          if WALGIT_SKILL_MD="$tmp_skill" bash scripts/check-skill-covers-cli.sh; then
+            echo 'check-skill-covers-cli passed a guide that dropped `walgit service`' >&2
+            rm -f "$tmp_skill"
+            exit 1
+          fi
+          rm -f "$tmp_skill"
+          echo 'positive control: the guard fails when a documented command disappears'
       # The 300 s timeout in the justfile can trip under CI load (measured
       # exit 124 on 2026-08-28); a rerun after a timeout is a retry, not a
       # regression signal. The retry lives inside this step, like sim/e2e: a

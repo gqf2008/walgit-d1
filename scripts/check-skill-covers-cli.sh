@@ -40,6 +40,23 @@ flags="$({
     "$bin" mcp --help
 } | grep -oE -- '--[a-z0-9-]+' | sort -u)"
 
+# The two extractions are the guard's whole input: if either comes back empty
+# (clap's help layout changed, the wrong binary was built, `awk` matched
+# nothing) the loops below would check nothing and still print OK. That is the
+# "guard that cannot fail" shape, so an empty or implausibly small surface is a
+# hard error here rather than a green step.
+[ -n "$commands" ] || {
+    echo "check-skill-covers-cli: no top-level command extracted from \`$bin --help\`" >&2
+    exit 2
+}
+[ -n "$flags" ] || {
+    echo "check-skill-covers-cli: no flag extracted from \`$bin mcp --help\`" >&2
+    exit 2
+}
+# 20 items are documented today (2 exemptions); the floor leaves room for a
+# deliberate exemption or two while catching a shrunken extraction.
+min_checked="${WALGIT_MIN_CHECKED:-15}"
+
 missing=0
 checked=0
 
@@ -80,6 +97,11 @@ done <<<"$commands"
 while IFS= read -r flag; do
     [ -n "$flag" ] && check_flag "$flag"
 done <<<"$flags"
+
+if [ "$checked" -lt "$min_checked" ]; then
+    echo "check-skill-covers-cli: only $checked items were checked (floor $min_checked)" >&2
+    exit 2
+fi
 
 if [ "$missing" -ne 0 ]; then
     echo "check-skill-covers-cli: update $skill or add a reasoned exemption" >&2
