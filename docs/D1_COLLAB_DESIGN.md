@@ -1,9 +1,10 @@
 # D1 — 去中心化协作层设计（Decentralized collaboration on walgit）
 
-> 状态：**设计提案**（design proposal），供讨论与立项，尚未实现。
-> 本文描述一个**构建在 walgit 之上**的外部协作层——它不是 walgit 进程内的功能。文中出现的
-> API / 路径 / 命令均为**提案**，未实现前不视为存在（与 `RULE_技能文档命令须有可执行实现` 对齐：
-> 文档声明的能力必须由实现兑现，二选一）。
+> 状态：**设计已实现**。当前规范（对象 schema、canonical 签名、验证、聚合、看板、D45 折叠、
+> 限额与验收锚点）见 **`docs/D1_PROTOCOL.md`**——实现事实与规范冲突时，以规范与代码为准。
+> 本文保留为设计背景与推进记录（§9–§11 的进度注记是历史原貌，不再逐条维护），不重复规范内容。
+>
+> 本文描述一个**构建在 walgit 之上**的外部协作层——它不是 walgit 进程内的功能。
 > 与 walgit 的关系遵循 `AGENTS.md §3` 原则 X（keep walgit small）与 `GOAL.md §4`：
 > code review / merge queues / CI / issues 不在 walgit 范围内，**build on this**。
 

@@ -51,6 +51,8 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
 | `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `walgit ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation (`walgit-wal/src/ci.rs`). Normative rule language. |
+| `docs/D1_PROTOCOL.md` | Anyone touching the D1 collaboration layer: identities, refs layout, entry schema/canonical signing, verification, aggregation (thread / PR / report), the board projection, the D45 fold, or the observation lanes. Normative rule language. |
+| `docs/D1_COLLAB_DESIGN.md` | Design background and progress history of the D1 layer; current normative rules live in `docs/D1_PROTOCOL.md` (implementation wins where they differ). |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
@@ -498,7 +500,7 @@ decision in §4 — or the PR is; never "fix later".
   `refs/collab/inbox/*` namespace hits two walls as it grows: the 20k-ref
   per-request aggregation budget (`collab_load`) and the clone/fetch ref
   advertisement size. The fold is the WAL checkpoint's shape applied to the
-  collab namespace (normative: `docs/D1_COLLAB_DESIGN.md` §11.4): one
+  collab namespace (normative: `docs/D1_PROTOCOL.md` §9): one
   CAS-moved ref `refs/collab/meta/snapshot` points at a signed JSON blob
   that carries every folded entry verbatim (`oid` + inbox `principal` + raw
   signed bytes — the digest manifest that keeps the per-entry signature
