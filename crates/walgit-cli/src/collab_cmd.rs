@@ -17,10 +17,10 @@ use walgit_git::ObjectFormat;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use walgit_wal::collab::{
-    BOARD_PATH, Board, BoardDef, Entry, EntryRef, EntryRefs, EntrySet, MergeRules, Report,
-    SNAPSHOT_REF, SnapshotRecord, build_board, build_report, build_snapshot, default_board,
-    merge_rule_eval, parse_board_def, parse_snapshot, pr_view, sign_entry, thread,
-    verify_snapshot,
+    BOARD_PATH, Board, BoardDef, COLLAB_SNAPSHOT_MAX_BYTES, Entry, EntryRef, EntryRefs, EntrySet,
+    MergeRules, Report, SNAPSHOT_REF, Snapshot, SnapshotRecord, build_board, build_report,
+    build_snapshot, build_snapshot_truncated, default_board, merge_rule_eval, parse_board_def,
+    parse_snapshot, pr_view, sign_entry, thread, verify_snapshot,
 };
 
 // ---- CLI commands --------------------------------------------------------------
@@ -94,6 +94,15 @@ pub enum CollabAction {
         /// body (repeatable; issue #75 ④). Hard cap 64 KiB per file.
         #[arg(long = "attach")]
         attach: Vec<PathBuf>,
+        /// After a successful `--push`, fold the inbox when the local unfolded
+        /// ref count is at or above `--fold-threshold` (opportunistic gc with
+        /// the same actor/key; fold failures are warnings, the entry stays).
+        #[arg(long)]
+        auto_fold: bool,
+        /// Unfolded-ref threshold for `--auto-fold` (default 10000, half of
+        /// the server's 20k per-request read budget).
+        #[arg(long, default_value_t = 10_000)]
+        fold_threshold: usize,
     },
     /// First-use registration of a principal's public key at
     /// `refs/collab/meta/principals/<principal>` (`docs/D1_PROTOCOL.md` §4.3).
@@ -177,6 +186,12 @@ pub enum CollabAction {
         /// Remote to push the fold to (omit for a local-only fold).
         #[arg(long)]
         push: Option<String>,
+        /// Truncate instead of refusing when the folded snapshot would exceed
+        /// the 64 MiB cap: drop the oldest records (by entry ts) and mark the
+        /// snapshot `complete: false`, so a pruned ledger is distinguishable
+        /// from a complete one (`docs/D1_PROTOCOL.md` §9).
+        #[arg(long)]
+        truncate: bool,
     },
     /// Resident watcher: fetch `refs/collab/*` from a remote, report new or
     /// changed refs, and invoke `--exec` for each with the entry JSON on
@@ -251,6 +266,8 @@ pub async fn run(action: CollabAction) -> Result<()> {
             related,
             depends_on,
             attach,
+            auto_fold,
+            fold_threshold,
         } => run_entry(&EntryArgs {
             repo,
             push,
@@ -265,6 +282,8 @@ pub async fn run(action: CollabAction) -> Result<()> {
             related,
             depends_on,
             attach,
+            auto_fold,
+            fold_threshold,
         })?,
         CollabAction::PrincipalRegister {
             repo,
@@ -277,8 +296,14 @@ pub async fn run(action: CollabAction) -> Result<()> {
             principal,
             push,
         } => run_principal_revoke(&repo, &principal, push.as_deref())?,
-        CollabAction::Gc { repo, actor, key, push } => {
-            run_gc(&repo, &actor, &key, push.as_deref())?;
+        CollabAction::Gc {
+            repo,
+            actor,
+            key,
+            push,
+            truncate,
+        } => {
+            run_gc(&repo, &actor, &key, push.as_deref(), truncate)?;
         }
         CollabAction::PrincipalFetch {
             repo,
@@ -316,10 +341,7 @@ pub async fn run(action: CollabAction) -> Result<()> {
             let (entries, principals) = reader.load()?;
             let filtered: Vec<&EntryRef> = entries.iter().filter(|e| e.entry.id == id).collect();
             let pr = pr_view(&filtered, &principals);
-            let rules: MergeRules = match rules {
-                Some(p) => serde_json::from_str(&std::fs::read_to_string(&p)?)?,
-                None => MergeRules::default(),
-            };
+            let rules = load_merge_rules(&repo, rules.as_deref())?;
             let eval = merge_rule_eval(&rules, &pr);
             println!(
                 "{}",
@@ -463,6 +485,10 @@ struct EntryArgs {
     /// Files to attach: sha256 + base64 content embedded in `body.attachments`
     /// (`--attach`, repeatable; issue #75 ④).
     attach: Vec<std::path::PathBuf>,
+    /// Fold after a successful push when the unfolded count reaches
+    /// `fold_threshold` (best-effort, same actor/key).
+    auto_fold: bool,
+    fold_threshold: usize,
 }
 
 /// The client-side transition gate (issue #102/#104): identical to the
@@ -584,7 +610,105 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
         git_push(&args.repo, remote, &ref_name)?;
     }
     println!("{ref_name} {oid}");
+    if args.auto_fold && args.push.is_some() {
+        run_auto_fold(
+            &args.repo,
+            &args.actor,
+            &args.key,
+            args.push.as_deref(),
+            args.fold_threshold,
+        );
+    }
     Ok(())
+}
+
+/// Opportunistic fold (docs/D1_PROTOCOL.md §9): a writer that just pushed an
+/// entry already holds a signing key, so it can fold the inbox before the
+/// 20k-ref server budget becomes an availability incident. Best-effort: the
+/// entry is already published, so a failed fold is a warning, not an error.
+fn run_auto_fold(repo: &Path, actor: &str, key: &Path, remote: Option<&str>, threshold: usize) {
+    let n = match CollabReader::new(repo).inbox_refs() {
+        Ok(refs) => refs.len(),
+        Err(e) => {
+            eprintln!("collab auto-fold skipped (cannot list inbox): {e}");
+            return;
+        }
+    };
+    if n < threshold {
+        return;
+    }
+    match run_gc(repo, actor, key, remote, false) {
+        Ok(()) => println!("collab auto-fold: folded {n} inbox ref(s) (threshold {threshold})"),
+        Err(e) => eprintln!("collab auto-fold skipped (entry is published): {e}"),
+    }
+}
+
+/// Build the fold under the snapshot byte cap: over the cap the fold is
+/// refused (pointing at `--truncate`), unless truncation was requested — then
+/// the oldest records (by entry `ts`, unparseable first) are dropped until the
+/// document fits and the result is marked `complete: false`.
+fn build_capped_snapshot(
+    actor: &str,
+    ts: i64,
+    records: Vec<SnapshotRecord>,
+    key: &SigningKey,
+    truncate: bool,
+) -> Result<(Snapshot, String)> {
+    build_capped_snapshot_at(actor, ts, records, key, truncate, COLLAB_SNAPSHOT_MAX_BYTES)
+}
+
+/// The cap-parameterised form (unit-testable without a 64 MiB fixture).
+fn build_capped_snapshot_at(
+    actor: &str,
+    ts: i64,
+    mut records: Vec<SnapshotRecord>,
+    key: &SigningKey,
+    truncate: bool,
+    max_bytes: usize,
+) -> Result<(Snapshot, String)> {
+    let snap = build_snapshot(actor, ts, records.clone(), key);
+    let text = serde_json::to_string(&snap).context("serialize snapshot")?;
+    if text.len() <= max_bytes {
+        return Ok((snap, text));
+    }
+    if !truncate {
+        bail!(
+            "collab gc: folded snapshot would exceed {} MiB; re-run with --truncate to drop the oldest records (marked complete:false), or raise the server cap",
+            COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
+        );
+    }
+    records.sort_by(|a, b| {
+        let ta = serde_json::from_str::<Entry>(&a.json)
+            .map(|e| e.ts)
+            .unwrap_or(i64::MIN);
+        let tb = serde_json::from_str::<Entry>(&b.json)
+            .map(|e| e.ts)
+            .unwrap_or(i64::MIN);
+        (ta, a.oid.as_str()).cmp(&(tb, b.oid.as_str()))
+    });
+    let mut dropped = 0u64;
+    let mut drained = 0usize;
+    loop {
+        let snap = build_snapshot_truncated(actor, ts, records.clone(), dropped, key);
+        let text = serde_json::to_string(&snap).context("serialize snapshot")?;
+        if text.len() <= max_bytes || records.is_empty() {
+            return Ok((snap, text));
+        }
+        // Rendered size is monotone in the record set: drop the oldest records
+        // until their serialized weight covers the overflow, then re-render.
+        let overflow = text.len() - max_bytes;
+        let mut freed = 0usize;
+        while drained < records.len() && freed < overflow {
+            freed += serde_json::to_string(&records[drained]).map_or(0, |s| s.len() + 1);
+            drained += 1;
+        }
+        if drained == 0 {
+            drained = 1; // defensive: always make progress
+        }
+        records.drain(0..drained);
+        dropped += drained as u64;
+        drained = 0;
+    }
 }
 
 fn run_principal_register(
@@ -834,7 +958,7 @@ fn keep_fold_record(
 /// whose ref is missing; another gc may have pruned it mid-flight). A crash
 /// or a reader mid-fold sees duplicates, never a loss; the read side dedups
 /// by oid.
-fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>) -> Result<()> {
+fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>, truncate: bool) -> Result<()> {
     ref_segment("gc.actor", actor)?;
     let reader = CollabReader::new(repo);
     let format = reader.object_format()?;
@@ -915,8 +1039,15 @@ fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>) -> Resu
     // names already carries every entry, so it is never rebuilt (a rebuild
     // would differ only in `ts` — pure ref churn).
     let snap_oid = if changed {
-        let snap = build_snapshot(actor, chrono::Utc::now().timestamp(), records, &key);
-        Some(git_write_blob(repo, &serde_json::to_string(&snap)?)?)
+        let ts = chrono::Utc::now().timestamp();
+        let (snap, content) = build_capped_snapshot(actor, ts, records, &key, truncate)?;
+        if !snap.complete {
+            eprintln!(
+                "collab gc: WARNING snapshot truncated: dropped {} oldest record(s); the ledger is now marked complete=false",
+                snap.dropped_entries
+            );
+        }
+        Some(git_write_blob(repo, &content)?)
     } else {
         None
     };
@@ -1137,33 +1268,76 @@ fn md_cell(s: &str) -> String {
         .replace('\n', "<br>")
 }
 
+/// Merge rules for local aggregation: `--rules <file>` wins; otherwise read
+/// `refs/collab/meta/rules` from the checkout — the same source the server
+/// uses — and default to nothing-protected when the ref is absent. A present
+/// but invalid document is an error (fail closed, matching the server).
+fn load_merge_rules(repo: &Path, rules_path: Option<&Path>) -> Result<MergeRules> {
+    if let Some(p) = rules_path {
+        return Ok(serde_json::from_str(&std::fs::read_to_string(p)?)?);
+    }
+    let reader = CollabReader::new(repo);
+    // Distinguish "no rules ref" (defaults) from "a rules ref that cannot be
+    // read or parsed" (fail closed, matching the server).
+    let exists = reader
+        .git(&["rev-parse", "--verify", "--quiet", "refs/collab/meta/rules"])
+        .map(|out| !String::from_utf8_lossy(&out).trim().is_empty())
+        .unwrap_or(false);
+    if !exists {
+        return Ok(MergeRules::default());
+    }
+    let bytes = reader
+        .git(&["cat-file", "blob", "refs/collab/meta/rules"])
+        .context("refs/collab/meta/rules: read")?;
+    serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("refs/collab/meta/rules: {e}"))
+}
+
 fn run_report(repo: &Path, format: &str, rules_path: Option<&Path>) -> Result<()> {
     let reader = CollabReader::new(repo);
     let (entries, principals) = reader.load()?;
     let refs: Vec<&EntryRef> = entries.iter().collect();
-    let rules: MergeRules = match rules_path {
-        Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
-        None => MergeRules::default(),
-    };
+    let rules = load_merge_rules(repo, rules_path)?;
     let report = build_report(&refs, &principals, &rules, chrono::Utc::now().timestamp());
+    // The snapshot's completeness marker (§9): a truncated fold says so in the
+    // report instead of silently reading like the whole ledger.
+    let truncated = CollabReader::new(repo)
+        .snapshot_blob()?
+        .and_then(|(_, b)| parse_snapshot(&b).ok())
+        .filter(|s| !s.complete)
+        .map(|s| s.dropped_entries);
+    let banner = truncated.map_or_else(String::new, |n| {
+        format!(
+            "WARNING: folded history truncated — {n} oldest entry(ies) were dropped at the last fold (snapshot complete=false)\n\n"
+        )
+    });
     // The CI section rides the same loaded log and the same aggregation core
     // as `walgit ci status` (D1-CI §8.3) — one answer, no second semantics.
     let ci = walgit_wal::ci::ci_entries(&refs);
     let runs = walgit_wal::ci::collect_runs(&ci, &principals, chrono::Utc::now().timestamp());
     match format {
         "text" => print!(
-            "{}\nci runs\n{}",
+            "{banner}{}\nci runs\n{}",
             render_report_text(&report),
             crate::ci_cmd::ci_runs_text(&runs)
         ),
         "markdown" => print!(
-            "{}\n## CI runs\n\n{}",
+            "{banner}{}\n## CI runs\n\n{}",
             render_report_markdown(&report),
             crate::ci_cmd::ci_runs_markdown(&runs)
         ),
         "html" => {
             let section = crate::ci_cmd::ci_runs_html(&runs);
             let html = render_report_html(&report);
+            let html = if let Some(n) = truncated {
+                html.replace(
+                    "<body>",
+                    &format!(
+                        "<body><p style=\"color:#b00\">WARNING: folded history truncated — {n} oldest entry(ies) dropped (complete=false)</p>"
+                    ),
+                )
+            } else {
+                html
+            };
             print!("{}", html.replace("</body>", &format!("{section}</body>")));
         }
         other => bail!("unknown report format {other} (text|markdown|html)"),
@@ -1274,10 +1448,7 @@ fn run_board(
     let reader = CollabReader::new(repo);
     let (entries, principals) = reader.load()?;
     let refs: Vec<&EntryRef> = entries.iter().collect();
-    let rules: MergeRules = match rules_path {
-        Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
-        None => MergeRules::default(),
-    };
+    let rules = load_merge_rules(repo, rules_path)?;
     let board_def = load_board_def(repo, board_path)?;
     let board = build_board(&refs, &principals, &rules, &board_def);
     match format {
@@ -1720,6 +1891,14 @@ impl CollabReader {
         let format = self.object_format()?;
         let mut set = EntrySet::new();
         if let Some((_, bytes)) = self.snapshot_blob()? {
+            if bytes.len() > COLLAB_SNAPSHOT_MAX_BYTES {
+                bail!(
+                    "{} is {} MiB, over the {} MiB read cap; run `walgit collab gc --truncate` in a clone that still holds it (or raise the server cap)",
+                    SNAPSHOT_REF,
+                    bytes.len() / (1024 * 1024),
+                    COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
+                );
+            }
             let snap = parse_snapshot(&bytes).map_err(|e| anyhow::anyhow!("{SNAPSHOT_REF}: {e}"))?;
             for rec in &snap.entries {
                 if let Some(er) = rec.entry_ref(format) {
@@ -1974,16 +2153,23 @@ mod tests {
             head: Some("refs/heads/topic".into()),
         });
         patch.entry.sig = sign_entry(&mut patch.entry, &sk);
+        // The reviewer must be someone other than the patch author: alice's
+        // own approve is excluded by the merge rule (distinct non-author
+        // approvers), so carol signs with her own key.
+        let sk2 = SigningKey::from_bytes(&[8u8; 32]);
+        let pk2 =
+            base64::engine::general_purpose::STANDARD.encode(sk2.verifying_key().to_bytes());
+        principals.insert("carol".to_string(), pk2);
         let mut review = entry(
             "pr1",
             "review",
-            "alice",
+            "carol",
             "c",
             "d",
             4,
             serde_json::json!({"decision": "approve"}),
         );
-        review.entry.sig = sign_entry(&mut review.entry, &sk);
+        review.entry.sig = sign_entry(&mut review.entry, &sk2);
 
         let refs = vec![&issue, &unsigned, &patch, &review];
         let rules = MergeRules {
@@ -2012,7 +2198,11 @@ mod tests {
         assert!(r1.prs[0].merge_allowed);
         assert_eq!(
             r1.by_actor,
-            vec![("alice".to_string(), 3), ("bob".to_string(), 1)]
+            vec![
+                ("alice".to_string(), 2),
+                ("bob".to_string(), 1),
+                ("carol".to_string(), 1)
+            ]
         );
 
         // Determinism: identical input -> identical text render.
@@ -2398,7 +2588,7 @@ mod gc_tests {
 
         // Local-only fold first: snapshot exists locally, but the remote has
         // only the inbox and no snapshot.
-        run_gc(&repo, "alice", &alice_key, None).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
         std::process::Command::new("git")
             .args(["-C"])
             .arg(&repo)
@@ -2406,7 +2596,7 @@ mod gc_tests {
             .status()
             .unwrap();
 
-        let pushed = run_gc(&repo, "alice", &alice_key, Some("origin"));
+        let pushed = run_gc(&repo, "alice", &alice_key, Some("origin"), false);
         let remote_snapshot = String::from_utf8_lossy(
             &std::process::Command::new("git")
                 .args(["-C"])
@@ -2540,7 +2730,7 @@ mod gc_tests {
 
         // The garbage blob fails the CLI's strict inbox parse (pre-existing
         // behavior); gc must still fold around it, so fold first.
-        run_gc(&repo, "alice", &alice_key, None).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
         assert_eq!(inbox_ref_count(&repo), 1, "only the unparseable blob's ref survives");
         let out = std::process::Command::new("git")
             .args(["-C"])
@@ -2573,7 +2763,7 @@ mod gc_tests {
         assert_eq!(entries.iter().filter(|e| e.is_verified(&principals)).count(), 2);
 
         // A second gc with an empty tail is a no-op...
-        run_gc(&repo, "alice", &alice_key, None).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
         assert_eq!(fingerprint(&repo), before, "no-op gc moves nothing");
 
         // ...and the tail stays live: a new entry chains onto a folded tip
@@ -2590,7 +2780,7 @@ mod gc_tests {
         assert!(ordered.iter().all(|e| e.entry.actor != "carol" || !e.is_verified(&principals)));
 
         // A second real fold composes with the existing snapshot.
-        run_gc(&repo, "alice", &alice_key, None).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
         assert_eq!(inbox_ref_count(&repo), 0);
         let (entries, _) = CollabReader::new(&repo).load().unwrap();
         assert_eq!(entries.len(), 4, "second fold loses nothing");
@@ -2612,7 +2802,7 @@ mod gc_tests {
         let mut e = mk_entry("issue", "t1", "alice", "", 1, serde_json::json!({"title": "x"}));
         e.sig = sign_entry(&mut e, &SigningKey::from_bytes(&[7u8; 32]));
         push_entry(&repo, &e);
-        run_gc(&repo, "alice", &alice_key, None).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
         let snap_oid = String::from_utf8_lossy(
             &CollabReader::new(&repo)
                 .git(&["rev-parse", SNAPSHOT_REF])
@@ -2690,5 +2880,79 @@ mod principal_cache_tests {
 
         let map = CollabReader::new(repo).principals().unwrap();
         assert_eq!(map.get("p").map(String::as_str), Some("LOCAL"));
+    }
+}
+
+#[cfg(test)]
+mod capped_snapshot_tests {
+    //! The gc write-side snapshot cap (docs/D1_PROTOCOL.md §9.3): over-cap is
+    //! refused unless truncation is asked for, and truncation drops the oldest
+    //! records and marks the snapshot incomplete.
+    use super::*;
+    use super::*;
+
+    fn keypair() -> (SigningKey, String) {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
+        (sk, pk)
+    }
+
+    fn record(seed: u8, ts: i64) -> SnapshotRecord {
+        let entry = Entry {
+            version: 1,
+            kind: "comment".into(),
+            id: "t".into(),
+            actor: "alice".into(),
+            ts,
+            parent: String::new(),
+            refs: None,
+            body: serde_json::json!({"note": format!("record-{seed}")}),
+            sig: String::new(),
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        SnapshotRecord {
+            oid: format!("{seed:040x}"),
+            principal: "alice".into(),
+            json,
+        }
+    }
+
+    #[test]
+    fn over_cap_is_refused_without_truncate() {
+        let (sk, _) = keypair();
+        let records = vec![record(1, 1), record(2, 2), record(3, 3)];
+        let (snap, _) =
+            build_capped_snapshot_at("alice", 9, records.clone(), &sk, false, 1 << 20).unwrap();
+        assert!(snap.complete);
+        assert_eq!(snap.dropped_entries, 0);
+        let err = build_capped_snapshot_at("alice", 9, records, &sk, false, 200).unwrap_err();
+        assert!(err.to_string().contains("--truncate"), "{err}");
+    }
+
+    #[test]
+    fn truncate_drops_the_oldest_and_marks_incomplete() {
+        let (sk, _) = keypair();
+        let base = vec![record(1, 10), record(2, 20), record(3, 30)];
+        let full = serde_json::to_string(&build_snapshot("alice", 9, base.clone(), &sk)).unwrap();
+        // A cap just below the full rendering forces at least one drop.
+        let cap = full.len() - 40;
+        let (snap, text) =
+            build_capped_snapshot_at("alice", 9, base.clone(), &sk, true, cap).unwrap();
+        assert!(!snap.complete, "truncation is marked");
+        assert!(snap.dropped_entries >= 1);
+        assert!(text.len() <= cap, "rendered {} <= cap {cap}", text.len());
+        // The newest record (ts 30) always survives; the oldest (ts 10) goes first.
+        assert!(
+            snap.entries
+                .iter()
+                .any(|r| r.oid == format!("{:040x}", 3)),
+            "newest survives"
+        );
+        assert!(
+            snap.entries
+                .iter()
+                .all(|r| r.oid != format!("{:040x}", 1)),
+            "oldest dropped"
+        );
     }
 }

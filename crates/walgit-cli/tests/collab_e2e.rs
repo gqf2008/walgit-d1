@@ -1117,3 +1117,97 @@ async fn sha256_repo_fold_preserves_the_thread() -> TestResult {
     );
     Ok(())
 }
+
+/// `collab entry --auto-fold`: once the local unfolded ref count reaches the
+/// threshold, the writing client folds the inbox (snapshot created, inbox refs
+/// pruned) and aggregation collapses into the snapshot — the opportunistic
+/// answer to the server's 20k per-request budget (docs/D1_PROTOCOL.md §9.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entry_auto_fold_folds_the_inbox_past_the_threshold() -> TestResult {
+    let (base, _shutdown) = start_server().await?;
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let keydir = tempfile::tempdir()?;
+    let key = keydir.path().join("key");
+    std::fs::write(&key, "07".repeat(32))?;
+    let key_s = key.to_str().unwrap();
+
+    let run = |args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    let a = tempfile::tempdir()?;
+    git_in(a.path(), &["init", "-q", "-b", "main"])?;
+    git_in(a.path(), &["config", "user.email", "t@t"])?;
+    git_in(a.path(), &["config", "user.name", "T"])?;
+    git_in(
+        a.path(),
+        &["remote", "add", "origin", &format!("{base}/o/r.git")],
+    )?;
+    let repo_a = a.path().to_str().unwrap();
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", key_s,
+        "--push", "origin",
+    ])?;
+
+    let mut parent = String::new();
+    for n in 1..=3 {
+        let body = if n == 1 {
+            r#"{"title":"auto-fold"}"#.to_string()
+        } else {
+            r#"{"note":"more"}"#.to_string()
+        };
+        let mut args = vec![
+            "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t1", "--actor",
+            "alice", "--body", &body, "--key", key_s, "--push", "origin", "--auto-fold",
+            "--fold-threshold", "3",
+        ];
+        if !parent.is_empty() {
+            args.extend_from_slice(&["--parent", &parent]);
+        }
+        let out = run(&args)?;
+        parent = out.split_whitespace().nth(1).unwrap().to_string();
+        if n < 3 {
+            let snap = git_in(
+                a.path(),
+                &["for-each-ref", "--format=%(refname)", "refs/collab/meta/snapshot"],
+            )?;
+            assert!(
+                snap.trim().is_empty(),
+                "below the threshold no snapshot exists yet: {snap}"
+            );
+        }
+    }
+
+    let snap = git_in(
+        a.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/collab/meta/snapshot"],
+    )?;
+    assert!(
+        snap.contains("refs/collab/meta/snapshot"),
+        "auto-fold created the snapshot: {snap}"
+    );
+    let inbox = git_in(a.path(), &["for-each-ref", "refs/collab/inbox/"])?;
+    assert!(
+        inbox.trim().is_empty(),
+        "the folded inbox refs are pruned locally: {inbox}"
+    );
+    let thread = run(&["collab", "thread", "t1", "--repo", repo_a])?;
+    let arr: serde_json::Value = serde_json::from_str(&thread)?;
+    assert_eq!(
+        arr.as_array().map(Vec::len),
+        Some(3),
+        "snapshot + empty tail still aggregates every entry: {thread}"
+    );
+    Ok(())
+}

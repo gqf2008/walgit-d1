@@ -458,6 +458,15 @@ pub(crate) fn etag_for(sha: &str) -> String {
 pub(crate) fn json_swr<T: Serialize>(value: &T, etag: Option<&str>) -> Rendered {
     Rendered::json(json_bytes(value), SWR, etag.map(str::to_string))
 }
+
+/// SWR + a strong ETag taken from the body digest: ref-dependent answers change
+/// with every push, but identical bytes still deserve a 304. Used by the three
+/// D1 aggregation endpoints (D1_PROTOCOL §12).
+fn json_swr_hashed<T: Serialize>(value: &T) -> Rendered {
+    let body = json_bytes(value);
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&body);
+    Rendered::json(body, SWR, Some(etag_for(&hex::encode(digest))))
+}
 fn json_bytes<T: Serialize>(value: &T) -> bytes::Bytes {
     bytes::Bytes::from(serde_json::to_vec(value).unwrap_or_default())
 }
@@ -1276,6 +1285,15 @@ async fn collab_entries(
         }
     }
     let content = serde_json::to_vec(&entry).map_err(internal)?;
+    if content.len() > walgit_wal::collab::COLLAB_ENTRY_MAX_BYTES {
+        metrics::counter!("walgit_collab_entry_skipped_total", "reason" => "oversized-write")
+            .increment(1);
+        return Err(ApiError::BadRequest(format!(
+            "entry is {} bytes; the cap is {} KiB (docs/D1_PROTOCOL.md §13)",
+            content.len(),
+            walgit_wal::collab::COLLAB_ENTRY_MAX_BYTES / 1024
+        )));
+    }
     let ref_name = format!("refs/collab/inbox/{actor}/{}", uuid::Uuid::new_v4());
     let (oid, seq) =
         publish_collab_ref(&st, handle, &r, &principal.name, &ref_name, content).await?;
@@ -1296,8 +1314,9 @@ const COLLAB_MAX_ENTRIES: usize = 20_000;
 
 /// Bound on the folded-history blob at `refs/collab/meta/snapshot` (D45): the
 /// fold turns N historical refs into one ref + one blob, and this cap keeps
-/// the blob bounded work for the remote reader and the parser.
-const COLLAB_SNAPSHOT_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// the blob bounded work for the remote reader and the parser. Shared with the
+/// CLI, which refuses to publish one over it.
+const COLLAB_SNAPSHOT_MAX_BYTES: usize = walgit_wal::collab::COLLAB_SNAPSHOT_MAX_BYTES;
 
 /// One `git cat-file --batch` for many oids: a process per entry made the
 /// aggregation O(refs) subprocesses per request. Requests go out in small
@@ -1307,6 +1326,7 @@ const COLLAB_SNAPSHOT_MAX_BYTES: usize = 64 * 1024 * 1024;
 async fn git_cat_file_batch(
     local: &walgit_git::LocalRepo,
     oids: &[String],
+    max_bytes: Option<usize>,
 ) -> Result<HashMap<String, Vec<u8>>, ApiError> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     const CHUNK: usize = 512;
@@ -1357,6 +1377,27 @@ async fn git_cat_file_batch(
             let size: usize = size
                 .parse()
                 .map_err(|_| ApiError::Internal(format!("cat-file header {header:?}")))?;
+            if let Some(cap) = max_bytes
+                && size > cap
+            {
+                // Over the per-entry read cap: skip without materializing (the
+                // loader treats a missing blob exactly like an unparseable one).
+                // cat-file --batch will not emit the next header until this body
+                // is consumed, so drain it in bounded chunks.
+                let mut remaining = size + 1; // body + trailing newline
+                let mut scratch = [0u8; 64 * 1024];
+                while remaining > 0 {
+                    let take = remaining.min(scratch.len());
+                    stdout
+                        .read_exact(&mut scratch[..take])
+                        .await
+                        .map_err(internal)?;
+                    remaining -= take;
+                }
+                metrics::counter!("walgit_collab_entry_skipped_total", "reason" => "oversized")
+                    .increment(1);
+                continue;
+            }
             let mut body = vec![0u8; size];
             stdout.read_exact(&mut body).await.map_err(internal)?;
             let mut nl = [0u8; 1];
@@ -1548,7 +1589,14 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     let mut rules = MergeRules::default();
     let mut rules_oid: Option<String> = None;
     let mut snapshot_oid: Option<String> = None;
-    for (name, oid) in &r.index.all {
+    let all = &r.index.all;
+    // Byte-sorted index: jump straight to the `refs/collab/` namespace instead
+    // of scanning every ref in a 466k-ref repository (same idiom as ref_list).
+    let start = all.partition_point(|(name, _)| name.as_str() < "refs/collab/");
+    for (name, oid) in &all[start..] {
+        if !name.starts_with("refs/collab/") {
+            break;
+        }
         if let Some(rest) = name.strip_prefix("refs/collab/meta/principals/") {
             plan.push(("principal", rest.to_string(), oid.clone()));
         } else if let Some(rest) = name.strip_prefix("refs/collab/inbox/") {
@@ -1559,7 +1607,9 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
             snapshot_oid = Some(oid.clone());
         }
     }
+    metrics::histogram!("walgit_collab_load_refs").record(plan.len() as f64);
     if plan.len() > COLLAB_MAX_ENTRIES {
+        metrics::counter!("walgit_collab_budget_exceeded").increment(1);
         return Err(ApiError::ServiceUnavailable(format!(
             "collab namespace has more than {COLLAB_MAX_ENTRIES} unfolded refs; fold the inbox with `walgit collab gc` (docs/D1_PROTOCOL.md §9) or aggregate offline with the `walgit collab` CLI (this budget guards the remote reader and the per-request object fan-out)"
         )));
@@ -1593,14 +1643,23 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
-    let mut want: Vec<String> = plan.iter().map(|(_, _, oid)| oid.clone()).collect();
+    let want_entries: Vec<String> = plan.iter().map(|(_, _, oid)| oid.clone()).collect();
+    let mut want_meta: Vec<String> = Vec::new();
     if let Some(oid) = &rules_oid {
-        want.push(oid.clone());
+        want_meta.push(oid.clone());
     }
     if let Some(oid) = &snapshot_oid {
-        want.push(oid.clone());
+        want_meta.push(oid.clone());
     }
-    let blobs = git_cat_file_batch(&r.local, &want).await?;
+    // Entries carry the byte cap; the snapshot/rules singletons do not (the
+    // snapshot has its own 64 MiB bound, checked before materialization above).
+    let mut blobs = git_cat_file_batch(
+        &r.local,
+        &want_entries,
+        Some(walgit_wal::collab::COLLAB_ENTRY_MAX_BYTES),
+    )
+    .await?;
+    blobs.extend(git_cat_file_batch(&r.local, &want_meta, None).await?);
     // D45 read semantics: the folded history (snapshot) ∪ the unfolded tail,
     // deduped by oid — a mid-fold state (snapshot moved, deletes pending)
     // aggregates identically to either side of it.
@@ -1627,6 +1686,12 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
         // inside, like a corrupt inbox blob.)
         let snap = walgit_wal::collab::parse_snapshot(bytes)
             .map_err(|e| internal(format!("{}: {e}", walgit_wal::collab::SNAPSHOT_REF)))?;
+        metrics::histogram!("walgit_collab_snapshot_bytes").record(bytes.len() as f64);
+        metrics::histogram!("walgit_collab_snapshot_age_seconds")
+            .record((chrono::Utc::now().timestamp() - snap.ts).max(0) as f64);
+        if !snap.complete {
+            metrics::counter!("walgit_collab_snapshot_truncated").increment(1);
+        }
         for rec in &snap.entries {
             if let Some(er) = rec.entry_ref(r.local.object_format()) {
                 set.insert(er);
@@ -1711,7 +1776,7 @@ async fn collab_report(
                 &state.rules,
                 chrono::Utc::now().timestamp(),
             );
-            Ok(Rendered::json(json_bytes(&report), SWR, None))
+            Ok(json_swr_hashed(&report))
         },
     )
     .await
@@ -1767,11 +1832,8 @@ async fn collab_thread(
                 let merge = merge_rule_eval(&state.rules, &pr);
                 serde_json::json!({ "pr": pr, "merge": merge })
             });
-            Ok(Rendered::json(
-                json_bytes(&serde_json::json!({ "id": id, "entries": entries, "pr": pr })),
-                SWR,
-                None,
-            ))
+            let value = serde_json::json!({ "id": id, "entries": entries, "pr": pr });
+            Ok(json_swr_hashed(&value))
         },
     )
     .await
@@ -1820,7 +1882,7 @@ async fn collab_ci_artifact(
                 }
                 let oid_owned = oid.to_string();
                 let blobs =
-                    git_cat_file_batch(&r.local, std::slice::from_ref(&oid_owned)).await?;
+                    git_cat_file_batch(&r.local, std::slice::from_ref(&oid_owned), None).await?;
                 let Some(bytes) = blobs.get(oid) else {
                     continue;
                 };
@@ -1982,7 +2044,7 @@ async fn collab_board(
             let board_def = load_board_def(&r).await?;
             let refs: Vec<&EntryRef> = state.entries.iter().collect();
             let board: Board = build_board(&refs, &state.principals, &state.rules, &board_def);
-            Ok(Rendered::json(json_bytes(&board), SWR, None))
+            Ok(json_swr_hashed(&board))
         },
     )
     .await

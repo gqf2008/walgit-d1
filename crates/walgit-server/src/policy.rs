@@ -553,10 +553,14 @@ fn deny_reason(
         let Some(protect) = &rule.effect.protect else {
             continue; // history/size: specified, not enforced
         };
-        if !rule_matches(&rule.match_, &u.name, principal, groups) {
+        let Some(captured) = rule_matches(&rule.match_, &u.name, principal, groups) else {
             continue;
-        }
-        if bypasses(protect, principal, groups) {
+        };
+        if bypasses(protect, principal, groups)
+            || (captured.is_some()
+                && protect.bypass.iter().any(|b| b == "{principal}")
+                && captured.as_deref() == Some(principal))
+        {
             continue;
         }
         let set = restrict_set(protect);
@@ -576,20 +580,74 @@ fn deny_reason(
     None
 }
 
+/// Match one ref pattern that may carry the `{principal}` capture segment.
+/// Returns `Some(captured)` when the pattern matched (`captured` is `Some` when
+/// the placeholder matched a segment); `None` when it did not.
+///
+/// `{principal}` matches exactly one non-empty path segment between the
+/// pattern's prefix and suffix, e.g. `refs/collab/inbox/{principal}/**` on
+/// `refs/collab/inbox/alice/123` captures `alice`. That is what lets one rule
+/// say "every inbox, bypass its own owner" (`bypass: ["{principal}"]`).
+pub fn ref_pattern_capture(pattern: &str, text: &str) -> Option<Option<String>> {
+    let Some(idx) = pattern.find("{principal}") else {
+        return glob_match(pattern, text).then_some(None);
+    };
+    let prefix = &pattern[..idx];
+    let suffix = &pattern[idx + "{principal}".len()..];
+    // The placeholder must be a whole segment: the capture is unambiguous.
+    if !prefix.is_empty() && !prefix.ends_with('/') {
+        return None;
+    }
+    if !suffix.is_empty() && !suffix.starts_with('/') {
+        return None;
+    }
+    let rest = text.strip_prefix(prefix)?;
+    let (captured, tail) = match rest.split_once('/') {
+        Some((head, _)) if !head.is_empty() => (head, &rest[head.len()..]),
+        None if !rest.is_empty() && suffix.is_empty() => (rest, ""),
+        _ => return None,
+    };
+    if suffix.is_empty() {
+        return tail.is_empty().then(|| Some(captured.to_string()));
+    }
+    glob_match(suffix, tail).then(|| Some(captured.to_string()))
+}
+
 fn rule_matches(
     m: &Match,
     ref_name: &str,
     principal: &str,
     groups: &HashMap<&str, &Group>,
-) -> bool {
-    if !m.refs.is_empty() && !pattern_list_matches(&m.refs, ref_name) {
-        return false;
+) -> Option<Option<String>> {
+    let mut captured: Option<String> = None;
+    if !m.refs.is_empty() {
+        let mut any_inc = false;
+        let mut inc = false;
+        let mut exc = false;
+        for p in &m.refs {
+            if let Some(rest) = p.strip_prefix('^') {
+                if glob_match(rest, ref_name) {
+                    exc = true;
+                }
+                continue;
+            }
+            any_inc = true;
+            if let Some(cap) = ref_pattern_capture(p, ref_name) {
+                inc = true;
+                if cap.is_some() {
+                    captured = cap;
+                }
+            }
+        }
+        if !((inc || !any_inc) && !exc) {
+            return None;
+        }
     }
     if !m.principals.is_empty() && !actor_list_matches(&m.principals, principal, groups) {
-        return false;
+        return None;
     }
     // paths ignored on protect (see docs/POLICY.md)
-    true
+    Some(captured)
 }
 
 fn bypasses(p: &ProtectEffect, principal: &str, groups: &HashMap<&str, &Group>) -> bool {
@@ -812,6 +870,66 @@ mod tests {
             &["refs/tags/**".into(), "^refs/tags/tmp/**".into()],
             "refs/tags/tmp/x"
         ));
+    }
+
+    #[test]
+    fn principal_placeholder_captures_one_segment() {
+        assert_eq!(
+            ref_pattern_capture("refs/collab/inbox/{principal}/**", "refs/collab/inbox/alice/123"),
+            Some(Some("alice".to_string()))
+        );
+        assert_eq!(
+            ref_pattern_capture("refs/collab/inbox/{principal}/*", "refs/collab/inbox/bob/x"),
+            Some(Some("bob".to_string()))
+        );
+        assert_eq!(
+            ref_pattern_capture("refs/collab/inbox/{principal}/**", "refs/collab/inbox/"),
+            None,
+            "an empty segment is not a capture"
+        );
+        assert_eq!(
+            ref_pattern_capture("refs/collab/inbox/{principal}/**", "refs/heads/main"),
+            None
+        );
+        assert_eq!(
+            ref_pattern_capture("refs/collab/inbox/x{principal}/**", "refs/collab/inbox/xalice/1"),
+            None,
+            "the placeholder must be a whole segment"
+        );
+        assert_eq!(
+            ref_pattern_capture("refs/heads/*", "refs/heads/main"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn compact_inbox_policy_shards_per_principal() {
+        let p = parse_bytes(
+            br#"{
+          "version": 1,
+          "rules": [{
+            "name": "inbox-owner-only",
+            "match": { "refs": ["refs/collab/inbox/{principal}/**"] },
+            "effect": { "protect": { "restricts": ["create", "update", "delete"], "bypass": ["{principal}"] } }
+          }]
+        }"#,
+        )
+        .unwrap();
+        let own = txn(vec![upd("refs/collab/inbox/alice/x", "", "aaa")], false);
+        assert!(
+            evaluate(&p, "alice", &own, |_| false).per_ref[0].1.is_ok(),
+            "the captured owner may write their inbox"
+        );
+        let foreign = txn(vec![upd("refs/collab/inbox/alice/y", "", "bbb")], false);
+        assert!(
+            evaluate(&p, "bob", &foreign, |_| false).per_ref[0].1.is_err(),
+            "a principal other than the captured owner is denied"
+        );
+        let other = txn(vec![upd("refs/heads/topic", "", "ccc")], false);
+        assert!(
+            evaluate(&p, "bob", &other, |_| false).per_ref[0].1.is_ok(),
+            "refs outside the pattern are unaffected"
+        );
     }
 
     #[test]

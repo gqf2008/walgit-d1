@@ -211,8 +211,37 @@ pub struct Snapshot {
     pub actor: String,
     pub ts: i64,
     pub entries: Vec<SnapshotRecord>,
+    /// Whether this fold carries the whole ledger it was built from. Absent =
+    /// true (pre-marker snapshots); `false` marks a deliberately truncated
+    /// snapshot, with `dropped_entries` saying how many records were left out.
+    #[serde(default = "snapshot_complete_default", skip_serializing_if = "is_true")]
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub dropped_entries: u64,
     #[serde(default)]
     pub sig: String,
+}
+
+/// Upper bound for one repository's folded snapshot, shared by the fold (write
+/// side: refuses to publish over it) and the server (read side: refuses to
+/// materialize it).
+pub const COLLAB_SNAPSHOT_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upper bound for one collab entry blob read through aggregation. Larger
+/// blobs are skipped (visible degradation) instead of materialized — the
+/// per-request budget counts refs, not bytes (docs/D1_PROTOCOL.md §13).
+pub const COLLAB_ENTRY_MAX_BYTES: usize = 256 * 1024;
+
+fn snapshot_complete_default() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// The git blob id of raw bytes: `<hash>("blob <len>\0" + bytes)` in the
@@ -302,6 +331,30 @@ pub fn build_snapshot(
     mut entries: Vec<SnapshotRecord>,
     key: &SigningKey,
 ) -> Snapshot {
+    build_snapshot_with(actor, ts, entries, true, 0, key)
+}
+
+/// A fold that deliberately dropped `dropped_entries` records to stay under
+/// `COLLAB_SNAPSHOT_MAX_BYTES`. The marker makes a truncated ledger
+/// distinguishable from a complete one (`complete: false`).
+pub fn build_snapshot_truncated(
+    actor: &str,
+    ts: i64,
+    entries: Vec<SnapshotRecord>,
+    dropped_entries: u64,
+    key: &SigningKey,
+) -> Snapshot {
+    build_snapshot_with(actor, ts, entries, false, dropped_entries, key)
+}
+
+fn build_snapshot_with(
+    actor: &str,
+    ts: i64,
+    mut entries: Vec<SnapshotRecord>,
+    complete: bool,
+    dropped_entries: u64,
+    key: &SigningKey,
+) -> Snapshot {
     entries.sort_by(|a, b| a.oid.cmp(&b.oid));
     entries.dedup_by(|a, b| a.oid == b.oid);
     let mut snap = Snapshot {
@@ -310,6 +363,8 @@ pub fn build_snapshot(
         actor: actor.to_string(),
         ts,
         entries,
+        complete,
+        dropped_entries,
         sig: String::new(),
     };
     snap.sig = sign_snapshot(&mut snap, key);
@@ -381,10 +436,16 @@ pub fn validate_status_transition(
             "transition → done requires current status needs-review (got {current})"
         ));
     }
+    let authors: Vec<&str> = thread_entries
+        .iter()
+        .filter(|r| r.entry.kind == "patch" && r.is_verified(principals))
+        .map(|r| r.entry.actor.as_str())
+        .collect();
     let has_approve = thread_entries.iter().any(|r| {
         r.entry.kind == "review"
             && r.entry.body.get("decision").and_then(|v| v.as_str()) == Some("approve")
             && r.is_verified(principals)
+            && !authors.contains(&r.entry.actor.as_str())
     });
     if !has_approve {
         return Err("transition → done requires a verified approve review in the thread".into());
@@ -468,6 +529,9 @@ pub struct PrView {
     pub reviews: Vec<Review>,
     /// Verified `approve` reviews by non-agent actors.
     pub human_approvals: Vec<Review>,
+    /// Verified `patch` authors (distinct, in thread order). Self-approvals by
+    /// these actors never count toward the merge rule or the `done` gate.
+    pub authors: Vec<String>,
     pub unverified: Vec<String>,
 }
 
@@ -494,15 +558,19 @@ pub fn pr_view(
     let mut reviews: Vec<Review> = Vec::new();
     let mut human_approvals: Vec<Review> = Vec::new();
     let mut unverified: Vec<String> = Vec::new();
+    let mut authors: Vec<String> = Vec::new();
     for r in &ordered {
         let e = &r.entry;
-        if e.kind == "patch"
-            && let Some(rs) = &e.refs
-        {
-            base = rs.base.clone().or(base);
-            head = rs.head.clone().or(head);
-        }
         let verified = r.is_verified(principals);
+        if e.kind == "patch" {
+            if let Some(rs) = &e.refs {
+                base = rs.base.clone().or(base);
+                head = rs.head.clone().or(head);
+            }
+            if verified && !authors.contains(&e.actor) {
+                authors.push(e.actor.clone());
+            }
+        }
         if !verified {
             unverified.push(format!("{}@{}", e.actor, r.oid));
         }
@@ -551,6 +619,7 @@ pub fn pr_view(
         status,
         reviews,
         human_approvals,
+        authors,
         unverified,
     }
 }
@@ -594,25 +663,33 @@ pub fn merge_rule_eval(rules: &MergeRules, pr: &PrView) -> MergeEval {
             satisfied_by: Vec::new(),
         };
     }
-    let approvals: Vec<&Review> = pr
-        .human_approvals
-        .iter()
-        .filter(|r| r.decision == "approve" && !is_agent(&r.actor))
-        .collect();
-    let satisfied_by: Vec<String> = approvals.iter().map(|r| r.actor.clone()).collect();
-    if approvals.len() >= rules.require_human_approvals {
+    // Distinct approvers, and never the patch's own author: one principal
+    // approving twice — or approving their own change — is not two reviews.
+    let mut satisfied_by: Vec<String> = Vec::new();
+    for r in &pr.human_approvals {
+        if r.decision != "approve" || is_agent(&r.actor) || pr.authors.contains(&r.actor) {
+            continue;
+        }
+        if !satisfied_by.contains(&r.actor) {
+            satisfied_by.push(r.actor.clone());
+        }
+    }
+    if satisfied_by.len() >= rules.require_human_approvals {
         MergeEval {
             allowed: true,
-            reason: format!("{} human approval(s) on protected base", approvals.len()),
+            reason: format!(
+                "{} distinct non-author human approval(s) on protected base",
+                satisfied_by.len()
+            ),
             satisfied_by,
         }
     } else {
         MergeEval {
             allowed: false,
             reason: format!(
-                "protected base needs {} human approval(s), got {}",
+                "protected base needs {} distinct non-author human approval(s), got {}",
                 rules.require_human_approvals,
-                approvals.len()
+                satisfied_by.len()
             ),
             satisfied_by,
         }
@@ -686,12 +763,28 @@ pub struct Report {
     pub by_kind: Vec<(String, usize)>,
 }
 
-/// The thread's title: the root entry's `body.title`, "" when it has none or
-/// the thread is empty. One extraction rule for `BoardCard`, `ReportThread`
-/// and `ReportPr` — the board cards and the report lists show the same name.
-fn root_title(ordered: &[&EntryRef]) -> String {
+/// The thread's canonical root: the first verified root entry (parent empty)
+/// in thread order, falling back to the first entry when no verified root
+/// exists (unsigned legacy threads keep their old identity rule). One
+/// extraction rule for `BoardCard`, `ReportThread` and `ReportPr` — and the
+/// verified preference means an unregistered pass-by cannot rewrite a card's
+/// identity by appending a backdated root.
+fn canonical_root<'a>(
+    ordered: &[&'a EntryRef],
+    principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+) -> Option<&'a EntryRef> {
     ordered
-        .first()
+        .iter()
+        .copied()
+        .find(|r| r.entry.parent.is_empty() && r.is_verified(principals))
+        .or_else(|| ordered.first().copied())
+}
+
+fn root_title(
+    ordered: &[&EntryRef],
+    principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+) -> String {
+    canonical_root(ordered, principals)
         .and_then(|r| r.entry.body.get("title"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -727,7 +820,7 @@ pub fn build_report(
         kinds.dedup();
         report.threads.push(ReportThread {
             id: (*id).to_string(),
-            title: root_title(&ordered),
+            title: root_title(&ordered, principals),
             entries: group.len(),
             verified,
             last_ts: group.iter().map(|r| r.entry.ts).max().unwrap_or(0),
@@ -744,7 +837,7 @@ pub fn build_report(
                 last_ts,
                 ReportPr {
                     id: (*id).to_string(),
-                    title: root_title(&thread(group)),
+                    title: root_title(&thread(group), principals),
                     base: pr.base.clone(),
                     head: pr.head.clone(),
                     status: pr.status.clone(),
@@ -1191,7 +1284,7 @@ pub fn build_board(
         let mut kinds: Vec<String> = group.iter().map(|r| r.entry.kind.clone()).collect();
         kinds.sort();
         kinds.dedup();
-        let root = ordered.first();
+        let root = canonical_root(&ordered, principals);
         let merge = group.iter().any(|r| r.entry.kind == "patch").then(|| {
             let pr = pr_view(group, principals);
             let eval = merge_rule_eval(rules, &pr);
@@ -1203,7 +1296,7 @@ pub fn build_board(
         let work = card_work_context(&ordered);
         let card = BoardCard {
             id: (*id).to_string(),
-            title: root_title(&ordered),
+            title: root_title(&ordered, principals),
             prose: root.map_or(String::new(), |r| entry_prose(&r.entry.body)),
             actor: root.map(|r| r.entry.actor.clone()).unwrap_or_default(),
             status: card_status(&ordered),
@@ -1668,7 +1761,7 @@ name = "everything else"
             .expect("pr-1 card");
         assert_eq!(card.title, "ship the report");
         // Missing root (empty thread): "" — never a panic.
-        assert_eq!(root_title(&[]), "");
+        assert_eq!(root_title(&[], &HashMap::new()), "");
     }
 
     /// Issue #131 follow-up: the projection owns the order — threads newest
@@ -1809,6 +1902,61 @@ name = "everything else"
         let want: Vec<&str> = all.iter().map(|e| e.oid.as_str()).collect();
         assert_eq!(got, want);
         assert_eq!(ordered.last().expect("non-empty").entry.kind, "status");
+    }
+
+    /// Identity comes from the canonical root: the first *verified* root wins
+    /// over an unverified backdated one; with no verified root the legacy
+    /// first-entry rule still applies (unsigned repos keep working).
+    #[test]
+    fn board_identity_prefers_a_verified_root() {
+        let (sk, pk) = keypair();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk);
+        let mut real = entry(
+            "t1",
+            "issue",
+            "alice",
+            "",
+            10,
+            serde_json::json!({"title": "real", "body": "real body"}),
+        );
+        signed(&sk, &mut real);
+        let hijack = entry(
+            "t1",
+            "issue",
+            "mallory",
+            "",
+            1,
+            serde_json::json!({"title": "hijack", "body": "x"}),
+        );
+        let owned = refs_of(&[real, hijack]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
+        let card = board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .find(|c| c.id == "t1")
+            .expect("card");
+        assert_eq!(card.title, "real");
+        assert_eq!(card.actor, "alice");
+        assert_eq!(card.prose, "real body");
+
+        // No verified root: the legacy first-entry identity is preserved.
+        let legacy = refs_of(&[
+            entry("t2", "issue", "alice", "", 10, serde_json::json!({"title": "late"})),
+            entry("t2", "issue", "bob", "", 1, serde_json::json!({"title": "early"})),
+        ]);
+        let refs: Vec<&EntryRef> = legacy.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
+        let card = board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .find(|c| c.id == "t2")
+            .expect("card");
+        assert_eq!(card.title, "early");
+        assert_eq!(card.actor, "bob");
     }
 }
 
@@ -2122,6 +2270,33 @@ mod snapshot_tests {
             assert!(entries[0].is_verified(&principals));
         }
     }
+
+    /// The complete/dropped marker round-trips without breaking legacy
+    /// snapshots: a complete fold serializes exactly like a pre-marker one
+    /// (the fields are omitted), and a truncated fold is distinguishable and
+    /// still verifies (the marker is signed with the fold).
+    #[test]
+    fn snapshot_completeness_marker_round_trips() {
+        let (sk, pk) = keypair(9);
+        let (records, _) = history();
+        let complete = build_snapshot("alice", 42, records.clone(), &sk);
+        let text = serde_json::to_string(&complete).expect("serialize");
+        assert!(!text.contains("\"complete\""), "complete is the implicit default");
+        assert!(!text.contains("\"dropped_entries\""));
+        let parsed = parse_snapshot(text.as_bytes()).expect("parses");
+        assert!(parsed.complete);
+        assert_eq!(parsed.dropped_entries, 0);
+        assert!(verify_snapshot(&parsed, &pk).is_ok());
+
+        let truncated = build_snapshot_truncated("alice", 43, records[..1].to_vec(), 7, &sk);
+        let text = serde_json::to_string(&truncated).expect("serialize");
+        assert!(text.contains("\"complete\":false"));
+        assert!(text.contains("\"dropped_entries\":7"));
+        let parsed = parse_snapshot(text.as_bytes()).expect("parses");
+        assert!(!parsed.complete);
+        assert_eq!(parsed.dropped_entries, 7);
+        assert!(verify_snapshot(&parsed, &pk).is_ok(), "the marker is signed with the fold");
+    }
 }
 
 #[cfg(test)]
@@ -2254,6 +2429,81 @@ mod transition_tests {
             entry_prose(&serde_json::json!({"text": "  trimmed  "})),
             "trimmed"
         );
+    }
+
+    /// The merge rule counts distinct non-`svc-` approvers and never the
+    /// patch's own author.
+    #[test]
+    fn merge_rule_counts_distinct_non_author_approvers() {
+        let mut pr = pr_view(&[], &HashMap::new());
+        pr.base = Some("refs/heads/main".into());
+        pr.authors = vec!["author".into()];
+        pr.human_approvals = vec![
+            Review { actor: "author".into(), decision: "approve".into(), ts: 1, oid: "a".into() },
+            Review { actor: "alice".into(), decision: "approve".into(), ts: 2, oid: "b".into() },
+            Review { actor: "alice".into(), decision: "approve".into(), ts: 3, oid: "c".into() },
+            Review { actor: "svc-bot".into(), decision: "approve".into(), ts: 4, oid: "d".into() },
+        ];
+        let rules = MergeRules {
+            protect: vec!["refs/heads/main".into()],
+            require_human_approvals: 1,
+        };
+        let eval = merge_rule_eval(&rules, &pr);
+        assert!(eval.allowed);
+        assert_eq!(
+            eval.satisfied_by,
+            vec!["alice".to_string()],
+            "author + duplicate alice + svc-bot = one distinct human approver"
+        );
+        let rules = MergeRules {
+            protect: vec!["refs/heads/main".into()],
+            require_human_approvals: 2,
+        };
+        assert!(!merge_rule_eval(&rules, &pr).allowed, "one approver is not two");
+    }
+
+    #[test]
+    fn pr_view_collects_verified_patch_authors_only() {
+        let key = make_key();
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pub_b64);
+        let patch = signed_entry(
+            &key,
+            "patch",
+            "t",
+            "alice",
+            "p1",
+            1,
+            serde_json::json!({"message": "x"}),
+        );
+        let unsigned = entry("patch", "t", "bob", "p2", 2, serde_json::json!({"message": "y"}));
+        let pr = pr_view(&[&patch, &unsigned], &principals);
+        assert_eq!(pr.authors, vec!["alice".to_string()], "only verified patches carry authority");
+    }
+
+    #[test]
+    fn done_gate_rejects_self_approval_by_the_patch_author() {
+        let key = make_key();
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pub_b64);
+        let issue = signed_entry(&key, "issue", "t9", "alice", "i1", 1, serde_json::json!({"title": "x"}));
+        let status = signed_entry(&key, "status", "t9", "alice", "s1", 2, serde_json::json!({"status": "needs-review"}));
+        let patch = signed_entry(&key, "patch", "t9", "alice", "p1", 3, serde_json::json!({"message": "x"}));
+        let self_review = signed_entry(&key, "review", "t9", "alice", "r1", 4, serde_json::json!({"decision": "approve"}));
+        let refs = vec![&issue, &status, &patch, &self_review];
+        assert!(validate_status_transition(&refs, &principals).is_err(), "the author cannot approve their own change into done");
+
+        let key2 = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let pub2 =
+            base64::engine::general_purpose::STANDARD.encode(key2.verifying_key().to_bytes());
+        principals.insert("bob".to_string(), pub2);
+        let review = signed_entry(&key2, "review", "t9", "bob", "r2", 5, serde_json::json!({"decision": "approve"}));
+        let refs = vec![&issue, &status, &patch, &self_review, &review];
+        assert!(validate_status_transition(&refs, &principals).is_ok(), "a second, non-author reviewer unblocks it");
     }
 }
 

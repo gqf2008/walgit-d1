@@ -149,6 +149,25 @@ fn push_inbox(src: &TestRepo, server: &Server, actor: &str, name: &str, token: &
     }
 }
 
+/// One principal-relative rule instead of one literal rule per actor: the
+/// `{principal}` segment captures the inbox owner and `bypass: ["{principal}"]`
+/// lets that owner through — the compact shape docs/POLICY.md documents.
+fn inbox_policy_principal_relative() -> String {
+    r#"{
+  "version": 1,
+  "rules": [
+    {
+      "name": "inbox-owner-only",
+      "match": { "refs": ["refs/collab/inbox/{principal}/**"] },
+      "effect": {
+        "protect": { "restricts": ["create", "update", "delete"], "bypass": ["{principal}"] }
+      }
+    }
+  ]
+}"#
+    .to_string()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn collab_inbox_pushes_are_gated_per_actor_in_token_mode() -> TestResult {
     let server = start_server_with_two_principals().await?;
@@ -211,6 +230,51 @@ async fn collab_inbox_pushes_are_gated_per_actor_in_token_mode() -> TestResult {
     assert!(
         ok,
         "after policy clear the same push must succeed; stderr: {err}"
+    );
+    Ok(())
+}
+
+/// The compact principal-relative policy must behave exactly like the
+/// per-actor literal rules above — one rule that scales with the team instead
+/// of an admin edit per participant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collab_inbox_shards_with_one_principal_relative_rule() -> TestResult {
+    let server = start_server_with_two_principals().await?;
+    let status = reqwest::Client::new()
+        .put(format!("{}/t/secured", server.base_url))
+        .bearer_auth("alice-s3cret")
+        .send()
+        .await?
+        .status();
+    assert!(status.is_success(), "repo create with bearer: {status}");
+
+    let put = reqwest::Client::new()
+        .put(format!("{}/t/secured/policy", server.base_url))
+        .bearer_auth("alice-s3cret")
+        .header("content-type", "application/json")
+        .body(inbox_policy_principal_relative())
+        .send()
+        .await?;
+    assert_eq!(put.status(), 204, "{}", put.text().await?);
+
+    let src = TestRepo::synthetic(1, 1)?;
+    let (ok, err) = push_inbox(&src, &server, "alice", "p1", "alice-s3cret");
+    assert!(ok, "alice pushing her own inbox failed: {err}");
+    let (ok, err) = push_inbox(&src, &server, "bob", "p2", "bob-s3cret");
+    assert!(ok, "bob pushing his own inbox failed: {err}");
+    let (ok, err) = push_inbox(&src, &server, "alice", "p3", "bob-s3cret");
+    assert!(
+        !ok,
+        "bob pushing alice's inbox must be rejected by the captured-owner rule; stderr: {err}"
+    );
+    assert!(
+        err.contains("inbox-owner-only") || err.contains("rejected by rule"),
+        "stderr should name the rule: {err}"
+    );
+    let (ok, err) = push_inbox(&src, &server, "bob", "p4", "alice-s3cret");
+    assert!(
+        !ok,
+        "alice pushing bob's inbox must be rejected the same way; stderr: {err}"
     );
     Ok(())
 }
