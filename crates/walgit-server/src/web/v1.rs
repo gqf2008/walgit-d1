@@ -53,7 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             &format!("{API_V1}/owners/{{owner}}/repos"),
             get(crate::web::api::owner_repos),
         )
-        // Host-global principal registry (cross-repo identity, D1 §5 extension):
+        // Host-global principal registry (cross-repo identity, docs/D1_PROTOCOL.md §4.4 extension):
         // one registration verifies in every repository of this host.
         .route(&format!("{API_V1}/principals"), get(host_principals))
         .route(

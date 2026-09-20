@@ -20,7 +20,7 @@
 ## 1. 定位与不变式
 
 1. **无中心调度器**：没有服务、队列或数据库决定"谁跑这个任务"。一切协调状态都是
-   `refs/collab/inbox/<principal>/<uuid>` 里的**签名条目**（D1 §4.2），任何客户端都能
+   `refs/collab/inbox/<principal>/<uuid>` 里的**签名条目**（docs/D1_PROTOCOL.md §5），任何客户端都能
    离线验签、回放、重算出同一个答案。
 2. **认领不是 walgit lease**（与 D7 的边界）：D7 租约是服务端维护回路（compact/bundle）
    的跨实例互斥，存桶内 `leases/*.pb`，由 manifest CAS 保证。CI 认领是协作层条目，
@@ -30,19 +30,19 @@
 3. **任务声明随代码走**：`.walgit/ci.toml` 是被测提交里的文件，被测哪个提交就读哪个
    提交的声明——没有中心注册表，没有"配置漂移"。
 4. **一切都是可验证的**：claim 与 result 都经 Ed25519 签名、进签名者的收件箱、受
-   `policy.json` 与 D1 §4.1 收件箱归属不变量约束。验签失败 = 红（不参与收敛计数）。
+   `policy.json` 与 docs/D1_PROTOCOL.md §4.5 收件箱归属不变量约束。验签失败 = 红（不参与收敛计数）。
 5. **秘密只在客户端**：环境变量属于 runner 进程；桶、ref、结果对象里没有任何秘密值
    （§9 是可机器检验的规范）。
 
 ## 2. 参与者与身份
 
-- **runner 是一个普通 principal**（D1 §5）：一份 token（git 认证）+ 一对 Ed25519 密钥
+- **runner 是一个普通 principal**（docs/D1_PROTOCOL.md §4）：一份 token（git 认证）+ 一对 Ed25519 密钥
   + 一个 principal（惯例前缀 `ci-` 或 `svc-`，如 `ci-runner-1`；语法与校验同 D1）。
   首次使用自注册进 `refs/collab/meta/principals/<principal>`——**只建不改**：receive-pack
   拒绝对非 commit ref 的非 force 更新，所以 `walgit ci run` 仅在该 ref 不存在时创建；
   轮换密钥是显式的 `walgit collab principal-register`，不是 runner 的副作用。
 - 写路径与人类/agent 完全同构：签名条目 → 自己的收件箱 ref → receive-pack。仓库若用
-  `policy.json` 保护 `refs/collab/*`（D1 §6），CI 条目同样受其约束——CI 没有特权路径。
+  `policy.json` 保护 `refs/collab/*`（docs/D1_PROTOCOL.md §7.3），CI 条目同样受其约束——CI 没有特权路径。
 - 同一仓库可以并存任意多个 runner；同一 principal 也可以有多个 runner 进程（认领以
   principal 为身份，见 §6.4 崩溃恢复）。
 
@@ -154,7 +154,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
 
   `fnv1a64` 为 64 位 FNV-1a；`hex16` 为其大端 64 位值的 16 个小写 hex 字符。短、URL
   安全、确定性、无碰撞现实风险（2^32 次运行才到生日界）；可读字段（task/ref/commit）
-  在条目 body 里。run id 就是协作线程 id（D1 §4.2 `id`），claim 与 result 因此落在同一
+  在条目 body 里。run id 就是协作线程 id（docs/D1_PROTOCOL.md §5 `id`），claim 与 result 因此落在同一
   线程，`walgit collab thread <run_id>` 直接可看。
 - **定时运行的 id 变体（§4.3，issue #161）**：槽位 `S` 触发的运行把槽位混进标识——
 
@@ -230,7 +230,7 @@ decide(run, actor, max_attempts) -> Decision      // §6.2 步骤 2 的规范实
                                                   //（评估时刻已由 run_view(.., now) 携带）
 ```
 
-只计入**已验证**条目（`EntryRef::is_verified`：验签通过 **且** 收件箱归属正确，D1 §4.1）；
+只计入**已验证**条目（`EntryRef::is_verified`：验签通过 **且** 收件箱归属正确，docs/D1_PROTOCOL.md §4.5）；
 未验证/malformed 条目计入展示计数（红），不参与状态。
 
 ### 7.2 胜者与生效结果（收敛规则，normative）
@@ -412,7 +412,7 @@ done    : effective 存在                               → Settled(conclusion)
 
 ## 11. 安全与滥用
 
-- 收件箱模型 + `policy.json` 与 D1 §6/§10 完全一致：CI 条目可被冻结（保护
+- 收件箱模型 + `policy.json` 与 docs/D1_PROTOCOL.md §7.3/§14 完全一致：CI 条目可被冻结（保护
   `refs/collab/*`），恶意 runner 可 tombstone 吊销（其后续条目全部验签失败 = 不参与收敛）。
 - 竞争成本：认领竞争的最坏代价是重复执行（at-least-once），不是状态破坏；没有可被
   垄断的中心队列。恶意抢认领（超早 ts）只赢得执行权，输给后来者唯一途径是交不出

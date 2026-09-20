@@ -159,7 +159,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 
 ```text
 is_verified(er) =
-      er.principal == er.entry.actor          // 收件箱归属（D1 §4.1 的读侧闸）
+      er.principal == er.entry.actor          // 收件箱归属（本协议 §4.5 的读侧闸）
    && principals 含 er.entry.actor
    && verify_entry(er.entry, principals[actor])   // canonical 字节上的 Ed25519 严格验签
 ```
@@ -241,7 +241,7 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 
 数字与键序的跨语言约束：**协议数值字段全部是整数**（`ts`/`version` 等），跨语言验签的条目
 不得在 `body` 使用浮点（各语言的浮点序列化不同）。键序按实现语言字节序（Rust `String` Ord
-= UTF-8 字节序；JS 默认排序 = UTF-16 码元序）——**协议字段名全为 ASCII，两者一致**；
+= UTF-8 字节序；JS `Object.keys().toSorted()` = UTF-16 码元序，需 ES2023 运行时）——**协议字段名全为 ASCII，两者一致**；
 跨语言条目的 `body` 键也应为 ASCII（非 ASCII 键在两种序下可能不同）。JS 实现还必须在
 canonicalize 前丢弃值为 `undefined` 的键（SDK 已如此），其它语言无此概念。
 
@@ -284,7 +284,8 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
 
 - `related` / `depends_on`：oid 字符串数组（写 CLI：`--related` / `--depends-on`，可多次）。
   读侧不做存在性写门禁；`GET …/api/collab/threads/{id}` 对每条条目返回
-  `broken_refs`（引用但不在当前 collab 全集里的 oid），机器可读。
+  `broken_refs`（引用但不在当前 collab 全集里的 oid），机器可读（仅服务端线程端点计算；
+  CLI `thread` 不返回该字段）。
 - `attachments`：数组项 `{filename, sha256, content_b64}`；**单文件 ≤ 64 KiB**（写侧
   `--attach` 强制）；`sha256` 为内容十六进制摘要，读取方应复算校验；`filename` 只取基名。
 
@@ -321,11 +322,16 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
 - **确定序**：算法是集合的纯函数——同一集合、任意输入顺序，输出一致（轮内 `(ts, actor, oid)`）。
 - **链序**：当 `ts` 沿链**非递减**（常规写入：后写的 `ts` 不早于前写）时，单链在第一轮按
   `ts` 顺序级联发射，输出即完整链序。
-- **守卫可能提前截断**：第 3 步的界用的是**当前** pending 长度（随发射收缩），因此长链在
-  `ts` 非单调（回填时间、跨机时钟偏斜）时会走到第 4 步；此时尾部条目按 `(ts, actor, oid)`
-  追加，**可能不再是链序**。例：10 条链的 `ts` 沿链递减时输出尾段为 `o9,o8,o7`（逆链序）。
-  这是已知实现边界（疑似守卫应相对初始长度求值），修与不修都需同批测试；读方不应假定「输出
-  必为拓扑序」，需要严格链序时以 `parent` 指针自行重排。
+- **守卫会提前截断（实现缺陷，非设计特性）**：第 3 步的界用的是**当前** pending 长度（随发射
+  收缩），触发点很低——沿链严格递减的 `ts` 下，7 条链即截断（前 6 条按链发射，第 7 条起进入
+  第 4 步的兜底追加；10 条链输出 `o0…o6, o9, o8, o7`）。一旦截断不会恢复：后续追加条目不再
+  链序，`last_oid` 也不再是链头（后续以它为 `parent` 的条目全部挂错）。同一集合仍字节确定
+  （确定序成立），但**拓扑序不成立**。修复方向（后续 issue）：界相对**初始**集合大小求值
+  （或去掉全局上限），并加沿链递减 `ts`、n≥7 的回归测试。读方在修复前不应假定输出是拓扑序；
+  需要严格链序时以 `parent` 自行重排。
+- **排序不由签名保真**：`ts` 与 `parent` 都是条目作者可控的字段（签名只证「作者这么写了」，
+  不证「时间真实 / parent 属实」），顺序是协作约定、不是可依赖的安全边界；`done` 门禁与看板
+  都读这个顺序（§7.5/§8.2），威胁模型见 §14。
 - **链头**（tip）= 输出末条，`last_oid`；后续条目以它为 `parent`。
 
 ### 6.3 链完整性（运维须知）
@@ -380,6 +386,9 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
   2. 非保护 base → `allowed=true`，理由 `base is not protected`。
   3. 批准数 = `human_approvals` 中 `actor` **不以 `svc-` 开头**的条目数。
   4. `allowed = 批准数 ≥ require_human_approvals`；理由与 `satisfied_by`（批准者列表）随附。
+- **按条目计数，不去重批准者**：同一 principal 的多条 verified approve 会重复计入
+  （`satisfied_by` 也逐条列出）；patch 作者可以给自己 approve。这是当前实现的语义（不是笔误）；
+  是否要求 distinct approvers、是否禁止自审是待定的设计决策（后续 issue 跟踪）。
 
 **规则来源按客户端不同**（现状，非缺陷）：server 的 report/threads/board 自动读
 `refs/collab/meta/rules`（解析失败 = 500，fail closed）；CLI 的 `pr`/`report`/`board` 只认
@@ -414,7 +423,9 @@ unverified 永远可见：读侧对验签失败/收件箱不符的条目只降�
 
 **边界（必须知道）**：门禁在**写路径**（CLI + 薄 API），不在聚合。裸
 `git push`/其它客户端追加的 `done` 不会被读侧拒绝——读侧只按签名与投影规则处理；门禁是协作
-纪律的执行器，不是共识规则。
+纪律的执行器，不是共识规则。且第 1/2 步都读由 `ts`/`parent` 决定的线程顺序（§6.2），approve
+也按条目计数——门禁挡流程失误，不挡恶意（参与者可回拨 `ts` 或自签 approve）。真正的安全边界
+是写权限（`policy.json`）与签名身份，见 §14。
 
 ## 8. 看板投影（`build_board`，normative）
 
@@ -533,7 +544,8 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
    携带 `--force-with-lease=refs/collab/meta/snapshot:<基线 oid>`；无快照时基线是**空
    `<expect>`**（`refs/collab/meta/snapshot:`）——不是零 oid；**绝不加 `+`**（`+` 会静默短路
    lease，让过期折叠覆盖并发折叠者的新快照）。lease 失败 = 有并发折叠者，重取重折。
-   纯剪枝折叠也先推基线快照（no-op 或补齐），**任何情况下先快照后删除**。
+   纯剪枝折叠也先推基线快照（no-op 或补齐），**任何情况下先快照后删除**；若检查点没有任何
+   快照可推（远端尚无快照且本次无新记录），命令报错并提示先 fetch，绝不用空基线直接删除。
 5. **再删收件箱**：一次全量 `git ls-remote` 取远端通告，只删仍在通告里的 ref（并发 gc 可能
    已剪掉一些；stock git 对通告里没有的 ref 删除会报错，把这种拒绝当错误会让「重跑收敛」
    承诺失效）；每批 ≤ 500 条 refspec（规避 ARG_MAX），每条带**刚读到的 OID lease**（防通告
@@ -552,6 +564,10 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
 - 折叠把 N 条 ref 收成 1 条 ref + 1 个有界 blob；fetch 该命名空间的客户端会拉快照字节
   （≈ 折叠历史体积），不关心协作层的克隆不取该命名空间（这也是正确的：快照是对该命名空间
   的压缩，不是仓库数据的压缩）。
+- **写侧无上限（当前实现缺陷）**：64 MiB 只在服务端读路径检查，CLI 的 `gc` 与本地 load 都
+  不设限；折叠后的快照一旦超过 64 MiB，服务端从此对所有聚合返回 `503`（读路径 fail-closed）。
+  恢复：由 admin 删除/回退 `refs/collab/meta/snapshot` 后重折（或先缩小输入）；修复方向是
+  `gc` 推送前拒绝并给出提示（后续 issue 跟踪）。
 
 ## 10. CI 协作（子协议）
 
@@ -585,7 +601,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
      对 actor 注册 key 的验证（仅 provenance）；
    - `meta/principals/<p>` → `kind="principal"`、`actor`=p、`verified=true`（注册文档本身不签名，
      该字段只表示「已识别的注册表事件」）；
-   - 其它 meta ref → 解析回退为 `kind="unknown"`。
+   - 其它 meta ref（如 `meta/rules`）→ 按 entry 路径尝试解析（principal 取不到时为空串）；
+     解析不出合法 entry 时回退为 `kind="unknown"`、`verified=false`。
 4. `--exec <cmd>` 对每个事件执行一次（`sh -c`）：**原始 blob 文本进 stdin**，环境给
    `WALGIT_COLLAB_REF` / `_KIND` / `_THREAD` / `_ACTOR` / `_VERIFIED`。事件字段取自**解析后的
    条目**而非渲染文本（body 里的 `\nkind=` 不能伪造信号）。exec 非零退出 → 本轮报错中止，
@@ -609,7 +626,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 层 | 键 | 语义 |
 |---|---|---|
 | 条目集合 | oid（内容寻址） | 同 oid = 一条；重放/折叠重复无害 |
-| 线程顺序 | `(parent, ts, actor, oid)` | 确定序，任何客户端一致 |
+| 线程顺序 | 排序键 `(ts, actor, oid)`（`parent` 只决定就绪，不参与排序）；不保证拓扑序，见 §6.2 | 确定序，任何客户端一致 |
 | ref 事件 | `(refname, oid)` | watch 状态文件对比 |
 | CI 触发 | `(ref, tip oid)` | runner 状态文件 processed |
 | WAL | `(repo, seq)` | 游标回放 |
@@ -637,7 +654,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 |---|---|---|
 | principal / entry-seg | refname-safe，字节长 ≤ 255 | CLI/薄 API 写入口 |
 | entry 附件 | 每文件 ≤ 64 KiB | CLI `--attach` |
-| 快照 blob | ≤ 64 MiB | 服务端物化前；超限 `503` |
+| 快照 blob | ≤ 64 MiB | 服务端物化前；超限 `503`（写侧未强制，见 §9.4） |
 | 未折叠 ref 数 | ≤ 20 000 / 请求（inbox + principals） | 服务端聚合；超限 `503` |
 | CI body | ≤ 256 KiB | `walgit-wal::ci` 读侧（CI 协议 §11） |
 | CI 产物 | ≤ 16 MiB/对象、≤ 32 个/结果 | runner/读侧（CI 协议 §8.2） |
@@ -657,7 +674,10 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 快照文档损坏/超大 | fail-closed，读整体报错；超 64 MiB 拒绝物化 |
 | 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端的 fetch **不带 prune** → 长寿命 checkout 里被删的注册 ref 可能残留，验签仍信旧 key——需 `git fetch --prune`（或删本地 ref）后聚合；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
 | 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份，服务端只能人工 tombstone；升级路径 = 不可导出密钥 + 服务端登记确认（已知取舍） |
-| 时钟 | `ts` 不被认证；只影响排序/展示，不参与安全判定 |
+| 排序投毒（`ts`/`parent` 不被认证） | 线程顺序、卡片状态与 `done` 门禁都依赖 `(ts, actor, oid)` 顺序与作者自报的 `parent`；参与者可回拨 `ts`、制造孤儿条目影响投影（§6.2 的守卫截断让少量条目即可稳定触发）。当前防线：**无**（顺序是协作约定）——不得把顺序当安全判定；代码修复（守卫改界 / 链上 ts 回退处理）见后续 issue |
+| 自审/重复批准 | merge 规则按 approve **条目数**计，不去重 principal；patch 作者可自 approve，`done` 门禁同理。当前防线：**无**——写权限与签名身份才是边界，`require_human_approvals` 是流程门禁；是否收紧见后续 issue |
+| gc 写出超限快照 | CLI 写侧无 64 MiB 检查；超限后服务端全部聚合 `503`。恢复：admin 删除/回退 `refs/collab/meta/snapshot`；修复见后续 issue |
+| 时钟 | `ts` 不被认证；只影响排序/展示（及 CI TTL 活性），不参与签名/身份等安全判定；但投影顺序依赖它，见上一行 |
 
 ## 15. 版本与兼容
 
@@ -676,7 +696,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 | 锚点 | 锁死的性质 |
 |---|---|
-| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 排序 |
+| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`） |
 | `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好 |
 | `…::transition_tests` | `done` 门禁（needs-review + verified approve）；先 thread() 后判定；card prose 抽取 |
 | `walgit-cli/src/collab_cmd.rs` 测试 | canonicalize 紧凑键序；签名/验签/篡改；gc key 匹配；折叠记录属主偏好；thread 链序/悬空；merge 只计非 `svc-`；report 确定性与计数；changed_refs；错收件箱不算 verified |

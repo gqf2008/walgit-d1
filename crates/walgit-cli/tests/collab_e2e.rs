@@ -6,7 +6,7 @@
     clippy::string_slice,
     clippy::dbg_macro
 )]
-//! D1 (`docs/D1_COLLAB_DESIGN.md` §4.3/§7): the `walgit collab` CLI against a
+//! D1 (`docs/D1_PROTOCOL.md` §6/§7/§11): the `walgit collab` CLI against a
 //! real walgit server — sign + push entries through receive-pack, then a
 //! fresh clone aggregates and verifies them. Tests the whole loop: CLI write
 //! path → walgit WAL → second-instance deterministic aggregation.
@@ -278,7 +278,7 @@ async fn watch_reports_new_collab_entries_via_callback() -> TestResult {
     Ok(())
 }
 
-/// The work-unit board (D1 §8): two independent clients — the CLI's offline
+/// The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): two independent clients — the CLI's offline
 /// aggregation over a fetched clone and the server's `GET …/collab/board` —
 /// must project the same collab refs to **byte-identical** output, and moving
 /// a card (an ordinary signed `status` entry) must move the projection for
@@ -493,7 +493,7 @@ async fn board_projection_is_byte_identical_across_clients_and_moves_with_status
     Ok(())
 }
 
-/// D45 / D1 §11.4 (issue #160): the fold. A mixed history (issue/patch/
+/// D45 / docs/D1_PROTOCOL.md §9 (issue #160): the fold. A mixed history (issue/patch/
 /// review/status/comment + `ci_claim`/`ci_result`, with an unregistered actor and
 /// a wrong-key signature among them) is folded by `walgit collab gc --push`:
 /// the inbox refs are deleted, `refs/collab/meta/snapshot` carries every entry

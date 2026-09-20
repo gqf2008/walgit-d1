@@ -706,7 +706,7 @@ list by `commit_date` day and shows `subject` + `author`.
 
 ### D1 collaboration lane (`/{owner}/{repo}/api/collab/…`) — walgit-specific
 
-The decentralized collaboration layer (`docs/D1_COLLAB_DESIGN.md`) writes to
+The decentralized collaboration layer (`docs/D1_PROTOCOL.md`) writes to
 `refs/collab/*` (inbox entries + principals registry) and aggregates them
 deterministically; these endpoints back the Collab tab and mirror what the
 `walgit collab` CLI computes locally. Since D45 (issue #160) the aggregation
@@ -739,7 +739,7 @@ browser path too (`403`, the reason is logged server-side). No credential
 ```
 
 First-use self-registration: publishes the public key at
-`refs/collab/meta/principals/<principal>` (D1 §5; re-registering **updates**
+`refs/collab/meta/principals/<principal>` (docs/D1_PROTOCOL.md §4.3; re-registering **updates**
 the ref — CAS against its current value, so a concurrent re-registration
 loses and retries; the tombstone is a git deletion). `principal ==
 authenticated principal` is enforced, as is `policy.json` (same gate as
@@ -747,7 +747,7 @@ receive-pack). `200` → `{ "ref", "oid", "seq" }`.
 
 #### `GET /{owner}/{repo}/api/collab/report`
 
-The full observability report (D1 §8) — thread summaries, PR status + merge
+The full observability report (docs/D1_PROTOCOL.md §7.4/§8) — thread summaries, PR status + merge
 rule evaluation, the CI runs section (D1-CI §8.3: pure-CI threads are not
 board cards but are projected here by the same aggregation as
 `walgit ci status`), verification health, per-actor/per-kind activity. Shape
@@ -800,7 +800,7 @@ thread id.
 
 #### `GET /{owner}/{repo}/api/collab/board`
 
-The work-unit board (D1 §8): every thread projected under the declarative
+The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): every thread projected under the declarative
 column rules of `.walgit/board.toml` **at HEAD**. The board is a *pure
 function of the collab refs and the definition* — `build_board` in
 `walgit-wal::collab` — and there is no board state anywhere: moving a card is

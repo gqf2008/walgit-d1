@@ -53,7 +53,7 @@ export interface RefListQuery {
   /** Page size (server default 100, max 1000). */
   n?: number;
 }
-// ---- D1 collaboration lane (docs/D1_COLLAB_DESIGN.md) ------------------------
+// ---- D1 collaboration lane (docs/D1_PROTOCOL.md) ------------------------
 /** Full-name ref pages: `refs/all` (every ref) and `refs/collab/*` (inbox/meta). */
 export interface MergeBaseResult {
   from: string;
@@ -202,7 +202,7 @@ export interface CollabThread {
   entries: CollabEntryRef[];
   pr: { pr: CollabPr; merge: CollabMergeEval } | null;
 }
-/** One card of the work-unit board (D1 §8): a thread flattened by the
+/** One card of the work-unit board (docs/D1_PROTOCOL.md §7.4/§8): a thread flattened by the
     deterministic `build_board` projection the CLI renders too. */
 export interface CollabBoardCard {
   id: string;
@@ -523,7 +523,7 @@ function scriptOrigin(): string | undefined {
 export const DEFAULT_BASE = typeof location !== "undefined" ? location.origin : "http://127.0.0.1:8080";
 
 /** One walgit host. */
-/** Deterministic key-sorted JSON (D1 §4.2: the signed canonical form). */
+/** Deterministic key-sorted JSON (docs/D1_PROTOCOL.md §5: the signed canonical form). */
 function canonicalize(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
   if (value !== null && typeof value === "object") {
@@ -539,7 +539,7 @@ function canonicalize(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** Refname-safe segment for collab refs (D1 §5): no `:`, `/`, `..`, `.lock`. */
+/** Refname-safe segment for collab refs (docs/D1_PROTOCOL.md §3.1/§4.2): no `:`, `/`, `..`, `.lock`. */
 const REF_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._@-]*$/;
 function refSegment(label: string, s: string): void {
   if (!REF_SEGMENT.test(s) || s === "." || s === ".." || s.includes("..") || s.endsWith(".lock")) {
@@ -547,7 +547,7 @@ function refSegment(label: string, s: string): void {
   }
 }
 
-/** A refname-safe per-entry segment (D1 §4.1: inbox refs are per-entry, so a
+/** A refname-safe per-entry segment (docs/D1_PROTOCOL.md §3: inbox refs are per-entry, so a
     thread can hold many entries by one principal without overwriting). */
 function entrySegment(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -997,7 +997,7 @@ export class RepoClient {
 
   /** D1 collaboration lane: build signed entries and the git push commands that
       deliver them through receive-pack. The SDK cannot run git; a CLI or agent
-      executes `commands` (docs/D1_COLLAB_DESIGN.md §4/§7). */
+      executes `commands` (docs/D1_PROTOCOL.md §6/§7/§11). */
   readonly collab = {
     /**
      * Build a signed entry for `refs/collab/inbox/<principal>/<uuid>`.
@@ -1017,7 +1017,7 @@ export class RepoClient {
     }): Promise<CollabPush> => {
       const entry = await signedEntry(input);
       // Per-entry ref: a thread with many entries by one principal must not
-      // overwrite a single inbox ref (D1 §4.1).
+      // overwrite a single inbox ref (docs/D1_PROTOCOL.md §3).
       return pushFor(`refs/collab/inbox/${input.principal}/${entrySegment()}`, JSON.stringify(entry, null, 2));
     },
     /**
@@ -1036,7 +1036,7 @@ export class RepoClient {
     }): Promise<Record<string, unknown>> => signedEntry(input),
     /**
      * Post a signed entry through the thin-API write path
-     * (`POST /{o}/{r}/api/collab/entries`, D1 §11): the server materializes
+     * (`POST /{o}/{r}/api/collab/entries`, docs/D1_PROTOCOL.md §12): the server materializes
      * the entry as a bucket pack and publishes the inbox ref — the browser
      * write path (no git needed). The actor must be the authenticated
      * principal.
@@ -1049,13 +1049,13 @@ export class RepoClient {
       });
     },
 
-    /** The full observability report (D1 §8): thread summaries, PR status +
+    /** The full observability report (docs/D1_PROTOCOL.md §7.4/§8): thread summaries, PR status +
         merge rule evaluation, verification health. */
     report: (opts?: CallOptions) => this.client.json<CollabReport>(`${this.p}/collab/report`, opts),
     /** One thread: parent-ordered entries with per-entry verification, plus
         the PR view + merge evaluation when the thread has a patch. */
     thread: (id: string, opts?: CallOptions) => this.client.json<CollabThread>(`${this.p}/collab/threads/${enc(id)}`, opts),
-    /** The work-unit board (D1 §8): the threads projected under the board
+    /** The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): the threads projected under the board
         definition versioned at `.walgit/board.toml` (HEAD) — the same
         `build_board` the `walgit collab board` CLI renders offline. Read-only;
         moving a card posts an ordinary signed `status` entry (`buildEntry` +
@@ -1076,7 +1076,7 @@ export class RepoClient {
       });
     },
     /** First-use registration of a principal's Ed25519 public key at
-        `refs/collab/meta/principals/<principal>` (D1 §5: the token binds the
+        `refs/collab/meta/principals/<principal>` (docs/D1_PROTOCOL.md §4.3: the token binds the
         principal; this ref binds the key). Content is stored as-is. */
     principal: (input: { principal: string; publicKey: string }): CollabPush => {
       refSegment("principal", input.principal);
@@ -1087,7 +1087,7 @@ export class RepoClient {
       );
       return pushFor(`refs/collab/meta/principals/${input.principal}`, content);
     },
-    /** Revoke a principal's key: delete the registry ref (tombstone, D1 §10). */
+    /** Revoke a principal's key: delete the registry ref (tombstone, docs/D1_PROTOCOL.md §14). */
     revokePrincipal: (principal: string): CollabPush => {
       refSegment("revokePrincipal", principal);
       return pushFor(`refs/collab/meta/principals/${principal}`, null);

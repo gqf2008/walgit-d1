@@ -1,4 +1,4 @@
-//! `walgit collab` — the D1 collaboration layer (`docs/D1_COLLAB_DESIGN.md`).
+//! `walgit collab` — the D1 collaboration layer (`docs/D1_PROTOCOL.md`).
 //!
 //! Deterministic aggregation over `refs/collab/*` (§4.3): every client that
 //! reads the same refs and verifies the same signatures computes the same
@@ -96,7 +96,7 @@ pub enum CollabAction {
         attach: Vec<PathBuf>,
     },
     /// First-use registration of a principal's public key at
-    /// `refs/collab/meta/principals/<principal>` (D1 §5).
+    /// `refs/collab/meta/principals/<principal>` (docs/D1_PROTOCOL.md §4.3).
     PrincipalRegister {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -131,7 +131,7 @@ pub enum CollabAction {
         #[arg(long)]
         token: Option<String>,
     },
-    /// Read-only observability dashboard (D1 §8): aggregate all collab state
+    /// Read-only observability dashboard (docs/D1_PROTOCOL.md §7.4/§8): aggregate all collab state
     /// into a summary — threads, PR status, verification health, activity.
     Report {
         #[arg(long, default_value = ".")]
@@ -143,7 +143,7 @@ pub enum CollabAction {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
-    /// The work-unit board (D1 §8): the threads projected under the board
+    /// The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): the threads projected under the board
     /// definition at `.walgit/board.toml` (HEAD). Read-only: moving a card is
     /// an ordinary signed `status` entry (`collab entry --kind status`).
     Board {
@@ -162,7 +162,7 @@ pub enum CollabAction {
         rules: Option<PathBuf>,
     },
     /// Fold the append-only inbox into the signed aggregate snapshot
-    /// (D45 / D1 §11.4): `refs/collab/meta/snapshot` moves first, then the
+    /// (D45 / docs/D1_PROTOCOL.md §9): `refs/collab/meta/snapshot` moves first, then the
     /// folded inbox refs are deleted. Aggregation reads snapshot ∪ tail and
     /// is byte-identical across the fold. Idempotent; safe to re-run.
     Gc {
@@ -714,7 +714,7 @@ fn run_principal_revoke(repo: &Path, principal: &str, push: Option<&str>) -> Res
     Ok(())
 }
 
-// ---- gc: fold the inbox into the signed snapshot (D45 / D1 §11.4) -------------
+// ---- gc: fold the inbox into the signed snapshot (D45 / docs/D1_PROTOCOL.md §9) -------------
 
 /// Delete refspecs per push call — keeps argv far below `ARG_MAX` even for a
 /// 20k-ref fold. Non-atomic batches: inbox refs never move, so a delete either
@@ -1524,7 +1524,7 @@ fn describe_ref(repo: &Path, name: &str, oid: &str) -> Result<RefEvent> {
         sig: String::new(),
     });
     // The inbox path names the principal; verification includes the
-    // inbox-consistency invariant (D1 §4.1, `EntryRef::is_verified`).
+    // inbox-consistency invariant (docs/D1_PROTOCOL.md §4.5, `EntryRef::is_verified`).
     let principal = name
         .strip_prefix("refs/collab/inbox/")
         .and_then(|p| p.rsplit_once('/'))
@@ -2174,7 +2174,7 @@ mod tests {
         assert!(own.is_verified(&principals));
 
         // The same signed bytes found in someone else's inbox: the signature is
-        // alice's, but the inbox model (D1 §4.1) shards by principal — an entry
+        // alice's, but the inbox model (docs/D1_PROTOCOL.md §4.5) shards by principal — an entry
         // in bob's inbox naming alice as actor does not count.
         let mut smuggled = e.clone();
         smuggled.principal = "bob".into();

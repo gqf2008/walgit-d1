@@ -326,4 +326,4 @@ walgit wal show <owner>/<repo> <seq>
 
 ---
 
-> 更多协议级细节见仓库 docs：`D1_COLLAB_DESIGN.md`、`D1_CI_PROTOCOL.md`、`POLICY.md`、`BUNDLE_URI_DESIGN.md`。
+> 更多协议级细节见仓库 docs：`D1_PROTOCOL.md`（D1 规范）、`D1_COLLAB_DESIGN.md`（设计背景）、`D1_CI_PROTOCOL.md`、`POLICY.md`、`BUNDLE_URI_DESIGN.md`。

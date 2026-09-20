@@ -281,7 +281,7 @@ export function runOp(
  * `event: ref` per match, `event: done` with `{more}`): the picker paints
  * matches as the server finds them instead of waiting for the whole page.
  * `collab` streams the D1 namespace — the board page reopens it as its live
- * change signal (refs-level reads are cheap, D1 §7).
+ * change signal (refs-level reads are cheap, docs/D1_PROTOCOL.md §11).
  */
 export function refListStream(
   repo: string,

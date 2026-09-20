@@ -1160,7 +1160,7 @@ mod tests {
         let mut principals = HashMap::new();
         principals.insert("ci-a".to_string(), pk_a);
         let id = run_ref("run7");
-        // Signed by ci-a but planted in ci-b's inbox: the D1 §4.1 inbox
+        // Signed by ci-a but planted in ci-b's inbox: the docs/D1_PROTOCOL.md §4.5 inbox
         // invariant makes it unverified, so it drives nothing.
         let mut smuggled = signed_entry(
             &sk_a,

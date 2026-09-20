@@ -1,4 +1,4 @@
-//! D1 collaboration protocol (`docs/D1_COLLAB_DESIGN.md` §4.2/§4.3): the
+//! D1 collaboration protocol (`docs/D1_PROTOCOL.md` §5/§6/§7): the
 //! deterministic aggregation over `refs/collab/*` — entry schema, canonical
 //! form, Ed25519 verification, `thread` / `pr` / `merge_rule_eval` / `report`.
 //! Pure functions: every client that reads the same refs and verifies the same
@@ -51,7 +51,7 @@ pub struct EntryRef {
 impl EntryRef {
     /// Whether the entry counts as verified: the signature checks against the
     /// actor's registered key **and** the inbox it was found in names the
-    /// entry's own principal. The inbox model (D1 §4.1) shards write access by
+    /// entry's own principal. The inbox model (docs/D1_PROTOCOL.md §4.5) shards write access by
     /// principal; a policy that lets anyone write any inbox must not smuggle
     /// an entry across principals — the signature alone only proves the actor
     /// signed it, not that it belongs in this inbox.
@@ -163,7 +163,7 @@ pub fn sign_entry(entry: &mut Entry, key: &SigningKey) -> String {
 // `refs/collab/meta/snapshot`, carries every folded entry verbatim, and every
 // aggregation reads snapshot ∪ unfolded tail, deduped by oid. The fold is a
 // pure function of the entry set, so aggregation before and after is
-// byte-identical. Normative text: `docs/D1_COLLAB_DESIGN.md` §11.4.
+// byte-identical. Normative text: `docs/D1_PROTOCOL.md` §9.
 
 /// Where the folded collab state lives: one ref per repository, moved forward
 /// by `walgit collab gc` (snapshot first, then the pruned inbox refs are
@@ -549,7 +549,7 @@ pub fn pr_view(
 // ---- merge rule evaluation ---------------------------------------------------
 
 /// A minimal merge rule document (stored at `refs/collab/meta/rules` or given
-/// on the CLI). D1 §6: merge rules are deterministic functions of the log.
+/// on the CLI). docs/D1_PROTOCOL.md §7.3: merge rules are deterministic functions of the log.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MergeRules {
     /// Ref patterns whose merges require human approvals (e.g.
@@ -610,7 +610,7 @@ pub fn merge_rule_eval(rules: &MergeRules, pr: &PrView) -> MergeEval {
     }
 }
 
-// ---- report: read-only observability dashboard (D1 §8) -------------------------
+// ---- report: read-only observability dashboard (docs/D1_PROTOCOL.md §7.4/§8) -------------------------
 
 #[derive(Serialize, Clone, Debug)]
 pub struct ReportThread {
@@ -809,7 +809,7 @@ pub fn build_report(
     report
 }
 
-// ---- board: a deterministic projection of the threads (D1 §8) -----------------
+// ---- board: a deterministic projection of the threads (docs/D1_PROTOCOL.md §7.4/§8) -----------------
 //
 // The board is not state and not a view with its own write path: it is the
 // thread set folded under a declarative column definition versioned with the
@@ -1086,7 +1086,7 @@ fn card_work_context(ordered: &[&EntryRef]) -> BoardWorkContext {
     ctx
 }
 
-/// First-match-wins against the column predicate (D1 §8).
+/// First-match-wins against the column predicate (docs/D1_PROTOCOL.md §7.4/§8).
 fn card_matches(card: &BoardCard, col: &BoardColumnDef) -> bool {
     if !col.kind.is_empty() && !card.kinds.iter().any(|k| k == &col.kind) {
         return false;
@@ -1734,7 +1734,7 @@ name = "everything else"
 
 #[cfg(test)]
 mod snapshot_tests {
-    //! D45 / D1 §11.4: the fold. A snapshot carries every folded entry
+    //! D45 / docs/D1_PROTOCOL.md §9: the fold. A snapshot carries every folded entry
     //! verbatim (oid + inbox principal + raw signed bytes); aggregation over
     //! `snapshot ∪ tail` must be byte-identical to aggregation over the
     //! unfolded inbox — that equality is the acceptance property.

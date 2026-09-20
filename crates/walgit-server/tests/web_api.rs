@@ -1703,7 +1703,7 @@ async fn collab_board_projects_threads_under_the_default_definition() -> TestRes
     Ok(())
 }
 
-/// D1 §8.2 storage convention (issue #161): the HTTP read side of
+/// docs/D1_CI_PROTOCOL.md §8.2 storage convention (issue #161): the HTTP read side of
 /// `refs/collab/ci-artifacts/<actor>/<sha256>` — exact bytes, immutable
 /// caching, sha256-verified, 400/404 shapes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

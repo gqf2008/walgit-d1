@@ -1126,7 +1126,7 @@ async fn archive(
     .await
 }
 
-// ---- D1 collab thin-API write path (browser writes; D1 §11) -------------------
+// ---- D1 collab thin-API write path (browser writes; docs/D1_PROTOCOL.md §12) -------------------
 
 #[derive(serde::Deserialize)]
 struct CollabPost {
@@ -1213,7 +1213,7 @@ async fn git_pack_object(local: &walgit_git::LocalRepo, oid: &str) -> Result<Vec
 
 /// Accept a signed collab entry, materialize it as a one-object bucket pack and
 /// publish `refs/collab/inbox/<actor>/<uuid>` through the WAL — the
-/// receive-pack-equivalent that lets a browser write (D1 §11 thin API).
+/// receive-pack-equivalent that lets a browser write (docs/D1_PROTOCOL.md §12 thin API).
 /// Verification is client-side (signatures over the canonical form); the
 /// server enforces identity (actor == the authenticated principal) and that
 /// the ref lands in the actor's own inbox.
@@ -1287,7 +1287,7 @@ async fn collab_entries(
 }
 
 /// Upper bound on the collab namespace one aggregation request may read: the
-/// inbox is folded by `walgit collab gc` (D45 / D1 §11.4), so this counts only
+/// inbox is folded by `walgit collab gc` (D45 / docs/D1_PROTOCOL.md §9), so this counts only
 /// the **unfolded** tail plus the principals registry — past this size the
 /// answer is a 503 pointing at gc / the CLI, not an unbounded fan-out of
 /// faults and objects. The snapshot itself is one ref + one bounded blob
@@ -1391,7 +1391,7 @@ async fn object_size(r: &Repo, oid: &str) -> Result<Option<u64>, ApiError> {
 }
 
 /// Materialize a JSON blob as a one-object bucket pack and publish one ref
-/// through the WAL (D1 §11 thin API). Shared by inbox entries and principal
+/// through the WAL (docs/D1_PROTOCOL.md §12 thin API). Shared by inbox entries and principal
 /// registration; returns `(oid, seq)`.
 async fn publish_collab_ref(
     st: &Arc<AppState>,
@@ -1482,7 +1482,7 @@ async fn publish_collab_ref(
 }
 
 /// First-use self-registration of the authenticated principal's Ed25519 public
-/// key at `refs/collab/meta/principals/<principal>` (D1 §5): the token binds
+/// key at `refs/collab/meta/principals/<principal>` (docs/D1_PROTOCOL.md §4.3): the token binds
 /// the principal, this ref binds the key. Registration is one-directional
 /// (the tombstone is `revokePrincipal` via git); re-registration overwrites
 /// with the new key.
@@ -1528,10 +1528,10 @@ async fn collab_principal(
     .into_response(&headers))
 }
 
-// ---- D1 collab aggregation API (read path; D1 §8 dashboard + thread views) -----
+// ---- D1 collab aggregation API (read path; docs/D1_PROTOCOL.md §7.4/§8 dashboard + thread views) -----
 
 /// The collab state a read request needs: every inbox entry, the principals
-/// registry and the merge-rule document (`refs/collab/meta/rules`, D1 §6).
+/// registry and the merge-rule document (`refs/collab/meta/rules`, docs/D1_PROTOCOL.md §7.3).
 /// Entries that do not parse are skipped — one corrupt inbox entry must not
 /// take the dashboard down; the deterministic aggregation over the rest is
 /// identical to what the `walgit collab` CLI computes locally.
@@ -1561,7 +1561,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     }
     if plan.len() > COLLAB_MAX_ENTRIES {
         return Err(ApiError::ServiceUnavailable(format!(
-            "collab namespace has more than {COLLAB_MAX_ENTRIES} unfolded refs; fold the inbox with `walgit collab gc` (D1 §11.4) or aggregate offline with the `walgit collab` CLI (this budget guards the remote reader and the per-request object fan-out)"
+            "collab namespace has more than {COLLAB_MAX_ENTRIES} unfolded refs; fold the inbox with `walgit collab gc` (docs/D1_PROTOCOL.md §9) or aggregate offline with the `walgit collab` CLI (this budget guards the remote reader and the per-request object fan-out)"
         )));
     }
     // D45 size precheck: refuse an oversized snapshot before materializing its
@@ -1687,7 +1687,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     })
 }
 
-/// The full observability report (D1 §8): thread summaries, PR status + merge
+/// The full observability report (docs/D1_PROTOCOL.md §7.4/§8): thread summaries, PR status + merge
 /// rule evaluation, verification health and per-actor/per-kind activity.
 async fn collab_report(
     State(st): State<Arc<AppState>>,
@@ -1953,11 +1953,11 @@ async fn collab_ci_artifact_size(
     .await
 }
 
-/// The work-unit board (D1 §8): `build_board` — the same projection the
+/// The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): `build_board` — the same projection the
 /// `walgit collab` CLI computes offline — over the collab state, under the
 /// board definition versioned at `.walgit/board.toml` (HEAD).
 ///
-/// The render cache (`cache/api/v1/*.json`, D1 §11 open question 3) is
+/// The render cache (`cache/api/v1/*.json`, docs/D1_PROTOCOL.md §12 open question 3) is
 /// deliberately **not** used: it exists for sha-addressed immutable answers,
 /// while the projection's input is the live collab refs, which move with every
 /// entry push — keying it would need a second cache with its own invalidation
