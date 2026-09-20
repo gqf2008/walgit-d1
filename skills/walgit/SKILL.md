@@ -136,7 +136,7 @@ W collab entry --kind <issue|comment|patch|review|merge_result|status> \
 | `status` | `{"status","owner","worktree?","branch?","work","note?"}` | claim / move the card |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
 | `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review; actor must differ from the author (coordinator-enforced) |
-| `merge_result` | first `{"oid","result":"merged","note"}`, then `{"oid","merged":true,"note"}` | merge record (the board keys on `merged:true`) |
+| `merge_result` | `{"merged":true,"oid":…,"result":"merged","note":…}` | merge record, **one entry** (the board/PR state keys on `merged:true`) |
 | `comment` | `{"note"}` | progress notes (does not move the card) |
 
 **Board projection rules** (`.walgit/board.toml` defines the columns): `status` is the newest `status`
@@ -151,7 +151,7 @@ not count.
 
 Standard flow: `issue` → `status: in-progress` (owner/worktree/branch) → work in a worktree →
 `patch` → `status: needs-review` → independent `review` by another principal → coordinator merges
-locally & pushes → `merge_result` with the oid → `merge_result {"merged":true}` → `status: closed`.
+locally & pushes → `merge_result {"merged":true,"oid":…}` → `status: closed`.
 Remove the worktree after closure. Keep the board and the thread as the single record; never edit
 state files by hand.
 

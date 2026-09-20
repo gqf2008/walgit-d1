@@ -99,6 +99,10 @@ principal 与 entry-seg 必须满足（CLI `ref_segment` 与薄 API `ref_segment
 packed-refs 时才爆炸。SDK 的客户端校验（`refSegment`）只做正则与 4/5 条、未限 255 字节，
 超长段会在服务端被拒。
 
+写入口分片建议用 policy 的 **principal 相对模式**：一条规则
+`refs/collab/inbox/{principal}/**` + `bypass: ["{principal}"]` 就让每个参与者只能写自己的
+收件箱，无需逐人加字面规则（`{principal}` 捕获一个 path 段；见 `docs/POLICY.md`）。
+
 `<entry-seg>` 只需 refname-safe 且**在该收件箱内唯一**；协议不规定生成方式。现状：
 CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4。
 
@@ -221,9 +225,9 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 | `issue` | 工作单元（线程根） | `title`；正文 `body`/`text` | 成为 report thread / 看板卡片 |
 | `comment` | 评论、留痕 | `note`/`text` | 无状态副作用 |
 | `patch` | 挂实现分支 → 线程成 PR | `title`、`message`；分支在 **entry.refs** | report.prs / merge 判定 |
-| `review` | 评审结论 | `decision`（`approve` 计入；其余值原样展示，缺省当 `comment`）、`agent`、`note` | approvals |
-| `status` | 工作单元状态/上下文 | `status`、`owner`、`worktree`、`branch`、`work`、`note` | card_status / 看板上下文 / `done` 门禁 |
-| `merge_result` | 合并落账 | `merged: true`；`oid`、`result`、`note` | card_status 与 PR status → `merged` |
+| `review` | 评审结论 | `decision`（`approve` 计入；其余值原样展示，缺省当 `comment`）、`agent`、`note` | approvals（按 actor 去重、排除 patch 作者，§7.3） |
+| `status` | 工作单元状态/上下文 | `status`、`owner`、`worktree`、`branch`、`work`、`note`；规范取值：`open`/`in-progress`/`needs-review`/`blocked`/`needs-human`/`merged`/`done`/`closed`（自由字符串合法，投影只按值比较） | card_status / 看板上下文 / `done` 门禁 |
+| `merge_result` | 合并落账 | **单条约定**：`{"merged":true,"oid":…,"result":"merged","note":…}`；只有 `merged == true` 生效 | card_status 与 PR status → `merged` |
 | `ci_claim` / `ci_result` | CI 认领/结果 | **见 `docs/D1_CI_PROTOCOL.md`**（严格 schema） | CI 聚合（report.runs） |
 | `<custom>` | 自定义/未来 | 自由 | 仅出现在 kinds / by_kind |
 
@@ -384,15 +388,15 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
      **注意前缀语义**：`refs/heads/main` 也会匹配 `refs/heads/mainline`（想要精确保护就写全名，
      且不要用会成为别的 ref 前缀的字符串）。
   2. 非保护 base → `allowed=true`，理由 `base is not protected`。
-  3. 批准数 = `human_approvals` 中 `actor` **不以 `svc-` 开头**的条目数。
-  4. `allowed = 批准数 ≥ require_human_approvals`；理由与 `satisfied_by`（批准者列表）随附。
-- **按条目计数，不去重批准者**：同一 principal 的多条 verified approve 会重复计入
-  （`satisfied_by` 也逐条列出）；patch 作者可以给自己 approve。这是当前实现的语义（不是笔误）；
-  是否要求 distinct approvers、是否禁止自审是待定的设计决策（后续 issue 跟踪）。
+  3. 批准者集合 = `human_approvals` 中 `actor` **不以 `svc-` 开头**、且 **不在 `pr.authors`
+     （verified `patch` 的 actor 集合）中**的 actor，**按 actor 去重**。
+  4. `allowed = |批准者集合| ≥ require_human_approvals`；理由与 `satisfied_by`（去重后的批准者）随附。
+- **自审与重复批准不计**：同一 principal 的多条 approve 只算一次；patch 作者给自己的 approve
+  被排除（`pr.authors` 来自 verified patch）。要凑批准数就找别的 principal，不要刷条目。
 
-**规则来源按客户端不同**（现状，非缺陷）：server 的 report/threads/board 自动读
-`refs/collab/meta/rules`（解析失败 = 500，fail closed）；CLI 的 `pr`/`report`/`board` 只认
-`--rules <file>`，不传 = 默认（不保护任何 base）。要本地复现服务端判定，CLI 需显式给规则文件。
+**规则来源（CLI 与服务端同源）**：两端都读 `refs/collab/meta/rules`（server 的
+report/threads/board；CLI 的 `pr`/`report`/`board`）；CLI 的 `--rules <file>` 覆盖该 ref。
+文档存在但非法 = 报错（server `500` / CLI 非零，fail closed）；ref 缺失 = 默认（不保护任何 base）。
 
 ### 7.4 观测报告 `report`
 
@@ -416,7 +420,8 @@ unverified 永远可见：读侧对验签失败/收件箱不符的条目只降�
 **薄 API 写路径**追加 `kind=status && body.status == "done"` 的条目时，必须满足：
 
 1. 线程按 §6.2 **先排序后**重放 `card_status`（§8.2），当前状态 == `needs-review`；
-2. 线程中存在 **verified** 的 `review` 条目且 `decision == "approve"`。
+2. 线程中存在 **verified** 的 `review` 条目且 `decision == "approve"`，且该 approve 的
+   actor 不是线程内任一 verified `patch` 的 actor（禁止自审，与 §7.3 同一权威规则）。
 
 否则写入被拒（CLI 非零退出并给机器可读理由；薄 API `400`）。CLI 在缺 verified approve 时
 提示先 `walgit collab principal-fetch`（approve 者的 key 可能只在 host 注册表）。
@@ -424,8 +429,8 @@ unverified 永远可见：读侧对验签失败/收件箱不符的条目只降�
 **边界（必须知道）**：门禁在**写路径**（CLI + 薄 API），不在聚合。裸
 `git push`/其它客户端追加的 `done` 不会被读侧拒绝——读侧只按签名与投影规则处理；门禁是协作
 纪律的执行器，不是共识规则。且第 1/2 步都读由 `ts`/`parent` 决定的线程顺序（§6.2），approve
-也按条目计数——门禁挡流程失误，不挡恶意（参与者可回拨 `ts` 或自签 approve）。真正的安全边界
-是写权限（`policy.json`）与签名身份，见 §14。
+已排除 patch 作者（§7.3）——门禁挡流程失误，不挡恶意（参与者仍可回拨 `ts` 或找同伙刷 approve）。
+真正的安全边界是写权限（`policy.json`）与签名身份，见 §14。
 
 ## 8. 看板投影（`build_board`，normative）
 
@@ -503,9 +508,14 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
   "entries": [
     { "oid": "<条目 blob 的 git oid>", "principal": "<收件箱属主>", "json": "<条目原始字节，逐字>" }
   ],
+  "complete": true,
+  "dropped_entries": 0,
   "sig": "ed25519:<base64，覆盖把 sig 清空（键保留）后的本文档 canonical 形，同 §5.3>"
 }
 ```
+
+- **完整性标记**：`complete`（缺省 `true`）与 `dropped_entries`（缺省 0）只在裁剪折叠（§9.3）
+  时写入非默认值；canonical 形对默认值省略这两个键，所以旧快照的签名不受 schema 扩展影响。
 
 - `entries` 按 `oid` 升序、按 oid 去重：折叠是输入集合的纯函数，同一集合必然产出同一快照字节。
 - 每条记录 = **digest 清单**：oid + 收件箱属主 + **原始签名字节逐字携带**（绝不重序列化）。
@@ -526,9 +536,10 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
   读取整体报错（静默跳过等于改写历史）。服务端在物化 body 前先查 size，超 64 MiB → `503`。
 - 折叠前后聚合逐字节一致（快照 ∪ 尾部 == 原收件箱），这是本设计的验收等式：空尾部全折叠、
   部分折叠、折叠中途（快照已更新、删除未完成 → 重复输入）三种状态答案相同。
-- **快照没有完整性标记**（只有 `version/kind/actor/ts/entries/sig`）：读者必须按 §3.2 同时取
-  `meta/*`（含快照）再聚合——只读 inbox 的读者在折叠后会看到不完整的账本。把「已折叠下界」
-  写进快照（让读者能察觉自己缺了折叠历史）是后续 issue 的改进项。
+- **完整性可察觉**：`complete=false` 表示上次折叠为满足 64 MiB 上限有意丢弃了
+  `dropped_entries` 条记录；CLI `collab report` 在截断账本上打 WARNING 横幅，服务端导出
+  `walgit_collab_snapshot_truncated` 计数器。只取 inbox 的读者仍会缺折叠历史——正确读法始终是
+  §3.2 的 `meta/*`（含快照）。
 
 ### 9.3 `collab gc` 写侧算法（normative）
 
@@ -541,8 +552,11 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
 2. **扫本地收件箱**：逐 ref 读 blob；无法 UTF-8/无法解析为 Entry/名字不合法的 → 计数
    `unparseable` 留在原地（读侧同样跳过；自动剔除会把可修复的暂时损坏变成永久丢失）。
    可解析者按 oid 合并：若新副本属主 == actor 而既有记录不是，替换（与 §7.1 同规则）。
-3. **判断**：有新记录或更好的副本 → 构造并签名新快照 blob（`hash-object -w`）；否则
-   **纯剪枝折叠**：不重建快照（重建只差 `ts`，是纯 ref churn）。
+3. **判断与限额**：有新记录或更好的副本 → 构造并签名新快照 blob（`hash-object -w`）；否则
+   **纯剪枝折叠**：不重建快照（重建只差 `ts`，是纯 ref churn）。渲染后的快照超过
+   `COLLAB_SNAPSHOT_MAX_BYTES`（64 MiB）时：默认**拒绝发布**并提示；`--truncate` 则按 entry
+   `ts` 从最老开始丢弃记录直到放下（不可解析的记录最先丢），置 `complete=false` /
+   `dropped_entries=<丢掉数>` 后再发布——这是超限后恢复可服务状态的唯一安全路径。
 4. **先落快照（CAS）**：`git push <remote> <snapshot-oid>:refs/collab/meta/snapshot`
    携带 `--force-with-lease=refs/collab/meta/snapshot:<基线 oid>`；无快照时基线是**空
    `<expect>`**（`refs/collab/meta/snapshot:`）——不是零 oid；**绝不加 `+`**（`+` 会静默短路
@@ -567,9 +581,13 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
 - 折叠把 N 条 ref 收成 1 条 ref + 1 个有界 blob；fetch 该命名空间的客户端会拉快照字节
   （≈ 折叠历史体积），不关心协作层的克隆不取该命名空间（这也是正确的：快照是对该命名空间
   的压缩，不是仓库数据的压缩）。
-- **写侧无上限（当前实现缺陷）**：64 MiB 只在服务端读路径检查，CLI 的 `gc` 与本地 load 都
-  不设限；折叠后的快照一旦超过 64 MiB，服务端从此对所有聚合返回 `503`（读路径 fail-closed）。
-  恢复：先把快照记录/条目字节取出（保留窗口内可 `walgit wal materialize --at-seq` 回放，或从仍持有快照的克隆导出），再移动/删除 `refs/collab/meta/snapshot` 并重折——直接删 ref 会把快照 blob 变成不可达对象，有丢历史的风险；修复方向是 `gc` 推送前拒绝并给出提示（后续 issue 跟踪）。
+- **写侧上限已强制**：CLI `gc` 在渲染后超过 64 MiB 时默认拒绝发布（提示 `--truncate`）；
+  `--truncate` 写入带 `complete=false` 的裁剪快照，服务端立即恢复可读。CLI 的本地 `load`
+  对超限快照 fail-closed 并提示 `--truncate`——快照字节是折叠历史的唯一载体，**不要先删 ref**
+  （需要导出时用 `walgit wal materialize --at-seq` 或仍持有快照的克隆）。
+- **机会式折叠**：`walgit collab entry --push --auto-fold` 在本地未折叠 ref 达到
+  `--fold-threshold`（默认 10000，服务端预算的一半）时顺带跑一次 gc；折叠失败只是警告，
+  条目已发布。有活跃写入者时，20k 悬崖不会无人处理。
 
 ## 10. CI 协作（子协议）
 
@@ -645,17 +663,17 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 | 端点 | 语义 | 门禁 |
 |---|---|---|
-| `POST /{o}/{r}/api/collab/entries` | 浏览器写路径：条目 blob 打成单对象 pack，经 **同一条 WAL 发布路径** 写 `refs/collab/inbox/<actor>/<uuid>`；`200 → {ref, oid, seq}` | 认证写；`actor == 认证 principal`（auth=none 时匿名例外）；actor refname-safe；`status=done` 走 §7.5 门禁；`policy.json` 与 receive-pack **同一评估链**；**服务端不验签** |
+| `POST /{o}/{r}/api/collab/entries` | 浏览器写路径：条目 blob 打成单对象 pack，经 **同一条 WAL 发布路径** 写 `refs/collab/inbox/<actor>/<uuid>`；`200 → {ref, oid, seq}` | 认证写；`actor == 认证 principal`（auth=none 时匿名例外）；actor refname-safe；条目 ≤ 256 KiB（超限 `400`）；`status=done` 走 §7.5 门禁；`policy.json` 与 receive-pack **同一评估链**；**服务端不验签** |
 | `POST /{o}/{r}/api/collab/principal` | 首次注册/轮换公钥到 `refs/collab/meta/principals/<p>`（CAS 旧值） | `principal == 认证 principal`；policy 同 receive-pack |
-| `GET /{o}/{r}/api/collab/report` | §7.4 报告（含 CI runs） | 读权限；SWR，永不 immutable |
-| `GET /{o}/{r}/api/collab/threads/{id}` | 线程有序条目 + 每条的 `verified`、`broken_refs`，含 patch 时附 `{pr, merge}`；未知 id `404` | 同上 |
-| `GET /{o}/{r}/api/collab/board` | §8 看板（读 HEAD 的 `.walgit/board.toml`）；定义非法 `400` | 同上 |
+| `GET /{o}/{r}/api/collab/report` | §7.4 报告（含 CI runs） | 读权限；SWR + body-digest ETag，永不 immutable |
+| `GET /{o}/{r}/api/collab/threads/{id}` | 线程有序条目 + 每条的 `verified`、`broken_refs`，含 patch 时附 `{pr, merge}`；未知 id `404` | SWR + body-digest ETag |
+| `GET /{o}/{r}/api/collab/board` | §8 看板（读 HEAD 的 `.walgit/board.toml`）；定义非法 `400` | SWR + body-digest ETag |
 | `GET`/`HEAD /{o}/{r}/api/collab/ci-artifacts/{sha256}` | CI 日志/产物读取（先查 size、后读取、发前验 sha256；`HEAD` 是 CLI 预检） | 同 CI 协议 §8.2 |
 | `GET /api/v1/principals`、`PUT`/`DELETE /api/v1/principals/{principal}` | host 注册表（§4.4） | 读需读权限；写 self-only |
 
 预算与缓存：collab 聚合端点受 §9.4 的 20k/64MiB 预算保护，超限 `503` 指向 gc / 离线 CLI；
-三个聚合读端点一律 **SWR、永不 immutable**（输入是活跃 refs，不存在可缓存的不可变答案）；
-当前实现不返回 ETag（`json_swr(…, None)`），加 ETag/304 属后续优化（见后续 issue）。
+三个聚合读端点一律 **SWR + 响应体 sha256 ETag、永不 immutable**（同一 body 的重复请求 304；
+`report` 含 `now` 相关的 CI 运行态，跨 TTL 边界 body 变化即回 200）。
 
 ## 13. 限额与预算（汇总）
 
@@ -663,7 +681,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 |---|---|---|
 | principal / entry-seg | refname-safe，字节长 ≤ 255 | CLI/薄 API 写入口 |
 | entry 附件 | 每文件 ≤ 64 KiB | CLI `--attach` |
-| 快照 blob | ≤ 64 MiB | 服务端物化前；超限 `503`（写侧未强制，见 §9.4） |
+| entry blob | ≤ 256 KiB | 服务端聚合读侧（超限跳过 + 计数）；薄 API 写侧拒绝 |
+| 快照 blob | ≤ 64 MiB | 服务端物化前；CLI `gc` 发布前（超限默认拒绝，`--truncate` 裁剪并标记 `complete=false`） |
 | 未折叠 ref 数 | ≤ 20 000 / 请求（inbox + principals） | 服务端聚合；超限 `503` |
 | CI body | ≤ 256 KiB | `walgit-wal::ci` 读侧（CI 协议 §11） |
 | CI 产物 | ≤ 16 MiB/对象、≤ 32 个/结果 | runner/读侧（CI 协议 §8.2） |
@@ -674,7 +693,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 威胁 | 防线 |
 |---|---|
 | 伪造他人条目 | 签名 + 注册表验签；伪造者无他人私钥 → 恒 unverified（可见红，不参与计数/批准） |
-| 越权写收件箱（policy 缺失/配置错） | 读侧收件箱归属校验（§4.5）：条目在他人收件箱里即使签名真也 unverified；生产仓库应对 `refs/collab/*` 配 policy（写入口分片） |
+| 越权写收件箱（policy 缺失/配置错） | 读侧收件箱归属校验（§4.5）：条目在他人收件箱里即使签名真也 unverified；生产仓库应对 `refs/collab/*` 配 policy——一条 `refs/collab/inbox/{principal}/**` + `bypass:["{principal}"]` 即可分片（§3.1） |
 | 伪造注册表条目（顶替他人公钥） | policy 必须限制 registry ref 只允许本人写；allow-all 仓库无身份保证——这是部署责任，协议不装作有中心权威 |
 | 篡改条目内容 | 签名覆盖 canonical 字节；改动任何字段 → 验签失败 |
 | 重放/重复 | oid 内容寻址去重；重放无害 |
@@ -684,8 +703,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端的 fetch **不带 prune** → 长寿命 checkout 里被删的注册 ref 可能残留，验签仍信旧 key——需 `git fetch --prune`（或删本地 ref）后聚合；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
 | 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份，服务端只能人工 tombstone；升级路径 = 不可导出密钥 + 服务端登记确认（已知取舍） |
 | 排序投毒（`ts`/`parent` 不被认证） | 线程顺序、卡片状态与 `done` 门禁都依赖 `(ts, actor, oid)` 顺序与作者自报的 `parent`；参与者可回拨 `ts`、往任意线程追加低 `ts` 根条目来影响投影与卡片身份（§6.2/§8.2）。当前防线：**无**（顺序是协作约定）——不得把顺序当安全判定；链上 ts 回退处理见后续 issue（守卫截断本身已修，见 §6.2） |
-| 自审/重复批准 | merge 规则按 approve **条目数**计，不去重 principal；patch 作者可自 approve，`done` 门禁同理。当前防线：**无**——写权限与签名身份才是边界，`require_human_approvals` 是流程门禁；是否收紧见后续 issue |
-| gc 写出超限快照 | CLI 写侧无 64 MiB 检查；超限后服务端全部聚合 `503`。恢复：先导出快照记录（`walgit wal materialize` / 持有快照的克隆）再移动该 ref，禁止直接删；修复见后续 issue |
+| 自审/重复批准 | **已收紧**：merge 规则按**去重后的非作者**批准者数计（§7.3），`done` 门禁同样排除 patch 作者；同伙串谋刷 approve 仍是流程边界内的事（写权限与身份是安全边界） |
+| gc 写出超限快照 | **已强制**：CLI 渲染后 >64 MiB 默认拒绝，`--truncate` 丢弃最老记录并置 `complete=false`，服务端立即恢复可读；本地 `load` 同样 fail-closed。快照字节是唯一载体，禁止先删 ref |
 | 时钟 | `ts` 不被认证；只影响排序/展示（及 CI TTL 活性），不参与签名/身份等安全判定；但投影顺序依赖它，见上一行 |
 
 ## 15. 版本与兼容
@@ -694,7 +713,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   `version=1` + `kind="collab_snapshot"`（未知即读整体报错）；`.walgit/board.toml`
   `version=1`（未知即 fail-closed）；`.walgit/ci.toml` 见 CI 协议。
 - **兼容契约是 canonical 形**：跨语言实现必须逐字节复现 §5.3；否则签名不可互认
-  （§5.3.1 是现存偏差，修复前以验证端行为为准）。
+  （§5.3.1 的跨语言偏差已修，三处金标锚点见 §16）。
 - **不可变数据**：条目一经发布不改；折叠逐字携带原始字节；快照记录永不重序列化。
   仓库级「pre-1.0 无向后兼容、旧形状同批删除」的政策适用于**形状**（字段/路由/配置）；
   已落盘的条目字节与 WAL 一样是追加式数据，读取方必须在保留窗口内可回放。
@@ -705,14 +724,15 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 | 锚点 | 锁死的性质 |
 |---|---|
-| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`）；长链递减 `ts` 全量解析（`thread_resolves_descending_ts_chains_without_truncation`）与截断后追加（`thread_keeps_chain_order_for_entries_appended_after_a_long_chain`） |
+| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`）；长链递减 `ts` 全量解析（`thread_resolves_descending_ts_chains_without_truncation`）与截断后追加（`thread_keeps_chain_order_for_entries_appended_after_a_long_chain`）；canonical root 优先 verified（`board_identity_prefers_a_verified_root`） |
 | `walgit-wal/src/collab.rs::golden_tests` + `web/src/collab-canonical.test.ts` + `crates/walgit-server/tests/web_api.rs::collab_sdk_golden_entry_verifies_end_to_end` | 跨语言金标向量：SDK/WebCrypto 与 Rust 覆盖同一 canonical 字节串（含 `"sig":""`），且浏览器式条目经薄 API 聚合 verified |
-| `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好 |
-| `…::transition_tests` | `done` 门禁（needs-review + verified approve）；先 thread() 后判定；card prose 抽取 |
+| `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好；完整性标记 round-trip（`snapshot_completeness_marker_round_trips`） |
+| `…::transition_tests` | `done` 门禁（needs-review + verified approve，且排除 patch 作者）；先 thread() 后判定；card prose 抽取；merge 去重/非作者（`merge_rule_counts_distinct_non_author_approvers` / `pr_view_collects_verified_patch_authors_only` / `done_gate_rejects_self_approval_by_the_patch_author`） |
 | `walgit-cli/src/collab_cmd.rs` 测试 | canonicalize 紧凑键序；签名/验签/篡改；gc key 匹配；折叠记录属主偏好；thread 链序/悬空；merge 只计非 `svc-`；report 确定性与计数；changed_refs；错收件箱不算 verified |
 | `crates/walgit-cli/tests/collab_e2e.rs` | 真服务器全流程（注册→issue→链式评论→approve→新克隆聚合验签）；watch 回调；CLI vs 服务端看板字节一致 + status 移动；gc 折叠前后聚合字节一致且尾部存活；过期基线 lease 失败与崩溃重跑收敛；sha256 仓库折叠 |
 | `crates/walgit-server/tests/web_api.rs` (`collab_*`) | 薄 API 签名条目（服务端不验签、聚合验）；report/thread 聚合；注册+verified；薄 API 遵守 policy；默认板投影；CI 产物按哈希供字节；超大快照物化前拒绝 |
-| `crates/walgit-server/tests/policy_inbox.rs` | token 模式下收件箱按 actor 分片门禁 |
+| `crates/walgit-server/src/policy.rs` 测试 + `crates/walgit-server/tests/policy_inbox.rs` | `{principal}` 段捕获与单规则收件箱隔离（`collab_inbox_shards_with_one_principal_relative_rule`，bypass 只放行被捕获的 owner）；token 模式按 actor 分片的字面规则版 |
+| `web/src/collab-text.test.ts` + Rust `card_prose_is_the_thread_page_field_walk` | 跨语言 prose 抽取同表（看板卡片与线程页不漂移） |
 
 ## 附录 A：CLI 命令与最小工作流
 
@@ -723,7 +743,7 @@ W="walgit --config ~/.walgit/walgit.toml"
 $W collab ls [--repo .]                 # 线程 id 列表
 $W collab thread <id> [--repo .]        # 链序 + 每条的 oid/principal/verified，JSON
 $W collab thread-heads [--repo .]       # thread id -> 链头 oid
-$W collab pr <id> [--rules r.json]      # PR 视图 + merge 求值，JSON
+$W collab pr <id> [--rules r.json]      # PR 视图 + merge 求值；默认读 refs/collab/meta/rules
 $W collab report [--format text|markdown|html] [--rules r.json]
 $W collab board  [--format text|markdown|json|hash] [--board f] [--rules r.json]
 ```
@@ -733,12 +753,13 @@ $W collab board  [--format text|markdown|json|hash] [--board f] [--rules r.json]
 ```sh
 $W collab principal-register --principal alice --key ~/.walgit/keys/alice.ed25519 [--push origin]
 $W collab entry --kind issue --id cc-ai-demo --actor alice --parent "" \
-   --body '{"title":"…","body":"…"}' --key ~/.walgit/keys/alice.ed25519 --push origin
+   --body '{"title":"…","body":"…"}' --key ~/.walgit/keys/alice.ed25519 --push origin \
+   [--auto-fold --fold-threshold 10000]     # 机会式折叠（阈值默认 10000）
 # 后续条目：--parent 填上一条命令输出第二列的 oid
 $W collab principal-revoke  --principal alice [--push origin]
 $W collab principal-fetch   [--remote origin] [--token $WALGIT_TOKEN]
 $W collab watch --remote origin --interval 10 [--once] [--exec '<cmd>'] [--state <file>]
-$W collab gc --actor alice --key ~/.walgit/keys/alice.ed25519 [--push origin]
+$W collab gc --actor alice --key ~/.walgit/keys/alice.ed25519 [--push origin] [--truncate]
 ```
 
 host 注册表：`walgit principal register|rotate|list|revoke --url <host> [--principal p] [--key f]`。
@@ -746,6 +767,6 @@ CI：`walgit ci validate|run|status|log|artifacts`（`docs/D1_CI_PROTOCOL.md`）
 
 标准工作单元流程（与 `CONTRIBUTING.md` / `RULE_开发流程规范` 对齐）：issue → 开工
 `comment` + `status: in-progress`（带 owner/worktree/branch/work）→ 实现后 `patch`
-（base/head）+ `status: needs-review` → `review`（独立审查者）→ 合并后 `merge_result`
-（`{"oid":…,"result":"merged","note":…}`，再补一跳 `{"merged":true,…}` 落看板）→
+（base/head）+ `status: needs-review` → `review`（独立审查者）→ 合并后 **一次写入**
+`merge_result {"merged":true,"oid":…,"result":"merged","note":…}`（落看板）→
 `status: closed`（或经门禁的 `status: done`）；全程可查 `board` / `pr`。

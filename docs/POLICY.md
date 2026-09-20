@@ -146,6 +146,27 @@ rule, so the `^` is a no-op that looks like a revoke. Refuse it at load.
 `paths` is reserved for `size`. On a `protect` / `history` rule it is ignored
 until a quarantine path walk exists.
 
+### `{principal}` in a ref pattern
+
+A ref pattern may carry one `{principal}` **segment**: it matches exactly one
+non-empty path segment and captures it, e.g. `refs/collab/inbox/{principal}/**`
+on `refs/collab/inbox/alice/123` captures `alice`. In a rule's
+`protect.bypass`, the entry `"{principal}"` means *the principal captured by
+the ref pattern* — so one rule shards per-writer refs without an admin edit per
+participant:
+
+```json
+{ "name": "collab-inbox-owner-only",
+  "match": { "refs": ["refs/collab/inbox/{principal}/**"] },
+  "effect": { "protect": { "restricts": ["create", "update", "delete"],
+                           "bypass": ["{principal}"] } } }
+```
+
+The placeholder must be a whole segment (`inbox/{principal}/…`, not
+`inbox/x{principal}`), and it does not participate in the overlap audit — keep
+the capture form to one rule per namespace (the audit compares patterns
+literally).
+
 ## Effect is a tagged union
 
 The file does not say how rules combine. The effect type does. A file that can
