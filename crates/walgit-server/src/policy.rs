@@ -198,6 +198,31 @@ impl RepoPolicy {
             {
                 return Err(format!("rule {:?}: mode must be enforce|audit", r.name));
             }
+            // `{principal}` is a capture segment (docs/POLICY.md): it must be
+            // one whole path segment, or the rule would silently protect a
+            // namespace nobody can match.
+            for p in &r.match_.refs {
+                if !p.contains("{principal}") {
+                    continue;
+                }
+                if p.matches("{principal}").count() > 1 {
+                    return Err(format!(
+                        "rule {:?}: at most one {{principal}} placeholder per pattern",
+                        r.name
+                    ));
+                }
+                let idx = p.find("{principal}").unwrap_or(0);
+                let prefix = &p[..idx];
+                let suffix = &p[idx + "{principal}".len()..];
+                if (!prefix.is_empty() && !prefix.ends_with('/'))
+                    || (!suffix.is_empty() && !suffix.starts_with('/'))
+                {
+                    return Err(format!(
+                        "rule {:?}: {{principal}} must be a whole ref segment (…/{{principal}}/…)",
+                        r.name
+                    ));
+                }
+            }
             // ^ exclusions forbidden on first-match (union-like) families.
             if r.effect.history.is_some() || r.effect.size.is_some() {
                 for pats in [&r.match_.refs, &r.match_.principals, &r.match_.paths] {
@@ -557,9 +582,10 @@ fn deny_reason(
             continue;
         };
         if bypasses(protect, principal, groups)
-            || (captured.is_some()
-                && protect.bypass.iter().any(|b| b == "{principal}")
-                && captured.as_deref() == Some(principal))
+            || (captured
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case(principal))
+                && protect.bypass.iter().any(|b| b == "{principal}"))
         {
             continue;
         }
@@ -930,6 +956,34 @@ mod tests {
             evaluate(&p, "bob", &other, |_| false).per_ref[0].1.is_ok(),
             "refs outside the pattern are unaffected"
         );
+    }
+
+    #[test]
+    fn principal_placeholder_must_be_a_whole_segment() {
+        let bad = [
+            r#"{"version":1,"rules":[{"name":"x","match":{"refs":["refs/collab/inbox/x{principal}/**"]},"effect":{"protect":{"bypass":["{principal}"]}}}]}"#,
+            r#"{"version":1,"rules":[{"name":"x","match":{"refs":["refs/collab/inbox/{principal}x/**"]},"effect":{"protect":{"bypass":["{principal}"]}}}]}"#,
+            r#"{"version":1,"rules":[{"name":"x","match":{"refs":["refs/collab/inbox/{principal}/{principal}/**"]},"effect":{"protect":{"bypass":["{principal}"]}}}]}"#,
+        ];
+        for doc in bad {
+            assert!(parse_bytes(doc.as_bytes()).is_err(), "must reject: {doc}");
+        }
+        let ok = r#"{"version":1,"rules":[{"name":"x","match":{"refs":["refs/collab/inbox/{principal}/**"]},"effect":{"protect":{"bypass":["{principal}"]}}}]}"#;
+        assert!(parse_bytes(ok.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn captured_owner_match_is_case_insensitive() {
+        let p = parse_bytes(
+            br#"{"version":1,"rules":[{"name":"x","match":{"refs":["refs/collab/inbox/{principal}/**"]},"effect":{"protect":{"restricts":["create"],"bypass":["{principal}"]}}}]}"#,
+        )
+        .unwrap();
+        let t = txn(vec![upd("refs/collab/inbox/alice/x", "", "aaa")], false);
+        assert!(
+            evaluate(&p, "Alice", &t, |_| false).per_ref[0].1.is_ok(),
+            "actor specs are case-insensitive; the captured-owner compare matches too"
+        );
+        assert!(evaluate(&p, "bob", &t, |_| false).per_ref[0].1.is_err());
     }
 
     #[test]

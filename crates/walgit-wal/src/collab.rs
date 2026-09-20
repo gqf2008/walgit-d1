@@ -651,6 +651,22 @@ pub struct MergeEval {
 
 /// Evaluate whether the PR may be merged: protected bases need at least
 /// `require_human_approvals` verified approvals from non-agent actors.
+/// The approvals a merge rule can count (and the only ones the report's
+/// `approvals` column shows): verified `approve` reviews by non-`svc-` actors,
+/// distinct, excluding the verified patch authors (self-approval).
+fn countable_approvers(pr: &PrView) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in &pr.human_approvals {
+        if r.decision != "approve" || is_agent(&r.actor) || pr.authors.contains(&r.actor) {
+            continue;
+        }
+        if !out.contains(&r.actor) {
+            out.push(r.actor.clone());
+        }
+    }
+    out
+}
+
 pub fn merge_rule_eval(rules: &MergeRules, pr: &PrView) -> MergeEval {
     let protected = pr
         .base
@@ -665,15 +681,7 @@ pub fn merge_rule_eval(rules: &MergeRules, pr: &PrView) -> MergeEval {
     }
     // Distinct approvers, and never the patch's own author: one principal
     // approving twice — or approving their own change — is not two reviews.
-    let mut satisfied_by: Vec<String> = Vec::new();
-    for r in &pr.human_approvals {
-        if r.decision != "approve" || is_agent(&r.actor) || pr.authors.contains(&r.actor) {
-            continue;
-        }
-        if !satisfied_by.contains(&r.actor) {
-            satisfied_by.push(r.actor.clone());
-        }
-    }
+    let satisfied_by = countable_approvers(pr);
     if satisfied_by.len() >= rules.require_human_approvals {
         MergeEval {
             allowed: true,
@@ -841,7 +849,7 @@ pub fn build_report(
                     base: pr.base.clone(),
                     head: pr.head.clone(),
                     status: pr.status.clone(),
-                    approvals: pr.human_approvals.len(),
+                    approvals: countable_approvers(&pr).len(),
                     merge_allowed: eval.allowed,
                     merge_reason: eval.reason.clone(),
                 },

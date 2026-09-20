@@ -303,7 +303,14 @@ pub async fn run(action: CollabAction) -> Result<()> {
             push,
             truncate,
         } => {
-            run_gc(&repo, &actor, &key, push.as_deref(), truncate)?;
+            run_gc(
+                &repo,
+                &actor,
+                &key,
+                push.as_deref(),
+                truncate,
+                COLLAB_SNAPSHOT_MAX_BYTES,
+            )?;
         }
         CollabAction::PrincipalFetch {
             repo,
@@ -637,7 +644,14 @@ fn run_auto_fold(repo: &Path, actor: &str, key: &Path, remote: Option<&str>, thr
     if n < threshold {
         return;
     }
-    match run_gc(repo, actor, key, remote, false) {
+    match run_gc(
+        repo,
+        actor,
+        key,
+        remote,
+        false,
+        COLLAB_SNAPSHOT_MAX_BYTES,
+    ) {
         Ok(()) => println!("collab auto-fold: folded {n} inbox ref(s) (threshold {threshold})"),
         Err(e) => eprintln!("collab auto-fold skipped (entry is published): {e}"),
     }
@@ -647,17 +661,6 @@ fn run_auto_fold(repo: &Path, actor: &str, key: &Path, remote: Option<&str>, thr
 /// refused (pointing at `--truncate`), unless truncation was requested — then
 /// the oldest records (by entry `ts`, unparseable first) are dropped until the
 /// document fits and the result is marked `complete: false`.
-fn build_capped_snapshot(
-    actor: &str,
-    ts: i64,
-    records: Vec<SnapshotRecord>,
-    key: &SigningKey,
-    truncate: bool,
-) -> Result<(Snapshot, String)> {
-    build_capped_snapshot_at(actor, ts, records, key, truncate, COLLAB_SNAPSHOT_MAX_BYTES)
-}
-
-/// The cap-parameterised form (unit-testable without a 64 MiB fixture).
 fn build_capped_snapshot_at(
     actor: &str,
     ts: i64,
@@ -958,7 +961,14 @@ fn keep_fold_record(
 /// whose ref is missing; another gc may have pruned it mid-flight). A crash
 /// or a reader mid-fold sees duplicates, never a loss; the read side dedups
 /// by oid.
-fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>, truncate: bool) -> Result<()> {
+fn run_gc(
+    repo: &Path,
+    actor: &str,
+    key_path: &Path,
+    push: Option<&str>,
+    truncate: bool,
+    max_bytes: usize,
+) -> Result<()> {
     ref_segment("gc.actor", actor)?;
     let reader = CollabReader::new(repo);
     let format = reader.object_format()?;
@@ -983,15 +993,19 @@ fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>, truncat
     // as this gc read it (docs/D1_PROTOCOL.md §9). `None` is `--force-with-lease=ref:` (an
     // explicitly empty <expect>), Git's portable "the ref must not exist";
     // the zero OID is not equivalent on current Git.
-    let (baseline, mut records): (Option<String>, Vec<SnapshotRecord>) =
+    let (baseline, mut records, baseline_len): (Option<String>, Vec<SnapshotRecord>, usize) =
         match reader.snapshot_blob()? {
-            Some((oid, bytes)) => (
-                Some(oid),
-                parse_snapshot(&bytes)
-                    .map_err(|e| anyhow::anyhow!("{SNAPSHOT_REF}: {e}"))?
-                    .entries,
-            ),
-            None => (None, Vec::new()),
+            Some((oid, bytes)) => {
+                let len = bytes.len();
+                (
+                    Some(oid),
+                    parse_snapshot(&bytes)
+                        .map_err(|e| anyhow::anyhow!("{SNAPSHOT_REF}: {e}"))?
+                        .entries,
+                    len,
+                )
+            }
+            None => (None, Vec::new(), 0),
         };
     let mut seen: HashMap<String, usize> = HashMap::new();
     for (index, record) in records.iter().enumerate() {
@@ -1031,16 +1045,28 @@ fn run_gc(repo: &Path, actor: &str, key_path: &Path, push: Option<&str>, truncat
         );
         folded.push(name);
     }
-    if folded.is_empty() {
+    // Repair path: an over-cap snapshot with an empty inbox tail must still
+    // be truncatable (`gc --truncate`), otherwise the documented recovery from
+    // the server's 503 is a silent no-op.
+    let over_cap = baseline_len > max_bytes;
+    if folded.is_empty() && !(over_cap && truncate) {
+        if over_cap {
+            bail!(
+                "collab gc: {SNAPSHOT_REF} is {} MiB, over the {} MiB cap; re-run with --truncate to drop the oldest records (marked complete:false)",
+                baseline_len / (1024 * 1024),
+                max_bytes / (1024 * 1024)
+            );
+        }
         println!("collab gc: nothing to fold ({left} unparseable inbox blob(s) left in place)");
         return Ok(());
     }
     // Nothing new to record ⇒ prune-only fold: the snapshot the baseline
     // names already carries every entry, so it is never rebuilt (a rebuild
-    // would differ only in `ts` — pure ref churn).
-    let snap_oid = if changed {
+    // would differ only in `ts` — pure ref churn) — except when the baseline
+    // is over cap and truncation was explicitly requested.
+    let snap_oid = if changed || over_cap {
         let ts = chrono::Utc::now().timestamp();
-        let (snap, content) = build_capped_snapshot(actor, ts, records, &key, truncate)?;
+        let (snap, content) = build_capped_snapshot_at(actor, ts, records, &key, truncate, max_bytes)?;
         if !snap.complete {
             eprintln!(
                 "collab gc: WARNING snapshot truncated: dropped {} oldest record(s); the ledger is now marked complete=false",
@@ -2544,6 +2570,75 @@ mod gc_tests {
     }
 
     #[test]
+    /// A pre-existing over-cap snapshot with an EMPTY inbox tail is exactly the
+    /// recovery case the server 503 points at: `gc --truncate` must rebuild it
+    /// in place (marked incomplete), and a plain `gc` must refuse with the hint
+    /// instead of reporting "nothing to fold".
+    #[test]
+    fn gc_truncate_repairs_an_over_cap_snapshot_with_an_empty_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        let (alice_key, alice_pk, alice_sk) = keypair_file(tmp.path(), 7);
+        register(&repo, "alice", &alice_pk);
+
+        // Three signed records, folded into a snapshot whose rendering is a few
+        // bytes over a tiny cap; no inbox refs at all.
+        let records: Vec<SnapshotRecord> = (0..3)
+            .map(|i| {
+                let mut e = mk_entry(
+                    "comment",
+                    "t1",
+                    "alice",
+                    "",
+                    i as i64 + 1,
+                    serde_json::json!({"note": format!("record-{i}")}),
+                );
+                e.sig = sign_entry(&mut e, &alice_sk);
+                let json = serde_json::to_string(&e).unwrap();
+                SnapshotRecord {
+                    oid: walgit_wal::collab::git_blob_oid(
+                        json.as_bytes(),
+                        walgit_git::ObjectFormat::Sha1,
+                    ),
+                    principal: "alice".into(),
+                    json,
+                }
+            })
+            .collect();
+        let full = serde_json::to_string(&build_snapshot("alice", 9, records.clone(), &alice_sk))
+            .unwrap();
+        let cap = full.len() - 40;
+        let oid = git_write_blob(
+            &repo,
+            &serde_json::to_string(&build_snapshot("alice", 9, records.clone(), &alice_sk))
+                .unwrap(),
+        )
+        .unwrap();
+        git_update_ref(&repo, SNAPSHOT_REF, Some(&oid)).unwrap();
+
+        // Plain gc: refuses with the --truncate hint (not "nothing to fold").
+        let err = run_gc(&repo, "alice", &alice_key, None, false, cap).unwrap_err();
+        assert!(err.to_string().contains("--truncate"), "{err}");
+        // Repair: truncate rebuilds in place, marked and within the cap.
+        run_gc(&repo, "alice", &alice_key, None, true, cap).unwrap();
+        let bytes = CollabReader::new(&repo)
+            .snapshot_blob()
+            .unwrap()
+            .expect("snapshot exists")
+            .1;
+        assert!(bytes.len() <= cap, "{} <= {cap}", bytes.len());
+        let snap = parse_snapshot(&bytes).unwrap();
+        assert!(!snap.complete, "the repair marks the ledger truncated");
+        assert!(snap.dropped_entries >= 1);
+    }
+
     fn push_prune_only_never_deletes_without_a_snapshot_on_the_remote() {
         let tmp = tempfile::tempdir().unwrap();
         let remote = tmp.path().join("remote.git");
@@ -2588,7 +2683,7 @@ mod gc_tests {
 
         // Local-only fold first: snapshot exists locally, but the remote has
         // only the inbox and no snapshot.
-        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
         std::process::Command::new("git")
             .args(["-C"])
             .arg(&repo)
@@ -2596,7 +2691,7 @@ mod gc_tests {
             .status()
             .unwrap();
 
-        let pushed = run_gc(&repo, "alice", &alice_key, Some("origin"), false);
+        let pushed = run_gc(&repo, "alice", &alice_key, Some("origin"), false, usize::MAX);
         let remote_snapshot = String::from_utf8_lossy(
             &std::process::Command::new("git")
                 .args(["-C"])
@@ -2730,7 +2825,7 @@ mod gc_tests {
 
         // The garbage blob fails the CLI's strict inbox parse (pre-existing
         // behavior); gc must still fold around it, so fold first.
-        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
         assert_eq!(inbox_ref_count(&repo), 1, "only the unparseable blob's ref survives");
         let out = std::process::Command::new("git")
             .args(["-C"])
@@ -2763,7 +2858,7 @@ mod gc_tests {
         assert_eq!(entries.iter().filter(|e| e.is_verified(&principals)).count(), 2);
 
         // A second gc with an empty tail is a no-op...
-        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
         assert_eq!(fingerprint(&repo), before, "no-op gc moves nothing");
 
         // ...and the tail stays live: a new entry chains onto a folded tip
@@ -2780,7 +2875,7 @@ mod gc_tests {
         assert!(ordered.iter().all(|e| e.entry.actor != "carol" || !e.is_verified(&principals)));
 
         // A second real fold composes with the existing snapshot.
-        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
         assert_eq!(inbox_ref_count(&repo), 0);
         let (entries, _) = CollabReader::new(&repo).load().unwrap();
         assert_eq!(entries.len(), 4, "second fold loses nothing");
@@ -2802,7 +2897,7 @@ mod gc_tests {
         let mut e = mk_entry("issue", "t1", "alice", "", 1, serde_json::json!({"title": "x"}));
         e.sig = sign_entry(&mut e, &SigningKey::from_bytes(&[7u8; 32]));
         push_entry(&repo, &e);
-        run_gc(&repo, "alice", &alice_key, None, false).unwrap();
+        run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
         let snap_oid = String::from_utf8_lossy(
             &CollabReader::new(&repo)
                 .git(&["rev-parse", SNAPSHOT_REF])

@@ -146,16 +146,23 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
   - Before a parallel workstream: register the whole team, one principal per
     agent (see §0b); `walgit collab principal-register` publishes a public key.
   - `walgit collab entry --kind <kind> --id <thread> --actor <principal>
-    --body '<json>' --key <keyfile> [--base … --head …] --push <remote>`
+    --body '<json>' --key <keyfile> [--base … --head …] --push <remote>
+    [--auto-fold --fold-threshold <n>]`
     — appends a signed entry and pushes it. Nobody edits state; a change is
     a new signed entry whose parent chain anyone can replay and verify.
+    `--auto-fold` (threshold default 10000) folds the inbox with the same
+    actor/key once the unfolded refs pass the threshold — the server's
+    aggregate read budget is 20000 refs.
 - Automate: `walgit collab watch --exec <cmd>` — resident loop: fetch
   `refs/collab/*`, invoke `cmd` with each new/changed entry's JSON on stdin.
 - Housekeeping (D45): `walgit collab gc --actor <principal> --key <keyfile>
-  --push <remote>` folds the append-only inbox into the signed snapshot at
+  --push <remote> [--truncate]` folds the append-only inbox into the signed snapshot at
   `refs/collab/meta/snapshot` and prunes the folded refs — every aggregation
   (snapshot ∪ tail) is byte-identical across a fold, so run it whenever the
-  inbox grows large; it is idempotent and safe to re-run.
+  inbox grows large; it is idempotent and safe to re-run. A fold over the
+  64 MiB snapshot cap is refused unless `--truncate` drops the oldest records
+  and marks the snapshot `complete:false`; `--truncate` also repairs an
+already over-cap snapshot when there is nothing new to fold.
 
 ### Decentralized CI (`walgit ci …`)
 
@@ -409,17 +416,14 @@ walgit collab entry --repo "$checkout" --kind review --id <thread> \
   --body '{"decision":"approve","agent":"<proj>-reviewer-1","note":"location; problem; suggestion; reproducible verification"}' \
   --key ~/.walgit/keys/<proj>-reviewer-1.ed25519 --push origin
 
-# 6. Coordinator only: merge, push, then record the oid and the terminal move.
+# 6. Coordinator only: merge, push, then record the merge (one entry records the oid
+#    and moves the card to `merged`).
 git -C "$checkout" switch main
 git -C "$checkout" merge --ff-only feat/<thread>
 git -C "$checkout" push origin main
 walgit collab entry --repo "$checkout" --kind merge_result --id <thread> \
   --actor <proj>-coordinator --parent <review-oid> \
-  --body '{"oid":"<merged-oid>","result":"merged","note":"merged feat/<thread> into main"}' \
-  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
-walgit collab entry --repo "$checkout" --kind merge_result --id <thread> \
-  --actor <proj>-coordinator --parent <merge-oid-entry> \
-  --body '{"merged":true,"oid":"<merged-oid>","note":"<release summary>"}' \
+  --body '{"merged":true,"oid":"<merged-oid>","result":"merged","note":"merged feat/<thread> into main"}' \
   --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
 walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-coordinator --parent <merged-entry-oid> \

@@ -406,6 +406,7 @@ report/threads/board；CLI 的 `pr`/`report`/`board`）；CLI 的 `--rules <file
   `title` = 根条目 `body.title`（缺失为 `""`）；`kinds` = 去重升序。
   **排序是投影的一部分**：`last_ts` 降序，`id` 升序破平；客户端照序渲染、不重排。
 - `prs[]`：含 `patch` 的线程的 `{id, title, base, head, status, approvals, merge_allowed, merge_reason}`；
+  `approvals` = 可计数的批准者数（distinct、排除 `svc-` 与 patch 作者，与 §7.3 同源）；
   排序：`open` → `merged` → 其余（closed 等），组内 `last_ts` 降序、`id` 升序。
 - `runs[]`：CI 运行段（纯 CI 线程不进 threads/board，由此段投影；schema 见 CI 协议 §8.3）。
 - 计数：`total_entries` / `verified_entries` / `unverified_entries` / `missing_principals`

@@ -218,6 +218,7 @@ const en = {
   "status.blocked": "blocked",
   "status.needs-human": "needs-human",
   "status.merged": "merged",
+  "status.done": "done",
   "status.closed": "closed",
 
   // Review decisions (data values)
@@ -922,6 +923,7 @@ const zhCN: Record<I18nKey, string> = {
   "status.blocked": "受阻",
   "status.needs-human": "需要人工",
   "status.merged": "已合并",
+  "status.done": "已完成",
   "status.closed": "已关闭",
 
   // Review decisions (data values)
@@ -1622,6 +1624,7 @@ const zhTW: Record<I18nKey, string> = {
   "status.blocked": "受阻",
   "status.needs-human": "需要人工",
   "status.merged": "已合併",
+  "status.done": "已完成",
   "status.closed": "已關閉",
 
   // Review decisions (data values)
@@ -2225,6 +2228,7 @@ const STATUS_KEYS: Record<string, I18nKey> = {
   blocked: "status.blocked",
   "needs-human": "status.needs-human",
   merged: "status.merged",
+  done: "status.done",
   closed: "status.closed",
 };
 const DECISION_KEYS: Record<string, I18nKey> = {
