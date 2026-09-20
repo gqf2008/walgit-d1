@@ -1857,7 +1857,11 @@ name = "everything else"
         let mut out: Vec<EntryRef> = Vec::new();
         let mut parent = String::new();
         for i in 0..n {
-            let ts = if descending_ts { (n - i) as i64 } else { i as i64 };
+            let ts = if descending_ts {
+                i64::try_from(n - i).expect("test chain fits in i64")
+            } else {
+                i64::try_from(i).expect("test chain fits in i64")
+            };
             let e = entry("t-chain", "comment", "alice", &parent, ts, serde_json::json!({}));
             let oid = test_oid(&e);
             out.push(EntryRef {

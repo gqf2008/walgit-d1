@@ -641,6 +641,10 @@ pub fn ref_pattern_capture(pattern: &str, text: &str) -> Option<Option<String>> 
     glob_match(suffix, tail).then(|| Some(captured.to_string()))
 }
 
+#[allow(
+    clippy::option_option,
+    reason = "outer Option = rule matched; inner Option = it captured a principal"
+)]
 fn rule_matches(
     m: &Match,
     ref_name: &str,
