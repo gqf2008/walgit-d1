@@ -98,13 +98,21 @@ const en = {
   "tab.code": "Code",
   "tab.commits": "Commits",
   "tab.wal": "WAL",
-  "tab.collab": "Collab",
+  "tab.community": "Community",
   "tab.settings": "Settings",
   "clone.button": "Clone",
-  "back.collab": "← collab",
+  "back.collab": "← Community",
 
   // Collab index
-  "collab.title": "D1 collaboration",
+  "collab.title": "Community",
+  "community.nav.aria": "Community sections",
+  "community.nav.overview": "Overview",
+  "community.nav.discussions": "Discussions",
+  "community.nav.projects": "Projects",
+  "community.nav.guide": "How it works",
+  "community.discussions.desc": "Ask questions, share ideas and mark the answer that worked.",
+  "community.projects.desc": "See work as a board or table, filter it, and move cards with signed status entries.",
+  "community.card.count": "{n} items",
   "collab.threads": "Threads",
   "collab.prs": "Pull requests",
   "collab.entries": "Entries",
@@ -139,6 +147,8 @@ const en = {
   "projects.table": "Project table",
   "projects.th.owner": "owner",
   "projects.th.branch": "branch",
+  "projects.search": "search cards",
+  "projects.moving": "Moving card…",
 
   // Discussions
   "discussion.title": "Discussions",
@@ -172,6 +182,12 @@ const en = {
   "discussion.accept": "Accept answer",
   "discussion.accepting": "Accepting…",
   "discussion.accepted": "✓ accepted answer",
+  "discussion.thread": "Discussion {id}",
+  "discussion.write": "Write",
+  "discussion.preview": "Preview",
+  "discussion.preview.empty": "Nothing to preview yet.",
+  "discussion.search": "search discussions",
+  "discussion.count": "{visible} of {total} topics",
 
   // Board
   "board.title": "Work-unit board",
@@ -247,6 +263,8 @@ const en = {
   "write.err.noWebCrypto": "This browser has no WebCrypto Ed25519 support — use the walgit collab CLI to sign entries.",
   "write.err.signedOut": "Signed out — sign in to participate in the collaboration layer.",
   "write.err.untitled": "untitled",
+  "write.preview": "Preview",
+  "write.write": "Write",
 
   // Entry kinds (data values, translated at render time)
   "kind.issue": "issue",
@@ -852,13 +870,21 @@ const zhCN: Record<I18nKey, string> = {
   "tab.code": "代码",
   "tab.commits": "提交",
   "tab.wal": "WAL",
-  "tab.collab": "协作",
+  "tab.community": "社区",
   "tab.settings": "设置",
   "clone.button": "克隆",
-  "back.collab": "← 协作",
+  "back.collab": "← 社区",
 
   // Collab index
-  "collab.title": "D1 协作",
+  "collab.title": "社区",
+  "community.nav.aria": "社区栏目",
+  "community.nav.overview": "概览",
+  "community.nav.discussions": "讨论",
+  "community.nav.projects": "项目",
+  "community.nav.guide": "工作原理",
+  "community.discussions.desc": "提问、分享想法，并标记真正解决问题的回答。",
+  "community.projects.desc": "用看板或表格查看工作、筛选内容，并通过签名状态条目移动卡片。",
+  "community.card.count": "{n} 项",
   "collab.threads": "讨论串",
   "collab.prs": "拉取请求",
   "collab.entries": "条目",
@@ -893,6 +919,8 @@ const zhCN: Record<I18nKey, string> = {
   "projects.table": "项目表格",
   "projects.th.owner": "负责人",
   "projects.th.branch": "分支",
+  "projects.search": "搜索卡片",
+  "projects.moving": "正在移动卡片…",
 
   // Discussions
   "discussion.title": "讨论",
@@ -926,6 +954,12 @@ const zhCN: Record<I18nKey, string> = {
   "discussion.accept": "采纳答案",
   "discussion.accepting": "采纳中…",
   "discussion.accepted": "✓ 已采纳答案",
+  "discussion.thread": "讨论 {id}",
+  "discussion.write": "继续编辑",
+  "discussion.preview": "预览",
+  "discussion.preview.empty": "暂无可预览内容。",
+  "discussion.search": "搜索讨论",
+  "discussion.count": "显示 {visible}/{total} 个话题",
 
   // Board
   "board.title": "工作单元看板",
@@ -1001,6 +1035,8 @@ const zhCN: Record<I18nKey, string> = {
   "write.err.noWebCrypto": "此浏览器不支持 WebCrypto Ed25519——请改用 walgit collab CLI 签名条目。",
   "write.err.signedOut": "已登出——登录后才能参与协作层。",
   "write.err.untitled": "无标题",
+  "write.preview": "预览",
+  "write.write": "继续编辑",
 
   // Entry kinds (data values, translated at render time)
   "kind.issue": "议题",
@@ -1602,13 +1638,21 @@ const zhTW: Record<I18nKey, string> = {
   "tab.code": "程式碼",
   "tab.commits": "提交",
   "tab.wal": "WAL",
-  "tab.collab": "協作",
+  "tab.community": "社群",
   "tab.settings": "設定",
   "clone.button": "複製",
-  "back.collab": "← 協作",
+  "back.collab": "← 社群",
 
   // Collab index
-  "collab.title": "D1 協作",
+  "collab.title": "社群",
+  "community.nav.aria": "社群欄目",
+  "community.nav.overview": "總覽",
+  "community.nav.discussions": "討論",
+  "community.nav.projects": "專案",
+  "community.nav.guide": "運作原理",
+  "community.discussions.desc": "提問、分享想法，並標記真正解決問題的回答。",
+  "community.projects.desc": "用看板或表格查看工作、篩選內容，並透過簽名狀態條目移動卡片。",
+  "community.card.count": "{n} 項",
   "collab.threads": "討論串",
   "collab.prs": "提取請求",
   "collab.entries": "條目",
@@ -1643,6 +1687,8 @@ const zhTW: Record<I18nKey, string> = {
   "projects.table": "專案表格",
   "projects.th.owner": "負責人",
   "projects.th.branch": "分支",
+  "projects.search": "搜尋卡片",
+  "projects.moving": "正在移動卡片…",
 
   // Discussions
   "discussion.title": "討論",
@@ -1676,6 +1722,12 @@ const zhTW: Record<I18nKey, string> = {
   "discussion.accept": "採納答案",
   "discussion.accepting": "採納中…",
   "discussion.accepted": "✓ 已採納答案",
+  "discussion.thread": "討論 {id}",
+  "discussion.write": "繼續編輯",
+  "discussion.preview": "預覽",
+  "discussion.preview.empty": "尚無可預覽內容。",
+  "discussion.search": "搜尋討論",
+  "discussion.count": "顯示 {visible}/{total} 個話題",
 
   // Board
   "board.title": "工作單元看板",
@@ -1751,6 +1803,8 @@ const zhTW: Record<I18nKey, string> = {
   "write.err.noWebCrypto": "此瀏覽器不支援 WebCrypto Ed25519——請改用 walgit collab CLI 簽名條目。",
   "write.err.signedOut": "已登出——登入後才能參與協作層。",
   "write.err.untitled": "無標題",
+  "write.preview": "預覽",
+  "write.write": "繼續編輯",
 
   // Entry kinds (data values, translated at render time)
   "kind.issue": "議題",

@@ -133,6 +133,12 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
 
 ### D1 collaboration — issues, PRs, the board (`walgit collab …`)
 
+The human Web UI exposes these under one repository **Community** navigation:
+`Overview`, `Discussions`, `Projects`, `How it works`. The page routes are
+`/{owner}/{repo}/collab`, `.../collab/discussions`, `.../collab/projects`
+and `.../collab/guide`; they render the same collab refs/board
+projection and never create a second collaboration state.
+
 - Read (JSON out — pipe through `jq`):
   - `walgit collab ls` — thread ids on `refs/collab/inbox/*`.
   - `walgit collab thread <id>` — one thread, parent-ordered, per-entry

@@ -7,6 +7,7 @@ import { Box } from "../components/Layout";
 import { enableCollabKey } from "../components/CollabWrite";
 import { signCanonical } from "../collab";
 import { useI18n } from "../i18n";
+import { Markdown } from "../components/Markdown";
 
 function fmtTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
@@ -23,6 +24,7 @@ function DiscussionComposer({ full }: { full: string }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [category, setCategory] = useState("general");
+  const [preview, setPreview] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,18 +72,29 @@ function DiscussionComposer({ full }: { full: string }) {
           <option value="show-and-tell">{t("discussion.category.showAndTell")}</option>
         </select>
       </div>
-      <textarea
-        className="collab-body"
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-        placeholder={t("discussion.ph.body")}
-        rows={4}
-      />
-      <div className="row gap">
+      <div className="row gap" style={{ alignItems: "center" }}>
+        <button type="button" className={`btn${preview ? " primary" : ""}`} onClick={() => setPreview((v) => !v)}>
+          {preview ? t("discussion.write") : t("discussion.preview")}
+        </button>
+        {error && <span className="muted" style={{ color: "var(--danger, #f85149)" }}>{error}</span>}
+      </div>
+      {preview ? (
+        <div className="pad" style={{ minHeight: 80 }}>
+          {body ? <Markdown source={body} /> : <span className="muted">{t("discussion.preview.empty")}</span>}
+        </div>
+      ) : (
+        <textarea
+          className="collab-body"
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder={t("discussion.ph.body")}
+          rows={5}
+        />
+      )}
+      <div className="row gap" style={{ alignItems: "center" }}>
         <button className="btn primary" disabled={busy || !title.trim()} onClick={post}>
           {busy ? t("discussion.posting") : t("discussion.post")}
         </button>
-        {error && <span className="muted" style={{ color: "var(--danger, #f85149)" }}>{error}</span>}
       </div>
     </div>
   );
@@ -92,9 +105,14 @@ export function CollabDiscussionsPage() {
   const { full } = useRepo();
   const [state, setState] = useState<"all" | "open" | "closed" | "answered">("all");
   const [category, setCategory] = useState("");
+  const [query, setQuery] = useState("");
   const page = useData(`discussions:${full}:${state}:${category}`, () =>
     api.collab(full).discussions({ state, category: category || undefined, n: 100 }),
   );
+  const visible = page.discussions.filter((d) => {
+    const q = query.trim().toLowerCase();
+    return !q || d.title.toLowerCase().includes(q) || d.body.toLowerCase().includes(q) || d.actor.toLowerCase().includes(q);
+  });
 
   return (
     <>
@@ -120,10 +138,17 @@ export function CollabDiscussionsPage() {
           <option value="announcements">{t("discussion.category.announcements")}</option>
           <option value="show-and-tell">{t("discussion.category.showAndTell")}</option>
         </select>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t("discussion.search")}
+          aria-label={t("discussion.search")}
+        />
+        <span className="muted">{t("discussion.count", { visible: visible.length, total: page.discussions.length })}</span>
       </div>
       <Box title={t("discussion.list")}>
-        {page.discussions.length === 0 && <div className="pad muted">{t("discussion.empty")}</div>}
-        {page.discussions.length > 0 && (
+        {visible.length === 0 && <div className="pad muted">{t("discussion.empty")}</div>}
+        {visible.length > 0 && (
           <table className="grid">
             <thead>
               <tr>
@@ -135,13 +160,18 @@ export function CollabDiscussionsPage() {
               </tr>
             </thead>
             <tbody>
-              {page.discussions.map((d) => (
+              {visible.map((d) => (
                 <tr key={d.id}>
                   <td>
-                    <Link to={`/${full}/collab/thread/${encodeURIComponent(d.id)}`} className="strong">
-                      {d.title || d.id}
-                    </Link>
-                    {d.body && <div className="muted" style={{ fontSize: "0.85em" }}>{d.body}</div>}
+                    <div className="discussion-row">
+                      <div>
+                        <Link to={`/${full}/collab/thread/${encodeURIComponent(d.id)}`} className="strong">
+                          {d.title || d.id}
+                        </Link>
+                        {d.body && <div className="discussion-excerpt">{d.body}</div>}
+                      </div>
+                      <span className="muted" style={{ fontSize: "0.85em" }}>by {d.actor}</span>
+                    </div>
                   </td>
                   <td>{d.category}</td>
                   <td>{d.reply_count}</td>

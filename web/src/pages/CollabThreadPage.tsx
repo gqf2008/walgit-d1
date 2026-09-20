@@ -123,7 +123,7 @@ export function CollabThreadPage() {
       <div className="pad">
         <Link to={`/${full}/collab`} className="muted">{t("back.collab")}</Link>
       </div>
-      <Box title={t("thread.title", { id: thread.id })}>
+      <Box title={rootKind === "discussion" ? t("discussion.thread", { id: thread.id }) : t("thread.title", { id: thread.id })}>
         {thread.pr && (
           <div className="kv">
             <dt>{t("pr.baseHead")}</dt>
@@ -147,7 +147,13 @@ export function CollabThreadPage() {
         )}
         {thread.pr && <PrDiff full={full} base={thread.pr.pr.base} head={thread.pr.pr.head} />}
         <div className="box-header" style={{ marginTop: 8 }}>{t("thread.write")}</div>
-        <CollabWriteBox full={full} id={thread.id} parent={lastOid} />
+        <CollabWriteBox
+          full={full}
+          id={thread.id}
+          parent={lastOid}
+          defaultKind={rootKind === "discussion" ? "comment" : undefined}
+          kinds={rootKind === "discussion" ? ["comment", "status"] : undefined}
+        />
       </Box>
 
       {narration && <div className="pad muted" style={{ borderLeft: "3px solid var(--accent, #58a6ff)" }}>{narration}</div>}

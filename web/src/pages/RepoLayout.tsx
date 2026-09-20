@@ -4,6 +4,7 @@ import { api, type Refs } from "../api";
 import { useData } from "../data";
 import { RouteBoundary, Skeleton } from "../components/Loading";
 import { CloneSetup } from "../components/CloneSetup";
+import { CommunityNav } from "../components/CommunityNav";
 import { TasksOverlay } from "../components/TasksOverlay";
 import { useI18n } from "../i18n";
 import "../clone.css";
@@ -69,7 +70,8 @@ export function RepoLayout() {
   const walActive = pathname.endsWith("/wal");
   const settingsActive = pathname.endsWith("/settings");
   const collabActive = pathname === `/${full}/collab` || pathname.startsWith(`/${full}/collab/`);
-  const codeActive = !walActive && !settingsActive && !collabActive && !/\/commits?(\/|$)/.test(pathname);
+  const communityActive = collabActive;
+  const codeActive = !walActive && !settingsActive && !communityActive && !/\/commits?(\/|$)/.test(pathname);
   return (
     <>
       <div className="repo-head">
@@ -97,8 +99,8 @@ export function RepoLayout() {
           <NavLink to={`/${full}/wal`} className={() => (walActive ? "tab active" : "tab")}>
             {t("tab.wal")}
           </NavLink>
-          <NavLink to={`/${full}/collab`} className={() => (collabActive ? "tab active" : "tab")}>
-            {t("tab.collab")}
+          <NavLink to={`/${full}/collab`} className={() => (communityActive ? "tab active" : "tab")}>
+            {t("tab.community")}
           </NavLink>
           <NavLink to={`/${full}/settings`} className={() => (settingsActive ? "tab active" : "tab")}>
             {t("tab.settings")}
@@ -106,6 +108,7 @@ export function RepoLayout() {
           <TasksOverlay repo={full} />
         </nav>
       </div>
+      {communityActive && <CommunityNav full={full} />}
       <RouteBoundary fallback={<Skeleton title={false} rows={8} />}>
         <RepoBody owner={owner} repo={repo} full={full} />
       </RouteBoundary>

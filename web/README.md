@@ -27,6 +27,21 @@ use `/{owner}/{repo}/api-browser/*`, and only non-repository discovery/authentic
 uses `/api/v1/*` (D26/D27). Changing the API means changing `sdk/repos.ts` and
 `API.md` in the same commit.
 
+## Community surfaces (human UI)
+
+Discussions and Projects share one repository-level `Community` navigation
+(`components/CommunityNav.tsx`) so users do not need to know that discussions are collab
+entries. The routes are:
+
+- `/{owner}/{repo}/collab/discussions` — searchable topic list, Markdown preview, thread view and
+  accepted-answer action;
+- `/{owner}/{repo}/collab/projects` — board/table views over the deterministic card projection;
+  drag-and-drop between status columns posts the normal signed `status` entry;
+
+Keep protocol vocabulary behind the human copy: labels such as “Projection”, `refs/collab/*` or
+“signed entry” belong in the guide/advanced views, while the primary Community pages should say
+what the user can do.
+
 ## Markdown rendering and the XSS boundary (issue #112)
 
 - **Pipeline**: `components/Markdown.tsx` → lazy `MarkdownRenderer` —
