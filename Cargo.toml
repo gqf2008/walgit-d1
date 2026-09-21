@@ -121,7 +121,10 @@ google-cloud-storage = "1"
 google-cloud-gax = "1"
 google-cloud-auth = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# default-features off: the default `rustls` feature pulls the legacy rustls 0.21
+# stack (rustls-webpki 0.101, GHSA-82j2-j2ch-gfr8); `default-https-client` carries
+# the current rustls 0.23 (aws-lc) path the rest of the workspace already builds.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "rt-tokio", "default-https-client"] }
 aws-smithy-types = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.9"
