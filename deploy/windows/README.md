@@ -30,6 +30,36 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 S3/R2 配置向导（D43），保存后在托盘菜单里重启服务生效（Windows 的服务归任务计划程序，
 没有会替你 respawn 的 supervisor，D48）。也可以直接改 `[store]`（文件内有 R2 示例）。
 
+## 定时任务:action 不得是控制台程序
+
+**硬约束:任何计划任务的 action 都不得是控制台映像**（`cmd.exe`/`powershell.exe`/`pwsh.exe`，或自带控制台的 exe）。
+任务计划程序的 `Exec` action 总是先给控制台程序一个控制台；在交互会话里 Windows Terminal（或 Win10 的默认终端）会把它显示出来——`-WindowStyle Hidden` 只能「随后隐藏」，hide 之前那一帧仍然可见，任务栏还可能留下可恢复的按钮。
+2026-09-20 真机实测：一个每 60 秒运行、action 为 `powershell.exe -WindowStyle Hidden -File …` 的镜像任务，每轮都在桌面闪一次黑框；同一台机器上 `\walgit` 服务任务换成 GUI launcher 后不再出现窗口。
+
+**做法:action 指向 GUI 子系统的 launcher，由它无窗口地拉起真正的命令。**
+
+- 本仓参考实现：`crates/walgit-cli/src/bin/walgit-service-host.rs`（安装为 `walgit-service-host.exe`；`#![windows_subsystem = "windows"]`，用 `cmd /d /s /c` + `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` 启动命令、等它结束并回传退出码，`>> log 2>&1` 重定向仍由 `cmd` 持有）。
+- 自定义 launcher 的最小写法：一个只加 `#![windows_subsystem = "windows"]` 的 Rust bin（或任何 GUI 子系统可执行文件），`Command::new("cmd").args(["/d", "/s", "/c", cmd]).creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS).status()`。不要用 `powershell -WindowStyle Hidden` 交差。
+
+注册一条「每 N 分钟跑一次」的任务可照抄（命令经 `-EncodedCommand` 传 UTF-16LE base64，带空格/引号的路径不会被二次解析）：
+
+```powershell
+$host = Join-Path $env:LOCALAPPDATA 'Programs\walgit\walgit-service-host.exe'
+$command = '"C:\path\to\job.exe" --once 1>> "C:\logs\job.log" 2>&1'
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+$action  = New-ScheduledTaskAction -Execute $host -Argument "-EncodedCommand $encoded"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName 'my-job' -Action $action -Trigger $trigger -Force
+```
+
+**注册后自查**（消费方也可用；读 action 可执行文件的 PE 头断言子系统为 GUI(2)，不是名字白名单——`powershell.exe` 这类控制台映像会直接报错）：
+
+```powershell
+pwsh -File deploy\windows\task-action-check.ps1 -TaskName my-job
+```
+
+CI 里 `service-smoke.ps1` 对 `\walgit` 任务除自身同类断言外，也直接调用这条自查（D53）。
+
 ## 本机构建
 
 需要 [Inno Setup **6.4+**](https://jrsoftware.org/isinfo.php)(`ISCC` 在 PATH;

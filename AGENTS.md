@@ -641,6 +641,17 @@ decision in §4 — or the PR is; never "fix later".
   notification. This is `per-instance` and `best-effort`, matching the SSE/pull-lane semantics of
   D46: durable consumers still keep their own cursor. No server HTTP/SSE endpoint, no bridge,
   no new write path.
+- **D53** **A Windows scheduled task must not launch a console program (2026-09-21,
+  win-sched-task-console).** The Task Scheduler's `Exec` action always creates a console for a
+  console-subsystem action; in an interactive session Windows Terminal shows it (or leaves a
+  restorable taskbar button) before `-WindowStyle Hidden` can hide it — measured 2026-09-20: a
+  60-second mirror task flashed a window on every run. Every periodic task (mirror, sync,
+  inspection) launches a **GUI-subsystem launcher** instead, which spawns the real command with
+  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` and waits for it;
+  `walgit-service-host.exe` (`crates/walgit-cli/src/bin/walgit-service-host.rs`) is the reference
+  implementation, `deploy/windows/README.md` carries the copy-paste registration template, and
+  `deploy/windows/task-action-check.ps1` is the post-registration assertion (PE subsystem == GUI,
+  no name allowlist). `powershell -WindowStyle Hidden` is not acceptable.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

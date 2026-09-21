@@ -163,6 +163,8 @@ try {
     throw "the task's ExecutionTimeLimit is $($settings.ExecutionTimeLimit), not PT0S (unlimited)"
   }
   Assert-HiddenServiceTask -TaskObject $taskObj -ExpectedExe $bin -ExpectedConfig $cfg -ExpectedLog $log
+  # The consumer-facing check must agree with the dedicated assertion above.
+  & (Join-Path $PSScriptRoot 'task-action-check.ps1') -TaskName $task
   Write-Host "task settings: MultipleInstances=$($settings.MultipleInstances) ExecutionTimeLimit=$($settings.ExecutionTimeLimit) LogonType=$($taskObj.Principal.LogonType) Hidden=$($settings.Hidden)"
   if ($taskObj.Principal.LogonType -notin @('Interactive', 'InteractiveToken')) {
     throw "the task's LogonType is $($taskObj.Principal.LogonType), not the logged-on user's token"
