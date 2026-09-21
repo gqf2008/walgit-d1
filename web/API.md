@@ -755,7 +755,7 @@ is `walgit-wal::collab::Report`:
 
 ```json
 {
-  "threads": [ { "id": "t1", "title": "hi", "root_kind": "issue", "entries": 4, "verified": 3, "last_ts": 1786500000, "kinds": ["comment","issue","patch","review"] } ],
+  "threads": [ { "id": "t1", "title": "hi", "entries": 4, "verified": 3, "last_ts": 1786500000, "kinds": ["comment","issue","patch","review"] } ],
   "prs": [ { "id": "t1", "title": "hi", "base": "refs/heads/main", "head": "refs/heads/topic", "status": "open", "approvals": 1, "merge_allowed": true, "merge_reason": "…" } ],
   "runs": [ { "id": "ci-9a1b…", "task": "test", "repo_ref": "refs/heads/main", "commit": "c0ffee…", "state": "done", "conclusion": "success", "runner": "ci-runner-a", "claims": 2, "last_ts": 1786500100 } ],
   "total_entries": 4,
@@ -783,42 +783,6 @@ bug).
 `verified` requires a registered key for the actor **and** that the entry sits
 in the actor's own inbox (the D1 inbox model). Merge rules come from
 `refs/collab/meta/rules` when present, else defaults (nothing protected).
-
-#### `GET /{owner}/{repo}/api/collab/discussions`
-
-Discussions are the subset of collab threads whose root entry is
-`kind = "discussion"` (docs/COMMUNITY.md §2). Replies are `comment` entries;
-the newest `solution` entry with `accepted: true` selects `solution_oid`, and
-`accepted: false` revokes it. `state` is `all|open|closed|answered`
-(case-sensitive); `category` filters the root's `body.category`; `after` is the
-opaque cursor from `next` in the previous page. Pagination uses the stable
-`(last_ts,id)` projection order, never an offset.
-
-```json
-{
-  "discussions": [
-    {
-      "id": "release-notes-q3",
-      "title": "How should release notes be generated?",
-      "body": "Markdown body",
-      "category": "ideas",
-      "actor": "alice",
-      "entries": 4,
-      "verified": 4,
-      "reply_count": 2,
-      "answered": true,
-      "solution_oid": "…",
-      "closed": false,
-      "last_ts": 1786500000
-    }
-  ],
-  "next": "1786500000:release-notes-q3",
-  "more": false
-}
-```
-
-An invalid `state` is `400`; the endpoint shares the collab 20,000-ref budget
-and SWR/ETag semantics with report/thread/board.
 
 #### `GET /{owner}/{repo}/api/collab/threads/{id}`
 
@@ -993,7 +957,6 @@ GET /o/r/api/commit/deadbeef                    → 404 text/plain
 POST /o/r/api/collab/entries                    → 200 {ref,oid,seq} | 403 (actor≠principal, or policy denial) | 401 (no credential)
 POST /o/r/api/collab/principal                  → 200 {ref,oid,seq} | 403 (registering another principal, or policy denial)
 GET /o/r/api/collab/report                      → 200 CollabReport; SWR | 503 (namespace past the 20k-ref budget)
-GET /o/r/api/collab/discussions?state=answered  → 200 {discussions,next,more}; SWR | 400 (bad state) | 503 (budget)
 GET /o/r/api/collab/board                       → 200 {columns[{name,cards}]}; SWR | 400 (HEAD `.walgit/board.toml` unparseable) | 503 (budget)
 GET /o/r/api/collab/threads/t1                  → 200 {id,entries,pr?} | 404 unknown thread
 GET /o/r/tree/main/anything                              → 200 index.html

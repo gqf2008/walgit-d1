@@ -698,8 +698,6 @@ async fn api_md_conformance() -> TestResult {
     for path in [
         "/o/r/collab",
         "/o/r/collab/board",
-        "/o/r/collab/projects",
-        "/o/r/collab/discussions",
         "/o/r/collab/guide",
         "/o/r/collab/thread/w1",
     ] {
@@ -1390,7 +1388,6 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
     assert_eq!(report["total_entries"], 3);
     assert_eq!(report["threads"].as_array().unwrap().len(), 1);
     assert_eq!(report["threads"][0]["id"], "t1");
-    assert_eq!(report["threads"][0]["root_kind"], "issue");
     assert_eq!(report["threads"][0]["title"], "hi", "root title projected (issue #131)");
     assert_eq!(report["threads"][0]["entries"], 3);
     assert_eq!(report["prs"].as_array().unwrap().len(), 1);
@@ -1433,132 +1430,6 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
     )
     .await?;
     assert_eq!(st, 404);
-    Ok(())
-}
-
-/// Discussions are a pure projection over the same signed-entry refs:
-/// `discussion` roots, `comment` replies, `solution` acceptance and `status`
-/// closure. The list endpoint paginates by a stable cursor, never an offset.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn collab_discussions_project_answers_and_stable_cursor() -> TestResult {
-    use base64::Engine as _;
-    use ed25519_dalek::SigningKey;
-    use walgit_wal::collab::{Entry, sign_entry};
-
-    let server = Server::start_with_tweak(|c| {
-        c.server.auth.mode = walgit_config::AuthMode::Token;
-        c.server.auth.anonymous_read = false;
-        c.server.auth.tokens = vec![walgit_config::StaticToken {
-            principal: "alice".into(),
-            token: "alice-token".into(),
-            token_env: None,
-            write: true,
-            admin: false,
-        }];
-    })
-    .await?;
-    let client = reqwest::Client::new();
-    let put = client
-        .put(format!("{}/o/r", server.base_url))
-        .bearer_auth("alice-token")
-        .send()
-        .await?;
-    assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
-
-    let sk = SigningKey::from_bytes(&[9u8; 32]);
-    let public_key = base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
-    let resp = client
-        .post(format!("{}/o/r/api/collab/principal", server.base_url))
-        .bearer_auth("alice-token")
-        .json(&serde_json::json!({ "principal": "alice", "public_key": public_key }))
-        .send()
-        .await?;
-    assert_eq!(resp.status(), 200, "register principal");
-
-    let url = format!("{}/o/r/api/collab/entries", server.base_url);
-    let post = |kind: &str, id: &str, parent: &str, ts: i64, body: serde_json::Value| {
-        let client = client.clone();
-        let url = url.clone();
-        let sk = sk.clone();
-        let kind = kind.to_string();
-        let id = id.to_string();
-        let parent = parent.to_string();
-        async move {
-            let mut entry = Entry {
-                version: 1,
-                kind,
-                id,
-                actor: "alice".into(),
-                ts,
-                parent,
-                refs: None,
-                body,
-                sig: String::new(),
-            };
-            entry.sig = sign_entry(&mut entry, &sk);
-            let resp = client
-                .post(&url)
-                .bearer_auth("alice-token")
-                .json(&serde_json::json!({ "entry": serde_json::to_value(&entry)? }))
-                .send()
-                .await?;
-            anyhow::ensure!(resp.status() == 200, "post entry: {}", resp.status());
-            let body: serde_json::Value = resp.json().await?;
-            Ok::<String, anyhow::Error>(body["oid"].as_str().unwrap().to_string())
-        }
-    };
-
-    let root = post(
-        "discussion",
-        "d1",
-        "",
-        10,
-        serde_json::json!({"title": "How do we ship?", "body": "body", "category": "ideas"}),
-    )
-    .await?;
-    let comment = post("comment", "d1", &root, 20, serde_json::json!({"text": "ship it"})).await?;
-    let _solution = post(
-        "solution",
-        "d1",
-        &comment,
-        30,
-        serde_json::json!({"comment_oid": comment, "accepted": true}),
-    )
-    .await?;
-
-    let (st, text, _) = get_h(
-        &server,
-        "/o/r/api/collab/discussions",
-        &[("Authorization", "Bearer alice-token")],
-    )
-    .await?;
-    assert_eq!(st, 200, "{text}");
-    let all: serde_json::Value = serde_json::from_str(&text)?;
-    assert_eq!(all["discussions"].as_array().unwrap().len(), 1);
-    let d = &all["discussions"][0];
-    assert_eq!(d["id"], "d1");
-    assert_eq!(d["title"], "How do we ship?");
-    assert_eq!(d["category"], "ideas");
-    assert_eq!(d["reply_count"], 1);
-    assert_eq!(d["answered"], true);
-    assert_eq!(d["closed"], false);
-
-    let (st, text, _) = get_h(
-        &server,
-        "/o/r/api/collab/discussions?state=answered",
-        &[("Authorization", "Bearer alice-token")],
-    )
-    .await?;
-    assert_eq!(st, 200);
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&text)?["discussions"].as_array().unwrap().len(), 1);
-
-    let (st, text, _) = get_h(
-        &server,
-        "/o/r/api/collab/discussions?state=bad",
-        &[("Authorization", "Bearer alice-token")],
-    )
-    .await?;
-    assert_eq!(st, 400, "{text}");
     Ok(())
 }
 

@@ -26,22 +26,8 @@ export function CollabPage() {
 function CollabView({ full, report }: { full: string; report: CollabReport }) {
   const { t: t_ } = useI18n();
   const [newId, setNewId] = useState(() => uuid());
-  const discussions = report.threads.filter((thread) => thread.root_kind === "discussion").length;
-  const workItems = report.threads.filter((thread) => thread.root_kind !== "discussion" && !thread.kinds.includes("patch")).length;
   return (
     <>
-      <div className="community-cards">
-        <Link className="community-card" to={`/${full}/collab/discussions`}>
-          <h3>{t_("discussion.title")}</h3>
-          <p>{t_("community.discussions.desc")}</p>
-          <div className="muted" style={{ marginTop: 8 }}>{t_("community.card.count", { n: discussions })}</div>
-        </Link>
-        <Link className="community-card" to={`/${full}/collab/projects`}>
-          <h3>{t_("projects.title")}</h3>
-          <p>{t_("community.projects.desc")}</p>
-          <div className="muted" style={{ marginTop: 8 }}>{t_("community.card.count", { n: workItems })}</div>
-        </Link>
-      </div>
       <Box
         title={
           <span>
@@ -69,14 +55,6 @@ function CollabView({ full, report }: { full: string; report: CollabReport }) {
           <dt>{t_("board.title")}</dt>
           <dd>
             <Link to={`/${full}/collab/board`}>{t_("collab.board.link")}</Link>
-          </dd>
-          <dt>{t_("projects.title")}</dt>
-          <dd>
-            <Link to={`/${full}/collab/projects`}>{t_("projects.link")}</Link>
-          </dd>
-          <dt>{t_("discussion.title")}</dt>
-          <dd>
-            <Link to={`/${full}/collab/discussions`}>{t_("discussion.link")}</Link>
           </dd>
         </div>
         <div className="box-header" style={{ marginTop: 8 }}>{t_("collab.newThread")}</div>

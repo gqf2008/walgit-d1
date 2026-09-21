@@ -31,16 +31,13 @@ export type {
   CollabReport,
   CollabThread,
   CollabEntryRef,
-  CollabDiscussion,
-  CollabDiscussionPage,
-  CollabKind,
   CollabPr,
   CollabMergeEval,
   CollabBoard,
   CollabBoardColumn,
   CollabBoardCard,
 } from "../sdk/repos";
-import type { RefInfo, OpEvent, OpSpec, OpRecord, Tasks, CollabKind } from "../sdk/repos";
+import type { RefInfo, OpEvent, OpSpec, OpRecord, Tasks } from "../sdk/repos";
 export type { SettingsDescribe, SettingsValidation, SettingsHistory, StrategyInfo, SettingsField, Policy, PolicyValidation, PolicyDryRun, RepoSettings } from "../sdk/repos";
 export type { StoreSettings, StoreEdit, StoreTestResult, StoreSaveResult } from "../sdk/repos";
 import type { StoreEdit } from "../sdk/repos";
@@ -144,8 +141,6 @@ export const api = {
   collab: (repo: string) => ({
     report: () => authRedirect(client.repo(repo).collab.report()),
     thread: (id: string) => authRedirect(client.repo(repo).collab.thread(id)),
-    discussions: (q: { category?: string; state?: "all" | "open" | "closed" | "answered"; after?: string; n?: number } = {}) =>
-      authRedirect(client.repo(repo).collab.discussions(q)),
     board: () => authRedirect(client.repo(repo).collab.board()),
     post: (entry: Record<string, unknown>) => authRedirect(client.repo(repo).collab.post(entry), { write: true }),
     registerPrincipal: (principal: string, publicKey: string) =>
@@ -155,7 +150,7 @@ export const api = {
       ready for `collab.post` — the browser write path. */
   collabBuildEntry: (repo: string, input: {
     principal: string;
-    kind: CollabKind;
+    kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result";
     id: string;
     actor: string;
     parent: string;

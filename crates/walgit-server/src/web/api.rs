@@ -34,9 +34,8 @@ use walgit_store::{GetOptions, ObjectStore, Prefixed, PutBody, PutMode};
 use walgit_wal::{
     ObjectAccess, RepoHandle, Reporter,
     collab::{
-        BOARD_PATH, Board, BoardDef, DiscussionSummary, Entry, EntryRef, MergeRules,
-        build_board, build_discussions, build_report, default_board, discussion_after_cursor,
-        discussion_cursor, merge_rule_eval, parse_board_def, pr_view, thread,
+        BOARD_PATH, Board, BoardDef, Entry, EntryRef, MergeRules, build_board, build_report,
+        default_board, merge_rule_eval, parse_board_def, pr_view, thread,
     },
 };
 
@@ -219,21 +218,6 @@ struct RefListQuery {
     n: Option<usize>,
 }
 
-#[derive(serde::Deserialize, Default)]
-struct DiscussionQuery {
-    category: Option<String>,
-    state: Option<String>,
-    after: Option<String>,
-    n: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct DiscussionPage {
-    discussions: Vec<DiscussionSummary>,
-    next: Option<String>,
-    more: bool,
-}
-
 pub fn router(state: Arc<AppState>) -> Router {
     // D26/D27: repo-scoped endpoints live under the repository's own prefix,
     // `/{owner}/{repo}/api/…` (bearer/session lane) and `/{owner}/{repo}/api-browser/…`
@@ -254,7 +238,6 @@ pub fn router(state: Arc<AppState>) -> Router {
             .route(&format!("{base}/collab/entries"), post(collab_entries))
             .route(&format!("{base}/collab/principal"), post(collab_principal))
             .route(&format!("{base}/collab/report"), get(collab_report))
-            .route(&format!("{base}/collab/discussions"), get(collab_discussions))
             .route(&format!("{base}/collab/board"), get(collab_board))
             .route(&format!("{base}/collab/threads/{{id}}"), get(collab_thread))
             .route(
@@ -477,8 +460,8 @@ pub(crate) fn json_swr<T: Serialize>(value: &T, etag: Option<&str>) -> Rendered 
 }
 
 /// SWR + a strong ETag taken from the body digest: ref-dependent answers change
-/// with every push, but identical bytes still deserve a 304. Used by every D1
-/// aggregation endpoint (`docs/D1_PROTOCOL.md` §12).
+/// with every push, but identical bytes still deserve a 304. Used by the three
+/// D1 aggregation endpoints (`docs/D1_PROTOCOL.md` §12).
 fn json_swr_hashed<T: Serialize>(value: &T) -> Rendered {
     let body = json_bytes(value);
     let digest = <sha2::Sha256 as sha2::Digest>::digest(&body);
@@ -1794,81 +1777,6 @@ async fn collab_report(
                 chrono::Utc::now().timestamp(),
             );
             Ok(json_swr_hashed(&report))
-        },
-    )
-    .await
-}
-
-/// The discussion projection: `refs/collab/*` threads whose root is a
-/// `discussion`. The list is derived from the same verified entry set as
-/// `report`/`board`; `after` is a stable `(last_ts,id)` cursor, never an
-/// offset.
-async fn collab_discussions(
-    State(st): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((owner, repo_name)): Path<(String, String)>,
-    Query(q): Query<DiscussionQuery>,
-) -> Result<Response, ApiError> {
-    let category = q.category.filter(|s| !s.is_empty());
-    let state = q.state.unwrap_or_else(|| "all".to_string());
-    if !matches!(state.as_str(), "all" | "open" | "closed" | "answered") {
-        return Err(ApiError::BadRequest(
-            "state must be one of all|open|closed|answered".into(),
-        ));
-    }
-    if let Some(after) = q.after.as_deref() {
-        let mut parts = after.splitn(2, ':');
-        let ok = parts
-            .next()
-            .and_then(|ts| ts.parse::<i64>().ok())
-            .is_some()
-            && parts.next().is_some_and(|id| !id.is_empty());
-        if !ok {
-            return Err(ApiError::BadRequest("invalid discussion cursor".into()));
-        }
-    }
-    let limit = q.n.unwrap_or(50).clamp(1, 200);
-    let st2 = st.clone();
-    run(
-        &st,
-        &headers,
-        &owner,
-        &repo_name,
-        Need::Objects,
-        None,
-        move |r| async move {
-            // Boxed: `collab_load` is the large future every aggregate handler
-            // holds; boxing it here keeps this handler from adding a fresh
-            // `clippy::large_futures` site (rustc 1.98 baseline debt).
-            let collab = Box::pin(collab_load(&st2, &r)).await?;
-            let refs: Vec<&EntryRef> = collab.entries.iter().collect();
-            let mut rows = build_discussions(&refs, &collab.principals);
-            rows.retain(|d| {
-                let category_ok = category
-                    .as_deref()
-                    .is_none_or(|c| d.category == c);
-                let state_ok = match state.as_str() {
-                    "open" => !d.closed,
-                    "closed" => d.closed,
-                    "answered" => d.answered,
-                    _ => true,
-                };
-                category_ok
-                    && state_ok
-                    && discussion_after_cursor(d, q.after.as_deref())
-            });
-            let more = rows.len() > limit;
-            let next = if more {
-                rows.get(limit.saturating_sub(1)).map(discussion_cursor)
-            } else {
-                None
-            };
-            rows.truncate(limit);
-            Ok(json_swr_hashed(&DiscussionPage {
-                discussions: rows,
-                next,
-                more,
-            }))
         },
     )
     .await

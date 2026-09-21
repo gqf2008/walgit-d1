@@ -3,7 +3,6 @@ import { api } from "../api";
 import { invalidate } from "../data";
 import { ed25519Supported, publicKeyB64, signCanonical } from "../collab";
 import { useI18n, kindLabel, decisionLabel, statusLabel, type TFunc } from "../i18n";
-import { Markdown } from "./Markdown";
 
 /**
  * D1 browser write box: sign in as the session principal, self-register the
@@ -19,8 +18,6 @@ export interface CollabWriteProps {
   /** Previous entry oid in the thread ("" for a root entry). */
   parent: string;
   onPosted?: () => void;
-  defaultKind?: Kind;
-  kinds?: Kind[];
 }
 
 /**
@@ -47,18 +44,17 @@ export async function enableCollabKey(full: string, t?: TFunc): Promise<string> 
 
 type Kind = "issue" | "comment" | "review" | "status" | "patch";
 
-export function CollabWriteBox({ full, id, parent, onPosted, defaultKind, kinds }: CollabWriteProps) {
+export function CollabWriteBox({ full, id, parent, onPosted }: CollabWriteProps) {
   const { t } = useI18n();
   const [ready, setReady] = useState<string | null>(null); // principal when the browser key is registered
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [kind, setKind] = useState<Kind>(defaultKind ?? (parent === "" ? "issue" : "comment"));
+  const [kind, setKind] = useState<Kind>(parent === "" ? "issue" : "comment");
   const [text, setText] = useState("");
   const [decision, setDecision] = useState<"approve" | "request_changes" | "comment">("approve");
   const [status, setStatus] = useState<"open" | "closed" | "merged">("closed");
   const [base, setBase] = useState("refs/heads/main");
   const [head, setHead] = useState("");
-  const [preview, setPreview] = useState(false);
 
   const enable = useCallback(async (): Promise<string | null> => {
     setBusy(true);
@@ -133,9 +129,11 @@ export function CollabWriteBox({ full, id, parent, onPosted, defaultKind, kinds 
       <div className="row gap" style={{ alignItems: "center" }}>
         <strong>{ready}</strong>
         <select value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
-          {(kinds ?? ["issue", "comment", "review", "status", "patch"]).map((k) => (
-            <option key={k} value={k}>{kindLabel(t, k)}</option>
-          ))}
+          <option value="issue">{kindLabel(t, "issue")}</option>
+          <option value="comment">{kindLabel(t, "comment")}</option>
+          <option value="review">{kindLabel(t, "review")}</option>
+          <option value="status">{kindLabel(t, "status")}</option>
+          <option value="patch">{kindLabel(t, "patch")}</option>
         </select>
         {kind === "review" && (
           <select value={decision} onChange={(e) => setDecision(e.target.value as typeof decision)}>
@@ -158,24 +156,13 @@ export function CollabWriteBox({ full, id, parent, onPosted, defaultKind, kinds 
           <input value={head} onChange={(e) => setHead(e.target.value)} placeholder={t("write.headRef")} />
         </div>
       )}
-      <div className="row gap" style={{ alignItems: "center" }}>
-        <button type="button" className={`btn${preview ? " primary" : ""}`} onClick={() => setPreview((v) => !v)}>
-          {preview ? t("write.write") : t("write.preview")}
-        </button>
-      </div>
-      {preview ? (
-        <div className="pad" style={{ minHeight: 72 }}>
-          {text ? <Markdown source={text} /> : <span className="muted">{t("discussion.preview.empty")}</span>}
-        </div>
-      ) : (
-        <textarea
-          className="collab-body"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={kind === "issue" ? t("write.ph.issue") : kind === "review" || kind === "status" ? t("write.ph.note") : t("write.ph.write")}
-          rows={4}
-        />
-      )}
+      <textarea
+        className="collab-body"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={kind === "issue" ? t("write.ph.issue") : kind === "review" || kind === "status" ? t("write.ph.note") : t("write.ph.write")}
+        rows={4}
+      />
       <div className="row gap">
         <button className="btn primary" disabled={busy || (kind === "patch" && !head)} onClick={post}>
           {busy ? t("write.posting") : t("write.post", { kind: kindLabel(t, kind) })}
