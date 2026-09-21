@@ -1121,7 +1121,7 @@ async fn sha256_repo_fold_preserves_the_thread() -> TestResult {
 /// `collab entry --auto-fold`: once the local unfolded ref count reaches the
 /// threshold, the writing client folds the inbox (snapshot created, inbox refs
 /// pruned) and aggregation collapses into the snapshot — the opportunistic
-/// answer to the server's 20k per-request budget (docs/D1_PROTOCOL.md §9.4).
+/// answer to the server's 20k per-request budget (`docs/D1_PROTOCOL.md` §9.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn entry_auto_fold_folds_the_inbox_past_the_threshold() -> TestResult {
     let (base, _shutdown) = start_server().await?;

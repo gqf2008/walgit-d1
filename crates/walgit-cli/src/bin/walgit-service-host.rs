@@ -67,8 +67,10 @@ fn decode_command(encoded: &str) -> Option<String> {
         return None;
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     String::from_utf16(&units).ok()
 }
@@ -103,7 +105,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
         bits += 6;
         if bits >= 8 {
             bits -= 8;
-            out.push((acc >> bits) as u8);
+            out.push(u8::try_from((acc >> bits) & 0xFF).unwrap_or_default());
         }
     }
     Some(out)

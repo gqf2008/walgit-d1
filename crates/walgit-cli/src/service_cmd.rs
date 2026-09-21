@@ -188,6 +188,19 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
     )
 }
 
+/// `setsid(2)` for a `pre_exec` child: async-signal-safe, no allocation, no
+/// shared state — callable between fork and exec.
+#[cfg(not(windows))]
+#[allow(unsafe_code)] // setsid between fork and exec — the platform-seam exception.
+fn child_setsid() -> std::io::Result<()> {
+    // SAFETY: async-signal-safe libc call after fork and before exec in the
+    // child; it touches no Rust allocator or shared state.
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Put the server in its own session/process group so the short-lived
 /// `walgit service start` process and the shell/tray that invoked it can exit
 /// without reaping the server.
@@ -195,20 +208,14 @@ async fn start(config: &Path, listen: &str, home: &Path, log: &Path) -> Result<(
 /// macOS/Linux only: on Windows the *Task Scheduler* creates the process (D48),
 /// so there is nothing to detach.
 #[cfg(not(windows))]
-#[allow(unsafe_code)] // setsid in pre_exec — the same platform-seam exception as `proc_group.rs`.
+#[allow(unsafe_code)] // pre_exec is unsafe — the same platform-seam exception as `proc_group.rs`.
 fn detach_process(cmd: &mut std::process::Command) {
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: pre_exec runs after fork and before exec in the child. The
-        // closure only calls the async-signal-safe libc::setsid and constructs
-        // an io::Error on failure; it does not touch Rust allocator/shared state.
+        // SAFETY: pre_exec runs after fork and before exec in the child; the
+        // closure only calls the async-signal-safe helper above.
         unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            cmd.pre_exec(child_setsid);
         }
     }
 }
@@ -284,13 +291,11 @@ async fn healthy(listen: &str) -> bool {
 /// JSON is produced by two different serializers).
 #[cfg(any(windows, test))]
 fn version_of(body: &str) -> Option<String> {
-    let i = body.find("\"version\"")?;
-    let rest = &body[i + "\"version\"".len()..];
-    let rest = &rest[rest.find(':')? + 1..];
-    let start = rest.find('"')? + 1;
-    let rest = &rest[start..];
+    let (_, rest) = body.split_once("\"version\"")?;
+    let (_, rest) = rest.split_once(':')?;
+    let rest = rest.get(rest.find('"')? + 1..)?;
     let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    rest.get(..end).map(str::to_string)
 }
 
 /// The build the *release* workflow stamped into every crate it compiled, when
@@ -599,6 +604,11 @@ async fn port_owners(listen: &str) -> Result<Vec<u32>> {
 /// installer's port proof never passed). Reported 2026-09-19, thread
 /// `cc-ai-win-port-owner-scope`.
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn listeners_on(netstat: &str, listen: &str, port: u16) -> Result<Vec<u32>, String> {
     let suffix = format!(":{port}");
     let ours = listen_host(listen);
@@ -637,10 +647,10 @@ fn listeners_on(netstat: &str, listen: &str, port: u16) -> Result<Vec<u32>, Stri
 /// The host part of a `host:port` listen address (`[::1]:8081` → `::1`).
 #[cfg(any(windows, test))]
 fn listen_host(listen: &str) -> String {
-    listen
-        .rsplit_once(':')
-        .map(|(host, _)| host.trim_matches(['[', ']']).to_ascii_lowercase())
-        .unwrap_or_else(|| listen.trim_matches(['[', ']']).to_ascii_lowercase())
+    listen.rsplit_once(':').map_or_else(
+        || listen.trim_matches(['[', ']']).to_ascii_lowercase(),
+        |(host, _)| host.trim_matches(['[', ']']).to_ascii_lowercase(),
+    )
 }
 
 /// Can a socket bound to `row` be holding the port we are about to use on
@@ -689,6 +699,11 @@ fn is_our_image(name: &str) -> bool {
 /// walgit in its description or arguments, or runs `walgit-backup.exe`, is not
 /// ours. Getting this wrong means ending or deleting somebody else's task.
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn task_is_ours(xml: &str) -> bool {
     // Only the **action** counts, and only where a command lives: a task whose
     // *description* mentions walgit, or whose action merely passes its path to
@@ -760,6 +775,11 @@ fn action_is_ours(command: &str, args: &str) -> bool {
 /// Values of every `<tag>…</tag>` pair in `xml`, found case-insensitively while
 /// preserving the original value bytes (base64 is case-sensitive).
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn xml_tag_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
     let lower = xml.to_ascii_lowercase();
     let open = format!("<{tag}>");
@@ -779,6 +799,11 @@ fn xml_tag_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
 
 /// `C:\…\walgit.exe` → true (and `evilwalgit.exe` → false).
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn ends_with_our_image(token: &str) -> bool {
     let token = token.trim_matches(['"', '\'']);
     if token.chars().any(char::is_whitespace) && !looks_like_windows_path(token) {
@@ -791,6 +816,11 @@ fn ends_with_our_image(token: &str) -> bool {
 /// A quoted command token may contain spaces, but it must still look like a
 /// path — not a sentence such as `echo C:\tools\walgit.exe`.
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn looks_like_windows_path(token: &str) -> bool {
     let bytes = token.as_bytes();
     (bytes.len() >= 3
@@ -809,12 +839,22 @@ fn looks_like_windows_path(token: &str) -> bool {
 /// `cmd /c echo C:\...\walgit.exe` merely mentions our path; it does not run
 /// it. Only the first token after `/c` may identify the task as ours.
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn cmd_runs_our_binary(args: &str) -> bool {
     cmd_command_token(args).is_some_and(ends_with_our_image)
 }
 
 /// The command token `cmd.exe` runs after `/c` (`/d`/`/s` may precede it).
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn cmd_command_token(args: &str) -> Option<&str> {
     let mut rest = args.trim_start();
     loop {
@@ -833,6 +873,11 @@ fn cmd_command_token(args: &str) -> Option<&str> {
 /// Parse the first command token, including the usual `cmd /c ""…" args"`
 /// quoting shape and quoted paths that contain spaces.
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn first_cmd_token(args: &str) -> Option<&str> {
     let args = args.trim_start();
     if let Some(rest) = args.strip_prefix('"')
@@ -848,6 +893,11 @@ fn first_cmd_token(args: &str) -> Option<&str> {
 }
 
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn quoted_token(text: &str) -> Option<&str> {
     let rest = text.strip_prefix('"')?;
     let end = rest.find('"')?;
@@ -896,8 +946,10 @@ fn encoded_payload(args: &str) -> Option<String> {
         return None;
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     String::from_utf16(&units).ok()
 }
@@ -930,6 +982,11 @@ fn lists_task(list: &str, name: &str) -> bool {
 
 /// First CSV field of a `tasklist /FO CSV /NH` line, unquoted.
 #[cfg(any(windows, test))]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "fixed-format Windows metadata (netstat/tasklist/command lines): offsets come from find/split on ASCII delimiters, and a shifted format is exactly what a test should fail on"
+)]
 fn image_from_tasklist(text: &str) -> Option<String> {
     let line = text.lines().find(|l| l.starts_with('"'))?;
     let rest = line.strip_prefix('"')?;
@@ -1222,7 +1279,7 @@ mod task {
     }
 
     /// UTF-16LE/base64: the launcher's transport, so install paths with spaces or
-    /// quotes never have to survive a second round of command-line parsing. (WiX
+    /// quotes never have to survive a second round of command-line parsing. (`WiX`
     /// and `schtasks /XML` both mangle a nested `""…""` in an attribute.)
     fn encode_command_line(command_line: &str) -> String {
         let mut utf16 = Vec::with_capacity(command_line.len() * 2);
@@ -1251,9 +1308,13 @@ mod task {
                 &[0xFF, 0xFE],
                 "task XML must carry a UTF-16LE BOM"
             );
-            let units: Vec<u16> = bytes[2..]
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            let units: Vec<u16> = bytes
+                .get(2..)
+                .unwrap_or_default()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect();
             String::from_utf16(&units).expect("task XML is valid UTF-16")
         }
@@ -1263,8 +1324,10 @@ mod task {
                 .decode(encoded)
                 .expect("encoded command is base64");
             let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect();
             String::from_utf16(&units).expect("encoded command is UTF-16LE")
         }
@@ -1361,7 +1424,7 @@ mod task {
             let host_line = r#"""C:\tools\walgit-backup.exe" serve --config "x" >> "y" 2>&1""#;
             let host = format!("-EncodedCommand {}", encode_command_line(host_line));
             assert!(!super::super::action_is_ours(
-                r#"C:\Program Files\walgit\walgit-service-host.exe"#,
+                r"C:\Program Files\walgit\walgit-service-host.exe",
                 &host
             ));
             // …and a host action whose payload never starts the server is out too.

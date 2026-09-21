@@ -629,7 +629,7 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Opportunistic fold (docs/D1_PROTOCOL.md §9): a writer that just pushed an
+/// Opportunistic fold (`docs/D1_PROTOCOL.md` §9): a writer that just pushed an
 /// entry already holds a signing key, so it can fold the inbox before the
 /// 20k-ref server budget becomes an availability incident. Best-effort: the
 /// entry is already published, so a failed fold is a warning, not an error.
@@ -681,12 +681,8 @@ fn build_capped_snapshot_at(
         );
     }
     records.sort_by(|a, b| {
-        let ta = serde_json::from_str::<Entry>(&a.json)
-            .map(|e| e.ts)
-            .unwrap_or(i64::MIN);
-        let tb = serde_json::from_str::<Entry>(&b.json)
-            .map(|e| e.ts)
-            .unwrap_or(i64::MIN);
+        let ta = serde_json::from_str::<Entry>(&a.json).map_or(i64::MIN, |e| e.ts);
+        let tb = serde_json::from_str::<Entry>(&b.json).map_or(i64::MIN, |e| e.ts);
         (ta, a.oid.as_str()).cmp(&(tb, b.oid.as_str()))
     });
     let mut dropped = 0u64;
@@ -702,7 +698,9 @@ fn build_capped_snapshot_at(
         let overflow = text.len() - max_bytes;
         let mut freed = 0usize;
         while drained < records.len() && freed < overflow {
-            freed += serde_json::to_string(&records[drained]).map_or(0, |s| s.len() + 1);
+            if let Some(record) = records.get(drained) {
+                freed += serde_json::to_string(record).map_or(0, |s| s.len() + 1);
+            }
             drained += 1;
         }
         if drained == 0 {
@@ -1307,8 +1305,7 @@ fn load_merge_rules(repo: &Path, rules_path: Option<&Path>) -> Result<MergeRules
     // read or parsed" (fail closed, matching the server).
     let exists = reader
         .git(&["rev-parse", "--verify", "--quiet", "refs/collab/meta/rules"])
-        .map(|out| !String::from_utf8_lossy(&out).trim().is_empty())
-        .unwrap_or(false);
+        .is_ok_and(|out| !String::from_utf8_lossy(&out).trim().is_empty());
     if !exists {
         return Ok(MergeRules::default());
     }
@@ -2596,7 +2593,7 @@ mod gc_tests {
                     "t1",
                     "alice",
                     "",
-                    i as i64 + 1,
+                    i64::from(i) + 1,
                     serde_json::json!({"note": format!("record-{i}")}),
                 );
                 e.sig = sign_entry(&mut e, &alice_sk);
@@ -2980,7 +2977,7 @@ mod principal_cache_tests {
 
 #[cfg(test)]
 mod capped_snapshot_tests {
-    //! The gc write-side snapshot cap (docs/D1_PROTOCOL.md §9.3): over-cap is
+    //! The gc write-side snapshot cap (`docs/D1_PROTOCOL.md` §9.3): over-cap is
     //! refused unless truncation is asked for, and truncation drops the oldest
     //! records and marks the snapshot incomplete.
     use super::*;

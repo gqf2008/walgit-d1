@@ -557,35 +557,55 @@ impl Session {
             version,
             collab_rx,
         );
-        let mut subscriptions = self.subscriptions.lock();
-        if subscriptions.contains_key(uri) {
-            let _ = cancel.send(true);
-            let _ = task.await;
-            if is_collab {
-                self.release_collab_ref().await;
+        // Only the check and the insert run under the lock; the abandoned task
+        // (a concurrent subscribe won the race, or the cap was reached) is
+        // awaited after the guard is dropped — never with the mutex held.
+        let mut cancel = Some(cancel);
+        let mut task = Some(task);
+        let mut at_capacity = false;
+        let inserted = {
+            let mut subscriptions = self.subscriptions.lock();
+            if subscriptions.contains_key(uri) {
+                false
+            } else {
+                let live = u64::try_from(subscriptions.len()).unwrap_or(u64::MAX);
+                if live >= self.opts.max_subscriptions {
+                    at_capacity = true;
+                    false
+                } else {
+                    let (Some(cancel), Some(task)) = (cancel.take(), task.take()) else {
+                        unreachable!("cancel/task are taken only on the insert path");
+                    };
+                    subscriptions.insert(
+                        uri.to_string(),
+                        Subscription {
+                            collab: is_collab,
+                            cancel,
+                            task,
+                        },
+                    );
+                    true
+                }
             }
+        };
+        if inserted {
             return Ok(());
         }
-        let live = u64::try_from(subscriptions.len()).unwrap_or(u64::MAX);
-        if live >= self.opts.max_subscriptions {
+        if let Some(cancel) = cancel {
             let _ = cancel.send(true);
+        }
+        if let Some(task) = task {
             let _ = task.await;
-            if is_collab {
-                self.release_collab_ref().await;
-            }
+        }
+        if is_collab {
+            self.release_collab_ref().await;
+        }
+        if at_capacity {
             return Err(ResourceError::InvalidParams(format!(
                 "`--max-subscriptions` limit ({} live subscriptions) reached",
                 self.opts.max_subscriptions
             )));
         }
-        subscriptions.insert(
-            uri.to_string(),
-            Subscription {
-                collab: is_collab,
-                cancel,
-                task,
-            },
-        );
         Ok(())
     }
 
@@ -1512,10 +1532,10 @@ async fn probe_version_for_parsed(
         ResourceUri::Thread { thread, .. } => {
             refresh_collab_refs(opts, cancel.clone()).await?;
             let heads = collab_thread_heads(opts, cancel).await?;
-            return heads
+            heads
                 .get(thread)
                 .cloned()
-                .ok_or_else(|| ResourceError::NotFound(format!("no entries for thread {thread}")));
+                .ok_or_else(|| ResourceError::NotFound(format!("no entries for thread {thread}")))
         }
     }
 }
@@ -1672,8 +1692,8 @@ async fn read_board(
     let out = run_walgit(&argv, &opts.config, cancel)
         .await
         .map_err(|e| classify_resource_error("walgit://collab/board", e))?;
-    let board: Value = serde_json::from_str(&out).map_err(resource_execution)?;
-    let version = sha256_hex(&serde_json::to_vec(&board).map_err(resource_execution)?);
+    let board: Value = serde_json::from_str(&out).map_err(|e| resource_execution(&e))?;
+    let version = sha256_hex(&serde_json::to_vec(&board).map_err(|e| resource_execution(&e))?);
     Ok(ResourceSnapshot {
         body: json!({"board": board}),
         version,
@@ -1695,7 +1715,7 @@ async fn read_thread(
     let out = run_walgit(&argv, &opts.config, cancel)
         .await
         .map_err(|e| classify_resource_error(&format!("collab thread {thread}"), e))?;
-    let entries: Value = serde_json::from_str(&out).map_err(resource_execution)?;
+    let entries: Value = serde_json::from_str(&out).map_err(|e| resource_execution(&e))?;
     let version = entries
         .as_array()
         .and_then(|entries| entries.last())
@@ -1783,7 +1803,7 @@ async fn collab_thread_heads(
     let out = run_walgit(&argv, &opts.config, cancel)
         .await
         .map_err(|e| classify_resource_error("refs/collab/*", e))?;
-    let heads = serde_json::from_str(&out).map_err(resource_execution)?;
+    let heads = serde_json::from_str(&out).map_err(|e| resource_execution(&e))?;
     Ok(Arc::new(heads))
 }
 
@@ -2032,7 +2052,7 @@ fn classify_resource_error(uri: &str, err: ToolError) -> ResourceError {
     }
 }
 
-fn resource_execution(error: serde_json::Error) -> ResourceError {
+fn resource_execution(error: &serde_json::Error) -> ResourceError {
     ResourceError::Execution(format!("serializing resource: {error}"))
 }
 
@@ -2052,8 +2072,10 @@ fn resource_item(uri: &str, name: &str, description: &str) -> Value {
 
 fn notification(method: &str, params: Option<Value>) -> String {
     let mut body = json!({"jsonrpc": "2.0", "method": method});
-    if let Some(params) = params {
-        body["params"] = params;
+    if let Some(params) = params
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("params".to_string(), params);
     }
     body.to_string()
 }
@@ -2250,6 +2272,10 @@ async fn wait_shutdown(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.changed().await;
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "installing SIGTERM/SIGINT handlers cannot fail on a running Unix process"
+)]
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -2276,6 +2302,7 @@ mod tests {
         validate_subscription_options,
     };
     use serde_json::{Value, json};
+    use std::fmt::Write as _;
     #[cfg(unix)]
     use std::path::Path;
     use std::path::PathBuf;
@@ -2659,8 +2686,7 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 let lines = std::fs::read_to_string(&watched_pid_file)
-                    .map(|text| text.lines().count())
-                    .unwrap_or(0);
+                    .map_or(0, |text| text.lines().count());
                 if lines >= 2 {
                     break;
                 }
@@ -2892,7 +2918,7 @@ mod tests {
         let oid = oid.trim();
         let mut stdin = String::new();
         for index in 0..2000 {
-            stdin.push_str(&format!("create refs/heads/r{index} {oid}\n"));
+            let _ = writeln!(stdin, "create refs/heads/r{index} {oid}");
         }
         let mut child = std::process::Command::new("git")
             .args([
@@ -2927,7 +2953,10 @@ mod tests {
             "refs output was not large enough: {probe:?}"
         );
         assert_eq!(probe.version.len(), 64);
-        assert!(probe.truncated || probe.lines.len() < probe.count as usize);
+        assert!(
+            probe.truncated
+                || u64::try_from(probe.lines.len()).unwrap_or(u64::MAX) < probe.count
+        );
     }
 
     #[cfg(unix)]
