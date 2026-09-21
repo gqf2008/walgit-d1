@@ -698,6 +698,8 @@ async fn api_md_conformance() -> TestResult {
     for path in [
         "/o/r/collab",
         "/o/r/collab/board",
+        "/o/r/collab/projects",
+        "/o/r/collab/discussions",
         "/o/r/collab/guide",
         "/o/r/collab/thread/w1",
     ] {
