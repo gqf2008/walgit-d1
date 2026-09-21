@@ -56,6 +56,14 @@ function CollabView({ full, report }: { full: string; report: CollabReport }) {
           <dd>
             <Link to={`/${full}/collab/board`}>{t_("collab.board.link")}</Link>
           </dd>
+          <dt>{t_("projects.title")}</dt>
+          <dd>
+            <Link to={`/${full}/collab/projects`}>{t_("projects.link")}</Link>
+          </dd>
+          <dt>{t_("discussion.title")}</dt>
+          <dd>
+            <Link to={`/${full}/collab/discussions`}>{t_("discussion.link")}</Link>
+          </dd>
         </div>
         <div className="box-header" style={{ marginTop: 8 }}>{t_("collab.newThread")}</div>
         <CollabWriteBox full={full} id={newId} parent="" onPosted={() => setNewId(uuid())} />

@@ -97,6 +97,8 @@ git fetch origin '+refs/collab/*:refs/collab/*'
   `board`、`report`、`gc`（折叠出 `refs/collab/meta/snapshot` 快照）、`watch` 等命令。
 - **看板**：`.walgit/board.toml` 里的声明式列定义，将线程集合折叠成确定性投影
   （见 `docs/BOARD.md`）——板不是状态，是纯函数。
+- **社区面**：Discussions 复用 `discussion`/`comment`/`solution` 签名条目，Projects 是同一批
+  board cards 的 board/table 纯投影；两者都不新增服务端权威状态。设计与边界见 `docs/COMMUNITY.md`。
 - **身份**：host 级 principal 注册表（`walgit principal`），一个 token 同时覆盖
   git 读写与协作读写；支持签名公钥注册/吊销。
 - **D1-CI（去中心化 CI）**：**服务端零 CI 逻辑**。认领与结果都是 `refs/collab/inbox/*`
@@ -126,7 +128,7 @@ runbook（`docs/WINDOWS.md`）等。
 ### 文档
 
 - `docs/USER_GUIDE.md` — 面向人类的完整使用手册（协作层怎么用）。
-- `docs/D1_PROTOCOL.md` — D1 协作层规范；`docs/D1_COLLAB_DESIGN.md`（设计背景）、`docs/D1_CI_PROTOCOL.md`（CI 子协议）。
+- `docs/D1_PROTOCOL.md` — D1 协作层规范；`docs/D1_COLLAB_DESIGN.md`（设计背景）、`docs/D1_CI_PROTOCOL.md`（CI 子协议）、`docs/COMMUNITY.md`（社区面：Discussions / Projects）。
 - `docs/BOARD.md`、`docs/POLICY.md` — 看板 / 推送策略。
 - `AGENTS.md` — 架构、所有设计决策、以及 agent 协作协议。
 - `GOAL.md` — 上游的验收目标（本分叉保持其内核语义不变）。
@@ -170,7 +172,7 @@ server entirely (**bundle-uri**: fresh clones and catch-ups are static files the
 | **bundle-uri** | Bundles cut on calendar slots (weekly full, chained dailies, hourlies) as a pure function of the WAL: a fresh clone downloads the newest full plus the chain above it from the bucket and asks the server only for the remainder; a catch-up downloads exactly the slots it missed. Two lists per repo: `bundles/list` for clones, `bundles/catchup` for fetches. Blobless families for `--filter=blob:none`. |
 | **LFS** | Batch API + basic transfer, objects in the bucket, optional read-through from an upstream LFS server for imported repositories. |
 | **web UI + API** | A React UI (tree, blob, commits, diffs, the WAL's own health page) on a read-mostly JSON API under `/{owner}/{repo}/api/*`; sha-addressed answers are immutable and cached everywhere; long answers stream progress as SSE. `repos.js` is a dependency-free SDK for pages, agents and scripts. |
-| **collab** | A decentralized collaboration layer on `refs/collab/*`: signed issue/comment/review/status/patch entries, per-principal Ed25519 keys self-registered via the thin API, and a deterministic aggregation (threads, PR merge rules, verification health, and a work-unit board projected from declarative column rules in `.walgit/board.toml` — moving a card is just a signed `status` entry) shared by the `walgit collab` CLI, the JSON API and the web UI's Collab tab — one S3 token per participant, no server-side collaboration state. `docs/D1_PROTOCOL.md`. **CI** rides the same refs: `.walgit/ci.toml` in the tested commit declares tasks; `walgit ci run` clients subscribe to ref tips, claim runs with signed `ci_claim` entries (deterministic earliest-claimant convergence, TTL re-claim), execute the command under an env allowlist and publish signed `ci_result` entries — a scheduler-free CI with zero server-side logic. `docs/D1_CI_PROTOCOL.md`. |
+| **collab + community** | A decentralized collaboration layer on `refs/collab/*`: signed issue/discussion/comment/solution/review/status/patch entries, per-principal Ed25519 keys self-registered via the thin API, and a deterministic aggregation (threads, discussions, PR merge rules, verification health, Projects board/table views, and a work-unit board projected from declarative column rules in `.walgit/board.toml` — moving a card is just a signed `status` entry) shared by the `walgit collab` CLI, the JSON API and the web UI's Collab tab — one S3 token per participant, no server-side collaboration state. `docs/D1_PROTOCOL.md`, `docs/COMMUNITY.md`. **CI** rides the same refs: `.walgit/ci.toml` in the tested commit declares tasks; `walgit ci run` clients subscribe to ref tips, claim runs with signed `ci_claim` entries (deterministic earliest-claimant convergence, TTL re-claim), execute the command under an env allowlist and publish signed `ci_result` entries — a scheduler-free CI with zero server-side logic. `docs/D1_CI_PROTOCOL.md`. |
 | **policy** | Per-repository push rules (`policy.json`): protected refs, groups, fast-forward only, bypass lists. `docs/POLICY.md`. |
 | **settings** | Per-repository config (bundle schedules, compaction, upstream follow) published into the WAL with history. |
 | **maintenance** | Checkpoints, bundle builds, geometric compaction, base rebuilds, connectivity audits and repairs — one loop that computes the desired state from (config, WAL) every pass and does one bounded unit of the most important missing work. Self-healing by construction: an outage leaves no holes; a deleted artefact is "missing" and rebuilt identically. |

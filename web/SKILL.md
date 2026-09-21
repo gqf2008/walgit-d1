@@ -2,8 +2,9 @@
 
 walgit is a git smart-HTTP server whose repositories live in an object store:
 hosts are disposable caches, the bucket is the repository. Collaboration
-(issues, PRs, boards) and CI are **inside the repository** — signed entries on
-`refs/collab/*` — and the `walgit` CLI is their primary interface. This file
+(issues, discussions, PRs, boards) and CI are **inside the repository** — signed entries on
+`refs/collab/*` — and the `walgit` CLI is their
+primary interface. This file
 teaches an AI agent to discover, read, and write repositories on **this host**
 with plain git, the CLI, and HTTP. No interactive steps anywhere.
 
@@ -142,6 +143,8 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     entry, not an edit.
   - `walgit collab report` — global dashboard: threads, PR status,
     verification health, activity.
+  - `GET /{owner}/{repo}/api/collab/discussions?state=&category=&after=&n=` —
+    discussions projected from signed `discussion` roots (stable cursor).
 - Write (construct + sign + deliver):
   - Before a parallel workstream: register the whole team, one principal per
     agent (see §0b); `walgit collab principal-register` publishes a public key.
@@ -153,6 +156,13 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     `--auto-fold` (threshold default 10000) folds the inbox with the same
     actor/key once the unfolded refs pass the threshold — the server's
     aggregate read budget is 20000 refs.
+  - **Discussion workflow**: a discussion is a normal thread whose root entry
+    is `--kind discussion --body '{"title":"…","body":"…","category":"ideas"}'`;
+    reply with `--kind comment`; accept a reply with `--kind solution --body
+    '{"comment_oid":"<comment oid>","accepted":true}'` (`accepted:false`
+    revokes the answer; only a *verified* solution naming a *verified* comment
+    counts). Close with a normal `status` entry. Threads route by their root
+    kind (`root_kind` in `collab report`).
 - Automate: `walgit collab watch --exec <cmd>` — resident loop: fetch
   `refs/collab/*`, invoke `cmd` with each new/changed entry's JSON on stdin.
 - Housekeeping (D45): `walgit collab gc --actor <principal> --key <keyfile>

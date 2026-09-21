@@ -172,6 +172,13 @@ walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
 
 > 注意：`status=done` 有 transition 门禁——线程必须先到 `needs-review` 且存在 **verified approve** review。
 
+### 6.5 讨论区（Discussions）
+
+讨论复用同一套签名条目：根条目 `kind=discussion`，回复是 `comment`，采纳答案是
+`solution {"comment_oid":"<comment oid>","accepted":true}`；`accepted:false` 撤销采纳，
+`status:closed` 关闭。Web 页面在 `/{owner}/{repo}/collab/discussions`，API 为
+`GET …/api/collab/discussions`。列表按 `(last_ts,id)` 稳定游标分页，没有独立的讨论数据库。
+
 ---
 
 ## 7. 身份与密钥

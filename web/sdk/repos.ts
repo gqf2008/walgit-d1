@@ -127,15 +127,46 @@ export interface CollabEntryRef {
     sig: string;
   };
 }
+export type CollabKind =
+  | "issue"
+  | "comment"
+  | "discussion"
+  | "solution"
+  | "patch"
+  | "review"
+  | "status"
+  | "merge_result";
 export interface CollabReportThread {
   id: string;
   /** Root entry's `body.title`, "" when it has none (issue #131 — render
       `title || id` like the board cards). */
   title: string;
+  root_kind: string;
   entries: number;
   verified: number;
   last_ts: number;
   kinds: string[];
+}
+/** One deterministic discussion list row (docs/COMMUNITY.md §2). */
+export interface CollabDiscussion {
+  id: string;
+  title: string;
+  body: string;
+  category: string;
+  actor: string;
+  entries: number;
+  verified: number;
+  reply_count: number;
+  answered: boolean;
+  solution_oid: string;
+  closed: boolean;
+  last_ts: number;
+}
+export interface CollabDiscussionPage {
+  discussions: CollabDiscussion[];
+  /** Opaque `(last_ts,id)` cursor for the next page. */
+  next: string | null;
+  more: boolean;
 }
 export interface CollabReview {
   actor: string;
@@ -1011,7 +1042,7 @@ export class RepoClient {
      */
     entry: async (input: {
       principal: string;
-      kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result";
+      kind: CollabKind;
       id: string;
       actor: string;
       parent: string;
@@ -1030,7 +1061,7 @@ export class RepoClient {
      */
     buildEntry: (input: {
       principal: string;
-      kind: "issue" | "comment" | "patch" | "review" | "status" | "merge_result";
+      kind: CollabKind;
       id: string;
       actor: string;
       parent: string;
@@ -1059,6 +1090,11 @@ export class RepoClient {
     /** One thread: parent-ordered entries with per-entry verification, plus
         the PR view + merge evaluation when the thread has a patch. */
     thread: (id: string, opts?: CallOptions) => this.client.json<CollabThread>(`${this.p}/collab/threads/${enc(id)}`, opts),
+    /** Discussions projected from signed `discussion` root entries
+        (`build_discussions`, docs/COMMUNITY.md §2): newest activity first,
+        id on ties, with the opaque `(last_ts,id)` cursor for paging. */
+    discussions: (q: { category?: string; state?: "all" | "open" | "closed" | "answered"; after?: string; n?: number } = {}, opts?: CallOptions) =>
+      this.client.json<CollabDiscussionPage>(`${this.p}/collab/discussions${qs(q)}`, opts),
     /** The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): the threads projected under the board
         definition versioned at `.walgit/board.toml` (HEAD) — the same
         `build_board` the `walgit collab board` CLI renders offline. Read-only;

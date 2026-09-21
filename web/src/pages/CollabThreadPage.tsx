@@ -1,16 +1,17 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import { api, type CollabEntryRef } from "../api";
 import { useRepo } from "./RepoLayout";
-import { useData } from "../data";
+import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
-import { CollabWriteBox } from "../components/CollabWrite";
+import { CollabWriteBox, enableCollabKey } from "../components/CollabWrite";
 import { useI18n, kindLabel, type TFunc } from "../i18n";
 import { Markdown } from "../components/Markdown";
 import { fmtSize } from "../format";
 import { collabEntryText } from "../collab-text";
+import { signCanonical } from "../collab";
 
 /** One attachment (`--attach`, issue #75 ④): `{filename, sha256, content_b64}`
     embedded in the signed entry body. Materialized to a Blob on demand —
@@ -91,6 +92,32 @@ export function CollabThreadPage() {
   const thread = useData(`collab:${full}:thread:${id}`, () => api.collab(full).thread(id));
   const narration = ciNarration(thread.entries, t);
   const lastOid = thread.entries[thread.entries.length - 1]?.oid ?? "";
+  const rootKind = thread.entries[0]?.entry.kind;
+  const acceptedOid = (() => {
+    let accepted = "";
+    for (const e of thread.entries) {
+      if (e.entry.kind !== "solution" || !e.verified) continue;
+      const body = e.entry.body as Record<string, unknown>;
+      if (body.accepted === true && typeof body.comment_oid === "string") accepted = body.comment_oid;
+      else if (body.accepted === false) accepted = "";
+    }
+    return accepted;
+  })();
+  const accept = useCallback(async (commentOid: string) => {
+    const principal = await enableCollabKey(full, t);
+    const entry = await api.collabBuildEntry(full, {
+      principal,
+      kind: "solution",
+      id: thread.id,
+      actor: principal,
+      parent: lastOid,
+      body: { comment_oid: commentOid, accepted: true },
+      sign: signCanonical,
+    });
+    await api.collab(full).post(entry);
+    invalidate(`collab:${full}`);
+    invalidate(`discussions:${full}`);
+  }, [full, lastOid, t, thread.id]);
   return (
     <>
       <div className="pad">
@@ -125,7 +152,13 @@ export function CollabThreadPage() {
 
       {narration && <div className="pad muted" style={{ borderLeft: "3px solid var(--accent, #58a6ff)" }}>{narration}</div>}
       {thread.entries.map((e, i) => (
-        <EntryBox key={e.oid} e={e} n={i + 1} />
+        <EntryBox
+          key={e.oid}
+          e={e}
+          n={i + 1}
+          accepted={e.oid === acceptedOid}
+          onAccept={rootKind === "discussion" && e.entry.kind === "comment" ? () => accept(e.oid) : undefined}
+        />
       ))}
     </>
   );
@@ -206,7 +239,7 @@ function fnv1a64(parts: string[]): string {
   return h.toString(16).padStart(16, "0");
 }
 
-const KNOWN_KINDS = new Set(["issue", "comment", "review", "status", "patch", "ci_claim", "ci_result"]);
+const KNOWN_KINDS = new Set(["issue", "discussion", "solution", "comment", "review", "status", "patch", "ci_claim", "ci_result"]);
 
 /** The thread-level CI narration (issue #38): claims of the newest attempt tell
     the reader what happened without the protocol vocabulary. */
@@ -222,19 +255,32 @@ function ciNarration(entries: CollabEntryRef[], t: TFunc): string | null {
     : t("entry.claim.pending");
 }
 
-function EntryBox({ e, n }: { e: CollabEntryRef; n: number }) {
+function EntryBox({
+  e,
+  n,
+  accepted,
+  onAccept,
+}: {
+  e: CollabEntryRef;
+  n: number;
+  accepted?: boolean;
+  onAccept?: () => Promise<void>;
+}) {
   const { t } = useI18n();
+  const [accepting, setAccepting] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
   const kind = e.entry.kind;
   const body = e.entry.body as Record<string, unknown>;
   const ciConclusion = kind === "ci_result" ? String(body.conclusion ?? "") : "";
   // 对话正文：兼容 CLI（issue body.body / review·merge_result body.note / patch
   // body.message）与 Web 写入口（issue·comment body.text / patch body.message）。
   // 除纯机器条目外都渲染 Markdown，让线程页可见 agent/人写的实际内容。
-  // `collabEntryText` 与投影端 entry_prose 是同一张表（双向金标，issue #112）。
-  const proseKinds = new Set(["issue", "comment", "review", "status", "patch"]);
+  // `collabEntryText` 与投影端 entry_prose 是同一张表（双向金标，issue #112）；
+  // `discussion` 的正文走同一走法，线程页与看板卡片不会漂移。
+  const proseKinds = new Set(["issue", "discussion", "comment", "review", "status", "patch"]);
   const prose = proseKinds.has(kind) ? collabEntryText(body) : "";
   const title =
-    kind === "issue" ? String(body.title ?? t("entry.issue.untitled"))
+    kind === "issue" || kind === "discussion" ? String(body.title ?? t("entry.issue.untitled"))
     : kind === "review" ? String(body.decision ?? "comment")
     : kind === "status" ? String(body.status ?? "status")
     : kind === "ci_claim"
@@ -259,6 +305,25 @@ function EntryBox({ e, n }: { e: CollabEntryRef; n: number }) {
           )}
         </div>
         {prose && <Markdown source={prose} />}
+        {accepted && <div className="ok">{t("discussion.accepted")}</div>}
+        {onAccept && (
+          <div className="row gap" style={{ marginTop: 8 }}>
+            <button
+              className="btn small"
+              disabled={accepting}
+              onClick={() => {
+                setAccepting(true);
+                setAcceptError(null);
+                onAccept()
+                  .catch((err: unknown) => setAcceptError(err instanceof Error ? err.message : String(err)))
+                  .finally(() => setAccepting(false));
+              }}
+            >
+              {accepting ? t("discussion.accepting") : t("discussion.accept")}
+            </button>
+            {acceptError && <span className="muted" style={{ color: "var(--danger, #f85149)" }}>{acceptError}</span>}
+          </div>
+        )}
         <EntryAttachments body={body} />
         {kind === "ci_result" && (
           <div className="mono muted">

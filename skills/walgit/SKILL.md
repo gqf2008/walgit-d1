@@ -1,6 +1,6 @@
 ---
 name: walgit
-description: "Operate a walgit host (object-store-backed Git server) and do D1 collaboration bookkeeping (issues/PRs/reviews/board live in refs/collab/*). Use when the user mentions walgit, a local/self-hosted git host, pushing to/cloning from a walgit host, walgit issues/PRs/reviews/board, walgit service lifecycle, or listening to walgit events — commands walgit service start|stop|status|restart and walgit collab (--config <walgit.toml>)."
+description: "Operate a walgit host (object-store-backed Git server) and do D1 collaboration bookkeeping (issues, discussions, PRs, reviews and boards live in refs/collab/*). Use when the user mentions walgit, a local/self-hosted git host, pushing to/cloning from a walgit host, walgit issues/PRs/reviews/board/discussions, walgit service lifecycle, or listening to walgit events — commands walgit service start|stop|status|restart and walgit collab (--config <walgit.toml>)."
 metadata:
   requires:
     bins: ["screen"]
@@ -124,7 +124,7 @@ Write entries (one signed entry per push; the printed second column is the entry
 next `--parent`):
 
 ```bash
-W collab entry --kind <issue|comment|patch|review|merge_result|status> \
+W collab entry --kind <issue|discussion|solution|comment|patch|review|merge_result|status> \
   --id <thread-id> --actor <principal> --parent <oid|""> \
   --body '<json>' --key ~/.walgit/keys/<principal>.ed25519 --push origin \
   [--base refs/heads/main --head refs/heads/<branch>]   # patch only
@@ -141,6 +141,8 @@ W collab gc --actor <principal> --key ~/.walgit/keys/<principal>.ed25519 \
 | kind | body (required) | use |
 |---|---|---|
 | `issue` | `{"title","body"}` | thread root |
+| `discussion` | `{"title","body","category"}` | discussion root (web Discussions tab) |
+| `solution` | `{"comment_oid","accepted":true\|false}` | accept or revoke one reply |
 | `status` | `{"status","owner","worktree?","branch?","work","note?"}` | claim / move the card |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
 | `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review; actor must differ from the author (coordinator-enforced) |

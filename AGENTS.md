@@ -53,6 +53,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `walgit ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation (`walgit-wal/src/ci.rs`). Normative rule language. |
 | `docs/D1_PROTOCOL.md` | Anyone touching the D1 collaboration layer: identities, refs layout, entry schema/canonical signing, verification, aggregation (thread / PR / report), the board projection, the D45 fold, or the observation lanes. Normative rule language. |
 | `docs/D1_COLLAB_DESIGN.md` | Design background and progress history of the D1 layer; current normative rules live in `docs/D1_PROTOCOL.md` (implementation wins where they differ). |
+| `docs/COMMUNITY.md` | Anyone touching Discussions or Projects: authority model, entry shapes, read/write paths and phased delivery. Design of record. |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |

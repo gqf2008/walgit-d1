@@ -12,6 +12,8 @@ use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use walgit_git::ObjectFormat;
 
+pub const DISCUSSION_KIND: &str = "discussion";
+pub const SOLUTION_KIND: &str = "solution";
 // ---- docs/D1_PROTOCOL.md §5 entry schema -------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -721,6 +723,9 @@ pub struct ReportThread {
     /// same rule as `BoardCard.title`, so the report list and the board cards
     /// never disagree about what a thread is called).
     pub title: String,
+    /// Root entry kind (`issue`, `discussion`, …), so clients can route a
+    /// thread to the right surface without re-reading the timeline.
+    pub root_kind: String,
     pub entries: usize,
     pub verified: usize,
     pub last_ts: i64,
@@ -777,6 +782,144 @@ pub struct Report {
     pub missing_principals: usize,
     pub by_actor: Vec<(String, usize)>,
     pub by_kind: Vec<(String, usize)>,
+}
+
+/// A discussion is a normal collab thread whose root entry is
+/// `kind = "discussion"`. Replies are comments; an immutable `solution` entry
+/// accepts (or revokes, with `accepted = false`) one of those comments.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DiscussionSummary {
+    pub id: String,
+    pub title: String,
+    /// Root `body.body` (falling back to `body.text`), for list previews.
+    pub body: String,
+    pub category: String,
+    pub actor: String,
+    pub entries: usize,
+    pub verified: usize,
+    pub reply_count: usize,
+    pub answered: bool,
+    /// The accepted comment's oid, or "" when the discussion is unanswered.
+    pub solution_oid: String,
+    pub closed: bool,
+    pub last_ts: i64,
+}
+
+/// The deterministic discussion list: newest activity first, id ascending on
+/// ties. Callers may apply a cursor and a limit without changing this order.
+pub fn build_discussions(
+    entries: &[&EntryRef],
+    principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+) -> Vec<DiscussionSummary> {
+    let mut by_thread: BTreeMap<&str, Vec<&EntryRef>> = BTreeMap::new();
+    for e in entries {
+        by_thread.entry(e.entry.id.as_str()).or_default().push(e);
+    }
+    let mut out = Vec::new();
+    for (id, group) in by_thread {
+        let ordered = thread(&group);
+        // Identity comes from the canonical root, not from list position: a
+        // backdated, unverified root appended by a pass-by cannot shadow or
+        // hijack a discussion that has a verified root (same rule as
+        // `BoardCard` / `ReportThread`).
+        let Some(root) = canonical_root(&ordered, principals) else {
+            continue;
+        };
+        if root.entry.kind != DISCUSSION_KIND {
+            continue;
+        }
+        let known_comments: BTreeMap<&str, &EntryRef> = ordered
+            .iter()
+            .skip(1)
+            .filter(|r| r.entry.kind == "comment" && r.is_verified(principals))
+            .map(|r| (r.oid.as_str(), *r))
+            .collect();
+        let reply_count = ordered
+            .iter()
+            .skip(1)
+            .filter(|r| r.entry.kind == "comment")
+            .count();
+        let mut answer = "";
+        for item in ordered.iter().skip(1) {
+            if item.entry.kind != SOLUTION_KIND {
+                continue;
+            }
+            let accepted = item
+                .entry
+                .body
+                .get("accepted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let comment_oid = item
+                .entry
+                .body
+                .get("comment_oid")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if accepted && item.is_verified(principals) && known_comments.contains_key(comment_oid) {
+                answer = comment_oid;
+            } else if !accepted {
+                answer = "";
+            }
+        }
+        let mut closed = false;
+        for item in ordered.iter().skip(1) {
+            if item.entry.kind != "status" {
+                continue;
+            }
+            if let Some(status) = item.entry.body.get("status").and_then(serde_json::Value::as_str) {
+                closed = status == "closed";
+            }
+        }
+        let body = ["body", "text"]
+            .iter()
+            .find_map(|key| root.entry.body.get(*key).and_then(serde_json::Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        out.push(DiscussionSummary {
+            id: (*id).to_string(),
+            title: root_title(&ordered, principals),
+            body,
+            category: root
+                .entry
+                .body
+                .get("category")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("general")
+                .to_string(),
+            actor: root.entry.actor.clone(),
+            entries: ordered.len(),
+            verified: ordered.iter().filter(|r| r.is_verified(principals)).count(),
+            reply_count,
+            answered: !answer.is_empty(),
+            solution_oid: answer.to_string(),
+            closed,
+            last_ts: ordered.iter().map(|r| r.entry.ts).max().unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.last_ts
+            .cmp(&a.last_ts)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// Stable cursor key for discussion pagination. `after` is deliberately opaque
+/// to callers; splitting on the first `:` keeps arbitrary thread ids usable.
+pub fn discussion_cursor(d: &DiscussionSummary) -> String {
+    format!("{}:{}", d.last_ts, d.id)
+}
+
+pub fn discussion_after_cursor(d: &DiscussionSummary, after: Option<&str>) -> bool {
+    let Some(after) = after else { return true };
+    let Some((ts, id)) = after.split_once(':') else {
+        return false;
+    };
+    let Ok(ts) = ts.parse::<i64>() else {
+        return false;
+    };
+    d.last_ts < ts || (d.last_ts == ts && d.id.as_str() > id)
 }
 
 /// The thread's canonical root: the first verified root entry (parent empty)
@@ -837,6 +980,9 @@ pub fn build_report(
         report.threads.push(ReportThread {
             id: (*id).to_string(),
             title: root_title(&ordered, principals),
+            root_kind: canonical_root(&ordered, principals)
+                .map(|r| r.entry.kind.clone())
+                .unwrap_or_default(),
             entries: group.len(),
             verified,
             last_ts: group.iter().map(|r| r.entry.ts).max().unwrap_or(0),
@@ -1977,6 +2123,172 @@ name = "everything else"
             .expect("card");
         assert_eq!(card.title, "early");
         assert_eq!(card.actor, "bob");
+    }
+
+    #[test]
+    fn discussions_project_answers_closures_and_stable_order() {
+        let (sk, pk) = keypair();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk.clone());
+        principals.insert("bob".to_string(), pk);
+
+        let mut root = entry(
+            "d1",
+            "discussion",
+            "alice",
+            "",
+            10,
+            serde_json::json!({"title": "How do we ship?", "body": "body", "category": "ideas"}),
+        );
+        root.sig = sign_entry(&mut root, &sk);
+        let root_oid = test_oid(&root);
+        let mut c1 = entry("d1", "comment", "bob", &root_oid, 20, serde_json::json!({"text": "first"}));
+        c1.sig = sign_entry(&mut c1, &sk);
+        let c1_oid = test_oid(&c1);
+        let mut c2 = entry("d1", "comment", "alice", &c1_oid, 30, serde_json::json!({"text": "second"}));
+        c2.sig = sign_entry(&mut c2, &sk);
+        let c2_oid = test_oid(&c2);
+        let mut accept = entry(
+            "d1",
+            "solution",
+            "alice",
+            &c2_oid,
+            40,
+            serde_json::json!({"comment_oid": c1_oid, "accepted": true}),
+        );
+        accept.sig = sign_entry(&mut accept, &sk);
+        let accept_oid = test_oid(&accept);
+        let mut close = entry(
+            "d1",
+            "status",
+            "alice",
+            &accept_oid,
+            50,
+            serde_json::json!({"status": "closed"}),
+        );
+        close.sig = sign_entry(&mut close, &sk);
+        let mut d2 = entry(
+            "d2",
+            "discussion",
+            "bob",
+            "",
+            60,
+            serde_json::json!({"title": "Newer", "category": "general"}),
+        );
+        d2.sig = sign_entry(&mut d2, &sk);
+        let mut d3 = entry(
+            "d3",
+            "discussion",
+            "alice",
+            "",
+            40,
+            serde_json::json!({"title": "Older", "category": "general"}),
+        );
+        d3.sig = sign_entry(&mut d3, &sk);
+        let owned = refs_of(&[root, c1, c2, accept, close, d2, d3]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let discussions = build_discussions(&refs, &principals);
+        assert_eq!(discussions.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec!["d2", "d1", "d3"]);
+        let d1 = &discussions[1];
+        assert_eq!(d1.title, "How do we ship?");
+        assert_eq!(d1.body, "body");
+        assert_eq!(d1.category, "ideas");
+        assert_eq!(d1.reply_count, 2);
+        assert!(d1.answered);
+        assert_eq!(d1.solution_oid, c1_oid);
+        assert!(d1.closed);
+        assert_eq!(d1.verified, 5);
+        assert_eq!(discussion_cursor(d1), "50:d1");
+        assert!(!discussion_after_cursor(&discussions[0], Some("50:d1")));
+        assert!(!discussion_after_cursor(d1, Some("50:d1")));
+        assert!(discussion_after_cursor(&discussions[2], Some("50:d1")));
+    }
+
+    /// A discussion's identity is its *verified* root: an unverified, backdated
+    /// root appended by a pass-by must not turn a thread into a discussion.
+    #[test]
+    fn discussions_use_the_canonical_verified_root() {
+        let (sk, pk) = keypair();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk);
+        let mut real = entry(
+            "d",
+            "discussion",
+            "alice",
+            "",
+            10,
+            serde_json::json!({"title": "real"}),
+        );
+        real.sig = sign_entry(&mut real, &sk);
+        // mallory's root is older, empty-parent, and unverified: canonical_root
+        // skips it, so the thread stays alice's discussion.
+        let hijack = entry(
+            "d",
+            "discussion",
+            "mallory",
+            "",
+            1,
+            serde_json::json!({"title": "hijack"}),
+        );
+        let owned = refs_of(&[real, hijack]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let discussions = build_discussions(&refs, &principals);
+        assert_eq!(discussions.len(), 1);
+        assert_eq!(discussions[0].actor, "alice");
+        assert_eq!(discussions[0].title, "real");
+    }
+
+    #[test]
+    fn discussions_ignore_unknown_answers_and_allow_revoke_and_reopen() {
+        let principals = HashMap::new();
+        let root = entry(
+            "d",
+            "discussion",
+            "alice",
+            "",
+            1,
+            serde_json::json!({"title": "Q"}),
+        );
+        let root_oid = test_oid(&root);
+        let comment = entry("d", "comment", "alice", &root_oid, 2, serde_json::json!({"text": "A"}));
+        let comment_oid = test_oid(&comment);
+        let bad = entry(
+            "d",
+            "solution",
+            "alice",
+            &comment_oid,
+            3,
+            serde_json::json!({"comment_oid": "not-a-comment", "accepted": true}),
+        );
+        let bad_oid = test_oid(&bad);
+        let accept = entry(
+            "d",
+            "solution",
+            "alice",
+            &bad_oid,
+            4,
+            serde_json::json!({"comment_oid": comment_oid, "accepted": true}),
+        );
+        let accept_oid = test_oid(&accept);
+        let revoke = entry(
+            "d",
+            "solution",
+            "alice",
+            &accept_oid,
+            5,
+            serde_json::json!({"accepted": false}),
+        );
+        let revoke_oid = test_oid(&revoke);
+        let close = entry("d", "status", "alice", &revoke_oid, 6, serde_json::json!({"status": "closed"}));
+        let close_oid = test_oid(&close);
+        let open = entry("d", "status", "alice", &close_oid, 7, serde_json::json!({"status": "open"}));
+        let owned = refs_of(&[root, comment, bad, accept, revoke, close, open]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let d = &build_discussions(&refs, &principals)[0];
+        assert!(!d.answered);
+        assert_eq!(d.solution_oid, "");
+        assert!(!d.closed);
+        assert_eq!(d.reply_count, 1);
     }
 }
 
