@@ -140,12 +140,10 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 - **文档本身没有签名**。绑定信任来自写入口：`policy.json` 必须只允许该 principal 写自己的
   registry ref（见 §14 威胁模型）。没有 policy 的仓库（allow-all）= 任何人可注册任何人。
 - `version` 当前恒为 1；`registered_at` 为 unix 秒（信息性）。
-- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。两条
-  写路径（CLI `principal-register|principal-revoke --push` 与薄 API）必须都能落账：CLI 对
-  非 commit ref 的更新用强制 refspec（`+`）、吊销用删除 refspec（`:`）。
-- 写路径：CLI `walgit collab principal-register|principal-revoke [--push <remote>]`；薄 API
-  `POST …/api/collab/principal`（CAS 旧值更新，§12）。receive-pack 路径按 Git 对 non-commit
-  ref 的更新规则（覆盖既存 ref 需要显式 force 时由调用方处理）。
+- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。
+- 写路径：轮换可用 CLI `principal-register --push`（对指向 blob 的非 commit ref 用强制
+  refspec `+`）或薄 API `POST …/api/collab/principal`（CAS 旧值更新，§12）；**吊销目前只有
+  CLI** `principal-revoke --push`（删除 refspec `:`）——薄 API 尚无删除端点。
 
 ### 4.4 host 注册表（跨仓库身份）
 
@@ -705,7 +703,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 恶意遮蔽（同一 oid 植入他人收件箱、或同名 sha 遮蔽 CI 产物） | EntrySet 保留属主副本；产物读取在命名空间内逐候选验哈希，错的跳过 |
 | 折叠覆盖（并发 gc） | CAS lease（基线 oid；无快照用空 expect）；绝不 `+`；先快照后删除 |
 | 快照文档损坏/超大 | fail-closed，读整体报错；超 64 MiB 拒绝物化 |
-| 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端的 fetch **不带 prune** → 长寿命 checkout 里被删的注册 ref 可能残留，验签仍信旧 key——需 `git fetch --prune`（或删本地 ref）后聚合；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
+| 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端 fetch（`collab watch` 与 `ci run` 共用）带 `--prune`，远端已删的注册 ref 在本地同步消失；自行 `git fetch`（不带 prune）的 checkout 仍可能残留旧 key——聚合前需 `git fetch --prune`；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
 | 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份，服务端只能人工 tombstone；升级路径 = 不可导出密钥 + 服务端登记确认（已知取舍） |
 | 排序投毒（`ts`/`parent` 不被认证） | 线程顺序、卡片状态与 `done` 门禁都依赖 `(ts, actor, oid)` 顺序与作者自报的 `parent`；参与者可回拨 `ts`、往任意线程追加低 `ts` 根条目来影响投影与卡片身份（§6.2/§8.2）。当前防线：**无**（顺序是协作约定）——不得把顺序当安全判定；链上 ts 回退处理见后续 issue（守卫截断本身已修，见 §6.2） |
 | 自审/重复批准 | **已收紧**：merge 规则按**去重后的非作者**批准者数计（§7.3），`done` 门禁同样排除 patch 作者；同伙串谋刷 approve 仍是流程边界内的事（写权限与身份是安全边界） |
