@@ -140,7 +140,9 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 - **文档本身没有签名**。绑定信任来自写入口：`policy.json` 必须只允许该 principal 写自己的
   registry ref（见 §14 威胁模型）。没有 policy 的仓库（allow-all）= 任何人可注册任何人。
 - `version` 当前恒为 1；`registered_at` 为 unix 秒（信息性）。
-- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。
+- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。两条
+  写路径（CLI `principal-register|principal-revoke --push` 与薄 API）必须都能落账：CLI 对
+  非 commit ref 的更新用强制 refspec（`+`）、吊销用删除 refspec（`:`）。
 - 写路径：CLI `walgit collab principal-register|principal-revoke [--push <remote>]`；薄 API
   `POST …/api/collab/principal`（CAS 旧值更新，§12）。receive-pack 路径按 Git 对 non-commit
   ref 的更新规则（覆盖既存 ref 需要显式 force 时由调用方处理）。
@@ -612,8 +614,9 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 每轮（默认 `--interval 10` 秒，`--once` 单轮）：
 
-1. `git fetch -q <remote> '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'`
-   ——**刻意不取 `refs/collab/ci-artifacts/*`**。
+1. `git fetch -q --prune <remote> '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'`
+   ——**刻意不取 `refs/collab/ci-artifacts/*`**；`--prune` 让远端已删的 ref（吊销的注册表
+   ref、gc 剪掉的收件箱 ref）在本地同步消失，否则已吊销 key 会在长期 checkout 里继续验签。
 2. 以 `for-each-ref refs/collab` 取当前 `refname → oid`，与状态文件
    （默认 `<gitdir>/collab-watch.json`，可 `--state` 覆盖）逐 ref 比对：新出现或 oid 变了的
    ref 为事件，按 refname 排序。**ref 删除不产生事件**（状态文件随轮覆盖）。

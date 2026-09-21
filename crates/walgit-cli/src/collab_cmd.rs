@@ -732,7 +732,10 @@ fn run_principal_register(
     let ref_name = format!("refs/collab/meta/principals/{principal}");
     git_update_ref(repo, &ref_name, Some(&oid))?;
     if let Some(remote) = push {
-        git_push(repo, remote, &ref_name)?;
+        // Re-registration updates a ref that points at a blob (a non-commit);
+        // the update is a forced one by construction (the signer rotated the
+        // key), so the refspec carries `+`.
+        git_push_refspecs(repo, remote, &[format!("+{ref_name}")], false, &[])?;
     }
     println!("{ref_name} {oid}");
     Ok(())
@@ -833,7 +836,9 @@ fn run_principal_revoke(repo: &Path, principal: &str, push: Option<&str>) -> Res
     let ref_name = format!("refs/collab/meta/principals/{principal}");
     git_update_ref(repo, &ref_name, None)?;
     if let Some(remote) = push {
-        git_push(repo, remote, &ref_name)?;
+        // The tombstone is a ref deletion; deleting the local ref first leaves
+        // no source for a bare `git push <ref>`, so send the deletion refspec.
+        git_push_refspecs(repo, remote, &[format!(":{ref_name}")], false, &[])?;
     }
     println!("{ref_name} revoked");
     Ok(())
@@ -1584,6 +1589,7 @@ pub(crate) fn git_fetch_collab(repo: &Path, remote: &str) -> Result<()> {
         .args([
             "fetch",
             "-q",
+            "--prune",
             remote,
             "+refs/collab/inbox/*:refs/collab/inbox/*",
             "+refs/collab/meta/*:refs/collab/meta/*",

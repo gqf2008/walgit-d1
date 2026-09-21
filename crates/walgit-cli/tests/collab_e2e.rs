@@ -1211,3 +1211,203 @@ async fn entry_auto_fold_folds_the_inbox_past_the_threshold() -> TestResult {
     );
     Ok(())
 }
+
+/// Registry rotation and revocation must work through the CLI's own push path
+/// (`docs/D1_PROTOCOL.md` §4.3 promises CLI and thin API are equivalent):
+/// re-registering is a forced update of a non-commit ref, revoking is a ref
+/// deletion. Both need explicit refspecs; a bare `git push <ref>` cannot do
+/// either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn principal_registry_rotation_and_revocation_push_through_receive_pack() -> TestResult {
+    let (base, _shutdown) = start_server().await?;
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let keydir = tempfile::tempdir()?;
+    let key1 = keydir.path().join("key1");
+    let key2 = keydir.path().join("key2");
+    std::fs::write(&key1, "07".repeat(32))?;
+    std::fs::write(&key2, "08".repeat(32))?;
+
+    let run = |args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    let a = tempfile::tempdir()?;
+    git_in(a.path(), &["init", "-q", "-b", "main"])?;
+    git_in(a.path(), &["config", "user.email", "t@t"])?;
+    git_in(a.path(), &["config", "user.name", "T"])?;
+    git_in(
+        a.path(),
+        &["remote", "add", "origin", &format!("{base}/o/r.git")],
+    )?;
+    let repo_a = a.path().to_str().unwrap();
+    let k1 = key1.to_str().unwrap();
+    let k2 = key2.to_str().unwrap();
+
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", k1,
+        "--push", "origin",
+    ])?;
+    let issue = run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t1", "--actor", "alice",
+        "--body", r#"{"title":"rotation"}"#, "--key", k1, "--push", "origin",
+    ])?;
+    let issue_oid = issue.split_whitespace().nth(1).unwrap().to_string();
+
+    // Rotate: the registry ref must be force-updated to the new key.
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", k2,
+        "--push", "origin",
+    ])?;
+
+    // A fresh observer sees the new key: the old-key issue is unverified, an
+    // entry signed with the new key verifies.
+    run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "comment", "--id", "t1", "--actor", "alice",
+        "--parent", &issue_oid, "--body", r#"{"note":"after rotation"}"#, "--key", k2, "--push",
+        "origin",
+    ])?;
+    let b = tempfile::tempdir()?;
+    git_in(
+        b.path(),
+        &["clone", "-q", "--no-checkout", &format!("{base}/o/r.git"), "."],
+    )?;
+    git_in(b.path(), &["fetch", "-q", "origin", "+refs/collab/*:refs/collab/*"])?;
+    let repo_b = b.path().to_str().unwrap();
+    let thread = run(&["collab", "thread", "t1", "--repo", repo_b])?;
+    let arr: serde_json::Value = serde_json::from_str(&thread)?;
+    let rows = arr.as_array().expect("thread rows");
+    let old = rows
+        .iter()
+        .find(|e| e["entry"]["kind"] == "issue")
+        .expect("issue row");
+    assert_eq!(old["verified"], false, "old-key entry unverified after rotation: {thread}");
+    let new = rows
+        .iter()
+        .find(|e| e["entry"]["kind"] == "comment")
+        .expect("comment row");
+    assert_eq!(new["verified"], true, "new-key entry verifies after rotation: {thread}");
+
+    // Revocation: the registry ref is deleted (tombstone) and the deletion
+    // reaches the remote.
+    run(&[
+        "collab", "principal-revoke", "--repo", repo_a, "--principal", "alice", "--push", "origin",
+    ])?;
+    let remote_meta = git_in(
+        a.path(),
+        &["ls-remote", "origin", "refs/collab/meta/principals/alice"],
+    )?;
+    assert!(remote_meta.trim().is_empty(), "tombstone reached the remote: {remote_meta}");
+
+    let c = tempfile::tempdir()?;
+    git_in(
+        c.path(),
+        &["clone", "-q", "--no-checkout", &format!("{base}/o/r.git"), "."],
+    )?;
+    git_in(c.path(), &["fetch", "-q", "origin", "+refs/collab/*:refs/collab/*"])?;
+    let repo_c = c.path().to_str().unwrap();
+    let thread = run(&["collab", "thread", "t1", "--repo", repo_c])?;
+    let arr: serde_json::Value = serde_json::from_str(&thread)?;
+    assert!(
+        arr.as_array()
+            .expect("thread rows")
+            .iter()
+            .all(|e| e["verified"] == false),
+        "after revocation nothing verifies: {thread}"
+    );
+    Ok(())
+}
+
+/// `collab watch` must prune refs deleted on the remote, or a revoked
+/// principal's key stays in the watcher's checkout and keeps verifying
+/// (`docs/D1_PROTOCOL.md` §4.5/§14).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watch_fetch_prunes_revoked_registry_refs() -> TestResult {
+    let (base, _shutdown) = start_server().await?;
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let keydir = tempfile::tempdir()?;
+    let key = keydir.path().join("key");
+    std::fs::write(&key, "07".repeat(32))?;
+    let k = key.to_str().unwrap();
+
+    let run = |args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    let a = tempfile::tempdir()?;
+    git_in(a.path(), &["init", "-q", "-b", "main"])?;
+    git_in(a.path(), &["config", "user.email", "t@t"])?;
+    git_in(a.path(), &["config", "user.name", "T"])?;
+    git_in(
+        a.path(),
+        &["remote", "add", "origin", &format!("{base}/o/r.git")],
+    )?;
+    let repo_a = a.path().to_str().unwrap();
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", k,
+        "--push", "origin",
+    ])?;
+    run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t1", "--actor", "alice",
+        "--body", r#"{"title":"watch prune"}"#, "--key", k, "--push", "origin",
+    ])?;
+
+    // Observer checkout: one watch pass fetches the collab refs.
+    let b = tempfile::tempdir()?;
+    git_in(
+        b.path(),
+        &["clone", "-q", "--no-checkout", &format!("{base}/o/r.git"), "."],
+    )?;
+    let repo_b = b.path().to_str().unwrap();
+    run(&["collab", "watch", "--repo", repo_b, "--remote", "origin", "--once"])?;
+    let meta = git_in(
+        b.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/collab/meta/principals"],
+    )?;
+    assert!(meta.contains("principals/alice"), "key fetched: {meta}");
+
+    run(&[
+        "collab", "principal-revoke", "--repo", repo_a, "--principal", "alice", "--push", "origin",
+    ])?;
+    run(&["collab", "watch", "--repo", repo_b, "--remote", "origin", "--once"])?;
+
+    let meta = git_in(
+        b.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/collab/meta/principals"],
+    )?;
+    assert!(
+        meta.trim().is_empty(),
+        "the revoked registry ref must be pruned by watch: {meta}"
+    );
+    let thread = run(&["collab", "thread", "t1", "--repo", repo_b])?;
+    let arr: serde_json::Value = serde_json::from_str(&thread)?;
+    assert!(
+        arr.as_array()
+            .expect("thread rows")
+            .iter()
+            .all(|e| e["verified"] == false),
+        "the revoked key no longer verifies anything: {thread}"
+    );
+    Ok(())
+}
