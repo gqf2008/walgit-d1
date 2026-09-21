@@ -647,7 +647,9 @@ decision in §4 — or the PR is; never "fix later".
   restorable taskbar button) before `-WindowStyle Hidden` can hide it — measured 2026-09-20: a
   60-second mirror task flashed a window on every run. Every periodic task (mirror, sync,
   inspection) launches a **GUI-subsystem launcher** instead, which spawns the real command with
-  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` and waits for it;
+  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` and waits for it; `DETACHED_PROCESS` is not used
+  (with no console to inherit, a console-subsystem child allocates a fresh one — a new window under
+  Windows Terminal);
   `walgit-service-host.exe` (`crates/walgit-cli/src/bin/walgit-service-host.rs`) is the reference
   implementation, `deploy/windows/README.md` carries the copy-paste registration template, and
   `deploy/windows/task-action-check.ps1` is the post-registration assertion (PE subsystem == GUI,

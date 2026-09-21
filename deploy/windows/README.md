@@ -38,16 +38,16 @@ S3/R2 配置向导（D43），保存后在托盘菜单里重启服务生效（Wi
 
 **做法:action 指向 GUI 子系统的 launcher，由它无窗口地拉起真正的命令。**
 
-- 本仓参考实现：`crates/walgit-cli/src/bin/walgit-service-host.rs`（安装为 `walgit-service-host.exe`；`#![windows_subsystem = "windows"]`，用 `cmd /d /s /c` + `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` 启动命令、等它结束并回传退出码，`>> log 2>&1` 重定向仍由 `cmd` 持有）。
-- 自定义 launcher 的最小写法：一个只加 `#![windows_subsystem = "windows"]` 的 Rust bin（或任何 GUI 子系统可执行文件），`Command::new("cmd").args(["/d", "/s", "/c", cmd]).creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS).status()`。不要用 `powershell -WindowStyle Hidden` 交差。
+- 本仓参考实现：`crates/walgit-cli/src/bin/walgit-service-host.rs`（安装为 `walgit-service-host.exe`；`#![windows_subsystem = "windows"]`，用 `cmd /d /s /c` + `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 启动命令、等它结束并回传退出码，`>> log 2>&1` 重定向仍由 `cmd` 持有）。不要加 `DETACHED_PROCESS`：脱离控制台的进程没有可继承的控制台，console 子进程会重新分配一个，窗口就回来了。
+- 自定义 launcher 的最小写法：一个只加 `#![windows_subsystem = "windows"]` 的 Rust bin（或任何 GUI 子系统可执行文件），`Command::new("cmd").args(["/d", "/s", "/c", cmd]).creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP).status()`。不要用 `powershell -WindowStyle Hidden` 交差。
 
 注册一条「每 N 分钟跑一次」的任务可照抄（命令经 `-EncodedCommand` 传 UTF-16LE base64，带空格/引号的路径不会被二次解析）：
 
 ```powershell
-$host = Join-Path $env:LOCALAPPDATA 'Programs\walgit\walgit-service-host.exe'
+$hostExe = Join-Path $env:LOCALAPPDATA 'Programs\walgit\walgit-service-host.exe'
 $command = '"C:\path\to\job.exe" --once 1>> "C:\logs\job.log" 2>&1'
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-$action  = New-ScheduledTaskAction -Execute $host -Argument "-EncodedCommand $encoded"
+$action  = New-ScheduledTaskAction -Execute $hostExe -Argument "-EncodedCommand $encoded"
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName 'my-job' -Action $action -Trigger $trigger -Force
 ```

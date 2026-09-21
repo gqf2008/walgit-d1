@@ -13,8 +13,8 @@
 //! So the action is this binary instead: a **GUI-subsystem** process built from
 //! this file alone — no dependency on the rest of the CLI, so the launcher stays
 //! a few hundred kilobytes — which runs the task's command through
-//! `cmd /d /s /c` with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP |
-//! DETACHED_PROCESS` and waits for it. Nothing in the tree ever gets a console;
+//! `cmd /d /s /c` with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` and waits
+//! for it. Nothing in the tree ever gets a console;
 //! `cmd` still owns the `>> server.log 2>&1` redirect (that is what keeps
 //! "append, never truncate"), and the task still tracks the server's lifetime
 //! because this process stays alive until the server exits.
