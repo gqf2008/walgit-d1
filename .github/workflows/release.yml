@@ -36,9 +36,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc (and the tray's GTK dev libs on linux)
+      - name: Install protoc
         run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then choco install protoc -y --no-progress; else sudo apt-get update && sudo apt-get install -y protobuf-compiler libgtk-3-dev libayatana-appindicator3-dev libxdo-dev; fi
+          if [ "$RUNNER_OS" = "Windows" ]; then choco install protoc -y --no-progress; else sudo apt-get update && sudo apt-get install -y protobuf-compiler; fi
         shell: bash
       - name: Install the stable Rust toolchain
         run: rustup toolchain install stable --profile minimal && rustup default stable && rustup show && cargo --version

@@ -43,7 +43,8 @@ libappindicator/gtk/libxdo，也不再依赖 glib。macOS/Windows 无额外系�
 - Windows:在 Windows 主机上 `cargo build --release`；安装目录放
   `walgit.exe` + `walgit-tray.exe` + `walgit-upgrade-helper.exe`，状态目录是
   `%USERPROFILE%\.walgit`
-- Linux:同 Windows 形态，状态目录是 `~/.walgit`，桌面环境需支持 appindicator
+- Linux:同 Windows 形态，状态目录是 `~/.walgit`，桌面环境需有 StatusNotifierItem
+  宿主（KDE/Ubuntu 默认有；GNOME 需 AppIndicator 扩展）
 
 ### Windows 说明(issue #68 修复后的行为)
 

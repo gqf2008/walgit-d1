@@ -23,9 +23,6 @@ jobs:
       - name: Install the stable Rust toolchain
         run: rustup toolchain install stable --profile minimal && rustup default stable && cargo --version
         shell: bash
-      - name: GTK dev libs (linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
       - uses: Swatinem/rust-cache@v2
         with:
           # 与 release.yml 同形:tray-rs 独立 lock,构建产物落根 target/

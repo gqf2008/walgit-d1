@@ -202,7 +202,6 @@ jobs:
           python3 scripts/mcp-subscribe-smoke.py target/debug/walgit walgit.example.toml
       - name: Assemble and inspect the linux .deb
         run: |
-          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
           cargo build --workspace --bin walgit --bin walgit-server
           cargo build --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
           deploy/linux/build-deb.sh target/debug 0.0.0-ci

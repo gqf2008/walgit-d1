@@ -1,8 +1,8 @@
 # Linux 托盘后端评估：消除 gtk/glib（tray-icon 的 ksni feature vs 自建 ksni 模块）
 
 状态：**已实施**（2026-09-21，`cc-ai-tray-ksni-impl`：tray-icon 0.25 + Linux `ksni` feature，
-`.deb` 依赖已去，三平台 check 与托盘测试绿；下方评估内容保留为当时依据）。原评估结论见下，
-首轮复审 request_changes 已按 `345cc9c6` 意见更正，见 §7）。
+`.deb` 依赖已去，三平台 check 与托盘测试绿）。下方评估内容保留为当时依据；
+首轮复审 request_changes 已按 `345cc9c6` 意见更正，见 §7。
 
 ## 1. 动机与更正后的前提
 
@@ -65,8 +65,8 @@ tray-icon = { version = "0.25", default-features = false }
 | 指标 | 现状 0.14/gtk | 候选 A 0.25/ksni | 候选 B 自建 ksni |
 |---|---|---|---|
 | 去重包数（整个托盘） | 164 | **158** | 75（无 winit）/ 约 94（含） |
-| gtk 系（glib/gtk/gdk/cairo/pango/atk/gio/libappindicator/libxdo） | 20 | **0** | 0 |
-| `.deb` 运行时依赖 | libgtk-3-0, libayatana-appindicator3-1, libxdo3 | **无**（仅桌面 DBus） | 无 |
+| gtk 系（glib/gtk/gdk/cairo/pango/atk/gio/libappindicator/libxdo；含 proc-macro 变体计数为 22） | 20 | **0** | 0 |
+| `.deb` 运行时依赖 | libgtk-3-0, libayatana-appindicator3-1, libxdo3 | **libc6**（无 gtk/appindicator/xdo） | libc6 |
 | 代码改动 | — | **零**（实测三平台编译通过） | Linux 模块 + main 分叉 |
 | glib 告警 | 有 | **消除** | 消除 |
 
@@ -93,9 +93,11 @@ tray-icon = { version = "0.25", default-features = false }
 实施卡步骤：
 1. `deploy/tray/tray-rs/Cargo.toml`：按 §3 目标分平台改 `tray-icon` 依赖；锁文件更新。
 2. `deploy/linux/build-deb.sh`：`Depends` 去掉 `libgtk-3-0, libayatana-appindicator3-1, libxdo3`。
-3. 三平台 `cargo check` + 现有 tray CI（windows/macos/ubuntu）绿；记录 Linux `--release` 体积。
-4. 真机矩阵：KDE / Ubuntu 默认 / GNOME 无扩展（图标、四菜单项、动态文案与禁用态、tooltip）。
-5. 回归：macOS/Windows 托盘升级通道与服务开关 smoke 不变。
+3. **同一批**去掉 CI/Dockerfile 里安装这些 dev 包的步骤（`.github/workflows/tray.yml`、
+   `ci.yml` 的 deb 步骤、`release.yml`），否则 Linux 构建门禁会在 gtk 被重新引回时仍显示绿（假绿）。
+4. 三平台 `cargo check` + 现有 tray CI（windows/macos/ubuntu）绿；记录 Linux `--release` 体积。
+5. 真机矩阵：KDE / Ubuntu 默认 / GNOME 无扩展（图标、四菜单项、动态文案与禁用态、tooltip）。
+6. 回归：macOS/Windows 托盘升级通道与服务开关 smoke 不变。
 
 ## 6. 复现命令
 
