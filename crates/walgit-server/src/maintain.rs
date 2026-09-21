@@ -630,6 +630,10 @@ async fn base_predates_window(
 /// can compose. `replayable` is the base's exact `refs_at_seq` witness:
 /// without it the compose fails forever, so the maintainer must rebuild instead
 /// of retrying the same bundle slot (the 2026-09-16 vox-seat production case).
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "the four booleans are the decision inputs; the call sites read like the predicate"
+)]
 fn base_rebuild_due(
     many_bases: bool,
     has_bitmap: bool,

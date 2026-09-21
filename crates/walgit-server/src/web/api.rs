@@ -459,7 +459,7 @@ pub(crate) fn json_swr<T: Serialize>(value: &T, etag: Option<&str>) -> Rendered 
     Rendered::json(json_bytes(value), SWR, etag.map(str::to_string))
 }
 
-/// SWR + a strong ETag taken from the body digest: ref-dependent answers change
+/// SWR + a strong `ETag` taken from the body digest: ref-dependent answers change
 /// with every push, but identical bytes still deserve a 304. Used by the three
 /// D1 aggregation endpoints (`docs/D1_PROTOCOL.md` §12).
 fn json_swr_hashed<T: Serialize>(value: &T) -> Rendered {
@@ -1269,7 +1269,7 @@ async fn collab_entries(
             .and_then(|v| v.as_str())
             == Some("done")
     {
-        let state = collab_load(&st, &r).await?;
+        let state = Box::pin(collab_load(&st, &r)).await?;
         let thread_refs: Vec<&walgit_wal::collab::EntryRef> = state
             .entries
             .iter()
@@ -1383,17 +1383,11 @@ async fn git_cat_file_batch(
                 // Over the per-entry read cap: skip without materializing (the
                 // loader treats a missing blob exactly like an unparseable one).
                 // cat-file --batch will not emit the next header until this body
-                // is consumed, so drain it in bounded chunks.
-                let mut remaining = size + 1; // body + trailing newline
-                let mut scratch = [0u8; 64 * 1024];
-                while remaining > 0 {
-                    let take = remaining.min(scratch.len());
-                    stdout
-                        .read_exact(&mut scratch[..take])
-                        .await
-                        .map_err(internal)?;
-                    remaining -= take;
-                }
+                // is consumed, so drain it (body + trailing newline) into the sink.
+                let mut limited = (&mut stdout).take((size + 1) as u64);
+                tokio::io::copy(&mut limited, &mut tokio::io::sink())
+                    .await
+                    .map_err(internal)?;
                 metrics::counter!("walgit_collab_entry_skipped_total", "reason" => "oversized")
                     .increment(1);
                 continue;
@@ -1582,6 +1576,17 @@ struct CollabState {
     rules: MergeRules,
 }
 
+/// Metric samples: histograms take `f64`, and the counts here (refs, entries,
+/// bytes, seconds) stay far below 2^53, so the conversion loses nothing that
+/// could matter for a gauge.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "histogram samples are f64 by API; these counts stay far below 2^53"
+)]
+fn metric_f64(n: u64) -> f64 {
+    n as f64
+}
+
 async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     // Refs-level work: the byte-sorted index, no LIST on the bucket.
     let mut principals: HashMap<String, String> = HashMap::new();
@@ -1593,7 +1598,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     // Byte-sorted index: jump straight to the `refs/collab/` namespace instead
     // of scanning every ref in a 466k-ref repository (same idiom as ref_list).
     let start = all.partition_point(|(name, _)| name.as_str() < "refs/collab/");
-    for (name, oid) in &all[start..] {
+    for (name, oid) in all.iter().skip(start) {
         if !name.starts_with("refs/collab/") {
             break;
         }
@@ -1607,7 +1612,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
             snapshot_oid = Some(oid.clone());
         }
     }
-    metrics::histogram!("walgit_collab_load_refs").record(plan.len() as f64);
+    metrics::histogram!("walgit_collab_load_refs").record(metric_f64(plan.len() as u64));
     if plan.len() > COLLAB_MAX_ENTRIES {
         metrics::counter!("walgit_collab_budget_exceeded").increment(1);
         return Err(ApiError::ServiceUnavailable(format!(
@@ -1659,7 +1664,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
         Some(walgit_wal::collab::COLLAB_ENTRY_MAX_BYTES),
     )
     .await?;
-    blobs.extend(git_cat_file_batch(&r.local, &want_meta, None).await?);
+    blobs.extend(Box::pin(git_cat_file_batch(&r.local, &want_meta, None)).await?);
     // D45 read semantics: the folded history (snapshot) ∪ the unfolded tail,
     // deduped by oid — a mid-fold state (snapshot moved, deletes pending)
     // aggregates identically to either side of it.
@@ -1686,9 +1691,10 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
         // inside, like a corrupt inbox blob.)
         let snap = walgit_wal::collab::parse_snapshot(bytes)
             .map_err(|e| internal(format!("{}: {e}", walgit_wal::collab::SNAPSHOT_REF)))?;
-        metrics::histogram!("walgit_collab_snapshot_bytes").record(bytes.len() as f64);
+        metrics::histogram!("walgit_collab_snapshot_bytes").record(metric_f64(bytes.len() as u64));
+        let age = (chrono::Utc::now().timestamp() - snap.ts).max(0);
         metrics::histogram!("walgit_collab_snapshot_age_seconds")
-            .record((chrono::Utc::now().timestamp() - snap.ts).max(0) as f64);
+            .record(metric_f64(u64::try_from(age).unwrap_or(0)));
         if !snap.complete {
             metrics::counter!("walgit_collab_snapshot_truncated").increment(1);
         }
@@ -1768,7 +1774,7 @@ async fn collab_report(
         Need::Objects,
         None,
         move |r| async move {
-            let state = collab_load(&st2, &r).await?;
+            let state = Box::pin(collab_load(&st2, &r)).await?;
             let refs: Vec<&EntryRef> = state.entries.iter().collect();
             let report = build_report(
                 &refs,
@@ -1798,7 +1804,7 @@ async fn collab_thread(
         Need::Objects,
         None,
         move |r| async move {
-            let state = collab_load(&st2, &r).await?;
+            let state = Box::pin(collab_load(&st2, &r)).await?;
             let filtered: Vec<&EntryRef> =
                 state.entries.iter().filter(|e| e.entry.id == id).collect();
             if filtered.is_empty() {
@@ -1882,7 +1888,12 @@ async fn collab_ci_artifact(
                 }
                 let oid_owned = oid.to_string();
                 let blobs =
-                    git_cat_file_batch(&r.local, std::slice::from_ref(&oid_owned), None).await?;
+                    Box::pin(git_cat_file_batch(
+                        &r.local,
+                        std::slice::from_ref(&oid_owned),
+                        None,
+                    ))
+                    .await?;
                 let Some(bytes) = blobs.get(oid) else {
                     continue;
                 };
@@ -2040,7 +2051,7 @@ async fn collab_board(
         Need::Objects,
         None,
         move |r| async move {
-            let state = collab_load(&st2, &r).await?;
+            let state = Box::pin(collab_load(&st2, &r)).await?;
             let board_def = load_board_def(&r).await?;
             let refs: Vec<&EntryRef> = state.entries.iter().collect();
             let board: Board = build_board(&refs, &state.principals, &state.rules, &board_def);
@@ -2898,12 +2909,12 @@ mod blob_view_tests {
     #[test]
     fn the_byte_channel_has_its_own_budget() {
         use super::{MAX_BLOB, RAW_BLOB_MAX};
+        const _: () = assert!(RAW_BLOB_MAX > MAX_BLOB);
         // The JSON lane's cap must not leak into `?raw` (a 3 MiB image is the
         // point of the channel), and the byte channel must stay bounded because
         // the object is faulted whole.
         assert_eq!(MAX_BLOB, 2 * 1024 * 1024);
         assert_eq!(RAW_BLOB_MAX, 32 * 1024 * 1024);
-        assert!(RAW_BLOB_MAX > MAX_BLOB);
     }
 
     #[test]

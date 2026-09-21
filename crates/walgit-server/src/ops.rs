@@ -2121,7 +2121,7 @@ mod gc_fence_tests {
         cfg.store.backend = StoreBackend::Memory;
         cfg.store.memory_backend_intentional = true;
         cfg.cache.dir = cache.path().to_path_buf();
-        cfg.compaction.retention_superseded = Duration::from_secs(7 * 24 * 3600);
+        cfg.compaction.retention_superseded = Duration::from_hours(7 * 24);
         cfg.wal.freshness_ttl = Duration::from_secs(3600);
         let registry = walgit_wal::Registry::new(fault.clone(), Arc::new(cfg));
         let id = walgit_git::RepoId::new("o", "r")?;
@@ -2252,7 +2252,7 @@ mod gc_fence_tests {
         old.seconds -= 2 * 3600;
         let old_marker = walgit_proto::v1::SupersededPack {
             checksum: checksum.clone(),
-            superseded_at: Some(old.clone()),
+            superseded_at: Some(old),
             seq: 7,
         }
         .encode_to_vec();

@@ -37,7 +37,7 @@ fn old_timestamp() -> prost_types::Timestamp {
 fn log_segment_bytes(seq: u64, at: &prost_types::Timestamp) -> bytes::Bytes {
     let entry = walgit_proto::v1::LogEntry {
         seq,
-        created_at: Some(at.clone()),
+        created_at: Some(*at),
         ..Default::default()
     };
     walgit_proto::frame::encode_entries(std::iter::once(&entry))
@@ -49,7 +49,7 @@ fn checkpoint_bytes(seq: u64, at: &prost_types::Timestamp) -> Vec<u8> {
     walgit_proto::v1::Checkpoint {
         seq,
         refs_key: walgit_proto::keys::checkpoint_refs_key(seq),
-        created_at: Some(at.clone()),
+        created_at: Some(*at),
         ..Default::default()
     }
     .encode_to_vec()
@@ -60,7 +60,7 @@ fn checkpoint_bytes(seq: u64, at: &prost_types::Timestamp) -> Vec<u8> {
 fn refs_snapshot_bytes(at: &prost_types::Timestamp) -> Vec<u8> {
     use prost::Message;
     walgit_proto::v1::RefSnapshot {
-        created_at: Some(at.clone()),
+        created_at: Some(*at),
         ..Default::default()
     }
     .encode_to_vec()
@@ -3833,9 +3833,9 @@ async fn gc_reclaims_folded_wal_objects_past_the_window() -> anyhow::Result<()> 
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(fresh.clone()),
-            first_state_at: Some(fresh.clone()),
-            as_of: Some(fresh.clone()),
+            created_at: Some(fresh),
+            first_state_at: Some(fresh),
+            as_of: Some(fresh),
         });
         m.min_seq = 6; // everything below 6 is folded into that checkpoint
         m.log_segments = vec![LogSegmentRef {
@@ -4126,9 +4126,9 @@ async fn gc_keeps_objects_with_missing_or_invalid_timestamps() -> anyhow::Result
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(fresh.clone()),
-            first_state_at: Some(fresh.clone()),
-            as_of: Some(fresh.clone()),
+            created_at: Some(fresh),
+            first_state_at: Some(fresh),
+            as_of: Some(fresh),
         });
         m.log_segments = vec![LogSegmentRef {
             key: keys::log_segment_key(15),
@@ -4171,7 +4171,7 @@ async fn gc_keeps_objects_with_missing_or_invalid_timestamps() -> anyhow::Result
     let entries = [
         LogEntry {
             seq: 4,
-            created_at: Some(old.clone()),
+            created_at: Some(old),
             ..Default::default()
         },
         LogEntry {
@@ -4271,9 +4271,9 @@ async fn gc_drains_a_checkpoint_remnant_after_an_interrupted_delete() -> anyhow:
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(fresh.clone()),
-            first_state_at: Some(fresh.clone()),
-            as_of: Some(fresh.clone()),
+            created_at: Some(fresh),
+            first_state_at: Some(fresh),
+            as_of: Some(fresh),
         });
         m.log_segments.clear();
         m.packs.clear();
@@ -4364,9 +4364,9 @@ async fn gc_keeps_a_checkpoint_directory_whole_at_the_delete_bound() -> anyhow::
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(fresh.clone()),
-            first_state_at: Some(fresh.clone()),
-            as_of: Some(fresh.clone()),
+            created_at: Some(fresh),
+            first_state_at: Some(fresh),
+            as_of: Some(fresh),
         });
         m.log_segments.clear();
         m.packs.clear();
@@ -4598,9 +4598,9 @@ async fn gc_reclaims_folded_wal_objects_when_the_base_witness_is_complete() -> a
         m.checkpoint = Some(CheckpointRef {
             seq: live_seq,
             key: keys::checkpoint_key(live_seq),
-            created_at: Some(fresh.clone()),
-            first_state_at: Some(fresh.clone()),
-            as_of: Some(fresh.clone()),
+            created_at: Some(fresh),
+            first_state_at: Some(fresh),
+            as_of: Some(fresh),
         });
         m.log_segments.clear();
         m.packs = vec![PackRef {

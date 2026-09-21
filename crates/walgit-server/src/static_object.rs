@@ -1,7 +1,7 @@
 //! HTTP serving of immutable store objects (bundles, LFS objects, packs) with
 //! the complete conditional/range contract a CDN or `git` expects:
 //!
-//! * strong `ETag` = the store version's HTTP ETag part (GCS generation /
+//! * strong `ETag` = the store version's HTTP `ETag` part (GCS generation /
 //!   S3 `ETag`), quoted;
 //! * `If-None-Match` (list or `*`) → `304` with the same validators;
 //! * `If-Range` (`ETag` or ignored date) gating `Range`;
