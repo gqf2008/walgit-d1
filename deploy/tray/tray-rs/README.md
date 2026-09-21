@@ -30,9 +30,9 @@
 cargo build --release        # 产物 target/release/walgit-tray(.exe)
 ```
 
-依赖:Rust(含 std);Linux 需要 gtk3 + appindicator + xdo 开发库
-(`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev`)——tray-icon 在
-Linux 走 appindicator,默认 feature 引 libxdo。macOS/Windows 无额外系统依赖。
+依赖:Rust(含 std)；Linux 无需额外系统开发包——托盘走 `tray-icon` 的
+`ksni` feature（StatusNotifierItem/DBusMenu，纯 Rust），不再引
+libappindicator/gtk/libxdo，也不再依赖 glib。macOS/Windows 无额外系统依赖。
 
 - macOS:产物可直接运行；正式 DMG 打包由 `deploy/tray/macos/`(`build.sh` /
   `build-dmg.sh`)负责，App Bundle 的托盘本体就是这个二进制(#183)。

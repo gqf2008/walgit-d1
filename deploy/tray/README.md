@@ -171,7 +171,7 @@ cd deploy/tray/tray-rs && cargo build --release
 # 产物 tray-rs/target/release/walgit-tray(.exe),与 walgit 放同一安装目录
 ```
 
-Linux 需要 `libgtk-3-dev libayatana-appindicator3-dev libxdo-dev`
-(tray-icon 走 appindicator,默认 feature 引 libxdo)。Windows 上 release
+Linux 无需额外系统开发包：托盘走 `tray-icon` 的 `ksni` feature（StatusNotifierItem/
+DBusMenu，纯 Rust），不再引 libappindicator/gtk/libxdo，也不再依赖 glib。Windows 上 release
 产物为 GUI 子系统(无控制台)、单实例、首次运行自动创建 `~/.walgit`
 状态目录并写 `tray.log`;细节见 `tray-rs/README.md` 的「Windows 说明」。

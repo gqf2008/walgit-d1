@@ -1,7 +1,8 @@
 # Linux 托盘后端评估：消除 gtk/glib（tray-icon 的 ksni feature vs 自建 ksni 模块）
 
-状态：**评估完成，建议走上游 ksni feature（候选 A）**（2026-09-21，线程 `cc-ai-tray-linux-ksni-eval`；
-首轮复审 request_changes 已按 `345cc9c6` 意见更正，见 §7）。实施另开卡。
+状态：**已实施**（2026-09-21，`cc-ai-tray-ksni-impl`：tray-icon 0.25 + Linux `ksni` feature，
+`.deb` 依赖已去，三平台 check 与托盘测试绿；下方评估内容保留为当时依据）。原评估结论见下，
+首轮复审 request_changes 已按 `345cc9c6` 意见更正，见 §7）。
 
 ## 1. 动机与更正后的前提
 

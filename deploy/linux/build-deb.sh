@@ -66,7 +66,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: libgtk-3-0, libayatana-appindicator3-1, libxdo3
+Depends: libc6
 Maintainer: qingfeng gao <gao.qingfeng@gmail.com>
 Homepage: https://github.com/gqf2008/walgit-d1
 Description: Git at any scale, on object storage

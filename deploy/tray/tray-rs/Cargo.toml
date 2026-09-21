@@ -5,7 +5,6 @@ edition = "2021"
 description = "walgit 服务托盘(macOS / Windows / Linux)"
 
 [dependencies]
-tray-icon = "0.14"
 winit = "0.30"
 
 # GitHub `releases/latest` 是第三方 JSON(转义/嵌套/null 都要正确解析),而这
@@ -20,6 +19,14 @@ sha2 = "0.10"
 [profile.release]
 opt-level = "z"
 strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# 上游一等公民 SNI 后端(ksni)：不引 libappindicator/gtk/libxdo 系统库，也不再带
+# glib（Dependabot medium 告警的来源）。macOS/Windows 不需要该 feature。
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.25", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
