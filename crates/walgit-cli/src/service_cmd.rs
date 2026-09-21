@@ -1175,7 +1175,10 @@ mod task {
 
     /// The task launches `walgit-service-host.exe` — a **GUI-subsystem** helper
     /// shipped next to this binary — which starts `cmd /d /s /c … >> log 2>&1`
-    /// with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`.
+    /// with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` (`DETACHED_PROCESS`
+    /// is wrong here: a detached process hands the child no console, so a
+    /// console-subsystem child allocates a fresh one — see the launcher's
+    /// module docs).
     ///
     /// A scheduled `Exec` action always gets a *console*, and with Windows
     /// Terminal as the machine's default terminal that console becomes a window
