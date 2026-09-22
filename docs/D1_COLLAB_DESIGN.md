@@ -171,7 +171,8 @@
 2. **行动**：构造签名条目（review / patch / comment / status）→ push 自己的收件箱。
    幂等：条目按 **oid**（内容寻址）去重，重复/重投递无害；事件按 seq 去重。
 3. **上下文**：walgit API（tree/blob/commits/resolve）+ blobless bundle（全量上下文、字节走桶）。
-4. **求助**：`status: needs-human` 条目 + `review: request_changes` 把球踢回人；dashboard/订阅者展示。
+4. **求助**：`review: request_changes` 走回实现者修复；`status: needs-human` 只用于真正需要人的
+   （授权/优先级/外部输入）——技术/产品判断由 owner 做出并在 `comment` 留痕，不是求助通道。
 5. **留痕**：`agent_action` 条目记录模型/置信度/耗时（可选），供 dashboard 与审计。
 
 ## 8. Dashboard / 可观测性

@@ -478,12 +478,13 @@ look productive while its rows cannot answer the only questions it exists to ans
   for the final review, from the merger — reviews the diff/artifacts and posts **full
   findings** in the `review` entry — location, problem, suggestion — not a one-line
   conclusion. The author's own `approve` is not independent review and must not satisfy
-  the review gate; the coordinator must check the actor, because the merge rule counts
-  verified approvals without excluding the author automatically.
-- Run the review as an independent agent process: its own principal/key, its own
-  worktree, and its own commands run against the pinned commit — a headless sub-agent
-  started for the review is the normal shape, not the exception. Evidence means what
-  the reviewer ran and observed; the author's own test run is not verification.
+  the review gate. The merge rule itself drops `svc-*` actors and the authors of the
+  **verified** patch(es) from its countable approvals; because an unverified patch does
+  not populate that author set, the coordinator still checks the actor before merging.
+- Run the review as an independent party — an agent process or a human, each with its
+  own principal/key — whose own commands run against the pinned commit; a headless
+  sub-agent started for the review is the normal shape, not the exception. Evidence
+  means what the reviewer ran and observed; the author's own test run is not verification.
 - `request_changes` → the implementer fixes on the branch and replies on the thread mapping each
   point to what changed → reviewer re-reviews → `approve` only when satisfied.
 - Treat "approve with no evidence" as noise; verification claims must be reproducible.
