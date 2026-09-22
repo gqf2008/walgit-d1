@@ -190,6 +190,9 @@ const en = {
   "write.enabling": "Setting up…",
   "write.enable.hint":
     " — generate an Ed25519 keypair in this browser, self-register the public key, and post signed entries.",
+  "write.key.backup": "Backup key",
+  "write.key.hint":
+    "Keep the backup: this key is this browser's collab identity. The registry trusts only its current key, so losing or rotating it makes every entry signed with it stop verifying.",
   "write.post": "Post {kind}",
   "write.posting": "Posting…",
   "write.ph.issue": "First line = title, rest = body",
@@ -895,6 +898,9 @@ const zhCN: Record<I18nKey, string> = {
   "write.enabling": "设置中…",
   "write.enable.hint":
     " — generate an Ed25519 keypair in this browser, self-register the public key, and post signed entries.",
+  "write.key.backup": "备份密钥",
+  "write.key.hint":
+    "请保存好备份：这是本浏览器的协作签名身份。验证只认当前 key——丢失或轮换后，用它签过的条目都会变为 unverified。",
   "write.post": "发布{kind}",
   "write.posting": "发布中…",
   "write.ph.issue": "第一行 = 标题，其余 = 正文",
@@ -1596,6 +1602,9 @@ const zhTW: Record<I18nKey, string> = {
   "write.enabling": "設定中…",
   "write.enable.hint":
     " — generate an Ed25519 keypair in this browser, self-register the public key, and post signed entries.",
+  "write.key.backup": "備份金鑰",
+  "write.key.hint":
+    "請保存好備份：這是本瀏覽器的協作簽章身分。驗證只認目前的 key——遺失或輪換後，用它簽過的條目都會變成 unverified。",
   "write.post": "發佈{kind}",
   "write.posting": "發佈中…",
   "write.ph.issue": "第一行 = 標題，其餘 = 內文",

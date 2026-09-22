@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { api } from "../api";
 import { invalidate } from "../data";
-import { ed25519Supported, publicKeyB64, signCanonical } from "../collab";
+import { downloadKeyBackup, ed25519Supported, publicKeyB64, signCanonical } from "../collab";
 import { useI18n, kindLabel, decisionLabel, statusLabel, type TFunc } from "../i18n";
 
 /**
@@ -149,7 +149,11 @@ export function CollabWriteBox({ full, id, parent, onPosted }: CollabWriteProps)
             <option value="open">{statusLabel(t, "open")}</option>
           </select>
         )}
+        <button type="button" className="btn small" onClick={() => downloadKeyBackup(ready)}>
+          {t("write.key.backup")}
+        </button>
       </div>
+      <div className="muted" style={{ fontSize: "0.85em" }}>{t("write.key.hint")}</div>
       {kind === "patch" && (
         <div className="row gap">
           <input value={base} onChange={(e) => setBase(e.target.value)} placeholder={t("write.baseRef")} />

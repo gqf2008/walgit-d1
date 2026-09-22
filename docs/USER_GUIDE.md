@@ -187,6 +187,9 @@ walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
   walgit collab principal-fetch --repo <checkout>
   ```
 - 密钥是 **32 字节 hex** 的 Ed25519 种子；妥善保管，谁持有谁就是该身份。
+- **浏览器身份（SPA 写路径）**：同一浏览器首次发条目时自注册一把 WebCrypto Ed25519 key（存 localStorage）。
+  验证只认「此刻」注册表里的那一把 key，因此 **key 丢失后换新 key（轮换）会让该身份此前签名的全部条目变为 unverified**——
+  用写入口的「备份密钥」导出 JWK 备份、并用旧 key 重新注册，是唯一恢复路径。`walgit principal rotate` 同理。
 
 ---
 

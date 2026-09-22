@@ -71,3 +71,28 @@ export async function signCanonical(canonical: string): Promise<string> {
   const sig = await crypto.subtle.sign("Ed25519", pair.privateKey, new TextEncoder().encode(canonical));
   return b64(sig);
 }
+
+/** The stored private JWK as a JSON data URL for a user-requested backup, or
+    `null` when this browser has no key yet. Exporting is deliberate: the
+    registry verifies against its *current* key, so losing or rotating this key
+    makes every entry signed with it unverified — the backup is the only way
+    back. */
+export function keyBackupDataUrl(): string | null {
+  const jwk = localStorage.getItem(KEY_STORE);
+  return jwk === null ? null : `data:application/json;charset=utf-8,${encodeURIComponent(jwk)}`;
+}
+
+export function keyBackupFilename(principal: string): string {
+  return `walgit-collab-key-${principal}.json`;
+}
+
+/** Download the stored key. Returns `false` when there is nothing to back up. */
+export function downloadKeyBackup(principal: string): boolean {
+  const href = keyBackupDataUrl();
+  if (href === null) return false;
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = keyBackupFilename(principal);
+  a.click();
+  return true;
+}

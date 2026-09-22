@@ -140,7 +140,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 - **文档本身没有签名**。绑定信任来自写入口：`policy.json` 必须只允许该 principal 写自己的
   registry ref（见 §14 威胁模型）。没有 policy 的仓库（allow-all）= 任何人可注册任何人。
 - `version` 当前恒为 1；`registered_at` 为 unix 秒（信息性）。
-- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。
+- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。验证只认**此刻**注册表里的那把 key，因此**轮换与该 key 的丢失都会让此前签名的全部条目在未来聚合中变为 unverified**；唯一恢复路径是用**旧 key 的备份**重新注册旧 key。浏览器写路径因此提供导出备份（SPA 写入口的「备份密钥」，后果见 §14 与 `docs/USER_GUIDE.md` §7）。
 - 写路径：轮换可用 CLI `principal-register --push`（对指向 blob 的非 commit ref 用强制
   refspec `+`）或薄 API `POST …/api/collab/principal`（CAS 旧值更新，§12）；**吊销目前只有
   CLI** `principal-revoke --push`（删除 refspec `:`）——薄 API 尚无删除端点。
@@ -333,9 +333,16 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
   `thread_keeps_chain_order_for_entries_appended_after_a_long_chain` 锁死新行为。
 - **排序不由签名保真**：`ts` 与 `parent` 都是条目作者可控的字段（签名只证「作者这么写了」，
   不证「时间真实 / parent 属实」），顺序是协作约定、不是可依赖的安全边界；`done` 门禁与看板
-  都读这个顺序（§7.5/§8.2），威胁模型见 §14。具体后果：卡片的身份字段（`title`/`prose`/
-  `actor`）取自**序首**（§8.2），任何 writer 往任意线程追加一条低 `ts` 的（根）条目即可改写
-  卡片身份；`status` 上下文按序重放，同样可被覆盖。
+  都读这个顺序（§7.5/§8.2），威胁模型见 §14。**现状与影响面（2026-09-22 与代码核对）**：
+  - 链序由 `parent` 拓扑决定（就绪性），`ts` 只在**平行候选**之间排序，因此**回拨 `ts` 不会
+    打乱一条链的顺序**；它影响的是并行根/分支的相对次序，以及 `last_ts`（看板排序）与
+    `created_ts` 的展示值——属显示/排序噪声。
+  - 卡片身份字段（`title`/`prose`/`actor`）取自 `canonical_root`（**首个 verified 根**，
+    退化取序首，§8.2）；未注册者注入的低 `ts` 根不会改写身份。已验证参与者仍可注入并影响
+    投影——但它本来就能直接发条目，身份边界始终是写权限（§3/§14）。`status` 上下文按同一
+    链序重放：任何已验证参与者都能追加 `status` 覆盖它，这是工具的设计行为，不是顺序缺陷。
+  - 写侧**不校验** `parent` 存在性：折叠后父条目只存在于快照里（不在 ref 上），按 ref 校验
+    会误拒合法追加；这是设计选择，不是遗漏。
 - **链头**（tip）= 输出末条，`last_oid`；后续条目以它为 `parent`。
 
 ### 6.3 链完整性（运维须知）
@@ -403,7 +410,7 @@ report/threads/board；CLI 的 `pr`/`report`/`board`）；CLI 的 `--rules <file
 字段（`walgit-wal::collab::Report`，CLI 与服务端同源）：
 
 - `threads[]`：每个非纯 CI 线程的 `{id, title, entries, verified, last_ts, kinds}`；
-  `title` = 根条目 `body.title`（缺失为 `""`）；`kinds` = 去重升序。
+  `title` = canonical root 的 `body.title`（缺失为 `""`）；`kinds` = 去重升序。
   **排序是投影的一部分**：`last_ts` 降序，`id` 升序破平；客户端照序渲染、不重排。
 - `prs[]`：含 `patch` 的线程的 `{id, title, base, head, status, approvals, merge_allowed, merge_reason}`；
   `approvals` = 可计数的批准者数（distinct、排除 `svc-` 与 patch 作者，与 §7.3 同源）；
@@ -469,9 +476,9 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
 | 字段 | 来源/规则 |
 |---|---|
 | `id` | 线程 id |
-| `title` | 根条目 `body.title`，缺失 `""` |
-| `prose` | 根条目 `text`→`body`→`note`→`message`→`summary` 第一个非空并 trim，缺失 `""` |
-| `actor` | 根条目 `actor` |
+| `title` | `canonical_root`（首个 verified 根，退化取序首）的 `body.title`，缺失 `""` |
+| `prose` | `canonical_root` 的 `text`→`body`→`note`→`message`→`summary` 第一个非空并 trim，缺失 `""` |
+| `actor` | `canonical_root` 的 `actor` |
 | `status` | `card_status`：按线程序重放，`status` 条目的字符串 `body.status` 覆盖；`merge_result {"merged":true}` 置 `merged`；更晚的 `status` 可再覆盖；默认 `open`。**刻意宽于 PR 状态机**：跟踪工作单元（in-progress/needs-review/blocked/needs-human…） |
 | `owner`/`worktree`/`branch`/`work` | 工作上下文：按线程序遍历 `status` 条目，字段为**字符串**时覆盖（含显式 `""` 清空）；字段缺失 = 继承上一份；`work` 缺失时回退该条目的 `note`；这条 `note` 回退也覆盖继承值 |
 | `created_ts` | 根条目 `ts` |
@@ -704,8 +711,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 折叠覆盖（并发 gc） | CAS lease（基线 oid；无快照用空 expect）；绝不 `+`；先快照后删除 |
 | 快照文档损坏/超大 | fail-closed，读整体报错；超 64 MiB 拒绝物化 |
 | 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端 fetch（`collab watch` 与 `ci run` 共用）带 `--prune`，远端已删的注册 ref 在本地同步消失；自行 `git fetch`（不带 prune）的 checkout 仍可能残留旧 key——聚合前需 `git fetch --prune`；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
-| 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份，服务端只能人工 tombstone；升级路径 = 不可导出密钥 + 服务端登记确认（已知取舍） |
-| 排序投毒（`ts`/`parent` 不被认证） | 线程顺序、卡片状态与 `done` 门禁都依赖 `(ts, actor, oid)` 顺序与作者自报的 `parent`；参与者可回拨 `ts`、往任意线程追加低 `ts` 根条目来影响投影与卡片身份（§6.2/§8.2）。当前防线：**无**（顺序是协作约定）——不得把顺序当安全判定；链上 ts 回退处理见后续 issue（守卫截断本身已修，见 §6.2） |
+| 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份（签名函数就在页面里，改不可导出只防「把 key 带走」，拦不住即时滥用），服务端只能人工 tombstone。**可导出是刻意的**：验证只认此刻注册表里的那一把 key，key 丢失后换新 key（轮换）会让该身份的历史条目全部变 unverified，用旧 key 备份回注是唯一恢复路径；SPA 写入口提供「备份密钥」导出，`docs/USER_GUIDE.md` §7 写明后果。 |
+| 排序投毒（`ts`/`parent` 不被认证） | 顺序是协作约定、不是安全边界（§6.2）。与代码核对后的现状：链序由 `parent` 拓扑决定，回拨 `ts` 只影响平行候选次序与 `last_ts`/`created_ts` 展示；卡片身份取 **首个 verified 根**（`canonical_root`），未注册者的回填根不能改写身份；已验证参与者能影响投影——等价于他们直接发条目的能力，边界仍是写权限（§3）。写侧不校验 `parent`（折叠后父只在快照里，按 ref 校验会误拒合法追加）。**不再计划**服务器时间戳/单调序号类防线（收益低、要改 schema）。 |
 | 自审/重复批准 | **已收紧**：merge 规则按**去重后的非作者**批准者数计（§7.3），`done` 门禁同样排除 patch 作者；同伙串谋刷 approve 仍是流程边界内的事（写权限与身份是安全边界） |
 | gc 写出超限快照 | **已强制**：CLI 渲染后 >64 MiB 默认拒绝，`--truncate` 丢弃最老记录并置 `complete=false`，服务端立即恢复可读；本地 `load` 同样 fail-closed。快照字节是唯一载体，禁止先删 ref |
 | 时钟 | `ts` 不被认证；只影响排序/展示（及 CI TTL 活性），不参与签名/身份等安全判定；但投影顺序依赖它，见上一行 |
