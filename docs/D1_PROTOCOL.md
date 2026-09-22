@@ -481,7 +481,7 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
 | `actor` | `canonical_root` 的 `actor` |
 | `status` | `card_status`：按线程序重放，`status` 条目的字符串 `body.status` 覆盖；`merge_result {"merged":true}` 置 `merged`；更晚的 `status` 可再覆盖；默认 `open`。**刻意宽于 PR 状态机**：跟踪工作单元（in-progress/needs-review/blocked/needs-human…） |
 | `owner`/`worktree`/`branch`/`work` | 工作上下文：按线程序遍历 `status` 条目，字段为**字符串**时覆盖（含显式 `""` 清空）；字段缺失 = 继承上一份；`work` 缺失时回退该条目的 `note`；这条 `note` 回退也覆盖继承值 |
-| `created_ts` | 根条目 `ts` |
+| `created_ts` | `canonical_root` 的 `ts` |
 | `last_ts` | 线程内最大 `ts` |
 | `entries`/`verified`/`unverified` | 集合大小与验证计数 |
 | `kinds` | 去重升序 |

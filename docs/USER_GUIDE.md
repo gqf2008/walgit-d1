@@ -187,9 +187,17 @@ walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
   walgit collab principal-fetch --repo <checkout>
   ```
 - 密钥是 **32 字节 hex** 的 Ed25519 种子；妥善保管，谁持有谁就是该身份。
-- **浏览器身份（SPA 写路径）**：同一浏览器首次发条目时自注册一把 WebCrypto Ed25519 key（存 localStorage）。
-  验证只认「此刻」注册表里的那一把 key，因此 **key 丢失后换新 key（轮换）会让该身份此前签名的全部条目变为 unverified**——
-  用写入口的「备份密钥」导出 JWK 备份、并用旧 key 重新注册，是唯一恢复路径。`walgit principal rotate` 同理。
+- **浏览器身份（SPA 写路径）**：同一浏览器首次发条目时自注册一把 WebCrypto Ed25519 key（存 localStorage，键名 `walgit.collab.keypair.v1`）。
+  验证只认「此刻」注册表里的那一把 key，因此 **key 丢失后换新 key（轮换）会让该身份此前签名的全部条目变为 unverified**。
+  - **备份**：线程页写入口的「备份密钥」导出 `walgit-collab-key-<principal>.json`（JWK 文本），请妥善保存。
+  - **恢复**：把备份内容写回本浏览器，刷新后用任意写入口（它会自动把公钥重新注册/覆盖回去）：
+    ```js
+    // 控制台执行；备份文件内容就是 localStorage 里存的 JSON 文本
+    localStorage.setItem("walgit.collab.keypair.v1", `粘贴 walgit-collab-key-<principal>.json 的内容`)
+    ```
+  - 注意注册表是「当前 key 唯一」语义：repo 本地 `refs/collab/meta/principals/*` 永远覆盖 host 注册表，
+    因此 `walgit principal rotate` 只影响以 host 注册表为有效来源的身份；反之 repo 本地轮换（CLI `collab principal-register`）
+    对所有读者生效。两者都会让旧 key 的历史条目失去 verified。
 
 ---
 
