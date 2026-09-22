@@ -94,8 +94,9 @@ leaves no collaboration record.
 agent *before* opening threads — a worker pool (`<proj>-worker-1..N`), a reviewer pool
 (`<proj>-reviewer-1..N`), and a coordinator (`<proj>-coordinator`). N active agents = N
 cards = N worktrees/branches; one card has one owner; the reviewer must sign with a
-different principal than the author and reject a self-approve (the merge rule counts
-verified approvals but does not infer authorship); the coordinator performs the merge. Never let
+different principal than the author and reject a self-approve (the merge rule drops the
+verified patch author, so the coordinator still checks the actor — an unverified patch does
+not populate the author set); the coordinator performs the merge. Never let
 multiple agents sign under one shared key (`sqb` or otherwise): the board and audit can
 then no longer distinguish implementer, reviewer, and merger. See `/SKILL.md` §0b for
 the full topology and copyable checklist.
