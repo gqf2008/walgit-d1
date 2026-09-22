@@ -143,7 +143,7 @@ W collab gc --actor <principal> --key ~/.walgit/keys/<principal>.ed25519 \
 | `issue` | `{"title","body"}` | thread root |
 | `status` | `{"status","owner","worktree?","branch?","work","note?"}` | claim / move the card |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
-| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review; actor must differ from the author (coordinator-enforced) |
+| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review, run as its own agent (own principal/key and worktree; a headless sub-agent counts); actor must differ from the author (coordinator-enforced) |
 | `merge_result` | `{"merged":true,"oid":…,"result":"merged","note":…}` | merge record, **one entry** (the board/PR state keys on `merged:true`) |
 | `comment` | `{"note"}` | progress notes (does not move the card) |
 
@@ -162,6 +162,11 @@ Standard flow: `issue` → `status: in-progress` (owner/worktree/branch) → wor
 locally & pushes → `merge_result {"merged":true,"oid":…}` → `status: closed`.
 Remove the worktree after closure. Keep the board and the thread as the single record; never edit
 state files by hand.
+
+**Reviews and tests run in an independent agent** (own principal/key, own worktree, own command runs; a
+headless sub-agent is the normal shape) — the author's self-test is not evidence. **Decide before
+parking**: `needs-human` is for what genuinely needs the human (authorization, priority, external
+input); a technical/product judgment the owner can make is made and recorded in a `comment`.
 
 ## 6. Listening for events (pull, never push)
 

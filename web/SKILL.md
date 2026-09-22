@@ -462,6 +462,10 @@ look productive while its rows cannot answer the only questions it exists to ans
   `blocked` / `needs-human` / `done` / `closed`), `review` (`approve` /
   `request_changes` + note), `merge_result` (`merged: true` + oid), `comment` for
   claims/progress/questions.
+- **Decide before parking.** `needs-human` is for what genuinely needs the human —
+  authorization, priority, external input. A technical or product judgment the owner
+  can make must be made, recorded in a `comment`, and carried out; use a decision aid
+  where the host offers one. Parking a decidable question is a stall, not a status.
 - Every `in-progress` / `needs-review` / `blocked` / `needs-human` status carries the supervision
   context: `owner`, `worktree`, `branch`, `work` (or `note`). Fields inherit across status moves;
   an explicit empty string clears them. Example:
@@ -476,6 +480,10 @@ look productive while its rows cannot answer the only questions it exists to ans
   conclusion. The author's own `approve` is not independent review and must not satisfy
   the review gate; the coordinator must check the actor, because the merge rule counts
   verified approvals without excluding the author automatically.
+- Run the review as an independent agent process: its own principal/key, its own
+  worktree, and its own commands run against the pinned commit — a headless sub-agent
+  started for the review is the normal shape, not the exception. Evidence means what
+  the reviewer ran and observed; the author's own test run is not verification.
 - `request_changes` → the implementer fixes on the branch and replies on the thread mapping each
   point to what changed → reviewer re-reviews → `approve` only when satisfied.
 - Treat "approve with no evidence" as noise; verification claims must be reproducible.
