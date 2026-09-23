@@ -22,20 +22,20 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 - **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
   board are signed entries in the D1 collaboration layer (`refs/collab/*`, `walgit collab ...`), not GitHub.
 - **GitHub is a mirror plus the release pipeline** — `github = gqf2008/walgit-d1`. The mirror runs **on
-  demand** (no resident loop): `bash ~/.walgit/sync-to-github.sh --once` mirrors every `refs/heads/*` and
-  `refs/tags/*` (never `refs/collab/*`), so a `v*` tag pushed in walgit reaches GitHub once that command
-  runs and then triggers `.github/workflows/release.yml`. Never push branches to the GitHub remote by hand
-  and never double-push.
+  demand** (no resident loop), so a `v*` tag reaches GitHub only once the sync command below runs — and only
+  then does `.github/workflows/release.yml` fire. Never push branches to the GitHub remote by hand and never
+  double-push.
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
   and Releases, while Actions/Security keep their CI/release jobs. `fork` (`gqf2008/walgit-1`) and `upstream`
   (`tobi/walgit`) are historical references — never push to them.
-- The mirror tool is `~/.walgit/sync-to-github.sh`, run **on demand** (`--once`; log
-  `~/.walgit/sync-to-github.log`) — e.g. after pushing a `v*` tag (the release pipeline only fires once the
-  tag reaches GitHub) or a feature branch that should show up there. It mirrors every `refs/heads/*` and
-  `refs/tags/*`, never `refs/collab/*`, and deletes GitHub branches walgit no longer has (GitHub's default
-  branch excepted). Never run two syncs at once — concurrent runs race the same refs.
+- The mirror tool is `~/.walgit/sync-to-github.sh`, run **on demand**, e.g. after pushing a `v*` tag or a
+  feature branch that should show up on GitHub:
+  `bash ~/.walgit/sync-to-github.sh --once >> ~/.walgit/sync-to-github.log 2>&1` (the script writes to
+  stdout/stderr; the redirect is the caller's). It mirrors every `refs/heads/*` and `refs/tags/*`, never
+  `refs/collab/*`, and deletes GitHub branches walgit no longer has (GitHub's default branch excepted).
+  Never run two syncs at once — there is no lock, and concurrent runs race the same refs.
 
 ## 0. Document map (one home per fact — link, don't duplicate)
 
