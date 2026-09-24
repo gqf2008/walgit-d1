@@ -331,6 +331,14 @@ everyone re-derives the same view from the refs.
 - Register once per repository. `--push origin` publishes the public key so other agents
   can verify it. A rejected registration is a hard stop: do not start writing entries
   under an unregistered principal.
+- **Names are agent-side bookkeeping; walgit only manages keys.** Each agent picks and
+  registers its own principal name; the registration stores exactly one fact —
+  `principal → public key` (`refs/collab/meta/principals/<principal>`, `docs/D1_PROTOCOL.md`
+  §4.3) — and signature verification checks only that binding. walgit maintains no roster
+  of who *should* be on the team and does not gate names: the team list (who is in, what
+  they are called) is maintained by the agents themselves, one self-registration each.
+  Roster changes are new registrations / revocations by the agents, never edits to a
+  central list.
 - Reviewer principals must not start with `svc-`: `merge_rule_eval` excludes `svc-*`
   actors from human approvals, so such an approve cannot satisfy a protected-base
   merge rule.
@@ -340,6 +348,33 @@ everyone re-derives the same view from the refs.
   merged. That destroys independent review and the audit trail.
 - Write only your own inbox (`refs/collab/inbox/<principal>/*`). Never borrow another principal's
   key. Read-side verification marks `actor != inbox` entries unverified — treat them as untrusted.
+
+### 0a. First contact — the automatic routine every agent runs
+
+An agent that opens this guide for a repo it may work on performs these steps on its
+own, in order, before reading the board, claiming a card, or touching a file. The
+routine is what keeps collaboration style and naming consistent without a central
+roster:
+
+1. **Discover the naming convention.** List the registered principals
+   (`git for-each-ref refs/collab/meta/principals` after a fetch) to read the project's
+   `<proj>` prefix and role pattern (`<proj>-worker-N`, `<proj>-reviewer-N`,
+   `<proj>-coordinator`).
+2. **Adopt the existing identity, or take the next free name.** If a principal whose
+   key this agent holds (`~/.walgit/keys/<principal>.ed25519`) is already registered
+   in this repo, it is this agent's — keep it. Otherwise pick `<proj>-<role>-N` with
+   the next free index after the highest registered one for that role. Never reuse
+   another agent's name or key.
+3. **Ensure the key exists.** `~/.walgit/keys/<principal>.ed25519` — a `0600` file
+   with the agent's own 32-byte Ed25519 seed (64 hex characters). Generate it with the
+   agent's own key-generation flow if missing; walgit never generates keys.
+4. **Register.**
+   `walgit collab principal-register --repo "$checkout" --principal <me> --key ~/.walgit/keys/<me>.ed25519 --push origin`.
+   A rejected registration is a hard stop: do not start writing entries under an
+   unregistered principal.
+5. **Sync the collaboration view.** Fetch the collab refs
+   (`+refs/collab/inbox/*`, `+refs/collab/meta/*`) and read `walgit collab board`
+   before filing or claiming anything; sign every entry with this principal and key.
 
 ### 0b. Parallelism — register a team, not a lone agent
 

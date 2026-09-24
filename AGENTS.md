@@ -656,6 +656,17 @@ decision in §4 — or the PR is; never "fix later".
   implementation, `deploy/windows/README.md` carries the copy-paste registration template, and
   `deploy/windows/task-action-check.ps1` is the post-registration assertion (PE subsystem == GUI,
   no name allowlist). `powershell -WindowStyle Hidden` is not acceptable.
+- **D54** **Agent names are agent-side bookkeeping; walgit manages only keys (2026-09-24,
+  agent-names-agent-side).** The D1 registry stores exactly one fact per principal — the
+  `principal → public key` binding (`refs/collab/meta/principals/<principal>`, host-level
+  `host/principals/<principal>`; `docs/D1_PROTOCOL.md` §4.3/§4.4) — and signature verification
+  checks only that binding. walgit maintains no roster of who *should* be on a team and does
+  not gate principal names: the team list (who is in, what they are called) is the agents'
+  own bookkeeping, formed by one self-registration each; roster changes are new registrations
+  or revocations by the agents, never edits to a central list. Private keys stay agent-side
+  at `~/.walgit/keys/<principal>.ed25519` (`0600`); the registry carries only public keys.
+  Consumer-facing statement in `web/SKILL.md` §0/§0a (the automatic first-contact routine)
+  and `skills/walgit/SKILL.md` §5.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

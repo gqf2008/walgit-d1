@@ -107,7 +107,15 @@ walgit collab principal-register --repo <checkout> --principal <principal> \
 ```
 
 `--key` is a file path: generate each principal's 32-byte Ed25519 seed with your own
-key-generation flow, store it `0600`, and never paste its contents on the command line.
+key-generation flow, store it `0600` at `~/.walgit/keys/<principal>.ed25519`, and never
+paste its contents on the command line. Names are agent-side bookkeeping: walgit stores
+only the `principal → public key` binding (`refs/collab/meta/principals/<principal>`;
+D1_PROTOCOL.md §4.3) and verifies signatures against it — the team list (who is in,
+what they are called) is maintained by the agents themselves, one self-registration each.
+On first contact with a repo an agent runs the automatic routine in `/SKILL.md` §0a —
+discover the naming convention from the registered principals, adopt its existing
+identity or take the next free name, ensure its key, register, and sync the board —
+before doing any work.
 Reviewer principals must not start with `svc-`; `merge_rule_eval` excludes `svc-*`
 actors from human approvals.
 
