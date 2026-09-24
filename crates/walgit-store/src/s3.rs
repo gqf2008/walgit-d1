@@ -26,30 +26,24 @@
 //!
 //! ## Conditional DELETE
 //!
-//! We HEAD (read the full incarnation), compare, then DELETE with
-//! `If-Match: <etag>`. The HEAD comparison rejects a stale version even when a
-//! re-created object has identical bytes; the DELETE guard rejects a different
-//! `ETag` racing in after that HEAD. What remains is the narrow
-//! same-ETag-after-HEAD window, bounded by walgit's lease/claim fences.
+//! Conditional DELETE uses native `If-Match: <etag>` at the storage
+//! linearization point; never substitute a HEAD followed by an unconditional
+//! delete. A refusal (412) may add one failure-only HEAD to distinguish an
+//! absent key on compatible services; a successful delete is one request.
 //!
 //! ## Multipart upload
 //!
-//! Objects above `cfg.multipart_threshold` use `CreateMultipartUpload` +
-//! `UploadPart` + `CompleteMultipartUpload`. `CreateMultipartUpload` does NOT
-//! support `If-None-Match`/`If-Match` in the S3 API:
-//!
-//! * `PutMode::Overwrite` (bundle lists, caches) gets plain multipart.
-//! * `PutMode::Create` gets a `HEAD` pre-check plus multipart. The pre-check
-//!   keeps the common "already exists" answer, but the check and the upload
-//!   are not atomic, so a concurrent create can win the key. That is safe for
-//!   walgit's large immutable objects — packs, `.idx`/`.rev`/`.bitmap`/
-//!   `.commit-graph` side files are content-addressed, so racing writers put
-//!   identical bytes. Single-shot PUT cannot be the answer above the
-//!   threshold: S3 caps one `PutObject` at 5 GiB while a tier-2 base may be
-//!   tens of GiB, and a slow uplink exceeds the request timeout long before
-//!   that.
-//! * `PutMode::Update` (CAS) stays single-shot and conditional; every
-//!   CAS-rewritten object (manifests, leases) is small.
+//! Objects above `cfg.multipart_threshold` use staged multipart uploads:
+//! `CreateMultipartUpload` + `UploadPart` + `CompleteMultipartUpload`, with
+//! `PutMode::Create`/`Update` conditions applied at completion — when the
+//! destination actually becomes visible (`If-None-Match: *` / `If-Match:
+//! <etag>`). `CreateMultipartUpload` itself has no conditional headers, so a
+//! condition must never be dropped by staging; a provider that refuses the
+//! conditional completion yields `PreconditionFailed` and the attempt is never
+//! retried unconditionally. Single-shot PUT cannot be the answer above the
+//! threshold: S3 caps one `PutObject` at 5 GiB while a tier-2 base may be
+//! tens of GiB, and a slow uplink exceeds the request timeout long before
+//! that.
 //!
 //! A multipart upload whose future is dropped (task abort, drain) is aborted
 //! best-effort by a drop guard. A hard kill cannot run it, so buckets should
@@ -518,23 +512,12 @@ impl ObjectStore for S3Store {
     async fn put(&self, key: &str, body: PutBody, opts: PutOptions) -> Result<ObjectMeta> {
         let (s3_body, len) = body_to_s3(body).await?;
 
-        // Above the threshold, Overwrite and Create both go multipart;
-        // `CreateMultipartUpload` has no conditional header support in the S3
-        // API, so Create keeps its no-overwrite intent with a HEAD pre-check
-        // (best effort — see the module docs). Update stays single-shot, and
-        // every CAS-rewritten object is small.
-        let use_multipart = len > self.multipart_threshold
-            && matches!(opts.mode, PutMode::Overwrite | PutMode::Create);
+        // Conditions apply to the final publication, not staging: Create and
+        // Update ride on CompleteMultipartUpload (there is no conditional
+        // CreateMultipartUpload).
+        let use_multipart = len > self.multipart_threshold;
 
         if use_multipart {
-            if matches!(opts.mode, PutMode::Create)
-                && let Some(current) = self.head(key).await?
-            {
-                return Err(StoreError::PreconditionFailed {
-                    key: key.into(),
-                    current: Some(current.version),
-                });
-            }
             return self.multipart_put(key, s3_body, len, &opts).await;
         }
 
@@ -592,58 +575,47 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete(&self, key: &str, if_version: Option<Version>) -> Result<()> {
+        let mut request = self.client.delete_object().bucket(&self.bucket).key(key);
         if let Some(want) = &if_version {
-            // S3 has no conditional delete: emulate via HEAD + compare + DELETE.
-            // RACE: a concurrent writer could replace the object between HEAD
-            // and DELETE. Acceptable for walgit's lease-guarded semantics.
-            let head = self.head(key).await?;
-            match head {
-                None => return Err(StoreError::NotFound { key: key.into() }),
-                Some(meta) if &meta.version != want => {
-                    return Err(StoreError::PreconditionFailed {
-                        key: key.into(),
-                        current: Some(meta.version),
-                    });
-                }
-                _ => {}
-            }
+            request = request.if_match(want.http_etag());
         }
-
-        let mut delete = self.client.delete_object().bucket(&self.bucket).key(key);
-        if let Some(want) = &if_version {
-            // The HEAD above compares the full incarnation. Rustfs/R2 support
-            // `If-Match` on DELETE, so this second guard still prevents a
-            // different ETag from being deleted if the object changes between
-            // the HEAD and this request.
-            delete = delete.if_match(want.http_etag());
-        }
-        let resp = delete.send().await;
+        let resp = request.send().await;
 
         match resp {
             Ok(_) => Ok(()),
             Err(err) => {
-                // S3 DeleteObject is idempotent: deleting a non-existent key
-                // returns Ok, not an error. If we get here, it's a real error.
-                // For unconditional deletes we treat any error as transient.
-                if if_version.is_none() {
-                    // Unconditional delete — be lenient (idempotent on S3/rustfs).
-                    let err_str = err.to_string();
-                    if err_str.contains("404")
-                        || err_str.contains("NoSuchKey")
-                        || err_str.contains("not found")
-                    {
-                        return Ok(());
-                    }
+                if err
+                    .raw_response()
+                    .is_some_and(|r| r.status().as_u16() == 404)
+                    || matches!(err_code(&err), Some("NoSuchKey" | "NotFound"))
+                {
+                    return if if_version.is_some() {
+                        Err(StoreError::NotFound { key: key.into() })
+                    } else {
+                        Ok(())
+                    };
                 }
-                let mut err = classify_delete_error(key, &err);
-                if let StoreError::PreconditionFailed { current, .. } = &mut err {
-                    match self.head(key).await {
-                        Ok(Some(meta)) => *current = Some(meta.version),
+                if err
+                    .raw_response()
+                    .is_some_and(|r| r.status().as_u16() == 412)
+                    || matches!(
+                        err_code(&err),
+                        Some("PreconditionFailed" | "ConditionalRequestConflict")
+                    )
+                {
+                    // Compatible services may use 412 for an absent key too.
+                    // Probe only after the atomic delete has already refused.
+                    let current = match self.head(key).await {
                         Ok(None) => return Err(StoreError::NotFound { key: key.into() }),
-                        Err(_) => {}
-                    }
+                        Ok(Some(meta)) => Some(meta.version),
+                        Err(_) => None,
+                    };
+                    return Err(StoreError::PreconditionFailed {
+                        key: key.into(),
+                        current,
+                    });
                 }
-                Err(err)
+                Err(classify_delete_error(key, &err))
             }
         }
     }
@@ -823,14 +795,6 @@ impl ObjectStore for S3Store {
             return Err(StoreError::InvalidArgument(
                 "compose needs at least one source".into(),
             ));
-        }
-        if let PutMode::Create = opts.mode
-            && self.head(dest).await?.is_some()
-        {
-            return Err(StoreError::PreconditionFailed {
-                key: dest.to_owned(),
-                current: None,
-            });
         }
         // Sizes first: the layout of parts depends on them.
         let mut sizes = Vec::with_capacity(sources.len());
@@ -1064,19 +1028,33 @@ impl ObjectStore for S3Store {
         let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
             .set_parts(Some(parts))
             .build();
-        let resp = match self
+        let complete = self
             .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(dest)
             .upload_id(&upload_id)
-            .multipart_upload(completed)
-            .send()
-            .await
-        {
+            .multipart_upload(completed);
+        let complete = match &opts.mode {
+            PutMode::Overwrite => complete,
+            PutMode::Create => complete.if_none_match("*"),
+            PutMode::Update(v) => complete.if_match(v.http_etag()),
+        };
+        let resp = match complete.send().await {
             Ok(r) => r,
             Err(e) => {
                 let _ = self.abort_multipart(dest, &upload_id).await;
+                if e.raw_response().is_some_and(|r| r.status().as_u16() == 412)
+                    || matches!(
+                        err_code(&e),
+                        Some("PreconditionFailed" | "ConditionalRequestConflict")
+                    )
+                {
+                    return Err(StoreError::PreconditionFailed {
+                        key: dest.into(),
+                        current: None,
+                    });
+                }
                 return Err(
                     transport_retryable("complete multipart", &e).unwrap_or_else(|| {
                         StoreError::Other(anyhow::anyhow!(
@@ -1121,7 +1099,7 @@ struct ListState {
     buffer: std::vec::IntoIter<Result<String>>,
 }
 
-// ---- multipart upload (Overwrite only) ---------------------------------
+// ---- multipart upload ---------------------------------
 
 impl S3Store {
     async fn multipart_put(
@@ -1132,6 +1110,12 @@ impl S3Store {
         opts: &PutOptions,
     ) -> Result<ObjectMeta> {
         use tokio::io::AsyncReadExt;
+
+        if self.multipart_part_size == 0 || len.div_ceil(self.multipart_part_size) > 10_000 {
+            return Err(StoreError::InvalidArgument(
+                "S3 upload requires 1..10000 nonempty parts".into(),
+            ));
+        }
 
         let incarnation = new_incarnation();
         let mut create = self
@@ -1262,24 +1246,57 @@ impl S3Store {
             part_number += 1;
         }
 
+        // Do not commit an input that grew after the caller captured its
+        // length: the extra bytes would land under a key that names fewer.
+        let mut extra = [0u8; 1];
+        match reader.read(&mut extra).await {
+            Ok(0) => {}
+            result => {
+                self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
+                    .await;
+                return Err(StoreError::InvalidArgument(
+                    if result.is_ok() {
+                        "S3 upload longer than declared length"
+                    } else {
+                        "S3 upload failed while validating final length"
+                    }
+                    .into(),
+                ));
+            }
+        }
+
         let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
             .set_parts(Some(uploaded_parts))
             .build();
 
-        let resp = match self
+        let complete = self
             .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(key)
             .upload_id(&upload_id)
-            .multipart_upload(completed)
-            .send()
-            .await
-        {
+            .multipart_upload(completed);
+        let complete = match &opts.mode {
+            PutMode::Overwrite => complete,
+            PutMode::Create => complete.if_none_match("*"),
+            PutMode::Update(v) => complete.if_match(v.http_etag()),
+        };
+        let resp = match complete.send().await {
             Ok(r) => r,
             Err(e) => {
                 self.abort_upload_or_keep_guard(key, &upload_id, &mut abort_guard)
                     .await;
+                if e.raw_response().is_some_and(|r| r.status().as_u16() == 412)
+                    || matches!(
+                        err_code(&e),
+                        Some("PreconditionFailed" | "ConditionalRequestConflict")
+                    )
+                {
+                    return Err(StoreError::PreconditionFailed {
+                        key: key.into(),
+                        current: None,
+                    });
+                }
                 return Err(
                     transport_retryable("complete multipart", &e).unwrap_or_else(|| {
                         StoreError::Other(anyhow::anyhow!(
@@ -1510,11 +1527,11 @@ mod tests {
     /// and time out past `store.idle_timeout`; single-shot is also capped at
     /// 5 GiB, below a tier-2 base). The fake S3 here *only* implements the
     /// multipart protocol and answers 501 to a plain `PUT`, so a regression to
-    /// single-shot cannot pass. The pre-check half pins the documented
-    /// best-effort create: an existing key answers `PreconditionFailed`
-    /// without starting an upload.
+    /// single-shot cannot pass. The condition half pins the new contract: an
+    /// existing key is refused at `CompleteMultipartUpload` (no condition is
+    /// lost by staging) and the staged upload is aborted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn large_create_uses_multipart_and_prechecks_existence() {
+    async fn large_create_uses_multipart_and_conditional_completion() {
         use std::net::TcpListener;
         use std::sync::{Arc, Mutex};
 
@@ -1571,12 +1588,6 @@ mod tests {
         let requests = seen.lock().unwrap().clone();
         assert!(
             requests
-                .first()
-                .is_some_and(|r| r.starts_with("HEAD ") && r.ends_with("pack.pack HTTP/1.1")),
-            "a large Create must HEAD the key first: {requests:?}"
-        );
-        assert!(
-            requests
                 .iter()
                 .any(|r| r.starts_with("POST ") && r.contains("uploads")),
             "CreateMultipartUpload missing: {requests:?}"
@@ -1605,16 +1616,16 @@ mod tests {
             !requests.iter().any(|r| r.starts_with("DELETE ")),
             "a completed upload must not abort: {requests:?}"
         );
-        // The documented budget: HEAD + CreateMultipartUpload + Complete + one
-        // request per part (see docs/ROUNDTRIPS.md).
+        // The documented budget: CreateMultipartUpload + Complete + one request
+        // per part (see docs/ROUNDTRIPS.md).
         assert_eq!(
             requests.len(),
-            3 + 2,
-            "HEAD + initiate + complete + 2 parts: {requests:?}"
+            2 + 2,
+            "initiate + complete + 2 parts: {requests:?}"
         );
 
-        // The key now exists in the fake bucket: the pre-check must answer
-        // PreconditionFailed and issue no multipart requests at all.
+        // The key now exists in the fake bucket: the condition rides on the
+        // completion, which is refused — and the staged upload is aborted.
         *existing.lock().unwrap() = true;
         let before = seen.lock().unwrap().len();
         let again = store
@@ -1629,19 +1640,33 @@ mod tests {
             "existing large Create must be PreconditionFailed, got {again:?}"
         );
         let after = seen.lock().unwrap().clone();
+        let tail = &after[before..];
         assert_eq!(
-            after.len(),
-            before + 1,
-            "only the HEAD pre-check may run once the key exists: {:?}",
-            &after[before..]
+            tail.len(),
+            5,
+            "initiate + 2 parts + refused complete + abort: {tail:?}"
         );
-        assert!(after.last().is_some_and(|r| r.starts_with("HEAD ")));
+        assert!(
+            tail.iter()
+                .any(|r| r.starts_with("POST ") && r.contains("uploadId=")),
+            "the condition is evaluated at CompleteMultipartUpload: {tail:?}"
+        );
+        assert!(
+            tail.last().is_some_and(|r| r.starts_with("DELETE ") && r.contains("uploadId=")),
+            "a refused completion must abort the staged upload: {tail:?}"
+        );
+        assert!(
+            !tail
+                .iter()
+                .any(|r| r.starts_with("PUT ") && !r.contains("partNumber=")),
+            "no single-shot PUT may be attempted: {tail:?}"
+        );
     }
 
-    /// Minimal S3 stub for [`large_create_uses_multipart_and_prechecks_existence`]:
-    /// HEAD (404 absent / 200 present), `CreateMultipartUpload`, `UploadPart` and
-    /// `CompleteMultipartUpload`. Any other request — in particular a single-shot
-    /// `PUT` without a part number — is 501.
+    /// Minimal S3 stub for [`large_create_uses_multipart_and_conditional_completion`]:
+    /// HEAD (404 absent / 200 present), `CreateMultipartUpload`, `UploadPart`,
+    /// a conditional `CompleteMultipartUpload` and abort. Any other request —
+    /// in particular a single-shot `PUT` without a part number — is 501.
     fn fake_s3_multipart_only(
         mut stream: std::net::TcpStream,
         seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -1659,6 +1684,7 @@ mod tests {
         }
         let mut content_length = 0usize;
         let mut expect_continue = false;
+        let mut if_none_match: Option<String> = None;
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -1670,6 +1696,9 @@ mod tests {
             let lower = line.to_ascii_lowercase();
             if let Some(v) = lower.strip_prefix("content-length:") {
                 content_length = v.trim().parse().unwrap_or(0);
+            }
+            if let Some(v) = lower.strip_prefix("if-none-match:") {
+                if_none_match = Some(v.trim().to_owned());
             }
             if lower.starts_with("expect:") && lower.contains("100-continue") {
                 expect_continue = true;
@@ -1726,15 +1755,27 @@ mod tests {
                 Vec::new(),
             )
         } else if method == "POST" && target.contains("uploadId=") {
-            let xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Location>http://stub/b/k</Location><Bucket>b</Bucket><Key>k</Key><ETag>\"stub-complete\"</ETag></CompleteMultipartUploadResult>";
-            (
-                "200 OK",
-                format!(
-                    "content-type: application/xml\r\ncontent-length: {}\r\n",
-                    xml.len()
-                ),
-                xml.to_vec(),
-            )
+            if present && if_none_match.as_deref() == Some("*") {
+                let xml = b"<Error><Code>PreconditionFailed</Code></Error>";
+                (
+                    "412 Precondition Failed",
+                    format!(
+                        "content-type: application/xml\r\ncontent-length: {}\r\n",
+                        xml.len()
+                    ),
+                    xml.to_vec(),
+                )
+            } else {
+                let xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Location>http://stub/b/k</Location><Bucket>b</Bucket><Key>k</Key><ETag>\"stub-complete\"</ETag></CompleteMultipartUploadResult>";
+                (
+                    "200 OK",
+                    format!(
+                        "content-type: application/xml\r\ncontent-length: {}\r\n",
+                        xml.len()
+                    ),
+                    xml.to_vec(),
+                )
+            }
         } else {
             (
                 "501 Not Implemented",
@@ -2415,6 +2456,250 @@ mod tests {
         }
         for status in [400, 403, 404, 409, 412, 501] {
             assert!(!is_transient_status(status), "{status} should be permanent");
+        }
+    }
+
+    #[derive(Default)]
+    struct ConditionService {
+        requests: Vec<(String, String, Option<String>, Option<String>)>,
+        current: Option<String>,
+    }
+
+    // Models the storage linearization point, including a rival that already
+    // replaced the caller's captured version. Actual SDK requests hit this server.
+    async fn condition_request(
+        axum::extract::State(state): axum::extract::State<
+            std::sync::Arc<std::sync::Mutex<ConditionService>>,
+        >,
+        request: axum::extract::Request,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let method = request.method().to_string();
+        let query = request.uri().query().unwrap_or("").to_owned();
+        let matched = request
+            .headers()
+            .get("if-match")
+            .map(|h| h.to_str().unwrap().to_owned());
+        let absent = request
+            .headers()
+            .get("if-none-match")
+            .map(|h| h.to_str().unwrap().to_owned());
+        // Drain the staged body before replying, as a real HTTP server would.
+        axum::body::to_bytes(request.into_body(), 1024)
+            .await
+            .unwrap();
+        let mut state = state.lock().unwrap();
+        state.requests.push((
+            method.clone(),
+            query.clone(),
+            matched.clone(),
+            absent.clone(),
+        ));
+        if method == "HEAD" {
+            if state.current.is_none() {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+            // A HEAD-before-DELETE implementation sees its old token; the rival
+            // is already current when the subsequent delete is evaluated.
+            return (
+                [("etag", "\"captured\""), ("content-length", "5242880")],
+                "",
+            )
+                .into_response();
+        }
+        if method == "POST" && query.starts_with("uploads") {
+            return "<InitiateMultipartUploadResult><UploadId>attempt</UploadId></InitiateMultipartUploadResult>".into_response();
+        }
+        if method == "PUT" {
+            return (
+                [("etag", "\"part\"")],
+                "<CopyPartResult><ETag>\"part\"</ETag></CopyPartResult>",
+            )
+                .into_response();
+        }
+        if method == "DELETE" && query.contains("uploadId") {
+            return axum::http::StatusCode::NO_CONTENT.into_response();
+        }
+        if method == "DELETE" && matched.is_some() && state.current.is_none() {
+            return (
+                axum::http::StatusCode::PRECONDITION_FAILED,
+                "<Error><Code>PreconditionFailed</Code></Error>",
+            )
+                .into_response();
+        }
+        if matched
+            .as_ref()
+            .is_some_and(|v| Some(v) != state.current.as_ref())
+            || (absent.as_deref() == Some("*") && state.current.is_some())
+        {
+            return (
+                axum::http::StatusCode::PRECONDITION_FAILED,
+                "<Error><Code>PreconditionFailed</Code></Error>",
+            )
+                .into_response();
+        }
+        if method == "DELETE" {
+            state.current = None;
+            axum::http::StatusCode::NO_CONTENT.into_response()
+        } else {
+            state.current = Some("published".into());
+            "<CompleteMultipartUploadResult><ETag>\"published\"</ETag></CompleteMultipartUploadResult>".into_response()
+        }
+    }
+
+    async fn condition_store() -> (
+        S3Store,
+        std::sync::Arc<std::sync::Mutex<ConditionService>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(ConditionService {
+            current: Some("rival".into()),
+            ..Default::default()
+        }));
+        let app = axum::Router::new()
+            .fallback(condition_request)
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = walgit_config::StoreConfig {
+            backend: walgit_config::StoreBackend::S3,
+            bucket: "bucket".into(),
+            s3: walgit_config::S3Config {
+                endpoint,
+                access_key: Some("synthetic".into()),
+                secret_key: Some("synthetic".into()),
+                force_path_style: true,
+                ..Default::default()
+            },
+            multipart_threshold: bytesize::ByteSize::b(1),
+            multipart_part_size: bytesize::ByteSize::b(8),
+            connect_timeout: Duration::from_millis(500),
+            idle_timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        (S3Store::new(&cfg).unwrap(), state, task)
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_preserves_rivals_and_only_probes_on_failure() {
+        let (store, state, server) = condition_store().await;
+        assert!(matches!(
+            store.delete("key", Some(Version::new("captured"))).await,
+            Err(StoreError::PreconditionFailed { .. })
+        ));
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.current.as_deref(), Some("rival"));
+            assert_eq!(state.requests.len(), 2);
+            assert_eq!(state.requests[0].0, "DELETE", "no HEAD/check/delete window");
+            assert_eq!(state.requests[1].0, "HEAD", "failure-only probe");
+            assert_eq!(state.requests[0].2.as_deref(), Some("captured"));
+        }
+        store
+            .delete("key", Some(Version::new("rival")))
+            .await
+            .unwrap();
+        assert!(state.lock().unwrap().current.is_none());
+        assert_eq!(
+            state.lock().unwrap().requests.len(),
+            3,
+            "successful delete uses one request"
+        );
+        assert!(matches!(
+            store.delete("key", Some(Version::new("rival"))).await,
+            Err(StoreError::NotFound { .. })
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn staged_put_and_compose_conditions_hold_at_completion() {
+        for compose in [false, true] {
+            for mode in [
+                PutMode::Create,
+                PutMode::Update(Version::new("captured")),
+                PutMode::Update(Version::new("rival")),
+            ] {
+                let (store, state, server) = condition_store().await;
+                let opts = PutOptions {
+                    mode: mode.clone(),
+                    ..Default::default()
+                };
+                let result = if compose {
+                    // One source is copied server-side before conditional completion.
+                    store.compose("dest", &["source".into()], opts).await
+                } else {
+                    store
+                        .put("dest", PutBody::Bytes(Bytes::from_static(b"sample")), opts)
+                        .await
+                };
+                let success = matches!(&mode, PutMode::Update(v) if v.as_str() == "rival");
+                if success {
+                    assert!(result.is_ok(), "{result:?}");
+                } else {
+                    assert!(
+                        matches!(result, Err(StoreError::PreconditionFailed { .. })),
+                        "{result:?}"
+                    );
+                }
+                let state = state.lock().unwrap();
+                assert_eq!(
+                    state.current.as_deref(),
+                    Some(if success { "published" } else { "rival" })
+                );
+                let completes: Vec<_> = state
+                    .requests
+                    .iter()
+                    .filter(|(m, q, _, _)| m == "POST" && q.contains("uploadId"))
+                    .collect();
+                assert_eq!(completes.len(), 1);
+                assert_eq!(
+                    completes[0].3.as_deref(),
+                    matches!(mode, PutMode::Create).then_some("*")
+                );
+                assert_eq!(
+                    state
+                        .requests
+                        .iter()
+                        .filter(|(m, q, _, _)| m == "DELETE" && q.contains("uploadId"))
+                        .count(),
+                    usize::from(!success)
+                );
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_length_mismatch_never_reaches_completion() {
+        for declared in [3u64, 12] {
+            let (store, state, server) = condition_store().await;
+            let result = store
+                .multipart_put(
+                    "key",
+                    S3ByteStream::from_static(b"sample"),
+                    declared,
+                    &PutOptions {
+                        mode: PutMode::Update(Version::new("rival")),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            assert!(
+                matches!(result, Err(StoreError::InvalidArgument(_))),
+                "{result:?}"
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(state.current.as_deref(), Some("rival"));
+            assert!(
+                !state
+                    .requests
+                    .iter()
+                    .any(|(method, query, _, _)| method == "POST" && query.contains("uploadId"))
+            );
+            assert_eq!(state.requests.iter().filter(|(method, query, _, _)| method == "DELETE" && query.contains("uploadId")).count(), 1);
+            server.abort();
         }
     }
 

@@ -102,6 +102,18 @@ link, so a scenario can assert "a push on a healthy link is ≤ N requests" as a
 - Fixing a liveness bug by adding a wait or a probe to the *happy* path.
 - A retry loop without backoff+jitter on `manifest.pb`.
 
+### Conditional storage operations (2026-09-24, upstream #59)
+
+S3 conditional DELETE is one conditional DELETE (formerly HEAD → compare → conditional DELETE, 2–3 requests);
+a 412 may add one **failure-only** HEAD to distinguish an absent key on compatible services, and a successful
+delete never probes. S3 compose removes its destination existence HEAD; source HEADs/staging are unchanged,
+and create/update preconditions apply at the final multipart commit. Large conditional PUTs (Create/Update
+above `multipart_threshold`) now use bounded multipart staging plus conditional completion instead of a
+single-shot PUT/pre-check; there is no unconditional retry when a provider refuses the conditional operation
+and the staged upload is aborted. GCS invalid update tokens fail locally with zero requests instead of
+dropping the condition. Complements the checklist rule below: the refusals stay on the failure path and the
+commit point keeps its condition.
+
 ## 5. Checklist for a protocol change (paste into the PR/commit)
 - Depth/requests before → after for each affected row in §2.
 - What moved to the failure path, and how often that path runs (measured or reasoned).
