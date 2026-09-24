@@ -373,7 +373,8 @@ roster:
    A rejected registration is a hard stop: do not start writing entries under an
    unregistered principal.
 5. **Sync the collaboration view.** Fetch the collab refs
-   (`+refs/collab/inbox/*`, `+refs/collab/meta/*`) and read `walgit collab board`
+   (`git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*'
+   '+refs/collab/meta/*:refs/collab/meta/*'`) and read `walgit collab board`
    before filing or claiming anything; sign every entry with this principal and key.
 
 ### 0b. Parallelism — register a team, not a lone agent
