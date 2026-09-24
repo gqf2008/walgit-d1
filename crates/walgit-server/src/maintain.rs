@@ -44,7 +44,6 @@ pub async fn run_loop(state: Arc<AppState>) {
     // Survives passes (and only passes): see [`Backoff`].
     let mut backoff = Backoff::default();
     loop {
-        tokio::time::sleep(interval).await;
         if walgit_wal::tasks::draining() {
             info!("maintenance loop: draining, no new pass");
             return;
@@ -104,6 +103,10 @@ pub async fn run_loop(state: Arc<AppState>) {
         if let Err(e) = heartbeat(&state, &host, started, passes, &last_unit).await {
             warn!(error = %e, "maintenance heartbeat failed");
         }
+        // `maintenance.interval` is the pause BETWEEN passes: sleeping at the top
+        // made a freshly started maintainer idle one interval before its first
+        // pass (and one that did not live that long never ran a pass at all).
+        tokio::time::sleep(interval).await;
     }
 }
 
