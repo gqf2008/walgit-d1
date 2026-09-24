@@ -559,6 +559,9 @@ pub async fn serve(
         );
     }
     let addr = state.cfg.server.listen;
+    // Resolve the machine type before the first request, so `/readyz`, `/healthz`
+    // and the UI footer only read a cell that is already filled (principle VI).
+    instance::init_machine_type(&state.cfg).await;
     let state_for_shutdown = state.clone();
     prewarm::spawn(state.clone());
     spawn_runtime_watchdog(state.registry.tasks().clone(), state.inflight.clone());
