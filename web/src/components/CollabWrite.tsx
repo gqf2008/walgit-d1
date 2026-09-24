@@ -48,6 +48,7 @@ type Kind = "issue" | "comment" | "review" | "status" | "patch";
 export function CollabWriteBox({ full, id, parent, onPosted }: CollabWriteProps) {
   const { t } = useI18n();
   const [ready, setReady] = useState<string | null>(null); // principal when the browser key is registered
+  const [imported, setImported] = useState(false); // import succeeded; the enable button re-registers it
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kind, setKind] = useState<Kind>(parent === "" ? "issue" : "comment");
@@ -118,6 +119,7 @@ export function CollabWriteBox({ full, id, parent, onPosted }: CollabWriteProps)
     return (
       <div className="pad">
         {error && <div className="muted" style={{ color: "var(--danger, #f85149)" }}>{error}</div>}
+        {imported && <div className="ok">{t("key.import.ok")}</div>}
         <button className="btn" disabled={busy} onClick={enable}>
           {busy ? t("write.enabling") : t("write.enable")}
         </button>
@@ -156,6 +158,9 @@ export function CollabWriteBox({ full, id, parent, onPosted }: CollabWriteProps)
         onImported={() => {
           // The registry still maps the principal to the previous key; the
           // enable button re-registers the imported one before any write.
+          // The status strip unmounts with the ready state, so the success
+          // note is re-shown next to the enable button instead.
+          setImported(true);
           setReady(null);
         }}
       />
