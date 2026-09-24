@@ -320,7 +320,7 @@ impl S3Store {
                 key: key.into(),
                 current: Some(version),
             }),
-            s if s >= 500 || s == 429 => {
+            s if is_transient_status(s) => {
                 Err(StoreError::Retryable(anyhow::anyhow!("s3 get status {s}")))
             }
             s => Err(StoreError::Other(anyhow::anyhow!("s3 get status {s}"))),
@@ -388,6 +388,15 @@ where
         ),
         None => err.to_string(),
     }
+}
+
+/// HTTP statuses that mean "try again", for raw responses the SDK hands
+/// back without an error code we recognise (rustfs and other S3-compatible
+/// stores do not all use AWS codes). The same set as `gcs::is_retryable`:
+/// 408/429 and the 5xx GCS documents as retryable, minus 501 (an
+/// unimplemented request will not start working on a second try).
+fn is_transient_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// #130: the transport shapes a wedge produces — a connect timeout, a read
@@ -2397,6 +2406,16 @@ mod tests {
             .expect("full body survives");
         assert_eq!(bytes.len(), 8192, "all 8 chunks");
         assert!(started.elapsed() > Duration::from_secs(2), "test itself must stream longer than the idle bound — otherwise it proves nothing");
+    }
+
+    #[test]
+    fn transient_statuses_are_retryable_and_501_is_not() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert!(is_transient_status(status), "{status} should be transient");
+        }
+        for status in [400, 403, 404, 409, 412, 501] {
+            assert!(!is_transient_status(status), "{status} should be permanent");
+        }
     }
 
     /// Regression: a DELETE `If-Match` race is a CAS failure, not an opaque
