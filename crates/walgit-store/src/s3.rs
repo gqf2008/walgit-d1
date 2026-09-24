@@ -26,10 +26,13 @@
 //!
 //! ## Conditional DELETE
 //!
-//! Conditional DELETE uses native `If-Match: <etag>` at the storage
-//! linearization point; never substitute a HEAD followed by an unconditional
-//! delete. A refusal (412) may add one failure-only HEAD to distinguish an
-//! absent key on compatible services; a successful delete is one request.
+//! We HEAD (read the full incarnation), compare, then DELETE with
+//! `If-Match: <etag>`. The HEAD comparison rejects a stale version even when a
+//! re-created object has identical bytes; the DELETE guard rejects a different
+//! `ETag` racing in after that HEAD. S3's `If-Match` compares bytes (`ETag`)
+//! only, so a single conditional DELETE cannot express our `etag@incarnation`
+//! token: the HEAD stays. What remains is the narrow same-ETag-after-HEAD
+//! window, bounded by walgit's lease/claim fences.
 //!
 //! ## Multipart upload
 //!
@@ -575,11 +578,32 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete(&self, key: &str, if_version: Option<Version>) -> Result<()> {
-        let mut request = self.client.delete_object().bucket(&self.bucket).key(key);
         if let Some(want) = &if_version {
-            request = request.if_match(want.http_etag());
+            // S3 has no conditional delete that sees the incarnation: a native
+            // `If-Match` on DELETE compares only the ETag. HEAD the full
+            // incarnation first so a re-created object with identical bytes is
+            // refused; the DELETE guard then rejects a different ETag racing in
+            // after that HEAD. RACE: a concurrent writer could replace the
+            // object between HEAD and DELETE — bounded to the same-ETag window
+            // and by walgit's lease/claim fences.
+            let head = self.head(key).await?;
+            match head {
+                None => return Err(StoreError::NotFound { key: key.into() }),
+                Some(meta) if &meta.version != want => {
+                    return Err(StoreError::PreconditionFailed {
+                        key: key.into(),
+                        current: Some(meta.version),
+                    });
+                }
+                _ => {}
+            }
         }
-        let resp = request.send().await;
+
+        let mut delete = self.client.delete_object().bucket(&self.bucket).key(key);
+        if let Some(want) = &if_version {
+            delete = delete.if_match(want.http_etag());
+        }
+        let resp = delete.send().await;
 
         match resp {
             Ok(_) => Ok(()),
@@ -595,27 +619,15 @@ impl ObjectStore for S3Store {
                         Ok(())
                     };
                 }
-                if err
-                    .raw_response()
-                    .is_some_and(|r| r.status().as_u16() == 412)
-                    || matches!(
-                        err_code(&err),
-                        Some("PreconditionFailed" | "ConditionalRequestConflict")
-                    )
-                {
-                    // Compatible services may use 412 for an absent key too.
-                    // Probe only after the atomic delete has already refused.
-                    let current = match self.head(key).await {
+                let mut err = classify_delete_error(key, &err);
+                if let StoreError::PreconditionFailed { current, .. } = &mut err {
+                    match self.head(key).await {
+                        Ok(Some(meta)) => *current = Some(meta.version),
                         Ok(None) => return Err(StoreError::NotFound { key: key.into() }),
-                        Ok(Some(meta)) => Some(meta.version),
-                        Err(_) => None,
-                    };
-                    return Err(StoreError::PreconditionFailed {
-                        key: key.into(),
-                        current,
-                    });
+                        Err(_) => {}
+                    }
                 }
-                Err(classify_delete_error(key, &err))
+                Err(err)
             }
         }
     }
@@ -2499,10 +2511,14 @@ mod tests {
             if state.current.is_none() {
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
-            // A HEAD-before-DELETE implementation sees its old token; the rival
-            // is already current when the subsequent delete is evaluated.
+            // A HEAD-before-DELETE implementation sees the full incarnation,
+            // so a re-created object with identical bytes is refused.
             return (
-                [("etag", "\"captured\""), ("content-length", "5242880")],
+                [
+                    ("etag", "\"captured\""),
+                    ("content-length", "5242880"),
+                    ("x-amz-meta-walgit-incarnation", "recreated"),
+                ],
                 "",
             )
                 .into_response();
@@ -2581,35 +2597,33 @@ mod tests {
         (S3Store::new(&cfg).unwrap(), state, task)
     }
 
+    /// A version token identifies an incarnation, not just the bytes: when the
+    /// key was deleted and re-created with the same bytes (same `ETag`, new
+    /// incarnation), a conditional delete with the pre-re-creation token must
+    /// be refused *before* the DELETE. A native `If-Match` (`ETag`-only) would
+    /// delete the re-created object — the rustfs contract suite pins the same
+    /// guarantee (`s3_contract`).
     #[tokio::test]
-    async fn conditional_delete_preserves_rivals_and_only_probes_on_failure() {
+    async fn conditional_delete_refuses_a_recreated_incarnation_before_deleting() {
         let (store, state, server) = condition_store().await;
-        assert!(matches!(
-            store.delete("key", Some(Version::new("captured"))).await,
-            Err(StoreError::PreconditionFailed { .. })
-        ));
-        {
-            let state = state.lock().unwrap();
-            assert_eq!(state.current.as_deref(), Some("rival"));
-            assert_eq!(state.requests.len(), 2);
-            assert_eq!(state.requests[0].0, "DELETE", "no HEAD/check/delete window");
-            assert_eq!(state.requests[1].0, "HEAD", "failure-only probe");
-            assert_eq!(state.requests[0].2.as_deref(), Some("captured"));
-        }
-        store
-            .delete("key", Some(Version::new("rival")))
+        let err = store
+            .delete("key", Some(Version::new("captured@old-incarnation")))
             .await
-            .unwrap();
-        assert!(state.lock().unwrap().current.is_none());
-        assert_eq!(
-            state.lock().unwrap().requests.len(),
-            3,
-            "successful delete uses one request"
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::PreconditionFailed { current: Some(_), .. }),
+            "{err:?}"
         );
-        assert!(matches!(
-            store.delete("key", Some(Version::new("rival"))).await,
-            Err(StoreError::NotFound { .. })
-        ));
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.requests.len(),
+            1,
+            "the incarnation check must refuse before the DELETE: {:?}",
+            state.requests
+        );
+        assert_eq!(state.requests[0].0, "HEAD");
+        assert_eq!(state.current.as_deref(), Some("rival"));
+        drop(state);
         server.abort();
     }
 

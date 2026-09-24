@@ -104,9 +104,11 @@ link, so a scenario can assert "a push on a healthy link is ≤ N requests" as a
 
 ### Conditional storage operations (2026-09-24, upstream #59)
 
-S3 conditional DELETE is one conditional DELETE (formerly HEAD → compare → conditional DELETE, 2–3 requests);
-a 412 may add one **failure-only** HEAD to distinguish an absent key on compatible services, and a successful
-delete never probes. S3 compose removes its destination existence HEAD; source HEADs/staging are unchanged,
+**Not ported: the single-request conditional DELETE.** Our version token identifies an incarnation
+(`etag@incarnation`); S3 `If-Match` compares only the ETag, so a single conditional DELETE would delete a
+re-created object with identical bytes. The HEAD (full incarnation) + conditional DELETE stays: 2 requests
+on success, plus a failure-only probe; the rustfs contract suite (`s3_contract`) pins that.
+S3 compose removes its destination existence HEAD; source HEADs/staging are unchanged,
 and create/update preconditions apply at the final multipart commit. Large conditional PUTs (Create/Update
 above `multipart_threshold`) now use bounded multipart staging plus conditional completion instead of a
 single-shot PUT/pre-check; there is no unconditional retry when a provider refuses the conditional operation
