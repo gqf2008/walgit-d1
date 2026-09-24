@@ -140,7 +140,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 - **文档本身没有签名**。绑定信任来自写入口：`policy.json` 必须只允许该 principal 写自己的
   registry ref（见 §14 威胁模型）。没有 policy 的仓库（allow-all）= 任何人可注册任何人。
 - `version` 当前恒为 1；`registered_at` 为 unix 秒（信息性）。
-- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。验证只认**此刻**注册表里的那把 key，因此**轮换与该 key 的丢失都会让此前签名的全部条目在未来聚合中变为 unverified**；唯一恢复路径是用**旧 key 的备份**重新注册旧 key。浏览器写路径因此提供导出备份（SPA 写入口的「备份密钥」，后果见 §14 与 `docs/USER_GUIDE.md` §7）。
+- **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。验证只认**此刻**注册表里的那把 key，因此**轮换与该 key 的丢失都会让此前签名的全部条目在未来聚合中变为 unverified**；唯一恢复路径是用**旧 key 的备份**重新注册旧 key。浏览器写路径因此提供导出备份与导入恢复（SPA 写入口的「备份密钥」/「导入密钥」，后果见 §14 与 `docs/USER_GUIDE.md` §7）。
 - 写路径：轮换可用 CLI `principal-register --push`（对指向 blob 的非 commit ref 用强制
   refspec `+`）或薄 API `POST …/api/collab/principal`（CAS 旧值更新，§12）；**吊销目前只有
   CLI** `principal-revoke --push`（删除 refspec `:`）——薄 API 尚无删除端点。
@@ -711,7 +711,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | 折叠覆盖（并发 gc） | CAS lease（基线 oid；无快照用空 expect）；绝不 `+`；先快照后删除 |
 | 快照文档损坏/超大 | fail-closed，读整体报错；超 64 MiB 拒绝物化 |
 | 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端 fetch（`collab watch` 与 `ci run` 共用）带 `--prune`，远端已删的注册 ref 在本地同步消失；自行 `git fetch`（不带 prune）的 checkout 仍可能残留旧 key——聚合前需 `git fetch --prune`；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
-| 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份（签名函数就在页面里，改不可导出只防「把 key 带走」，拦不住即时滥用），服务端只能人工 tombstone。**可导出是刻意的**：验证只认此刻注册表里的那一把 key，key 丢失后换新 key（轮换）会让该身份的历史条目全部变 unverified，用旧 key 备份回注是唯一恢复路径；SPA 写入口提供「备份密钥」导出，`docs/USER_GUIDE.md` §7 写明后果。 |
+| 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份（签名函数就在页面里，改不可导出只防「把 key 带走」，拦不住即时滥用），服务端只能人工 tombstone。**可导出是刻意的**：验证只认此刻注册表里的那一把 key，key 丢失后换新 key（轮换）会让该身份的历史条目全部变 unverified，用旧 key 备份回注是唯一恢复路径；SPA 写入口提供「备份密钥」导出与「导入密钥」恢复（导入前完整校验、失败不覆盖现有 key），`docs/USER_GUIDE.md` §7 写明后果。 |
 | 排序投毒（`ts`/`parent` 不被认证） | 顺序是协作约定、不是安全边界（§6.2）。与代码核对后的现状：链序由 `parent` 拓扑决定，回拨 `ts` 只影响平行候选次序与 `last_ts`/`created_ts` 展示；卡片身份取 **首个 verified 根**（`canonical_root`），未注册者的回填根不能改写身份；已验证参与者能影响投影——等价于他们直接发条目的能力，边界仍是写权限（§3）。写侧不校验 `parent`（折叠后父只在快照里，按 ref 校验会误拒合法追加）。**不再计划**服务器时间戳/单调序号类防线（收益低、要改 schema）。 |
 | 自审/重复批准 | **已收紧**：merge 规则按**去重后的非作者**批准者数计（§7.3），`done` 门禁同样排除 patch 作者；同伙串谋刷 approve 仍是流程边界内的事（写权限与身份是安全边界） |
 | gc 写出超限快照 | **已强制**：CLI 渲染后 >64 MiB 默认拒绝，`--truncate` 丢弃最老记录并置 `complete=false`，服务端立即恢复可读；本地 `load` 同样 fail-closed。快照字节是唯一载体，禁止先删 ref |

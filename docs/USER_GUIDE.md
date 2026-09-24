@@ -189,10 +189,9 @@ walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
 - 密钥是 **32 字节 hex** 的 Ed25519 种子；妥善保管，谁持有谁就是该身份。
 - **浏览器身份（SPA 写路径）**：同一浏览器首次发条目时自注册一把 WebCrypto Ed25519 key（存 localStorage，键名 `walgit.collab.keypair.v1`）。
   验证只认「此刻」注册表里的那一把 key，因此 **key 丢失后换新 key（轮换）会让该身份此前签名的全部条目变为 unverified**。
-  - **备份**：线程页写入口的「备份密钥」导出 `walgit-collab-key-<principal>.json`（JWK 文本），请妥善保存。
-  - **恢复**：把备份内容写回本浏览器，刷新后用任意写入口（它会自动把公钥重新注册/覆盖回去）：
+  - **备份**：线程页写入口与看板页的「浏览器密钥」区，「备份密钥」导出 `walgit-collab-key-<principal>.json`（JWK 文本），请妥善保存。
+  - **恢复**：同一处「导入密钥」选择备份文件。导入前会完整校验（JSON / JWK 结构 kty-crv-x-d / 密钥材料 / 公私一致性），失败不覆盖现有 key；已有 key 时需确认替换（先备份当前 key）。导入后经任意写入口即重新注册公钥。控制台兜底（备份文件内容就是 localStorage 里存的 JSON 文本）：
     ```js
-    // 控制台执行；备份文件内容就是 localStorage 里存的 JSON 文本
     localStorage.setItem("walgit.collab.keypair.v1", `粘贴 walgit-collab-key-<principal>.json 的内容`)
     ```
   - 注意注册表是「当前 key 唯一」语义：repo 本地 `refs/collab/meta/principals/*` 永远覆盖 host 注册表，
