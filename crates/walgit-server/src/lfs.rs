@@ -92,6 +92,19 @@ pub async fn batch(
         .map_err(|e| ApiError::from(e).git_lane())?;
     let body: BatchRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ApiError::BadRequest(format!("invalid lfs batch: {e}")))?;
+    // The operation decides the permission: an upload batch mints upload
+    // action URLs and must not be answered to a read-only principal; an
+    // unknown operation is a client error, never silently a download.
+    match body.operation.as_str() {
+        "upload" => {
+            st.auth
+                .require_write(headers)
+                .await
+                .map_err(|e| ApiError::from(e).git_lane())?;
+        }
+        "download" => {}
+        _ => return Err(ApiError::BadRequest("unsupported LFS operation".into())),
+    }
     not_served_here(st, &route.id)?;
     let handle = open_repo(st, &route.id, false).await?;
     let store = handle.store().clone();

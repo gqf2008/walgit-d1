@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Response},
@@ -426,10 +426,50 @@ async fn me(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
 /// `require_auth` sends an unauthenticated browser through sign-in first; this
 /// authenticated page then tells its opener and closes. The SDK opens it when a
 /// browser-lane call answers 401.
-async fn authenticate(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Deserialize)]
+struct AuthenticateQuery {
+    origin: Option<String>,
+}
+
+async fn authenticate(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthenticateQuery>,
+) -> Response {
+    // The notification about to be posted names the signed-in principal, so the
+    // target is the opener's own origin only when the configuration allows that
+    // origin; an unknown one is refused, and the no-origin case posts only to
+    // this page's own origin (same-window frames can still receive it).
+    if query
+        .origin
+        .as_ref()
+        .is_some_and(|origin| !origin_allowed(&st.cfg, origin))
+    {
+        return ApiError::Forbidden.into_response();
+    }
+    let target = query.origin.as_ref().map_or_else(
+        || "window.location.origin".to_owned(),
+        |origin| script_json(origin),
+    );
     match st.auth.require_read(&headers).await {
         Ok(p) => {
-            let page = AUTHENTICATE_HTML.replace("{{principal}}", &html_escape(&p.name));
+            let values = [
+                ("{{principal}}", html_escape(&p.name)),
+                ("{{principal_json}}", script_json(&p.name)),
+                ("{{target_origin}}", target),
+            ];
+            // Substitute only original template tokens, never tokens in user data.
+            let page: String = AUTHENTICATE_HTML
+                .split_inclusive("}}")
+                .map(|part| {
+                    for (token, value) in &values {
+                        if let Some(prefix) = part.strip_suffix(token) {
+                            return format!("{prefix}{value}");
+                        }
+                    }
+                    part.to_owned()
+                })
+                .collect();
             let mut r = Html(page).into_response();
             r.headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -447,9 +487,9 @@ const AUTHENTICATE_HTML: &str = r#"<!doctype html>
 <p id="m">You can close this window.</p>
 <script>
 (function () {
-  var msg = { type: "repos:authenticated", principal: "{{principal}}" };
-  try { if (window.opener) { window.opener.postMessage(msg, "*"); } } catch (e) {}
-  try { if (window.parent && window.parent !== window) { window.parent.postMessage(msg, "*"); } } catch (e) {}
+  var msg = { type: "repos:authenticated", principal: {{principal_json}} };
+  try { if (window.opener) { window.opener.postMessage(msg, {{target_origin}}); } } catch (e) {}
+  try { if (window.parent && window.parent !== window) { window.parent.postMessage(msg, {{target_origin}}); } } catch (e) {}
   // Only a window we opened ourselves (same site or cross-site via the SDK) is closed.
   if (window.opener) { setTimeout(function () { window.close(); }, 150); }
 })();
@@ -461,6 +501,13 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// JSON encoding alone permits </script>; HTML's script parser sees that before JS.
+fn script_json(value: &str) -> String {
+    serde_json::Value::String(value.into())
+        .to_string()
+        .replace('<', "\\u003c")
 }
 
 #[derive(Serialize)]
