@@ -6,6 +6,7 @@ import { invalidate, reportError, useData } from "../data";
 import { Box } from "../components/Layout";
 import { Markdown } from "../components/Markdown";
 import { enableCollabKey } from "../components/CollabWrite";
+import { CollabKeyStatus } from "../components/CollabKeyStatus";
 import { AgentFlow } from "../components/AgentFlow";
 import { signCanonical } from "../collab";
 import { useI18n, statusLabel } from "../i18n";
@@ -198,6 +199,13 @@ export function CollabBoardPage() {
       <Box title={t("board.flow.title")}>
         <div className="pad muted">{t("board.flow.explainer")}</div>
         <AgentFlow columns={board.columns} />
+      </Box>
+      <Box title={t("key.status.title")}>
+        <div className="pad">
+          {/* The board's write path (the card move menu) signs with the browser
+              key too, so the same backup/import affordance belongs here. */}
+          <CollabKeyStatus />
+        </div>
       </Box>
       <div className="row gap board-toolbar">
         <span className="muted">

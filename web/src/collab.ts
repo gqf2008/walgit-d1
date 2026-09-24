@@ -96,3 +96,79 @@ export function downloadKeyBackup(principal: string): boolean {
   a.click();
   return true;
 }
+
+/** Whether this browser currently holds a key (any key, valid or not). */
+export function hasStoredKey(): boolean {
+  return localStorage.getItem(KEY_STORE) !== null;
+}
+
+/** Failure semantics for restoring a key from a backup: the UI maps each kind
+    to one message. The stored key is replaced only after a fully validated
+    import — a failed import leaves the current key untouched, because
+    `loadKeyPair` wipes a key it cannot parse and an unchecked write could
+    destroy the only copy of the old identity. */
+export type RestoreKeyError =
+  | { kind: "not-json" }
+  | { kind: "not-object" }
+  | { kind: "structure"; detail: string }
+  | { kind: "invalid" }
+  | { kind: "mismatch" }
+  | { kind: "unsupported" };
+
+/** Restore a key from a backup export (the JSON the backup button wrote):
+    validate the JWK shape (`kty`/`crv`/`x`/`d`), import it through WebCrypto,
+    check the private (`d`) and public (`x`) halves describe the same key, then
+    store the canonical re-exported JWK. Throws `RestoreKeyError`; only a
+    fully valid key reaches localStorage. */
+export async function restoreKeyPair(text: string): Promise<CryptoKeyPair> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw { kind: "not-json" } satisfies RestoreKeyError;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw { kind: "not-object" } satisfies RestoreKeyError;
+  }
+  const jwk = parsed as Record<string, unknown>;
+  const problems: string[] = [];
+  if (jwk.kty !== "OKP") problems.push("kty");
+  if (jwk.crv !== "Ed25519") problems.push("crv");
+  if (typeof jwk.x !== "string" || jwk.x === "") problems.push("x");
+  if (typeof jwk.d !== "string" || jwk.d === "") problems.push("d");
+  if (problems.length > 0) {
+    throw { kind: "structure", detail: problems.join(",") } satisfies RestoreKeyError;
+  }
+  if (typeof crypto === "undefined" || typeof crypto.subtle === "undefined") {
+    throw { kind: "unsupported" } satisfies RestoreKeyError;
+  }
+
+  // WebCrypto import validates the key material itself; anything it refuses is
+  // not a usable key (an engine without Ed25519 says NotSupportedError).
+  let privateKey: CryptoKey;
+  try {
+    privateKey = await crypto.subtle.importKey("jwk", jwk as JsonWebKey, { name: "Ed25519" }, true, ["sign"]);
+  } catch (e) {
+    const unsupported = typeof DOMException !== "undefined" && e instanceof DOMException && e.name === "NotSupportedError";
+    throw (unsupported ? { kind: "unsupported" } : { kind: "invalid" }) satisfies RestoreKeyError;
+  }
+
+  // The private (d) and public (x) halves must describe the same key. Some
+  // engines derive the public key from d and ignore x on import, so the check
+  // is explicit: the imported key's public half must equal the JWK's x.
+  const exported = (await crypto.subtle.exportKey("jwk", privateKey)) as JsonWebKey;
+  if (exported.x !== jwk.x) {
+    throw { kind: "mismatch" } satisfies RestoreKeyError;
+  }
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    { kty: "OKP", crv: "Ed25519", x: exported.x, ext: true },
+    { name: "Ed25519" },
+    true,
+    ["verify"],
+  );
+
+  // Canonical stored form: what WebCrypto exported, not what the user pasted.
+  localStorage.setItem(KEY_STORE, JSON.stringify(exported));
+  return { privateKey, publicKey };
+}
