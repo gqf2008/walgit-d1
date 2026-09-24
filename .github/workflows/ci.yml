@@ -593,7 +593,8 @@ jobs:
             # shape above through task_xml(), creates the task and runs it.
             $serviceRoot = Join-Path $env:TEMP "walgit-task-ownership-service-$PID"
             New-Item -ItemType Directory -Force -Path $serviceRoot | Out-Null
-            $servicePort = Get-Random -Minimum 20000 -Maximum 60000
+            . ./deploy/windows/free-port.ps1
+            $servicePort = Get-WalgitFreePort
             $serviceCfg = Join-Path $serviceRoot 'walgit.toml'
             $cfgLines = @(
               '[server]'
@@ -725,12 +726,16 @@ jobs:
       - name: Service lifecycle smoke (scheduled task, D48)
         # The real binary, the real task and the real port: `start` twice (must
         # not fork), then `stop` (the port must go quiet). This is the level the
-        # old "stale pidfile orphans a live server" bug was visible at.
+        # old "stale pidfile orphans a live server" bug was visible at. The
+        # port is bind-probed (free-port.ps1), not random: a random port can
+        # land in a Hyper-V/WSL excluded range (os error 10013, thread
+        # cc-ai-win-smoke-port-flake).
         shell: pwsh
         run: |
           # Parse first: a PowerShell quoting slip (a backtick before a closing
           # quote escapes it) otherwise surfaces only after the ~6 minute build.
           pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./deploy/windows/service-smoke.ps1)) | Out-Null"
+          pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./deploy/windows/free-port.ps1)) | Out-Null"
           cargo build -p walgit-cli
           ./deploy/windows/service-smoke.ps1
 

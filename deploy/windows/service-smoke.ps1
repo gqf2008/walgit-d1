@@ -9,12 +9,20 @@
 #   * a server nobody supervises (an older install, a stray `walgit.exe serve`)
 #     could not be stopped at all;
 #   * D48's `cmd /c` action made the interactive task show a console window.
+#
+# The port is picked by `free-port.ps1` (bind-probed, not random): a random port
+# can land in a Hyper-V/WSL excluded range, and Windows reports that as
+# WSAEACCES (os error 10013) on the server's bind — "service start exited 1"
+# (thread cc-ai-win-smoke-port-flake).
 $ErrorActionPreference = 'Stop'
 
 $root = Join-Path $env:TEMP "walgit-service-smoke-$PID"
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-# A random high port: a fixed one collides with whatever else runs on the host.
-$port = Get-Random -Minimum 20000 -Maximum 60000
+. (Join-Path $PSScriptRoot 'free-port.ps1')
+# A fixed port collides with whatever else runs on the host; a random one can
+# be excluded. Bind-probed: the picker only returns ports it could bind on
+# 127.0.0.1 (the server's `::1` twin is best-effort, see free-port.ps1).
+$port = Get-WalgitFreePort
 $listen = "127.0.0.1:$port"
 $cfg = Join-Path $root 'walgit.toml'
 
@@ -128,6 +136,26 @@ function Wait-Free {
 
 $failed = $null
 try {
+  # Positive control for the port picker: a candidate it cannot bind (the shape
+  # an excluded range presents — WSAEACCES — same as a port another process
+  # holds) must be skipped, never used, and its holder left untouched. If the
+  # picker ever accepted an un-bindable candidate, the guard is decorative.
+  $held = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse('127.0.0.1'), 0)
+  $held.Start()
+  $heldPort = ([System.Net.IPEndPoint] $held.LocalEndpoint).Port
+  try {
+    $picked = Get-WalgitFreePort -Initial $heldPort
+    if ($picked -eq $heldPort) {
+      throw "port picker accepted an un-bindable candidate: $heldPort"
+    }
+    $probe = [System.Net.Sockets.TcpClient]::new()
+    $probe.Connect('127.0.0.1', $heldPort)
+    $probe.Close()
+  } finally {
+    $held.Stop()
+  }
+  Write-Host "port picker: un-bindable candidate $heldPort skipped, holder untouched"
+
   Write-Host '--- start'
   & $bin service start --config $cfg
   if ($LASTEXITCODE -ne 0) { throw "service start exited $LASTEXITCODE" }

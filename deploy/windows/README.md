@@ -60,6 +60,10 @@ pwsh -File deploy\windows\task-action-check.ps1 -TaskName my-job
 
 CI 里 `service-smoke.ps1` 对 `\walgit` 任务除自身同类断言外，也直接调用这条自查（D53）。
 
+`service-smoke.ps1` 与 CI 的 task-ownership 步骤共用 `free-port.ps1` 选端口（绑定探测，
+避开 Hyper-V/WSL 保留段与已被占用的端口——随机端口落保留段会以 os error 10013 假红，
+见线程 cc-ai-win-smoke-port-flake）。
+
 ## 本机构建
 
 需要 [Inno Setup **6.4+**](https://jrsoftware.org/isinfo.php)(`ISCC` 在 PATH;
