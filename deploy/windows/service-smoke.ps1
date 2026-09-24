@@ -18,11 +18,18 @@ $ErrorActionPreference = 'Stop'
 
 $root = Join-Path $env:TEMP "walgit-service-smoke-$PID"
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-. (Join-Path $PSScriptRoot 'free-port.ps1')
 # A fixed port collides with whatever else runs on the host; a random one can
 # be excluded. Bind-probed: the picker only returns ports it could bind on
-# 127.0.0.1 (the server's `::1` twin is best-effort, see free-port.ps1).
-$port = Get-WalgitFreePort
+# 127.0.0.1 (the server's `::1` twin is best-effort, see free-port.ps1). The
+# pick runs before the main try, so its failure cleans the scratch dir rather
+# than leaving it for the main finally to never see.
+try {
+  . (Join-Path $PSScriptRoot 'free-port.ps1')
+  $port = Get-WalgitFreePort
+} catch {
+  Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+  throw
+}
 $listen = "127.0.0.1:$port"
 $cfg = Join-Path $root 'walgit.toml'
 

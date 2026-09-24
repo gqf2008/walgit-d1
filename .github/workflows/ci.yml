@@ -540,6 +540,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Parse first: this step consumes free-port.ps1 below, and a
+          # PowerShell quoting slip would otherwise surface only after the
+          # ~6 minute build (review observation, thread
+          # cc-ai-win-smoke-port-flake).
+          pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./deploy/windows/free-port.ps1)) | Out-Null"
           cargo build -p walgit-cli
           if ($LASTEXITCODE -ne 0) { throw "cargo build -p walgit-cli exited $LASTEXITCODE" }
           $probe = (Resolve-Path './deploy/windows/task-ownership.ps1').Path
@@ -735,7 +740,6 @@ jobs:
           # Parse first: a PowerShell quoting slip (a backtick before a closing
           # quote escapes it) otherwise surfaces only after the ~6 minute build.
           pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./deploy/windows/service-smoke.ps1)) | Out-Null"
-          pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./deploy/windows/free-port.ps1)) | Out-Null"
           cargo build -p walgit-cli
           ./deploy/windows/service-smoke.ps1
 
