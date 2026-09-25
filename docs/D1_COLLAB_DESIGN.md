@@ -317,7 +317,7 @@
    拒绝 = 403，理由记日志）、`wal.fsck_objects` 同源、principal 更新为真实 old 值 CAS；
    聚合读单请求预算 20k refs，超限 503 指向 CLI 离线聚合（条目对象一次
    `cat-file --batch` 读完，无逐条目子进程）。
-   ⑤ CI 外挂协议（issue #31）：`docs/D1_CI_PROTOCOL.md`（规范）——触发 = ref 事实
+   ⑤ CI 子协议（issue #31）：`docs/D1_CI_PROTOCOL.md`（规范）——触发 = ref 事实
    （refs 级轮询）、`ci_claim`/`ci_result` 签名条目、
    确定性竞争收敛 + TTL 重认领、产物引用 + 哈希、秘密只在客户端 env；落地为
    `walgit-wal/src/ci.rs`（聚合核心）与 `walgit ci validate|run|status`。服务端零 CI
