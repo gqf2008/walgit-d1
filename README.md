@@ -99,7 +99,8 @@ git fetch origin '+refs/collab/*:refs/collab/*'
   （见 `docs/BOARD.md`）——板不是状态，是纯函数。
 - **身份**：host 级 principal 注册表（`walgit principal`），一个 token 同时覆盖
   git 读写与协作读写；支持签名公钥注册/吊销。
-- **D1-CI（去中心化 CI）**：**服务端零 CI 逻辑**。认领与结果都是 `refs/collab/inbox/*`
+- **D1-CI（去中心化 CI）**：**服务端零 CI 执行**（没有 runner / 调度 / 秘密；聚合随 walgit 编译，
+  只在 report runs 投影里跑）。认领与结果都是 `refs/collab/inbox/*`
   里的签名条目，由客户端 runner（`walgit ci`）认领、执行被测提交里的 `.walgit/ci.toml`、
   签名回传；收敛靠对条目日志的确定性规则，不靠互斥。规范见 `docs/D1_CI_PROTOCOL.md`。
 - **Web UI**：协作页、线程/PR 页、看板页、以及面向人类的「了解 D1 协作」讲解页

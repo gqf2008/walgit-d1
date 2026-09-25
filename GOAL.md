@@ -31,6 +31,9 @@ anyone can run against a bucket, and predictable enough that tooling can build o
    `<owner>/<repo>` namespaces, per-repo push policy and settings, a browsing web UI + one JSON API +
    one SDK (`repos.js`), tasks/narration so nothing ever waits silently. Not in scope: code review, merge
    queues, CI, issues — those live elsewhere and build on this.
+   **This fork's exception**: `gqf2008/walgit-d1` deliberately carries the D1 collaboration layer
+   (issues, reviews, board, D1-CI — see `docs/D1_PROTOCOL.md`) inside the same process; the rest of this
+   section is the upstream walgit scope (`README.md`, "关于这个仓库 — walgit-d1").
 5. **Works great for developers and their laptops.** One auth story (browser sign-in through your identity
    provider, a token for git), one install script, `git` does the rest; errors tell you the fix; every long
    wait is narrated. The developer on a rebased branch must get *cheaper*, never slower.

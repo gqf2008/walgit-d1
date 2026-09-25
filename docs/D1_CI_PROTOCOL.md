@@ -6,11 +6,13 @@
 > `crates/walgit-cli/src/ci_cmd.rs`（`walgit ci validate|run|status`），测试即其黄金用例
 > （与 `docs/POLICY.md` 同一纪律）。
 >
-> 与 walgit 的关系：**服务端零 CI 逻辑**（原则 X）。walgit 只提供两样东西——事实源（桶：
-> 代码对象与 `refs/collab/*`）与事件源（ref 事实：refs 级轮询 / `ls-remote` 的 tip diff）。
-> 跑任务的算力来自**持有凭据的客户端 runner**（人的机器 / agent 的机器），它以普通
-> git 客户端的身份 fetch 代码、认领、执行、签名回传结果。walgit 进程内没有任何
-> "CI"代码；`GOAL.md §4` 的边界不变。
+> 与 walgit 的关系：**服务端零 CI 执行**——没有 runner、没有调度、没有秘密。walgit 只提供两样
+> 东西——事实源（桶：代码对象与 `refs/collab/*`）与事件源（ref 事实：refs 级轮询 /
+> `ls-remote` 的 tip diff）。跑任务的算力来自**持有凭据的客户端 runner**（人的机器 /
+> agent 的机器），它以普通 git 客户端的身份 fetch 代码、认领、执行、签名回传结果。
+> 收敛逻辑（`crates/walgit-wal/src/ci.rs` 的认领/结果聚合）与协作聚合同一份实现，随 walgit
+> 一起编译并在服务端执行（`walgit-wal/src/collab.rs` 的 `report.runs = crate::ci::collect_runs(…)`）；
+> **本分叉有意越出上游 `GOAL.md §4` 的边界**，定位见 `docs/D1_COLLAB_DESIGN.md` 文首。
 >
 > **给人类的说明（呈现层，非规范）**：不想读协议的工程师看两处即可——① 产品内模型讲解页
 > 「了解 D1 协作」（SPA：仓库页 → 协作 → 「了解 D1 协作」，路由 `/{owner}/{repo}/collab/guide`；

@@ -4,9 +4,15 @@
 > 限额与验收锚点）见 **`docs/D1_PROTOCOL.md`**——实现事实与规范冲突时，以规范与代码为准。
 > 本文保留为设计背景与推进记录（§9–§11 的进度注记是历史原貌，不再逐条维护），不重复规范内容。
 >
-> 本文描述一个**构建在 walgit 之上**的外部协作层——它不是 walgit 进程内的功能。
-> 与 walgit 的关系遵循 `AGENTS.md §3` 原则 X（keep walgit small）与 `GOAL.md §4`：
-> code review / merge queues / CI / issues 不在 walgit 范围内，**build on this**。
+> 本文描述一个**与 walgit 同进程的协作层**：权威状态仍然是仓库里的 `refs/collab/*`，
+> 服务端不持有协作状态、也不做中心聚合服务；但实现就在 walgit 里——薄写 API
+> （`POST …/collab/entries`、`…/collab/principal`）与聚合读端点（`report` / `board` /
+> `threads/{id}`）挂在仓库 API 上，聚合核心与 walgit 共用 `walgit-wal::collab`，
+> 浏览器页面随 Web UI 一起发布，CLI 就是 walgit 二进制。
+>
+> 上游 walgit 用 `AGENTS.md §3` 原则 X（keep walgit small）与 `GOAL.md §4` 把
+> code review / merge queues / CI / issues 排除在 walgit 之外，要求 **build on this**；
+> **本分叉是有意越出那条范围的**，本层即其增量——见 `README.md`「关于这个仓库」。
 
 ## 1. 目标
 
@@ -26,7 +32,8 @@
 - 不做 **D2**（跨实例/跨组织联邦）与 **D3**（纯 P2P、无共享桶）。本设计的模型是
   **共享事实源（桶）+ 无中心协作服务器**。
 - 不重造 git 内部（对象格式、pack、传输协议）；只消费 walgit 已有的能力。
-- 不把协作逻辑塞进 walgit 进程（保持 walgit 小、专注；协作层是外部协议 + 客户端 + 可选薄服务）。
+- 不引入中心协作服务、第二套写语义或第二份聚合实现：协作状态只在仓库 refs 里，写入要么经
+  receive-pack、要么经共享同一 WAL 发布路径的薄 API，视图只由 `walgit-wal::collab` 一份纯函数算出。
 
 ## 3. 架构总览
 
@@ -310,11 +317,11 @@
    拒绝 = 403，理由记日志）、`wal.fsck_objects` 同源、principal 更新为真实 old 值 CAS；
    聚合读单请求预算 20k refs，超限 503 指向 CLI 离线聚合（条目对象一次
    `cat-file --batch` 读完，无逐条目子进程）。
-    ⑤ CI 外挂协议（issue #31）：`docs/D1_CI_PROTOCOL.md`（规范）——触发 = ref 事实
+   ⑤ CI 外挂协议（issue #31）：`docs/D1_CI_PROTOCOL.md`（规范）——触发 = ref 事实
    （refs 级轮询）、`ci_claim`/`ci_result` 签名条目、
    确定性竞争收敛 + TTL 重认领、产物引用 + 哈希、秘密只在客户端 env；落地为
    `walgit-wal/src/ci.rs`（聚合核心）与 `walgit ci validate|run|status`。服务端零 CI
-   逻辑（原则 X）。
+   **执行**（没有 runner / 调度 / 秘密），聚合只在 report runs 投影里跑。
 3. 聚合视图的只读缓存放哪（是否复用 walgit 的 render cache `cache/api/v1/*.json`）？
    **不复用（issue #30 决定）**。render cache 的契约是"答案按内容寻址、不可变"
    （键 = 答案自身的哈希：可无限重放、谁先算好谁受益）；而协作聚合的输入是活的
