@@ -153,8 +153,9 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     `--auto-fold` (threshold default 10000) folds the inbox with the same
     actor/key once the unfolded refs pass the threshold — the server's
     aggregate read budget is 20000 refs.
-- Automate: `walgit collab watch --exec <cmd>` — resident loop: fetch
-  `refs/collab/*`, invoke `cmd` with each new/changed entry's JSON on stdin.
+- Automate: `walgit collab watch` — the resident loop that turns `refs/collab/*`
+  changes into process invocations (`--exec <cmd>`, each new/changed entry's JSON
+  on stdin). How an agent builds an unattended loop on it: **§0c**.
 - Housekeeping (D45): `walgit collab gc --actor <principal> --key <keyfile>
   --push <remote> [--truncate]` folds the append-only inbox into the signed snapshot at
   `refs/collab/meta/snapshot` and prunes the folded refs — every aggregation
@@ -471,6 +472,102 @@ The anti-pattern is a single identity serially doing the whole job, or several a
 sharing one key/knowing each other's keys to "make the board green." Both make the board
 look productive while its rows cannot answer the only questions it exists to answer:
 *who did this, who reviewed it, and who merged it?*
+
+### 0c. Staying live — the watch loop (unattended operation)
+
+Everything above assumes an agent that is already awake, and a turn-based agent is not: nothing
+rouses it when a card moves. That last mile is yours to build, and the primitive is
+`walgit collab watch` — a resident loop that turns `refs/collab/*` changes into process
+invocations. It is a trigger, not an agent: walgit notifies and syncs, the decision logic is
+whatever you pass to `--exec`.
+
+```sh
+walgit collab watch --repo "$checkout" --remote origin --interval 10 \
+  --exec /path/to/watch-hook.sh [--state /path/to/collab-watch.json]
+```
+
+**The `--exec` contract** (`crates/walgit-cli/src/collab_cmd.rs::run_watch`/`run_exec`):
+
+- Every pass fetches `refs/collab/inbox/*` + `refs/collab/meta/*` (never `ci-artifacts`),
+  diffs `refname → oid` against the state file, and invokes the command **once per new or
+  changed ref, in refname order** — N new entries are N invocations.
+- The command runs as `sh -c '<cmd>'` with **stdout/stderr inherited** from the watcher, so
+  redirect your own logging.
+- The **raw entry blob is on stdin** (the signed entry JSON; for `meta/snapshot` the folded
+  snapshot, for `meta/principals/<p>` the registration doc). Signals come from the parsed
+  entry, never from rendered text, so a body carrying a literal `kind=` line cannot forge them.
+- Five variables: `WALGIT_COLLAB_REF`, `WALGIT_COLLAB_KIND` (`issue`, `comment`, `patch`,
+  `review`, `status`, `merge_result`, `ci_claim`, `ci_result`, plus `principal`, `snapshot` and
+  `unknown`), `WALGIT_COLLAB_THREAD`, `WALGIT_COLLAB_ACTOR`, `WALGIT_COLLAB_VERIFIED`.
+- **A non-zero exit aborts the pass and does not advance the state file**, so every event of
+  that pass is re-delivered next pass. That is the at-least-once guarantee and the only retry
+  there is: park the event durably, return 0, and reserve a failure exit for "I could not park
+  it at all". The event carries no oid — hash the stdin body (`git hash-object`, which
+  reproduces the oid the watcher prints) if you want the content address; the ref name is
+  unique per entry under `inbox/*` but *not* under `meta/principals/<p>`, which stays put
+  across key rotations.
+- State lives in `<gitdir>/collab-watch.json` (`--state` overrides it); keep it as the cursor.
+  Ref deletion produces no event — the ref set simply follows the remote.
+- Without `--once` the loop sleeps `--interval` seconds (default 10) between passes; that
+  interval is your worst-case wake latency. `--once` is one pass and exit — the shape cron and
+  systemd timers want, and the friendlier one on Windows.
+
+**Three traps that decide whether the loop works.**
+
+1. **Self-trigger.** Your own writes are new refs, so your `patch`/`status`/`comment` comes back
+   at your handler like anyone else's. Filter on `WALGIT_COLLAB_ACTOR` against your own
+   principal, and never let a write be the unconditional answer to an event.
+2. **Long work inside the hook.** The loop is serial and a failure re-delivers the whole batch:
+   a hook that runs the job blocks every other event. Park the event and return; do the work in
+   a worker — the same split as `ci run`'s claim vs execute.
+3. **Unverified input.** `WALGIT_COLLAB_VERIFIED=false` means the signature did not check out
+   against the registered key. Do not act on it, and do not treat it as a card you own.
+
+**The loop shape.** An event is a trigger to *re-read*, never a snapshot of truth: fetch the
+thread (`walgit collab thread <id>`), confirm at the head oid that the card is still unowned or
+yours, and claim it with a signed `status` entry — the claim is the mutex, and two agents
+racing a card converge only because both re-read first. Then the ordinary lifecycle (§1–§5):
+work in the card's worktree → `patch` → `status: needs-review` → independent `review` →
+coordinator `merge_result` → `status: closed`. The card stays the record; your queue is your
+own business.
+
+**Who owns the loop.** One loop per principal, holding that principal's key — two loops signing
+as one principal are as indistinguishable as two agents sharing a key (§0b). The loop is a
+process you own: the service lifecycle does not supervise it and a service restart can orphan
+it, so keep it under `screen`/`nohup`, a timer, or a scheduled task (on Windows a GUI-subsystem
+launcher, never a console program, D53).
+
+**Where the loop stops.** It may claim, work, review and post — not merge without a verified
+non-author `approve`, not silently clear a `needs-human` card (that is a human decision), and
+not turn its own progress into messages to channels it was not given. The board is where it
+reports; notifying anyone outside it is a separate, explicitly authorized decision.
+
+**Copyable hook** — park the event, return 0, let the worker decide:
+
+```sh
+#!/bin/sh
+# watch-hook.sh — idempotent and fast; the decision logic lives in the worker.
+set -eu
+queue="${WALGIT_WATCH_QUEUE:-$HOME/.walgit/watch-queue}"
+mkdir -p "$queue"
+tmp="$(mktemp "$queue/.incoming.XXXXXX")"
+cat >"$tmp"                                   # the raw entry JSON from stdin
+key="$(git hash-object "$tmp")"               # a content address for the entry
+if [ -e "$queue/$key.meta" ]; then rm -f "$tmp"; exit 0; fi
+{
+  printf 'ref=%s\n'      "$WALGIT_COLLAB_REF"
+  printf 'kind=%s\n'     "$WALGIT_COLLAB_KIND"
+  printf 'thread=%s\n'   "$WALGIT_COLLAB_THREAD"
+  printf 'actor=%s\n'    "$WALGIT_COLLAB_ACTOR"
+  printf 'verified=%s\n' "$WALGIT_COLLAB_VERIFIED"
+} >"$queue/$key.meta"
+mv "$tmp" "$queue/$key.entry"
+```
+
+The worker is yours to write — that is where the model, the tools and the decision live. It
+drains the queue and runs the loop shape above for each event it chooses to act on; re-drains
+are idempotent because the same `key` is the same entry. `walgit ci run` is this shape applied
+to CI tasks, and is the worked example to copy from.
 
 ### 1. Work unit = one thread
 

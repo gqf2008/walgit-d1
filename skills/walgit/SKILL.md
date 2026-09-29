@@ -200,6 +200,12 @@ The pull lanes are **at-least-once**: be idempotent and dedupe by `seq` (WAL) or
 (collab). Duplicates are possible; a fact you can still read is never lost. For push semantics
 (webhook/IM/queue), add a sidecar that forwards from a pull lane — never from SSE.
 
+Running a **resident** loop that picks up collab work and acts on it (claim → work → sign →
+repeat) is the agent's own job: `collab watch --exec` is the trigger, the handler and worker are
+yours. The `--exec` contract (stdin, `WALGIT_COLLAB_*`, non-zero exit re-delivers the pass), the
+three traps (self-trigger, long work in the hook, unverified input) and a copyable hook are in
+the host guide `/SKILL.md` §0c.
+
 ## 7. Decentralized CI
 
 The server holds no CI logic: `.walgit/ci.toml` in the tested commit declares tasks; a runner claims
