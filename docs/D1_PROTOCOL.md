@@ -635,8 +635,9 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
      解析不出合法 entry 时回退为 `kind="unknown"`、`verified=false`。
 4. `--exec <cmd>` 对每个事件执行一次（`sh -c`）：**原始 blob 文本进 stdin**，环境给
    `WALGIT_COLLAB_REF` / `_KIND` / `_THREAD` / `_ACTOR` / `_VERIFIED`。事件字段取自**解析后的
-   条目**而非渲染文本（body 里的 `\nkind=` 不能伪造信号）。exec 非零退出 → 本轮报错中止，
-   状态文件不推进：下轮重报同一批事件（at-least-once）。
+   条目**而非渲染文本（body 里的 `\nkind=` 不能伪造信号）。exec 非零退出 → 错误经 `?` 传出
+   `run_watch`，**watcher 进程结束**（不是只跳过本轮），状态文件因此不推进：进程下次运行
+   （常驻形态由监督者重启，或 `--once` 的下一次调度）重报同一批事件（at-least-once）。
 5. 全部事件处理完才写状态文件。
 
 消费方幂等键：条目 oid（内容寻址）；即使重投递也解析为同一事件集。

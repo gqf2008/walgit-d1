@@ -496,16 +496,21 @@ walgit collab watch --repo "$checkout" --remote origin --interval 10 \
 - The **raw entry blob is on stdin** (the signed entry JSON; for `meta/snapshot` the folded
   snapshot, for `meta/principals/<p>` the registration doc). Signals come from the parsed
   entry, never from rendered text, so a body carrying a literal `kind=` line cannot forge them.
-- Five variables: `WALGIT_COLLAB_REF`, `WALGIT_COLLAB_KIND` (`issue`, `comment`, `patch`,
-  `review`, `status`, `merge_result`, `ci_claim`, `ci_result`, plus `principal`, `snapshot` and
-  `unknown`), `WALGIT_COLLAB_THREAD`, `WALGIT_COLLAB_ACTOR`, `WALGIT_COLLAB_VERIFIED`.
-- **A non-zero exit aborts the pass and does not advance the state file**, so every event of
-  that pass is re-delivered next pass. That is the at-least-once guarantee and the only retry
-  there is: park the event durably, return 0, and reserve a failure exit for "I could not park
-  it at all". The event carries no oid — hash the stdin body (`git hash-object`, which
-  reproduces the oid the watcher prints) if you want the content address; the ref name is
-  unique per entry under `inbox/*` but *not* under `meta/principals/<p>`, which stays put
-  across key rotations.
+- Five variables: `WALGIT_COLLAB_REF`, `WALGIT_COLLAB_KIND` (the entry's `kind` — the six
+  lifecycle kinds, `ci_claim`/`ci_result`, or any custom kind; plus the watcher's own three:
+  `principal` for `meta/principals/<p>`, `snapshot` for a folded `meta/snapshot`, `unknown`
+  for an unparseable ref), `WALGIT_COLLAB_THREAD`, `WALGIT_COLLAB_ACTOR`,
+  `WALGIT_COLLAB_VERIFIED`. `VERIFIED=true` on a `principal` event only means "a registration
+  document was touched" — registration documents are unsigned.
+- **A non-zero exit ends the watcher process**, not merely the pass: the error propagates out
+  of the loop and the state file is never advanced. The at-least-once guarantee is therefore
+  conditional — the batch is re-delivered the next time the watcher *runs*, which in the
+  resident form means **after your supervisor restarts it** (`screen`/`nohup` will not; see
+  "Who owns the loop"). Park the event durably and return 0; reserve a failure exit for "I
+  could not park it at all". The event carries no oid — hash the stdin body
+  (`git -C "$checkout" hash-object`, which reproduces the oid the watcher prints) if you want
+  the content address; the ref name is unique per entry under `inbox/*` but *not* under
+  `meta/principals/<p>`, which stays put across key rotations.
 - State lives in `<gitdir>/collab-watch.json` (`--state` overrides it); keep it as the cursor.
   Ref deletion produces no event — the ref set simply follows the remote.
 - Without `--once` the loop sleeps `--interval` seconds (default 10) between passes; that
@@ -517,9 +522,10 @@ walgit collab watch --repo "$checkout" --remote origin --interval 10 \
 1. **Self-trigger.** Your own writes are new refs, so your `patch`/`status`/`comment` comes back
    at your handler like anyone else's. Filter on `WALGIT_COLLAB_ACTOR` against your own
    principal, and never let a write be the unconditional answer to an event.
-2. **Long work inside the hook.** The loop is serial and a failure re-delivers the whole batch:
-   a hook that runs the job blocks every other event. Park the event and return; do the work in
-   a worker — the same split as `ci run`'s claim vs execute.
+2. **Long work inside the hook.** The loop is serial and blocking, and one failure takes the
+   whole watcher down — a hook that runs the job stalls every other event and risks the batch.
+   Park the event and return; do the work in a worker — the same split as `ci run`'s claim vs
+   execute.
 3. **Unverified input.** `WALGIT_COLLAB_VERIFIED=false` means the signature did not check out
    against the registered key. Do not act on it, and do not treat it as a card you own.
 
@@ -533,14 +539,18 @@ own business.
 
 **Who owns the loop.** One loop per principal, holding that principal's key — two loops signing
 as one principal are as indistinguishable as two agents sharing a key (§0b). The loop is a
-process you own: the service lifecycle does not supervise it and a service restart can orphan
-it, so keep it under `screen`/`nohup`, a timer, or a scheduled task (on Windows a GUI-subsystem
-launcher, never a console program, D53).
+process you own, and the service lifecycle does not supervise it: a service restart can orphan
+it and a hook failure exits it. Keep it under something that **restarts on exit** — launchd
+`KeepAlive`, systemd `Restart=always`, or Windows Task Scheduler (with a GUI-subsystem
+launcher, never a console program, D53) — or drop the resident loop and run `--once` from a
+timer, which replays the failed batch on the next tick.
 
-**Where the loop stops.** It may claim, work, review and post — not merge without a verified
-non-author `approve`, not silently clear a `needs-human` card (that is a human decision), and
-not turn its own progress into messages to channels it was not given. The board is where it
-reports; notifying anyone outside it is a separate, explicitly authorized decision.
+**Where the loop stops.** It may claim cards, work them, and post — its `review` counts only
+when it signs as a principal other than the patch author (§4). It must not merge without a
+verified non-author `approve`, must not silently clear a `needs-human` card (that is a human
+decision), and must not turn its own progress into messages to channels it was not given. The
+board is where it reports; notifying anyone outside it is a separate, explicitly authorized
+decision.
 
 **Copyable hook** — park the event, return 0, let the worker decide:
 
@@ -549,10 +559,11 @@ reports; notifying anyone outside it is a separate, explicitly authorized decisi
 # watch-hook.sh — idempotent and fast; the decision logic lives in the worker.
 set -eu
 queue="${WALGIT_WATCH_QUEUE:-$HOME/.walgit/watch-queue}"
+checkout="${WALGIT_CHECKOUT:-$PWD}"            # the hook inherits the watcher's cwd
 mkdir -p "$queue"
 tmp="$(mktemp "$queue/.incoming.XXXXXX")"
 cat >"$tmp"                                   # the raw entry JSON from stdin
-key="$(git hash-object "$tmp")"               # a content address for the entry
+key="$(git -C "$checkout" hash-object "$tmp")"   # a content address for the entry
 if [ -e "$queue/$key.meta" ]; then rm -f "$tmp"; exit 0; fi
 {
   printf 'ref=%s\n'      "$WALGIT_COLLAB_REF"

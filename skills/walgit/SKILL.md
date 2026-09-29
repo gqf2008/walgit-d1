@@ -202,9 +202,9 @@ The pull lanes are **at-least-once**: be idempotent and dedupe by `seq` (WAL) or
 
 Running a **resident** loop that picks up collab work and acts on it (claim → work → sign →
 repeat) is the agent's own job: `collab watch --exec` is the trigger, the handler and worker are
-yours. The `--exec` contract (stdin, `WALGIT_COLLAB_*`, non-zero exit re-delivers the pass), the
-three traps (self-trigger, long work in the hook, unverified input) and a copyable hook are in
-the host guide `/SKILL.md` §0c.
+yours. The `--exec` contract (stdin, `WALGIT_COLLAB_*`, a non-zero exit ends the watcher with
+the state file unadvanced, so the batch replays when it next runs), the three traps (self-trigger,
+long work in the hook, unverified input) and a copyable hook are in the host guide `/SKILL.md` §0c.
 
 ## 7. Decentralized CI
 
