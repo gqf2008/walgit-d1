@@ -685,6 +685,20 @@ decision in §4 — or the PR is; never "fix later".
   subscriptions (adapter-side polling, best-effort, D52) and the SSE envelope as live narration for
   a request's *own* work (never a durable subscription). Do not re-open this as a missing feature:
   its absence is the decision.
+- **D56** **Windows installs the detected release unattended; macOS and source checkouts still need
+  the click (2026-09-30, cc-ai-win-auto-upgrade).** D51's Windows flow is unchanged in *what* it
+  installs — the exact `walgit-setup-<version>-x64.exe` selected by release version plus GitHub
+  `sha256` digest, the copied helper, silent install, `walgit.exe --version` + `/healthz` checks,
+  rollback on any failure — and changed in *who starts it*: a release-managed Windows install runs
+  the same pipeline **without a menu click**, 90 s after detection (long enough that a logon-time
+  detection cannot pull the tray out from under the user), then exits so the helper can replace it.
+  macOS keeps the click (its swap replaces the App Bundle) and a source checkout keeps the click (it
+  would rebuild). `WALGIT_AUTO_UPGRADE=0` pins one machine to manual; `=1` is the test/CI seam.
+  **The unattended path is fenced against retry loops:** when the helper rolls back it records the
+  target version in `<state>/update/auto-upgrade-failed`, and the tray never auto-installs a fenced
+  version again (the menu still can) — without that, "install → rollback → the helper relaunches the
+  old tray → it detects the same release" would repeat forever. Consumer-facing statement in
+  `web/SKILL.md` (Host upgrades), `skills/walgit/SKILL.md` and `deploy/tray/README.md`.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

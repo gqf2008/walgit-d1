@@ -2,9 +2,12 @@
 //!
 //! 菜单:状态行 · 启动/停止 · 版本升级状态行(abb 同款状态机) ·
 //!      打开 Web UI · 退出托盘(服务保持运行)。
-//! 升级语义:自动的只有「检测」(每 30 分钟 fetch 比对,启动 30 秒先查一次);
-//!      发现新版本只把菜单行变成「⬆️ 升级到新版本」,**由用户点击才升级**:
-//!      ff-merge main → cargo 构建 → 备份 → 停 → 热换 → 健康验证,失败回滚。
+//! 升级语义:检测每 30 分钟一次(启动 30 秒先查一次);发现新版本后,
+//!      **Windows 装机版(安装器目录)免点击自动安装**(检测到 90 秒后触发,
+//!      与点击共用同一条管线;被回滚过的版本有栅栏、不再自动重试),
+//!      macOS App Bundle 与源码形态仍把菜单行变成「⬆️ 升级到新版本」、
+//!      **由用户点击才升级**:ff-merge main → cargo 构建 → 备份 → 停 → 热换 →
+//!      健康验证,失败回滚。
 //!
 //! 服务控制:直接调用安装目录/App Bundle 里的 `walgit service`；程序文件
 //!          不复制进 ~/.walgit，状态、配置和日志才属于那里。
@@ -454,6 +457,49 @@ impl DetectEpoch {
 /// 停在 ST_FAILED,不能被定时器悄悄翻回「可升级/已最新」。
 fn auto_detect_allowed(busy: u8, state: u8) -> bool {
     busy == 0 && !matches!(state, ST_CHECKING | ST_INSTALLING | ST_FAILED)
+}
+
+/// Delay between detecting a release and installing it unattended. Long enough
+/// that a logon-time detection cannot yank the tray out from under the user's
+/// first minute of work; the 5 s status poll is what makes the deadline fire.
+const AUTO_INSTALL_DELAY: Duration = Duration::from_secs(90);
+
+/// Is installing a detected release without a click allowed?
+///
+/// Windows only, and only for a release-managed installation: the install goes
+/// through the verified installer + helper path, which already stops/starts the
+/// service, health-checks the new version and rolls back. macOS keeps the click
+/// (its swap replaces the App Bundle) and a source checkout keeps the click (it
+/// would rebuild). `WALGIT_AUTO_UPGRADE=0|1` overrides the default — `0` pins a
+/// machine, `1` is the test/CI seam.
+fn auto_install_allowed(windows: bool, release_install: bool, override_: Option<&str>) -> bool {
+    if !windows {
+        return false;
+    }
+    match override_ {
+        Some("0") => false,
+        Some("1") => true,
+        _ => release_install,
+    }
+}
+
+fn auto_install_enabled() -> bool {
+    auto_install_allowed(
+        cfg!(target_os = "windows"),
+        release_channel(),
+        std::env::var("WALGIT_AUTO_UPGRADE").ok().as_deref(),
+    )
+}
+
+fn auto_install_delay() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("WALGIT_AUTO_UPGRADE_DELAY_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    AUTO_INSTALL_DELAY
 }
 
 /// macOS Release 升级:下载 DMG → 校验 sha256 → 挂载 → 校验签名/公证/版本
@@ -1497,6 +1543,10 @@ struct App {
     note: String,
     detect_epoch: DetectEpoch,
     next_auto_detect: Option<Instant>,
+    /// Deadline of a pending unattended install. Armed when a release is
+    /// detected on a release-managed Windows install, fired by the event loop
+    /// once it is due, cleared on any other state transition.
+    auto_install_at: Option<Instant>,
 }
 
 impl App {
@@ -1558,6 +1608,83 @@ impl App {
         if let Some(proxy) = self.proxy.clone() {
             self.start_detection(&proxy, false);
         }
+    }
+
+    /// Arm the unattended install for a detected release, if this platform and
+    /// installation allow it. Called once per detection result.
+    fn arm_auto_install(&mut self) {
+        if self.release.is_none() || !auto_install_enabled() {
+            return;
+        }
+        // 回滚过的版本要有栅栏:helper 回滚后会把旧托盘拉起来,它再检测到同一
+        // 版本就会「装 → 回滚 → 再装」无限循环。被栅栏挡住的版本仍可在菜单里
+        // 手动点。
+        if let Some(info) = &self.release {
+            if walgit_tray::upgrade_helper::auto_upgrade_fenced(&state_dir(), &info.version) {
+                self.note = format!("v{} 自动升级已回滚过,请手动升级", info.version);
+                log_line(&format!(
+                    "auto upgrade: v{} is fenced after an earlier rollback",
+                    info.version
+                ));
+                self.auto_install_at = None;
+                return;
+            }
+        }
+        if self.auto_install_at.is_none() {
+            self.auto_install_at = Some(Instant::now() + auto_install_delay());
+            log_line("auto upgrade: release detected, installing without a click when due");
+        }
+    }
+
+    /// Fire a due unattended install. The event loop reaches here on every 5 s
+    /// status poll, so the deadline is honoured within one poll.
+    fn maybe_auto_install(&mut self) {
+        let Some(at) = self.auto_install_at else {
+            return;
+        };
+        if self.state != ST_AVAILABLE || !auto_detect_allowed(self.busy, self.state) {
+            self.auto_install_at = None;
+            return;
+        }
+        if Instant::now() < at {
+            return;
+        }
+        self.auto_install_at = None;
+        let Some(proxy) = self.proxy.clone() else {
+            return;
+        };
+        log_line("auto upgrade: deadline reached, installing without a click");
+        self.begin_install(&proxy);
+    }
+
+    /// Run the install pipeline. One implementation for both triggers: the menu
+    /// click and the unattended deadline must not drift apart.
+    fn begin_install(&mut self, proxy: &Arc<EventLoopProxy<Msg>>) {
+        // 作废升级前启动的检测,防止它在新状态落定后回灌。
+        self.detect_epoch.invalidate();
+        self.auto_install_at = None;
+        self.state = ST_INSTALLING;
+        self.busy = 2;
+        self.rebuild_menu();
+        let release = self.release.clone();
+        let proxy = Arc::clone(proxy);
+        std::thread::spawn(move || {
+            let r = run_upgrade(
+                &|m| {
+                    let _ = proxy.send_event(Msg::Note(m));
+                },
+                release.as_ref(),
+            );
+            // Release 交棒成功:辅助进程会替换/安装新版本并等待本 pid 退出;
+            // 这里直接退场,不再做状态回灌。
+            if r.is_ok() && release.is_some() {
+                log_line(&format!("upgrade -> {r:?}"));
+                std::process::exit(0);
+            }
+            let _ = proxy.send_event(Msg::UpgradeFinished { ok: r.is_ok() });
+            let _ = proxy.send_event(status_probe());
+            log_line(&format!("upgrade -> {r:?}"));
+        });
     }
 
     /// 一次性应用检测结果:菜单状态与对应的 payload 必须同代写入。
@@ -1709,6 +1836,7 @@ impl ApplicationHandler<Msg> for App {
             } => {
                 if self.detect_epoch.accepts(generation, self.busy) {
                     self.apply_detected(detected);
+                    self.arm_auto_install();
                 }
             }
         }
@@ -1758,30 +1886,7 @@ impl ApplicationHandler<Msg> for App {
                         self.start_detection(&proxy, true);
                     }
                     ST_AVAILABLE => {
-                        // 用户点击升级:这里才真正跑升级管线。先作废升级前
-                        // 启动的检测,防止它在新状态落定后回灌。
-                        self.detect_epoch.invalidate();
-                        self.state = ST_INSTALLING;
-                        self.busy = 2;
-                        self.rebuild_menu();
-                        let release = self.release.clone();
-                        std::thread::spawn(move || {
-                            let r = run_upgrade(
-                                &|m| {
-                                    let _ = proxy.send_event(Msg::Note(m));
-                                },
-                                release.as_ref(),
-                            );
-                            // Release 交棒成功:辅助进程会替换/安装新版本并等待
-                            // 本 pid 退出;这里直接退场,不再做状态回灌。
-                            if r.is_ok() && release.is_some() {
-                                log_line(&format!("upgrade -> {r:?}"));
-                                std::process::exit(0);
-                            }
-                            let _ = proxy.send_event(Msg::UpgradeFinished { ok: r.is_ok() });
-                            let _ = proxy.send_event(status_probe());
-                            log_line(&format!("upgrade -> {r:?}"));
-                        });
+                        self.begin_install(&proxy);
                     }
                     _ => {}
                 },
@@ -1792,6 +1897,7 @@ impl ApplicationHandler<Msg> for App {
             self.rebuild_menu();
         }
         self.maybe_auto_detect();
+        self.maybe_auto_install();
     }
 }
 
@@ -1951,6 +2057,7 @@ fn main() {
         note: String::new(),
         detect_epoch: DetectEpoch::default(),
         next_auto_detect: detect_enabled.then(|| Instant::now() + Duration::from_secs(30)),
+        auto_install_at: None,
     };
     app.rebuild_menu();
 
@@ -1970,6 +2077,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unattended install is Windows + release-install only, and the env knob
+    /// both pins (`0`) and forces (`1`) it.
+    #[test]
+    fn auto_install_only_applies_to_windows_release_installs() {
+        // Not Windows: never, override or not.
+        assert!(!auto_install_allowed(false, true, None));
+        assert!(!auto_install_allowed(false, true, Some("1")));
+        // Windows + installer directory: on by default.
+        assert!(auto_install_allowed(true, true, None));
+        // Windows + source checkout: the upgrade would rebuild — keep the click.
+        assert!(!auto_install_allowed(true, false, None));
+        // The knob wins in both directions.
+        assert!(!auto_install_allowed(true, true, Some("0")));
+        assert!(auto_install_allowed(true, false, Some("1")));
+        // Anything else (unset, empty, junk) keeps the default.
+        assert!(!auto_install_allowed(true, false, Some("")));
+        assert!(auto_install_allowed(true, true, Some("yes")));
+    }
 
     #[test]
     fn windows_release_channel_uses_installer_directories_only() {

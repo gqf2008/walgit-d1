@@ -28,8 +28,10 @@ The `walgit` CLI is a symlink to the installed binary (app bundle / install dir)
 
 ## 2. Host upgrades (tray)
 
-The tray checks for updates **30 seconds after startup and every 30 minutes**; detection only
-notifies, and installation always requires the user to click the tray menu.
+The tray checks for updates **30 seconds after startup and every 30 minutes**; a Windows
+installer-managed installation installs a detected release **by itself** (90 s after detection),
+while macOS and source checkouts only notify and wait for the tray menu. `WALGIT_AUTO_UPGRADE=0`
+pins a machine to manual, and a version that rolled back once is never auto-retried.
 
 - **macOS:** DMG channel — download the release DMG, verify SHA-256 and the signed/notarized app,
   replace the installed app, run the health check, and roll back on failure.

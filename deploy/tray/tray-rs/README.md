@@ -10,7 +10,9 @@
   spawn/supervise，也就没有可写坏的 pidfile。Linux 没有等价的桌面调度器，仍由托盘的
   supervisor 启动 `walgit serve`（setup wizard 保存后 exit 75 需要立即重启），pidfile
   写到 `~/.walgit`。程序文件不复制到状态目录。
-- **⬆️ 发现新版本 — 点击升级**:升级**只由用户点击触发**。macOS App Bundle
+- **⬆️ 发现新版本 — 点击升级**:Windows 装机版(安装器目录)**免点击自动装**
+  (检测到 90 秒后触发,与点击共用同一条管线);macOS App Bundle 与源码形态
+  **仍只由用户点击触发**。macOS App Bundle
   走 Release 管线:下载 DMG → 校验 sha256/签名/公证/版本 → 交给
   `release-install.sh` 换装(失败回滚旧 bundle)。Windows 安装目录走 Release
   管线:只选 `walgit-setup-<version>-x64.exe`，精确校验 GitHub sha256，下载
@@ -19,7 +21,8 @@
   Linux 走源码管线:ff-merge main → `cargo build --release -p walgit-cli` →
   备份(`walgit.bak-tray`)→ 停 → 热换 → 起服务 → 15s 健康验证,失败回滚
 - **自动检测新版本:开/关**:开着时每 30 分钟(+启动 30 秒)`fetch` 比对;
-  发现新版本仅提示(菜单 ⬆️ 项 + 图标状态),不自动升级
+  发现新版本提示(菜单 ⬆️ 项 + 图标状态);**Windows 装机版会自动安装**
+  (见上一条),其余形态只提示
 - **更新检查失败**:Release 与源码两条检测通道都失败时显示
   「更新检查失败(点击重试)」,不会伪装成「已是最新」;失败原因写 tray.log
 - **打开 Web UI** / **退出托盘(服务保持运行)**

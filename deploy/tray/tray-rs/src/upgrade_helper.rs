@@ -228,6 +228,60 @@ fn normalized(version: &str) -> String {
     crate::release::strip_version_prefix(version)
 }
 
+/// Versions whose unattended install rolled back, one per line.
+///
+/// The tray reads this before installing a detected release on its own. Without
+/// it a version that cannot install becomes an endless loop: install → roll back
+/// → the helper relaunches the *old* tray → it detects the same release →
+/// installs again. A fenced version is still installable from the menu (the user
+/// asked for it); it is just never retried unattended.
+pub fn auto_upgrade_fence(state_dir: &Path) -> PathBuf {
+    state_dir.join("update").join("auto-upgrade-failed")
+}
+
+/// True when `version` is fenced. Versions compare normalized, so the
+/// installer's `v0.8.7` and the release metadata's `0.8.7` are one version.
+pub fn auto_upgrade_fenced(state_dir: &Path, version: &str) -> bool {
+    let want = normalized(version);
+    if want.is_empty() {
+        return false;
+    }
+    let Ok(body) = std::fs::read_to_string(auto_upgrade_fence(state_dir)) else {
+        return false;
+    };
+    body.lines().any(|line| normalized(line) == want)
+}
+
+/// Record `version` as never-auto-install-again. Best effort on purpose: the
+/// fence is a safety net, and failing to write it must not mask the rollback
+/// error the caller is about to report.
+fn fence_auto_upgrade_version(state_dir: &Path, version: &str) {
+    let want = normalized(version);
+    if want.is_empty() {
+        return;
+    }
+    let path = auto_upgrade_fence(state_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.iter().any(|line| normalized(line) == want) {
+        return;
+    }
+    lines.push(want);
+    // Only recent failures matter; keep the file from growing without bound.
+    const MAX_FENCES: usize = 32;
+    if lines.len() > MAX_FENCES {
+        lines.drain(..lines.len() - MAX_FENCES);
+    }
+    let _ = std::fs::write(&path, format!("{}\n", lines.join("\n")));
+}
+
 fn log(args: &Args, message: &str) {
     if let Some(parent) = args.log.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -611,6 +665,16 @@ fn cleanup_staging(args: &Args) {
 }
 
 fn rollback(args: &Args, why: &str) -> Result<(), String> {
+    // Fence the target before touching anything: whatever happens below, the
+    // tray must not auto-install this version again (it would loop).
+    fence_auto_upgrade_version(&args.state_dir, &args.target_version);
+    log(
+        args,
+        &format!(
+            "fenced v{} against unattended retry",
+            normalized(&args.target_version)
+        ),
+    );
     let _ = stop_service(args);
     run_installer(&args.rollback_installer, "rollback", args)
         .map_err(|e| format!("rollback installer failed: {e}"))?;
@@ -667,6 +731,67 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fence_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "walgit-fence-{}-{}-{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fence dir");
+        dir
+    }
+
+    #[test]
+    fn a_missing_fence_file_fences_nothing() {
+        let dir = fence_dir("missing");
+        assert!(!auto_upgrade_fenced(&dir, "0.8.7"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fenced_version_is_recognized_across_the_v_prefix() {
+        let dir = fence_dir("normalized");
+        fence_auto_upgrade_version(&dir, "v0.8.7");
+        // The installer says `v0.8.7`, the release metadata says `0.8.7`.
+        assert!(auto_upgrade_fenced(&dir, "0.8.7"));
+        assert!(auto_upgrade_fenced(&dir, "v0.8.7"));
+        assert!(!auto_upgrade_fenced(&dir, "0.8.8"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fencing_is_idempotent_and_keeps_only_recent_versions() {
+        let dir = fence_dir("bounded");
+        fence_auto_upgrade_version(&dir, "0.8.7");
+        fence_auto_upgrade_version(&dir, "0.8.7");
+        assert_eq!(
+            std::fs::read_to_string(auto_upgrade_fence(&dir))
+                .expect("fence file")
+                .lines()
+                .count(),
+            1
+        );
+        for minor in 0..40 {
+            fence_auto_upgrade_version(&dir, &format!("0.9.{minor}"));
+        }
+        let body = std::fs::read_to_string(auto_upgrade_fence(&dir)).expect("fence file");
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(
+            lines.len() <= 32,
+            "fence file grew to {} lines",
+            lines.len()
+        );
+        // The oldest entries are the ones dropped, and the newest is kept.
+        assert_eq!(lines.last().copied(), Some("0.9.39"));
+        assert!(!auto_upgrade_fenced(&dir, "0.8.7"));
+        assert!(auto_upgrade_fenced(&dir, "0.9.39"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_required_args() {

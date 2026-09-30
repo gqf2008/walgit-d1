@@ -82,8 +82,12 @@ restart or instance change, so a durable sidecar must keep its own cursor and us
 
 ## Host upgrades (tray)
 
-The tray checks for updates **30 seconds after startup and every 30 minutes**. Detection only
-notifies; installation requires the user to click the tray menu.
+The tray checks for updates **30 seconds after startup and every 30 minutes**. A Windows
+installation made by the installer installs a detected release **by itself** — 90 s after
+detection the helper stops the service, installs, health-checks the new version and relaunches
+the tray — while macOS and source checkouts only notify and wait for the tray menu.
+`WALGIT_AUTO_UPGRADE=0` pins a machine to manual, and a version whose unattended install rolled
+back is never auto-retried (the menu still offers it).
 
 - **macOS:** DMG channel — download the release DMG, verify SHA-256 and the signed/notarized app,
   replace the installed app, run the health check, and roll back on failure.
