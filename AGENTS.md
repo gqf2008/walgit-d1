@@ -673,14 +673,15 @@ decision in §4 — or the PR is; never "fix later".
   push and fixed-interval polling, and **rejected**. It cannot buy correctness — the WAL is the only
   event source and nothing is pushed (D46) — and it buys latency only: the wait's own probe *is* a
   conditional GET of `manifest.pb` at 15–18 ms (`docs/ROUNDTRIPS.md` §1), `collab watch --interval`
-  already goes down to 1 s, and the dominant latency of an unattended loop is the
-  hook → worker → agent chain, not the refs check. It is also hostile to the deployment assumptions:
-  a held request is exactly the "time between requests" a serverless, CPU-throttled instance may not
-  grant (§1.1), and because instances are shared-nothing a waiter on instance A cannot be woken by a
-  push published on instance B — the waiter would degenerate into that server polling the bucket on
-  the client's behalf, i.e. the same round trips moved, not removed. The sanctioned lanes stay
-  refs-level polling (`walgit collab watch` — at-least-once with the client's own cursor,
-  `web/SKILL.md` §0c; `git ls-remote` tips; `walgit wal ls` for the retained log), MCP resource
+  already runs at 1 s (its practical floor — lower values only spin harder), and the dominant latency
+  of an unattended loop is the hook → worker → agent chain, not the refs check. It is also hostile to
+  the deployment assumptions: a held request is exactly the between-requests window §1.1 says may be
+  CPU-throttled on serverless platforms, and because instances are shared-nothing a waiter on
+  instance A cannot be woken by a push published on instance B — the waiter would degenerate into
+  that server polling the bucket on the client's behalf, i.e. the same round trips moved, not removed.
+  The sanctioned lanes stay refs-level polling (`walgit collab watch` — at-least-once with the
+  client's own cursor, *given a supervisor that restarts it or `--once` under a timer*, `web/SKILL.md`
+  §0c; `git ls-remote` tips; `walgit wal ls` for the retained log), MCP resource
   subscriptions (adapter-side polling, best-effort, D52) and the SSE envelope as live narration for
   a request's *own* work (never a durable subscription). Do not re-open this as a missing feature:
   its absence is the decision.
