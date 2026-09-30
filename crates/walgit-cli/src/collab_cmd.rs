@@ -17,10 +17,10 @@ use walgit_git::ObjectFormat;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use walgit_wal::collab::{
-    BOARD_PATH, Board, BoardDef, COLLAB_SNAPSHOT_MAX_BYTES, Entry, EntryRef, EntryRefs, EntrySet,
-    MergeRules, Report, SNAPSHOT_REF, Snapshot, SnapshotRecord, build_board, build_report,
-    build_snapshot, build_snapshot_truncated, default_board, merge_rule_eval, parse_board_def,
-    parse_snapshot, pr_view, sign_entry, thread, verify_snapshot,
+    BOARD_PATH, Board, BoardDef, COLLAB_ENTRY_MAX_BYTES, COLLAB_SNAPSHOT_MAX_BYTES, Entry,
+    EntryRef, EntryRefs, EntrySet, MergeRules, Report, SNAPSHOT_REF, Snapshot, SnapshotRecord,
+    build_board, build_report, build_snapshot, build_snapshot_truncated, default_board,
+    merge_rule_eval, parse_board_def, parse_snapshot, pr_view, sign_entry, thread, verify_snapshot,
 };
 
 // ---- CLI commands --------------------------------------------------------------
@@ -1832,6 +1832,96 @@ impl CollabReader {
         Ok(out.stdout)
     }
 
+    /// Many oids in **one** `git cat-file --batch`.
+    ///
+    /// The aggregation used to spawn one `git cat-file blob` per entry: at
+    /// ~0.4 s per spawn on Windows a real repository (1600+ inbox refs) took
+    /// ~10 minutes with no output — indistinguishable from a hang, and the
+    /// reason `collab ls` / `thread` / `thread-heads` / `board` looked broken
+    /// there while the same aggregation over HTTP answered in milliseconds.
+    ///
+    /// Requests go out in small chunks so neither pipe can fill while the other
+    /// side waits. A missing object is simply absent from the map (callers
+    /// treat "missing" exactly like "unparsable" and skip that entry), and an
+    /// object over `max_bytes` is drained and skipped rather than materialized
+    /// (the stream must stay aligned for the objects behind it).
+    fn blobs_batch(
+        &self,
+        oids: &[String],
+        max_bytes: Option<usize>,
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        // Bounded so neither pipe can fill while the other side waits.
+        const CHUNK: usize = 512;
+        let mut out: HashMap<String, Vec<u8>> = HashMap::new();
+        if oids.is_empty() {
+            return Ok(out);
+        }
+        let mut child = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&self.repo)
+            .args(["cat-file", "--batch"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("run git cat-file --batch in {}", self.repo.display()))?;
+        let mut stdin = child.stdin.take().context("cat-file --batch stdin")?;
+        let mut stdout = BufReader::new(child.stdout.take().context("cat-file --batch stdout")?);
+        for chunk in oids.chunks(CHUNK) {
+            let mut req = String::with_capacity(chunk.len() * 41);
+            for oid in chunk {
+                req.push_str(oid);
+                req.push('\n');
+            }
+            stdin
+                .write_all(req.as_bytes())
+                .context("feed git cat-file --batch")?;
+            stdin.flush()?;
+            for oid in chunk {
+                let mut header = String::new();
+                if stdout.read_line(&mut header)? == 0 {
+                    bail!(
+                        "git cat-file --batch closed early in {}",
+                        self.repo.display()
+                    );
+                }
+                let header = header.trim_end();
+                let mut it = header.split(' ');
+                let (got, kind, size) = (
+                    it.next().unwrap_or(""),
+                    it.next().unwrap_or(""),
+                    it.next().unwrap_or(""),
+                );
+                if kind == "missing" || got != oid.as_str() {
+                    continue;
+                }
+                let size: usize = size
+                    .parse()
+                    .with_context(|| format!("git cat-file --batch header {header:?}"))?;
+                if max_bytes.is_some_and(|cap| size > cap) {
+                    // Over the per-entry read cap: skip without materializing.
+                    // The batch emits the next header only after this body is
+                    // consumed, so drain the body plus its trailing newline.
+                    let mut limited = stdout.by_ref().take((size + 1) as u64);
+                    std::io::copy(&mut limited, &mut std::io::sink())?;
+                    continue;
+                }
+                let mut buf = vec![0u8; size];
+                stdout.read_exact(&mut buf)?;
+                let mut nl = [0u8; 1];
+                stdout.read_exact(&mut nl)?;
+                out.insert(got.to_string(), buf);
+            }
+        }
+        drop(stdin);
+        let status = child.wait().context("wait for git cat-file --batch")?;
+        if !status.success() {
+            bail!("git cat-file --batch exited with {status}");
+        }
+        Ok(out)
+    }
+
     /// `refs/collab/inbox/<principal>/<uuid>` -> (refname, oid).
     fn inbox_refs(&self) -> Result<Vec<(String, String)>> {
         let out = self.git(&[
@@ -1872,7 +1962,10 @@ impl CollabReader {
             "refs/collab/meta/principals",
             "refs/walgit/principals",
         ])?;
-        let mut map = HashMap::new();
+        // `for-each-ref` iterates refs/collab/* before refs/walgit/*; the or_insert
+        // below keeps the repo-local key authoritative, matching the server's
+        // `principals.entry(..).or_insert(..)`.
+        let mut refs: Vec<(String, String)> = Vec::new();
         for l in String::from_utf8_lossy(&out).lines() {
             let mut it = l.split_whitespace();
             let (Some(name), Some(oid)) = (it.next(), it.next()) else {
@@ -1884,14 +1977,19 @@ impl CollabReader {
             let Some(principal) = principal else {
                 continue;
             };
-            let blob = self.git(&["cat-file", "blob", oid])?;
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&blob)
+            refs.push((principal.to_string(), oid.to_string()));
+        }
+        let oids: Vec<String> = refs.iter().map(|(_, oid)| oid.clone()).collect();
+        let blobs = self.blobs_batch(&oids, None)?;
+        let mut map = HashMap::new();
+        for (principal, oid) in refs {
+            let Some(blob) = blobs.get(&oid) else {
+                continue;
+            };
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob)
                 && let Some(k) = v.get("public_key").and_then(|k| k.as_str())
             {
-                // for-each-ref iterates refs/collab/* before refs/walgit/*, so
-                // or_insert keeps the repo-local key authoritative (matches the
-                // server's `principals.entry(..).or_insert(..)`).
-                map.entry(principal.to_string()).or_insert_with(|| k.to_string());
+                map.entry(principal).or_insert_with(|| k.to_string());
             }
         }
         Ok(map)
@@ -1935,7 +2033,12 @@ impl CollabReader {
                 }
             }
         }
-        for (name, oid) in self.inbox_refs()? {
+        // One `cat-file --batch` for the whole tail: a process per entry made a
+        // real repository's aggregation take ~10 minutes (see `blobs_batch`).
+        let inbox = self.inbox_refs()?;
+        let oids: Vec<String> = inbox.iter().map(|(_, oid)| oid.clone()).collect();
+        let blobs = self.blobs_batch(&oids, Some(COLLAB_ENTRY_MAX_BYTES))?;
+        for (name, oid) in inbox {
             let Some(principal) = name
                 .strip_prefix("refs/collab/inbox/")
                 .and_then(|p| p.rsplit_once('/'))
@@ -1943,13 +2046,13 @@ impl CollabReader {
             else {
                 continue;
             };
-            // Match the server aggregation: one corrupt inbox entry must
-            // not take the whole report down. Its ref stays in place for gc
-            // to report and skip.
-            let Ok(blob) = self.git(&["cat-file", "blob", &oid]) else {
+            // Match the server aggregation: one corrupt or oversized inbox
+            // entry must not take the whole report down. Its ref stays in
+            // place for gc to report and skip.
+            let Some(blob) = blobs.get(&oid) else {
                 continue;
             };
-            let Ok(entry) = serde_json::from_slice::<Entry>(&blob) else {
+            let Ok(entry) = serde_json::from_slice::<Entry>(blob) else {
                 continue;
             };
             set.insert(EntryRef {
@@ -2570,6 +2673,76 @@ mod gc_tests {
             .unwrap();
         assert!(out.status.success());
         String::from_utf8_lossy(&out.stdout).lines().count()
+    }
+
+    /// The read path fans requests out in batches instead of one process per
+    /// object. Before the batch reader a real repository (1600+ inbox refs) took
+    /// ~10 minutes with no output on Windows — one `git cat-file blob` spawn
+    /// per entry — which is what made the read commands look broken.
+    ///
+    /// The request chunk is 512; this crosses it with a **single** object
+    /// repeated, so the fixture costs nothing while the assertion still pins
+    /// "many requests, one process, the stream stays aligned".
+    #[test]
+    fn blobs_batch_crosses_its_chunk_boundary_without_a_process_per_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let oid = git_write_blob(&repo, "{\"a\":1}").unwrap();
+        let many = vec![oid.clone(); 600];
+        let started = std::time::Instant::now();
+        let got = CollabReader::new(&repo).blobs_batch(&many, None).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(got.get(&oid).map(Vec::len), Some(7));
+        assert_eq!(got.len(), 1, "one oid, one entry");
+        assert!(
+            elapsed.as_secs() < 60,
+            "600 requests took {elapsed:?} — the batch read regressed to a process per object"
+        );
+    }
+
+    /// A missing oid and an over-cap blob are skipped without desynchronizing
+    /// the batch stream: the object behind them still parses.
+    #[test]
+    fn blobs_batch_skips_missing_and_oversized_without_desync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let first = git_write_blob(&repo, "{\"a\":1}").unwrap();
+        let big = git_write_blob(&repo, &"x".repeat(4096)).unwrap();
+        let last = git_write_blob(&repo, "{\"z\":9}").unwrap();
+        let absent = "0".repeat(40);
+        let reader = CollabReader::new(&repo);
+        let got = reader
+            .blobs_batch(
+                &[first.clone(), big.clone(), absent.clone(), last.clone()],
+                Some(1024),
+            )
+            .unwrap();
+        assert_eq!(got.get(&first).map(Vec::len), Some(7));
+        assert!(!got.contains_key(&big), "over the cap: drained, not kept");
+        assert!(!got.contains_key(&absent), "missing oid stays absent");
+        assert_eq!(
+            got.get(&last).map(Vec::len),
+            Some(7),
+            "the stream stays aligned after a skipped body"
+        );
+        let uncapped = reader.blobs_batch(std::slice::from_ref(&big), None).unwrap();
+        assert_eq!(uncapped.get(&big).map(Vec::len), Some(4096));
     }
 
     /// A pre-existing over-cap snapshot with an EMPTY inbox tail is exactly the
