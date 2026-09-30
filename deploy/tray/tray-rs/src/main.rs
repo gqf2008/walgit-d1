@@ -1614,6 +1614,9 @@ impl App {
     /// installation allow it. Called once per detection result.
     fn arm_auto_install(&mut self) {
         if self.release.is_none() || !auto_install_enabled() {
+            // 目标不是 Release(或本形态不允许自动装):连悬置的 deadline 一起清掉,
+            // 否则上一轮的 deadline 会在目标变成源码升级后到期,自动触发一次重建。
+            self.auto_install_at = None;
             return;
         }
         // 回滚过的版本要有栅栏:helper 回滚后会把旧托盘拉起来,它再检测到同一
@@ -1642,8 +1645,15 @@ impl App {
         let Some(at) = self.auto_install_at else {
             return;
         };
-        if self.state != ST_AVAILABLE || !auto_detect_allowed(self.busy, self.state) {
+        // 只自动装「检测到的 Release」:检测结果可能把目标换成源码(开发机),
+        // 那条路径要重建二进制,必须留给用户点。
+        if self.state != ST_AVAILABLE || self.release.is_none() {
             self.auto_install_at = None;
+            return;
+        }
+        // 正在做别的动作(服务启停)时不抢,但 deadline 留着:动作一结束就到期,
+        // 不必再等下一个 30 分钟检测。
+        if self.busy != 0 {
             return;
         }
         if Instant::now() < at {

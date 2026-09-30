@@ -185,7 +185,10 @@ fn run(args: &Args) -> Result<(), String> {
     let rollback_hash = verify_sha256_file(&args.rollback_installer, &args.rollback_sha256);
     if let Err(error) = new_hash.and(rollback_hash) {
         // Nothing was replaced yet: restore the user's entry point and fail
-        // without invoking either installer.
+        // without invoking either installer. Fence the target as well: an
+        // unattended caller must not download → fail → relaunch → download
+        // again. A manual click re-downloads and is unaffected by the fence.
+        fence_auto_upgrade_version(&args.state_dir, &args.target_version);
         let _ = launch_tray(args);
         return Err(error);
     }

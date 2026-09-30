@@ -295,13 +295,20 @@ pub fn upgrade_line(
         ST_CHECKING => format!("{version_text} · 正在检查更新…"),
         ST_LATEST => format!("{version_text} · 已是最新 ✓(点击重查)"),
         ST_AVAILABLE => {
-            if let Some(release) = release {
+            let line = if let Some(release) = release {
                 format!(
                     "⬆️ 下载并升级到 v{}(当前 {app})",
                     strip_version_prefix(&release.version)
                 )
             } else {
                 format!("⬆️ 从源码升级到 {source_sha}(当前 {app})")
+            };
+            // 自动升级被栅栏挡住时,托盘把原因放在这里——否则用户只看到
+            // 「⬆️ 下载并升级」,真相只在 tray.log 里。
+            if busy_note.is_empty() {
+                line
+            } else {
+                format!("{line} · {busy_note}")
             }
         }
         ST_INSTALLING => {
@@ -517,6 +524,20 @@ mod tests {
 
         let line = upgrade_line(ST_AVAILABLE, "0.5.0", "", None, "abcdef1", "");
         assert_eq!(line, "⬆️ 从源码升级到 abcdef1(当前 0.5.0)");
+
+        // A fenced auto-install says so on the menu row, not only in tray.log.
+        let line = upgrade_line(
+            ST_AVAILABLE,
+            "0.5.0",
+            "",
+            Some(&release),
+            "",
+            "v0.5.0 自动升级已回滚过,请手动升级",
+        );
+        assert_eq!(
+            line,
+            "⬆️ 下载并升级到 v0.5.0(当前 0.5.0) · v0.5.0 自动升级已回滚过,请手动升级"
+        );
 
         let line = upgrade_line(ST_INSTALLING, "0.5.0", "", None, "", "下载中");
         assert_eq!(line, "升级中… · 下载中");
