@@ -667,6 +667,23 @@ decision in §4 — or the PR is; never "fix later".
   at `~/.walgit/keys/<principal>.ed25519` (`0600`); the registry carries only public keys.
   Consumer-facing statement in `web/SKILL.md` §0/§0a (the automatic first-contact routine)
   and `skills/walgit/SKILL.md` §5.
+- **D55** **There is no wait / long-poll lane; refs-level polling and adapter-side subscriptions are
+  the observation surface (2026-09-30, cc-ai-no-longpoll-decision).** A held "wait until `head_seq`
+  or a `refs/collab/*` ref changes, else timeout" request was considered as the middle rung between
+  push and fixed-interval polling, and **rejected**. It cannot buy correctness — the WAL is the only
+  event source and nothing is pushed (D46) — and it buys latency only: the wait's own probe *is* a
+  conditional GET of `manifest.pb` at 15–18 ms (`docs/ROUNDTRIPS.md` §1), `collab watch --interval`
+  already goes down to 1 s, and the dominant latency of an unattended loop is the
+  hook → worker → agent chain, not the refs check. It is also hostile to the deployment assumptions:
+  a held request is exactly the "time between requests" a serverless, CPU-throttled instance may not
+  grant (§1.1), and because instances are shared-nothing a waiter on instance A cannot be woken by a
+  push published on instance B — the waiter would degenerate into that server polling the bucket on
+  the client's behalf, i.e. the same round trips moved, not removed. The sanctioned lanes stay
+  refs-level polling (`walgit collab watch` — at-least-once with the client's own cursor,
+  `web/SKILL.md` §0c; `git ls-remote` tips; `walgit wal ls` for the retained log), MCP resource
+  subscriptions (adapter-side polling, best-effort, D52) and the SSE envelope as live narration for
+  a request's *own* work (never a durable subscription). Do not re-open this as a missing feature:
+  its absence is the decision.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
