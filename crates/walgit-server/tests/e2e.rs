@@ -1835,7 +1835,7 @@ fn real_git_path() -> anyhow::Result<String> {
             .lines()
             .find(|l| l.trim().to_ascii_lowercase().ends_with(".exe"))
             .or_else(|| text.lines().next());
-        return Ok(exe.unwrap_or_default().trim().to_string());
+        Ok(exe.unwrap_or_default().trim().to_string())
     }
 }
 

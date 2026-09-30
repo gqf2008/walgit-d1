@@ -1142,9 +1142,9 @@ impl LocalRepo {
     /// that triggered a supersede.
     ///
     /// There is also a persistent cause that no wait fixes: git for Windows
-    /// creates `pack-*.idx`/`pack-*.pack` with the READ_ONLY attribute set
+    /// creates `pack-*.idx`/`pack-*.pack` with the `READ_ONLY` attribute set
     /// (its "don't touch finished packs" protection), and a supersede delete
-    /// fails with ERROR_ACCESS_DENIED until the attribute is cleared. So the
+    /// fails with `ERROR_ACCESS_DENIED` until the attribute is cleared. So the
     /// final attempt clears the read-only bit once before giving up.
     #[cfg(windows)]
     fn remove_pack_file(p: &std::path::Path) -> Result<(), GitError> {
@@ -1169,16 +1169,8 @@ impl LocalRepo {
                 }
                 Err(e) => {
                     // git's READ_ONLY pack attribute: clear it and retry once.
-                    if let Ok(md) = std::fs::metadata(p) {
-                        let mut perm = md.permissions();
-                        if perm.readonly() {
-                            perm.set_readonly(false);
-                            if std::fs::set_permissions(p, perm).is_ok()
-                                && std::fs::remove_file(p).is_ok()
-                            {
-                                return Ok(());
-                            }
-                        }
+                    if clear_readonly_attribute(p) && std::fs::remove_file(p).is_ok() {
+                        return Ok(());
                     }
                     return Err(GitError::Io(e));
                 }
@@ -3457,6 +3449,30 @@ fn write_history_marker(marker: &Path, base: impl std::fmt::Display) -> Result<(
     Ok(())
 }
 
+/// Windows: clear the `READ_ONLY` attribute git for Windows puts on finished
+/// pack files, so a delete/rename that just failed with `ACCESS_DENIED` can be
+/// retried once. Returns `true` only when the file **was** read-only and the
+/// attribute is now cleared (nothing to clear is not a retry reason).
+///
+/// The `#[allow]` is deliberate and local: `permissions_set_readonly_false`
+/// warns because on Unix `set_readonly(false)` means "make it world-writable".
+/// This call never runs on Unix — both callers are `#[cfg(windows)]` — where the
+/// intent is literally "clear `FILE_ATTRIBUTE_READONLY`", and std exposes no
+/// attribute-level API for it. The workspace lint table is untouched.
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_readonly_attribute(p: &Path) -> bool {
+    let Ok(md) = std::fs::metadata(p) else {
+        return false;
+    };
+    let mut perm = md.permissions();
+    if !perm.readonly() {
+        return false;
+    }
+    perm.set_readonly(false);
+    std::fs::set_permissions(p, perm).is_ok()
+}
+
 /// `fs::rename` that on Windows first clears a read-only destination (every
 /// pack/idx/rev git for Windows writes is `READ_ONLY`; overwriting it fails
 /// with `ACCESS_DENIED`) and retries once.
@@ -3466,14 +3482,8 @@ fn rename_replacing(src: &Path, dst: &Path) -> Result<(), GitError> {
         Err(e) => {
             #[cfg(windows)]
             {
-                if let Ok(md) = std::fs::metadata(dst) {
-                    let mut perm = md.permissions();
-                    if perm.readonly() {
-                        perm.set_readonly(false);
-                        if std::fs::set_permissions(dst, perm).is_ok() {
-                            return std::fs::rename(src, dst).map_err(GitError::Io);
-                        }
-                    }
+                if clear_readonly_attribute(dst) {
+                    return std::fs::rename(src, dst).map_err(GitError::Io);
                 }
             }
             Err(GitError::Io(e))
@@ -4786,7 +4796,7 @@ mod copy_into_place_tests {
     }
 
     /// On Windows a pre-existing read-only `dst` makes the rename fail with
-    /// ACCESS_DENIED (git for Windows writes every pack file READ_ONLY). For
+    /// `ACCESS_DENIED` (git for Windows writes every pack file `READ_ONLY`). For
     /// the content-addressed names this function installs, that file can only
     /// be the identical bytes, so the install counts as done and the file is
     /// left alone — the branch `rename_replacing` clears is deliberately not

@@ -74,16 +74,14 @@ fn max_rss_kb() -> u64 {
     // SAFETY: `PROCESS_MEMORY_COUNTERS` is plain old data; an all-zero bit pattern
     // is a valid initialized value, and the callee fills it (or we return 0 below).
     let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
-    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    // SAFETY: `GetCurrentProcess()` is the always-valid pseudo-handle; `counters` is a
-    // live out-struct whose `cb` we just set to its own size, as the API requires.
-    let ok = unsafe {
-        GetProcessMemoryInfo(
-            windows_sys::Win32::System::Threading::GetCurrentProcess(),
-            &mut counters,
-            counters.cb,
-        )
-    };
+    // The struct is a few dozen bytes: `try_from` keeps the cast honest (and
+    // clippy-clean) rather than asserting a truncation that cannot happen here.
+    counters.cb = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).unwrap_or(u32::MAX);
+    // SAFETY: `GetCurrentProcess()` is the always-valid pseudo-handle.
+    let process = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+    // SAFETY: `counters` is a live out-struct whose `cb` we just set to its own size,
+    // as the API requires; one unsafe op per block (clippy::multiple_unsafe_ops_per_block).
+    let ok = unsafe { GetProcessMemoryInfo(process, &raw mut counters, counters.cb) };
     if ok == 0 {
         return 0;
     }

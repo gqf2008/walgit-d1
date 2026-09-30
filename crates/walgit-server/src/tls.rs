@@ -319,7 +319,7 @@ mod tests {
             assert_eq!(aces, 1, "exactly one DACL entry: the owning user");
             // SAFETY: sd came from GetNamedSecurityInfoW and is no longer used.
             unsafe {
-                windows_sys::Win32::Foundation::LocalFree(sd as *mut core::ffi::c_void);
+                windows_sys::Win32::Foundation::LocalFree(sd);
             }
         }
     }

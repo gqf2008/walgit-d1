@@ -165,11 +165,17 @@ fn write_all_at_impl(file: &std::fs::File, offset: u64, buf: &[u8]) -> io::Resul
     Ok(())
 }
 
-/// Recursively clear the READ_ONLY attribute under `dir` (best effort).
+/// Recursively clear the `READ_ONLY` attribute under `dir` (best effort).
 /// git for Windows marks finished pack files read-only, and both
-/// `remove_dir_all` and `remove_file` then fail with ERROR_ACCESS_DENIED
+/// `remove_dir_all` and `remove_file` then fail with `ERROR_ACCESS_DENIED`
 /// (os error 5) — repo teardown must clear the bit first.
+///
+/// The `#[allow]` mirrors `walgit_git`'s `clear_readonly_attribute`: the lint
+/// warns about Unix `set_readonly(false)` (world-writable) and this function is
+/// `#[cfg(windows)]`-only, where the call is literally "clear
+/// `FILE_ATTRIBUTE_READONLY`". The workspace lint table is untouched.
 #[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
 pub(crate) fn clear_readonly_recursive(dir: &std::path::Path) {
     use std::path::Path;
     fn walk(p: &Path) {

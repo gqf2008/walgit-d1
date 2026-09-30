@@ -98,7 +98,15 @@ pub async fn run(cfg: &Arc<Config>, config_path: &std::path::Path) -> Result<()>
     };
     #[cfg(not(unix))]
     let shutdown = async {
-        signal::ctrl_c().await.expect("ctrl_c");
+        // Windows has no SIGTERM: Ctrl-C is the only signal, and the unix branch's
+        // "install the handler in run(), hand serve() an infallible future" split
+        // has no windows equivalent (signal::ctrl_c() registers and waits in one
+        // future). So a refusal is not actionable here: log it and park instead of
+        // panicking — the process keeps serving, and it is still killable.
+        if let Err(e) = signal::ctrl_c().await {
+            warn!("ctrl_c handler failed: {e}; the server keeps serving until it is killed");
+            std::future::pending::<()>().await;
+        }
         info!("received Ctrl-C, shutting down");
     };
 
