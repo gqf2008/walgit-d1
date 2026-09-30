@@ -21,10 +21,13 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 
 - **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
   board are signed entries in the D1 collaboration layer (`refs/collab/*`, `walgit collab ...`), not GitHub.
-- **GitHub is a mirror plus the release pipeline** — `github = gqf2008/walgit-d1`. The mirror runs **on
-  demand** (no resident loop), so a `v*` tag reaches GitHub only once the sync command below runs — and only
-  then does `.github/workflows/release.yml` fire. Never push branches to the GitHub remote by hand and never
-  double-push.
+- **GitHub is a mirror plus the release pipeline** — `github = gqf2008/walgit-d1`. The mirror runs **on demand
+  and only on demand**: pushing a `v*` tag to walgit does **not** reach GitHub by itself — a release is not
+  out until someone runs the sync command below by hand, and only then does `.github/workflows/release.yml`
+  fire. **Never run the mirror as a resident loop** — not a `screen`/watch loop, not a
+  launchd/Task-Scheduler/cron job (one was installed 2026-09-29 and removed 2026-09-30; D57): a loop makes
+  releases land without anyone deciding to publish them, and it pushes branch deletions while nobody is
+  watching. Never push branches to the GitHub remote by hand, and never double-push.
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
@@ -699,6 +702,15 @@ decision in §4 — or the PR is; never "fix later".
   version again (the menu still can) — without that, "install → rollback → the helper relaunches the
   old tray → it detects the same release" would repeat forever. Consumer-facing statement in
   `web/SKILL.md` (Host upgrades), `skills/walgit/SKILL.md` and `deploy/tray/README.md`.
+- **D57** **The GitHub mirror is an on-demand command, never a resident loop (2026-09-30,
+  cc-ai-mirror-on-demand).** D-fact, not a new policy: the rule dates from 2026-09-23 (f7635f9, "the GitHub
+  mirror is an on-demand command, not a 60 s screen loop") and lives in "Where this repository lives" above —
+  pushing a `v*` tag to walgit reaches GitHub only when someone runs
+  `bash ~/.walgit/sync-to-github.sh --once`. This entry exists because the rule was silently violated: a
+  launchd job (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) started mirroring continuously on
+  2026-09-29, and on 2026-09-30 a release reached GitHub by itself because of it. The job was booted out and
+  its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). A release must be a deliberate act:
+  tag it, push it to walgit, then run the sync by hand — never install the mirror under a scheduler.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
