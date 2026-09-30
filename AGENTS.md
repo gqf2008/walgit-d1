@@ -28,18 +28,18 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   release path: **never run it as a resident loop** — not a `screen`/watch loop, not a
   launchd/Task-Scheduler/cron job (one was installed 2026-09-29 and removed 2026-09-30; D57): a loop makes
   releases land without anyone deciding to publish them, and it pushes branch deletions while nobody is
-  watching. Branches are never hand-pushed and nothing mirrors them, so GitHub keeps Releases and Actions only.
+  watching. Branches are never hand-pushed and nothing mirrors them, so the only ref GitHub receives is a
+  release tag (below: Releases and Actions keep working; the pre-2026-09-16 PR history stays as history).
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
   and Releases, while Actions/Security keep their CI/release jobs. `fork` (`gqf2008/walgit-1`) and `upstream`
   (`tobi/walgit`) are historical references — never push to them.
-- The mirror tool is `~/.walgit/sync-to-github.sh`, run **on demand**, e.g. after pushing a `v*` tag or a
-  feature branch that should show up on GitHub:
-  `bash ~/.walgit/sync-to-github.sh --once >> ~/.walgit/sync-to-github.log 2>&1` (the script writes to
-  stdout/stderr; the redirect is the caller's). It mirrors every `refs/heads/*` and `refs/tags/*`, never
-  `refs/collab/*`, and deletes GitHub branches walgit no longer has (GitHub's default branch excepted).
-  Never run two syncs at once — there is no lock, and concurrent runs race the same refs.
+- The mirror tool is `~/.walgit/sync-to-github.sh`. It is **not** how releases ship and it is not to be run as
+  a loop (D57); it mirrors every `refs/heads/*` and `refs/tags/*`, never `refs/collab/*`, and deletes GitHub
+  branches walgit no longer has (GitHub's default branch excepted), which is exactly why it must stay a
+  deliberate, watched act. If it is ever run for a one-off repair, run it by hand, never two syncs at once
+  (there is no lock, and concurrent runs race the same refs).
 
 ## 0. Document map (one home per fact — link, don't duplicate)
 
@@ -706,15 +706,13 @@ decision in §4 — or the PR is; never "fix later".
   old tray → it detects the same release" would repeat forever. Consumer-facing statement in
   `web/SKILL.md` (Host upgrades), `skills/walgit/SKILL.md` and `deploy/tray/README.md`.
 - **D57** **The tag reaches GitHub by hand; the mirror is never a resident loop (2026-09-30,
-  cc-ai-mirror-on-demand, amended by cc-ai-release-push-github).** A release is a deliberate act: tag on
-  walgit (`git push origin vX.Y.Z`), then `git push github vX.Y.Z` — that hand-push is what triggers
-  `.github/workflows/release.yml`, which owns the whole publish (three platform builds, changelog, GitHub
-  Release). The `~/.walgit/sync-to-github.sh` mirror is **not** in that path and must never be installed under
-  a scheduler (`screen`/watch, launchd, Task Scheduler, cron): a launchd job
-  (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) started mirroring continuously on 2026-09-29, and
-  on 2026-09-30 two releases reached GitHub without anyone deciding to publish them because of it; the job was
-  booted out and its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). The 2026-09-23 rule
-  (f7635f9) said the same thing about loops — it was violated in practice, which is why this entry exists.
+  cc-ai-mirror-on-demand, amended by cc-ai-release-push-github).** The release recipe has one home — "Where
+  this repository lives" above. This entry is the incident that made it worth stating: a launchd job
+  (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) mirrored continuously from 2026-09-29, and on
+  2026-09-30 two releases reached GitHub without anyone deciding to publish them; the job was booted out and
+  its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). The 2026-09-23 rule (f7635f9) had
+  already said the mirror is an on-demand command, not a loop, and it was violated in practice — so: tag and
+  hand-push at release, never install the mirror under a scheduler.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
@@ -804,7 +802,7 @@ Decision identifiers are stable; gaps in the numbering are intentional.
 > walgit's D1 collaboration layer (`refs/collab/*`, `walgit collab ...`) — see "Where this repository
 > lives" above and the `walgit` skill. The GitHub claim/ship samples in §6.2 below are historical. What
 > still applies: §6.3 (reading the CI signals that run on the GitHub mirror) and §6.4's ruleset/release
-> facts (a `v*` tag reaches GitHub through the mirror, where `release.yml` publishes).
+> facts (a `v*` tag is pushed to GitHub by hand, where `release.yml` publishes).
 
 How this repository works as an agent-native collaboration platform: work units carry a
 machine-readable lifecycle, CI reports its own expected-red noise, and every state change an
@@ -870,7 +868,7 @@ gh issue edit <n> --add-label needs-review --remove-label in-progress
 # check CI for a PR (conclusion per job + failing steps)
 gh pr checks <pr> --repo gqf2008/walgit-d1
 gh run view <run> --repo gqf2008/walgit-d1 --json jobs --jq '.jobs[]|{n:.name,c:.conclusion,f:[.steps[]|select(.conclusion=="failure")|.name]}'
-# releases: push the tag to walgit; the mirror puts it on GitHub and release.yml publishes it
+# releases: push the tag to walgit, then `git push github vX.Y.Z` by hand; release.yml publishes it
 ```
 
 ### 6.3 Reading CI signals
