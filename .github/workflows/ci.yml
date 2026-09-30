@@ -742,6 +742,11 @@ jobs:
         # 仁,所以这里断言的正是上面那条 fixture 步骤刚构建出来的托盘。
         shell: pwsh
         run: ./deploy/windows/icon-check.ps1 target\debug\walgit-tray.exe target\debug\walgit-upgrade-helper.exe
+      - name: Tray input-health probe self-test
+        # 探针的判据(连续处于菜单模式 vs 阈值)是纯函数,不需要真托盘:这里断言它既会红
+        # (菜单循环卡死样本)也会保持绿(用户正常浏览菜单几秒)。线程 win-tray-menu-capture-stuck。
+        shell: pwsh
+        run: ./deploy/windows/tray-input-health.ps1 -SelfTest
       - name: Service lifecycle smoke (scheduled task, D48)
         # The real binary, the real task and the real port: `start` twice (must
         # not fork), then `stop` (the port must go quiet). This is the level the

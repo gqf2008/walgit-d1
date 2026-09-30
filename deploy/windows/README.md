@@ -94,6 +94,24 @@ fixture 之后、`release.yml` 的托盘构建与打包之间(发版路径)。`c
 `walgit.exe` / `walgit-service-host.exe` **本批不动**:shell 入口不指向它们,要不要一并
 编图标是产品口径(见该线程的 status 条目);要的话照抄同一条 `build.rs` 路径即可。
 
+## 托盘菜单卡死(整机点击失效)与自愈
+
+现场(2026-09-30,线程 `win-tray-menu-capture-stuck`):托盘弹出菜单卡在 Windows 的**模态菜单
+循环**里(`GetGUIThreadInfo` 的 `flags = GUI_INMENUMODE | GUI_POPUPMENUMODE`,`hwndCapture` 就是
+托盘窗口,连续 ≥10 分钟不变),期间**任何窗口都收不到激活点击**——用户看到的是「点哪儿都不
+聚焦、打不了字」,而托盘是唯一常驻入口。外部投一条 `WM_CANCELMODE` 后立即恢复(用户当场确认)。
+
+两层防线:
+
+| 位置 | 内容 |
+|---|---|
+| `deploy/tray/tray-rs/src/main.rs` 的 **menu watchdog** | 独立看守线程每 5s 采样自己 GUI 线程的菜单模式;持续 ≥90s 就向菜单宿主投 `WM_CANCELMODE`,`MENU_ESCALATE`(30s)后仍卡着再投一次,最多 3 次;每次处置写 `tray.log`(`menu watchdog: …`) |
+| `tray-input-health.ps1` | 真机巡检:采样 `GetGUIThreadInfo`,连续菜单模式超过 `-StuckSeconds` 判 FAIL,并打印可立即执行的处置命令;`-SelfTest` 只跑判据本身(CI 的 windows leg 跑它) |
+
+看守**必须是独立线程**:卡住时 GUI 线程正停在模态循环里,winit 的定时器回调不会被调用。
+阈值取 90s 是因为人工浏览托盘菜单是秒级,不会误伤。该修法的另一半——在 `TrackPopupMenu`
+之后补 `PostMessage(WM_NULL)`——落在 muda 里,属于上游;要做得先 fork 或自建 `show_menu` 路径。
+
 ## 本机构建
 
 需要 [Inno Setup **6.4+**](https://jrsoftware.org/isinfo.php)(`ISCC` 在 PATH;

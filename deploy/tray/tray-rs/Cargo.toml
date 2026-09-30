@@ -51,7 +51,9 @@ objc2-foundation = { version = "0.2", features = ["NSObject"] }
 # Win32_Security 是 CreateMutexW 声明的 cfg 要求——没有它,今天能编译全靠
 # winit 传递启用该 feature,winit 一裁剪就断编。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security"] }
+# Win32_UI_WindowsAndMessaging 是菜单循环自愈守卫的声明要求(GetGUIThreadInfo /
+# PostMessageW / GUI_INMENUMODE);只靠 winit 传递启用是隐式依赖,一裁剪就断编。
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_UI_WindowsAndMessaging"] }
 
 # 独立 crate:不加入 walgit workspace(根 Cargo.toml),自建 target/lock。
 [workspace]

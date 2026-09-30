@@ -1936,6 +1936,130 @@ fn single_instance_ok() -> bool {
     }
 }
 
+// ---------- 菜单循环自愈(Windows) ----------
+
+/// 托盘弹出菜单是**模态循环**(tray-icon → muda → `TrackPopupMenu`):它在自己的
+/// 循环里持有全局鼠标捕获,并在 `GetGUIThreadInfo` 里报 `GUI_INMENUMODE |
+/// GUI_POPUPMENUMODE`。Windows 不给这个循环任何超时——一旦它收不到关闭/失活消息
+/// (经典成因:`TrackPopupMenu` 之后少了 `PostMessage(WM_NULL)`,muda 不做这一步),
+/// 菜单就无限期挂着;而持有捕获期间**任何窗口都收不到激活点击**,用户看到的是
+/// "点哪儿都不聚焦、打不了字",托盘又是唯一常驻入口,只能杀进程自救。
+/// 线程 `win-tray-menu-capture-stuck` 的现场证据:`flags=0x14`、`hwndCapture` 与
+/// `hwndMenuOwner` 都是托盘窗口、连续 ≥10 分钟不变;外部投一条 `WM_CANCELMODE`
+/// 之后立即恢复(用户当场确认能输入了)。
+///
+/// 这条自愈是那个缺口的兜底:看守线程轮询菜单模式,持续超过阈值就投
+/// `WM_CANCELMODE` 打断循环,并在 `tray.log` 留痕。看守**必须是独立线程**——
+/// GUI 线程正卡在模态循环里,winit 的定时器回调根本不会被调用。
+/// 正常浏览托盘菜单是秒级,阈值放得很宽,不会误伤。
+const MENU_STUCK: Duration = Duration::from_secs(90);
+/// 第一次处置后仍卡在菜单模式多久 → 升级为再处置一次。
+const MENU_ESCALATE: Duration = Duration::from_secs(30);
+/// 最多处置几次:自愈失败也不能变成无限投递。
+const MENU_MAX_ATTEMPTS: u8 = 3;
+/// 采样间隔。
+const MENU_SAMPLE: Duration = Duration::from_secs(5);
+
+/// 自愈决策:纯函数,只吃"采样时刻 + 此刻是否处于菜单模式"。抽出来是为了能单测
+/// ——真机上诱发一次卡死不可控,判据必须能在 CI 里被断言。
+#[derive(Debug, Default)]
+struct MenuWatch {
+    stuck_since: Option<Instant>,
+    last_action: Option<Instant>,
+    attempts: u8,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MenuAction {
+    Idle,
+    /// 投 `WM_CANCELMODE` 打断菜单循环。
+    Break,
+    /// 第一次没救回来,再处置一次。
+    Escalate,
+}
+
+impl MenuWatch {
+    fn observe(&mut self, now: Instant, in_menu: bool) -> MenuAction {
+        if !in_menu {
+            *self = Self::default();
+            return MenuAction::Idle;
+        }
+        let since = *self.stuck_since.get_or_insert(now);
+        if now.duration_since(since) < MENU_STUCK {
+            return MenuAction::Idle;
+        }
+        match self.last_action {
+            None => {
+                self.attempts = 1;
+                self.last_action = Some(now);
+                MenuAction::Break
+            }
+            Some(prev) if now.duration_since(prev) >= MENU_ESCALATE => {
+                if self.attempts >= MENU_MAX_ATTEMPTS {
+                    return MenuAction::Idle;
+                }
+                self.attempts += 1;
+                self.last_action = Some(now);
+                MenuAction::Escalate
+            }
+            Some(_) => MenuAction::Idle,
+        }
+    }
+
+    /// 已经在菜单模式里待了多久(日志用)。
+    fn stuck_for(&self, now: Instant) -> Duration {
+        self.stuck_since
+            .map_or(Duration::ZERO, |t| now.duration_since(t))
+    }
+}
+
+/// 起看守线程。必须在 GUI 线程上调用 `GetCurrentThreadId`:要盯的就是它。
+#[cfg(target_os = "windows")]
+fn spawn_menu_watchdog() {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    let gui_thread = unsafe { GetCurrentThreadId() };
+    std::thread::spawn(move || {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetGUIThreadInfo, GUITHREADINFO, GUI_INMENUMODE, GUI_POPUPMENUMODE, PostMessageW,
+            WM_CANCELMODE,
+        };
+        let mut watch = MenuWatch::default();
+        loop {
+            std::thread::sleep(MENU_SAMPLE);
+            let now = Instant::now();
+            let mut info: GUITHREADINFO = unsafe { std::mem::zeroed() };
+            info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            let ok = unsafe { GetGUIThreadInfo(gui_thread, &mut info) };
+            let in_menu = ok != 0 && (info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE)) != 0;
+            let action = watch.observe(now, in_menu);
+            if action == MenuAction::Idle {
+                continue;
+            }
+            // 菜单宿主窗口优先(现场证据里它就是托盘窗口);捕获窗口可能是另一个。
+            let mut targets = vec![info.hwndMenuOwner];
+            if info.hwndCapture != 0 && info.hwndCapture != info.hwndMenuOwner {
+                targets.push(info.hwndCapture);
+            }
+            targets.retain(|h| *h != 0);
+            if targets.is_empty() {
+                log_line(&format!(
+                    "menu watchdog: {action:?} after {:?} in menu mode, but no owner/capture window to cancel",
+                    watch.stuck_for(now)
+                ));
+                continue;
+            }
+            for t in targets {
+                unsafe { PostMessageW(t, WM_CANCELMODE, 0, 0) };
+                log_line(&format!(
+                    "menu watchdog: {action:?} — posted WM_CANCELMODE to 0x{t:x} after {:?} in menu mode (attempt {})",
+                    watch.stuck_for(now),
+                    watch.attempts
+                ));
+            }
+        }
+    });
+}
+
 fn main() {
     // 单实例:双击多次不叠图标、不留幽灵进程。
     #[cfg(target_os = "windows")]
@@ -2037,6 +2161,11 @@ fn main() {
         .with_tooltip("walgit — 仓库活在桶上")
         .build()
         .expect("tray build");
+
+    // 菜单循环自愈看守(Windows)。放在托盘建好之后:一次性检测路径
+    // (WALGIT_DETECT_ONCE)在上面就 return 了,不会被这条线程缠上。
+    #[cfg(target_os = "windows")]
+    spawn_menu_watchdog();
 
     let detect_enabled = release_channel() || has_source_repo();
     if !detect_enabled {
@@ -2173,5 +2302,84 @@ mod tests {
 
         // 终止态也不会被自动 tick 立刻重新开启检测。
         assert!(!auto_detect_allowed(busy, state));
+    }
+
+    // ---- 菜单循环自愈(win-tray-menu-capture-stuck) ----
+    //
+    // 真机上诱发一次"菜单循环卡死"不可控(触发条件未知),所以把判据抽成纯函数
+    // 在这里断言:阈值、冷却、升级、上限、菜单关闭后重新计时。
+
+    #[test]
+    fn menu_watch_ignores_a_menu_the_user_is_browsing() {
+        let t0 = Instant::now();
+        let mut w = MenuWatch::default();
+        assert_eq!(w.observe(t0, true), MenuAction::Idle);
+        assert_eq!(
+            w.observe(t0 + Duration::from_secs(30), true),
+            MenuAction::Idle
+        );
+        assert_eq!(
+            w.observe(t0 + MENU_STUCK - Duration::from_secs(1), true),
+            MenuAction::Idle
+        );
+    }
+
+    #[test]
+    fn menu_watch_breaks_the_loop_after_the_stuck_threshold() {
+        let t0 = Instant::now();
+        let mut w = MenuWatch::default();
+        assert_eq!(w.observe(t0, true), MenuAction::Idle);
+        assert_eq!(w.observe(t0 + MENU_STUCK, true), MenuAction::Break);
+        assert_eq!(w.stuck_for(t0 + MENU_STUCK), MENU_STUCK);
+    }
+
+    #[test]
+    fn menu_watch_escalates_when_the_break_did_not_help() {
+        let t0 = Instant::now();
+        let mut w = MenuWatch::default();
+        assert_eq!(w.observe(t0, true), MenuAction::Idle);
+        let broke = t0 + MENU_STUCK;
+        assert_eq!(w.observe(broke, true), MenuAction::Break);
+        // 冷却窗口里不重复投递。
+        assert_eq!(
+            w.observe(broke + Duration::from_secs(5), true),
+            MenuAction::Idle
+        );
+        assert_eq!(w.observe(broke + MENU_ESCALATE, true), MenuAction::Escalate);
+    }
+
+    #[test]
+    fn menu_watch_gives_up_after_max_attempts() {
+        let t0 = Instant::now();
+        let mut w = MenuWatch::default();
+        assert_eq!(w.observe(t0, true), MenuAction::Idle);
+        let mut at = t0 + MENU_STUCK;
+        assert_eq!(w.observe(at, true), MenuAction::Break);
+        for _ in 2..=MENU_MAX_ATTEMPTS {
+            at += MENU_ESCALATE;
+            assert_eq!(w.observe(at, true), MenuAction::Escalate);
+        }
+        at += MENU_ESCALATE;
+        assert_eq!(
+            w.observe(at, true),
+            MenuAction::Idle,
+            "达到处置上限后不再投递(自愈失败也不能变成无限消息)"
+        );
+    }
+
+    #[test]
+    fn menu_watch_resets_when_the_menu_closes() {
+        let t0 = Instant::now();
+        let mut w = MenuWatch::default();
+        assert_eq!(w.observe(t0, true), MenuAction::Idle);
+        assert_eq!(w.observe(t0 + MENU_STUCK, true), MenuAction::Break);
+        // 菜单关掉了:一切归零(下一次开菜单重新计时,不接上一轮)。
+        assert_eq!(
+            w.observe(t0 + MENU_STUCK + Duration::from_secs(1), false),
+            MenuAction::Idle
+        );
+        let t1 = t0 + MENU_STUCK + Duration::from_secs(10);
+        assert_eq!(w.observe(t1, true), MenuAction::Idle);
+        assert_eq!(w.observe(t1 + MENU_STUCK, true), MenuAction::Break);
     }
 }

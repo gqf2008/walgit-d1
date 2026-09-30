@@ -66,6 +66,10 @@ Windows 目标会跑 `build.rs`,把产品图标(`deploy/windows/walgit.rc`)编�
   (`Command::args`,无引号拼装),且带 `CREATE_NO_WINDOW`(GUI 进程 spawn
   控制台程序不带它就闪黑窗);「打开 Web UI」用 `explorer <url>`——cmd 的
   `start` 经 Rust 参数转义后嵌套引号全灭,实测挂起事件循环 2 分钟以上。
+- **弹出菜单的菜单循环自愈**:Windows 的托盘菜单是模态循环,卡住时它持有全局鼠标
+  捕获、整机收不到激活点击(线程 `win-tray-menu-capture-stuck`)。本仓加了独立看守
+  线程(90s 阈值投 `WM_CANCELMODE` + `tray.log` 留痕),真机巡检脚本见
+  `deploy/windows/tray-input-health.ps1`,`deploy/windows/README.md` 有整段说明。
 
 ## 约定
 
