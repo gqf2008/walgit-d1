@@ -13,9 +13,10 @@ outrank any generic convention.
   GitHub is a read-only mirror plus the release pipeline. Work units, PRs, reviews and the
   board are signed entries in walgit's D1 collaboration layer (`refs/collab/*`): follow the
   `walgit` skill's flow (`walgit collab entry --kind issue|status|patch|review|merge_result`),
-  not GitHub labels/PRs. Branches are never pushed to the GitHub remote; a **release tag** is, and by
-  hand: `git push github vX.Y.Z`, which is what triggers the GitHub Actions release (AGENTS.md D57).
-  The `sync-to-github.sh` mirror is not in the release path and is never a loop.
+  not GitHub labels/PRs. Feature branches are never pushed to the GitHub remote; a **release** pushes
+  `main` and its tag by hand (`git push github main` + `git push github vX.Y.Z`), and the tag is what
+  triggers the GitHub Actions release (AGENTS.md D57). The `sync-to-github.sh` mirror is not in the
+  release path and is never a loop.
 - Work in a worktree off `origin/main` (walgit), one worktree per issue, and run the merge
   locally after the signed review approves: merge into `main`, push `origin`, then record
   `merge_result {"merged": true}` (card → `merged`; `status done` is the gated equivalent,

@@ -22,14 +22,15 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 - **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
   board are signed entries in the D1 collaboration layer (`refs/collab/*`, `walgit collab ...`), not GitHub.
 - **GitHub is the release pipeline** — `github = gqf2008/walgit-d1`. **Releases go through GitHub Actions, and
-  the tag gets there by hand**: after the tag is on walgit, `git push github vX.Y.Z` — nothing else carries it,
-  and only then does `.github/workflows/release.yml` fire (build linux/windows/macOS, changelog from
-  Conventional Commits, GitHub Release). The `~/.walgit/sync-to-github.sh` mirror is **not** part of the
+  their refs get there by hand**: after `main` and the tag are on walgit, `git push github main` and
+  `git push github vX.Y.Z` — nothing else carries them, and pushing the tag is what fires
+  `.github/workflows/release.yml` (build linux/windows/macOS, changelog from Conventional Commits, GitHub
+  Release). The `~/.walgit/sync-to-github.sh` mirror is **not** part of the
   release path: **never run it as a resident loop** — not a `screen`/watch loop, not a
   launchd/Task-Scheduler/cron job (one was installed 2026-09-29 and removed 2026-09-30; D57): a loop makes
   releases land without anyone deciding to publish them, and it pushes branch deletions while nobody is
-  watching. Branches are never hand-pushed and nothing mirrors them, so the only ref GitHub receives is a
-  release tag (below: Releases and Actions keep working; the pre-2026-09-16 PR history stays as history).
+  watching. Outside those two refs nothing is pushed and nothing is mirrored: feature branches stay on walgit
+  (below: Releases and Actions keep working; the pre-2026-09-16 PR history stays as history).
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
@@ -711,8 +712,8 @@ decision in §4 — or the PR is; never "fix later".
   (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) mirrored continuously from 2026-09-29, and on
   2026-09-30 two releases reached GitHub without anyone deciding to publish them; the job was booted out and
   its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). The 2026-09-23 rule (f7635f9) had
-  already said the mirror is an on-demand command, not a loop, and it was violated in practice — so: tag and
-  hand-push at release, never install the mirror under a scheduler.
+  already said the mirror is an on-demand command, not a loop, and it was violated in practice — so: push
+  `main` and the tag by hand at release, never install the mirror under a scheduler.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
