@@ -12,11 +12,19 @@
   进程影响,而这里要断言的正是 exe 自身的资源字节。
 
 .EXAMPLE
-  pwsh -File deploy/windows/icon-check.ps1 -Path target/release/walgit-tray.exe, target/release/walgit-upgrade-helper.exe
+  # 以文件形式跑(-File):走位置参数,一个文件一个实参
+  pwsh -File deploy/windows/icon-check.ps1 target/release/walgit-tray.exe target/release/walgit-upgrade-helper.exe
+
+.EXAMPLE
+  # PowerShell 提示符里也可以用具名数组
+  ./deploy/windows/icon-check.ps1 -Path target/release/walgit-tray.exe, target/release/walgit-upgrade-helper.exe
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
+    # Position = 0 与 ValueFromRemainingArguments **要成对**:只挂后者时,`pwsh -File` 路径下的
+    # 第二个实参没有位置参数可绑,直接报"找不到接受自变量的位置参数"——人手照文档跑就废了
+    # (独立审查 walgit-reviewer-2 条目 4e4273da 实测点出);两个都给,三种调用形式都能收进 $Path。
+    [Parameter(Mandatory = $true, Position = 0, ValueFromRemainingArguments = $true)]
     [string[]] $Path
 )
 

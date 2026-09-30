@@ -741,7 +741,7 @@ jobs:
         # 与 tray.yml 的同一条断言,平台腿自包含:build.rs 对 debug/release 一视同
         # 仁,所以这里断言的正是上面那条 fixture 步骤刚构建出来的托盘。
         shell: pwsh
-        run: ./deploy/windows/icon-check.ps1 -Path target\debug\walgit-tray.exe, target\debug\walgit-upgrade-helper.exe
+        run: ./deploy/windows/icon-check.ps1 target\debug\walgit-tray.exe target\debug\walgit-upgrade-helper.exe
       - name: Service lifecycle smoke (scheduled task, D48)
         # The real binary, the real task and the real port: `start` twice (must
         # not fork), then `stop` (the port must go quiet). This is the level the

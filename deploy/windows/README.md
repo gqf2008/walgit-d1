@@ -111,7 +111,7 @@ GNU 工具链(`x86_64-pc-windows-gnu`)用 MinGW-w64 的 `windres`,要在 PATH �
 ```powershell
 cargo build --release --bin walgit
 cargo build --release --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
-pwsh -File deploy\windows\icon-check.ps1 -Path target\release\walgit-tray.exe, target\release\walgit-upgrade-helper.exe
+pwsh -File deploy\windows\icon-check.ps1 target\release\walgit-tray.exe target\release\walgit-upgrade-helper.exe
 ISCC -DMyAppVersion=0.1.0 deploy\windows\installer.iss
 # 产物 deploy/windows/Output/walgit-setup-0.1.0-x64.exe
 ```

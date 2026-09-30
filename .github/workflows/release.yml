@@ -83,7 +83,7 @@ jobs:
       - name: Windows binaries carry the product icon
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./deploy/windows/icon-check.ps1 -Path target/release/walgit-tray.exe, target/release/walgit-upgrade-helper.exe
+        run: ./deploy/windows/icon-check.ps1 target/release/walgit-tray.exe target/release/walgit-upgrade-helper.exe
       # One installer per platform (issue #108): the .deb is the only linux release
       # artefact, the Inno Setup exe the only windows one; raw binaries are not
       # published. The macOS DMG is built by the dedicated `macos` job below.
