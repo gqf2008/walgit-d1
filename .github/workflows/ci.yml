@@ -492,6 +492,15 @@ jobs:
             echo 'installer.iss uses MsgBox: silent installs block on it (use SuppressibleMsgBox)' >&2
             exit 1
           fi
+          # 每条快捷方式都必须显式给出 IconFilename:默认取目标 exe 自己的图标资源,而
+          # v0.8.8 那批 Windows 二进制连资源目录都没有,桌面快捷方式就只剩标签文字
+          # (线程 win-tray-no-embedded-icon)。少一条 = 又退化成系统默认占位图。
+          missing="$(awk '/^\[Icons\]/{inside=1;next} /^\[/{inside=0} inside && /^Name:/ && !/IconFilename:/' deploy/windows/installer.iss)"
+          if [ -n "$missing" ]; then
+            echo 'installer.iss [Icons] entries without IconFilename:' >&2
+            printf '%s\n' "$missing" >&2
+            exit 1
+          fi
       - name: Type-check the Windows installer
         # `installer.iss` only ever compiles on a release tag otherwise, so a
         # Pascal slip (or a missing Source file) would surface as a broken
@@ -728,6 +737,11 @@ jobs:
             Remove-Item Env:WALGIT_DETECT_ONCE_FILE -ErrorAction SilentlyContinue
           }
 
+      - name: Tray binaries carry the product icon
+        # 与 tray.yml 的同一条断言,平台腿自包含:build.rs 对 debug/release 一视同
+        # 仁,所以这里断言的正是上面那条 fixture 步骤刚构建出来的托盘。
+        shell: pwsh
+        run: ./deploy/windows/icon-check.ps1 -Path target\debug\walgit-tray.exe, target\debug\walgit-upgrade-helper.exe
       - name: Service lifecycle smoke (scheduled task, D48)
         # The real binary, the real task and the real port: `start` twice (must
         # not fork), then `stop` (the port must go quiet). This is the level the

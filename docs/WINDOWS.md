@@ -24,6 +24,11 @@ same surface a contributor gets.
   `git log -1 --format=%T <rev>` (the root tree), `git cat-file -t|-e`, or
   `ls-tree <commit-ish>` directly. Fixed 2026-09-17, see the collab thread
   `cc-ai-win-git-argv`.
+- **Resource compiler** (only when building the tray): `deploy/tray/tray-rs/build.rs`
+  compiles `deploy/windows/walgit.rc` into the Windows binaries so the shell has an
+  icon to draw (`deploy/windows/README.md` §图标). MSVC targets use `rc.exe` from the
+  Windows SDK (located via the registry); GNU targets (`x86_64-pc-windows-gnu`) use
+  `windres` from MinGW-w64 on PATH — w64devkit or Strawberry Perl both carry one.
 - **pnpm**: `corepack enable` or a standalone install; `just web-build` uses it.
 - **just**: optional for a plain build; `just` itself is not installed by any
   package manager on Windows — grab a release binary from

@@ -77,6 +77,13 @@ jobs:
       # the same dir the upload globs and installer.iss expect.
       - name: Build the tray app
         run: cargo build --release --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
+      # Windows 的 shell 从可执行文件自己的 PE 资源取图标(安装器建的快捷方式
+      # IconLocation 是 ",0")。这条断言让"图标没编进去"在构建阶段就红,而不是等
+      # 用户再看到一次白图标(线程 win-tray-no-embedded-icon)。
+      - name: Windows binaries carry the product icon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./deploy/windows/icon-check.ps1 -Path target/release/walgit-tray.exe, target/release/walgit-upgrade-helper.exe
       # One installer per platform (issue #108): the .deb is the only linux release
       # artefact, the Inno Setup exe the only windows one; raw binaries are not
       # published. The macOS DMG is built by the dedicated `macos` job below.

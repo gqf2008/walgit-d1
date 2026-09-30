@@ -37,6 +37,10 @@ cargo build --release        # 产物 target/release/walgit-tray(.exe)
 `ksni` feature（StatusNotifierItem/DBusMenu，纯 Rust），不再引
 libappindicator/gtk/libxdo，也不再依赖 glib。macOS/Windows 无额外系统依赖。
 
+Windows 目标会跑 `build.rs`,把产品图标(`deploy/windows/walgit.rc`)编进这个 crate 的
+每个 bin:MSVC 工具链需要 Windows SDK 的 `rc.exe`(按注册表定位),GNU 工具链需要 PATH 上
+的 `windres`(MinGW-w64)。理由、资产与回归门禁见 `deploy/windows/README.md` 的「图标」一节。
+
 - macOS:产物可直接运行；正式 DMG 打包由 `deploy/tray/macos/`(`build.sh` /
   `build-dmg.sh`)负责，App Bundle 的托盘本体就是这个二进制(#183)。
   首次启动会 bootstrap `~/.walgit`(旧 `~/walgit` 布局自动复制迁移并留 5

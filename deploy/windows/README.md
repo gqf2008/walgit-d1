@@ -64,15 +64,54 @@ CI 里 `service-smoke.ps1` 对 `\walgit` 任务除自身同类断言外，也直
 避开 Hyper-V/WSL 保留段与已被占用的端口——随机端口落保留段会以 os error 10013 假红，
 见线程 cc-ai-win-smoke-port-flake）。
 
+## 图标
+
+Windows 的 shell 从**可执行文件自己的 PE 资源**取图标:安装器建的快捷方式
+`IconLocation` 是 `,0`(第一个图标资源),exe 里没有资源时就只能画系统默认占位图。
+v0.8.8 的四个 Windows 二进制连资源目录都没有,桌面快捷方式于是只剩标签文字
+(线程 `win-tray-no-embedded-icon`)。现在的形状:
+
+| 位置 | 内容 |
+|---|---|
+| `walgit.ico` | 多尺寸资产(16/24/32/48/64/128/256),与 macOS 的 `deploy/tray/macos/walgit.icns` 同一份艺术稿 |
+| `walgit.rc` | 资源脚本:只放图标,**不放 VERSIONINFO**——托盘的产品版本是运行时事实(安装器写的 `.walgit-install` 标记 + release 检测),不是 crate 的 `CARGO_PKG_VERSION`(0.1.0),编一个 0.1.0 进去只会和安装器/注册表里的 0.8.x 打架 |
+| `deploy/tray/tray-rs/build.rs` | 只对 Windows target 生效:用 winresource 找到资源编译器(MSVC → Windows SDK 的 `rc.exe`,GNU → `windres`)编译上面的 `.rc`,链进该 crate 的每个 bin(`walgit-tray.exe`、`walgit-upgrade-helper.exe`) |
+| `installer.iss` | `[Files]` 随包安装 `walgit.ico`;`[Icons]` 四条与 `UninstallDisplayIcon` 全部显式 `IconFilename` 指向它 |
+
+内嵌是主路径(桌面、开始菜单、任务栏、Alt+Tab 都拿得到);安装器里那份 `.ico` 是兜底:
+即使将来某个 exe 漏了资源,快捷方式也不会退化成系统默认图。
+
+**回归门禁**:`icon-check.ps1` 直接解析 PE(DataDirectory[2] → 资源目录树 →
+RT_GROUP_ICON / RT_ICON),断言存在 256×256 一档、且每个 GRPICONDIR 成员都能在资源目录里
+找到对应位图。它跑在三处:`tray.yml` 的 Windows 构建后、`ci.yml` windows leg 的托盘
+fixture 之后、`release.yml` 的托盘构建与打包之间(发版路径)。`ci.yml` 另有一条 grep:
+`installer.iss` 的 `[Icons]` 少一个 `IconFilename` 就红。
+
+反例(修复前必须失败):对 v0.8.8 的 `walgit-tray.exe` 跑这条断言 →
+`the PE has no resource directory at all`;阳性对照(例如 Inno 的 `unins000.exe`)必须通过
+——它不是"探测不到就当没有"的那种判据。
+
+`walgit.exe` / `walgit-service-host.exe` **本批不动**:shell 入口不指向它们,要不要一并
+编图标是产品口径(见该线程的 status 条目);要的话照抄同一条 `build.rs` 路径即可。
+
 ## 本机构建
 
 需要 [Inno Setup **6.4+**](https://jrsoftware.org/isinfo.php)(`ISCC` 在 PATH;
 脚本用 `x64compatible` 架构值,随库中文语言包为 UTF-8 无 BOM,均需 6.3+,
-isl 自述面向 6.4;GitHub Actions windows runner 已预装)。在仓库根:
+isl 自述面向 6.4;GitHub Actions windows runner 已预装)。构建**托盘**还需要资源编译器
+(见上一节):MSVC 工具链用 Windows SDK 自带的 `rc.exe`(build.rs 按注册表定位),
+GNU 工具链(`x86_64-pc-windows-gnu`)用 MinGW-w64 的 `windres`,要在 PATH 上
+(w64devkit、Strawberry Perl 都带)。缺了是**硬失败**:静默产出一个没有图标的 exe
+正是这条线程要修的病。winresource 选哪条路取决于**它自己被编译时的 `target_env`**
+(host),所以在本机默认的 GNU host 上跨 ABI 查 MSVC(`--target x86_64-pc-windows-msvc`)
+不会去查 SDK:那种场合用 `RC_PATH=<SDK>\bin\<ver>\x64\rc.exe` 指给它即可。
+
+在仓库根:
 
 ```powershell
 cargo build --release --bin walgit
 cargo build --release --target-dir target --manifest-path deploy/tray/tray-rs/Cargo.toml
+pwsh -File deploy\windows\icon-check.ps1 -Path target\release\walgit-tray.exe, target\release\walgit-upgrade-helper.exe
 ISCC -DMyAppVersion=0.1.0 deploy\windows\installer.iss
 # 产物 deploy/windows/Output/walgit-setup-0.1.0-x64.exe
 ```

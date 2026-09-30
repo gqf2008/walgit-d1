@@ -1,0 +1,15 @@
+/* deploy/windows/walgit.rc — Windows 资源脚本:托盘二进制的 PE 资源目录只有这一处来源。
+ *
+ * 快捷方式(安装器建的桌面/开始菜单项)的 IconLocation 是 ",0"——取的就是可执行文件的
+ * 第一个图标资源;exe 里没有资源时,shell 只能画系统默认占位图(线程
+ * win-tray-no-embedded-icon:当时四个 Windows 二进制连资源目录都没有)。
+ *
+ * 只放图标,不放 VERSIONINFO:托盘的产品版本是**运行时**事实(安装器写的 .walgit-install
+ * 标记 + release 检测),不是 crate 的 CARGO_PKG_VERSION(0.1.0)——编一个 0.1.0 进去只会
+ * 和安装器/注册表里的 0.8.x 打架。要版本信息就先把「产品版本」变成构建期已知的事实。
+ *
+ * 路径相对本文件所在目录;1 是标准「应用图标」id。
+ */
+#pragma code_page(65001)
+
+1 ICON "walgit.ico"

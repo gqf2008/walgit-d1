@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "walgit 服务托盘(macOS / Windows / Linux)"
 
+# Windows 二进制的图标资源(build.rs 只在 Windows target 上调它,见
+# deploy/windows/walgit.rc)。关掉默认 feature:唯一的默认 feature `toml` 只用来读
+# [package.metadata.winresource],而这里用的是自己的 .rc 文件。它只为「找到并调用
+# 资源编译器」而存在(MSVC → Windows SDK 的 rc.exe,GNU → windres)。
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
 [dependencies]
 winit = "0.30"
 

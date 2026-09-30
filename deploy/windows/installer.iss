@@ -33,7 +33,9 @@ CloseApplications=no
 OutputDir=Output
 OutputBaseFilename=walgit-setup-{#MyAppVersion}-x64
 UninstallDisplayName={#MyAppName}
-UninstallDisplayIcon={app}\{#MyAppExeName}
+; 指向随包的 .ico,不指向 exe:即使将来某个二进制漏了图标资源,「应用和功能」里
+; 的卸载项也不会退化成系统默认图(快捷方式同理,[Icons] 逐条显式给)。
+UninstallDisplayIcon={app}\walgit.ico
 MinVersion=10.0
 
 [Languages]
@@ -61,6 +63,9 @@ Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversio
 Source: "..\..\target\release\walgit-service-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\walgit-upgrade-helper.exe"; DestDir: "{app}"; Flags: ignoreversion
+; 图标资产(与 build.rs 内嵌进 exe 的同一份艺术稿:deploy/tray/macos/walgit.icns)。
+; 快捷方式与卸载项的显式来源——兜底,不是主路径。
+Source: "walgit.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; CI 与安装器共用的任务归属探测。必须作为普通文件装到 {app}；Inno 的临时解压 API
 ; 注册为 sfNoUninstall，而卸载路径也会调用归属探测，不能在安装器里依赖它。
 Source: "task-ownership.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -71,10 +76,13 @@ Source: "walgit.toml.initial"; DestDir: "{%USERPROFILE}\.walgit"; DestName: "wal
 ; 顶层再放一个 `walgit`:只放 {group} 文件夹的话,开始菜单「所有应用」里出现的是
 ; 文件夹名;托盘图标一旦被收进溢出区就没有别的入口(macOS 那侧的 Dock 图标
 ; #197/#200 是同一个诉求)。
-Name: "{userprograms}\walgit"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\walgit 配置文件 walgit.toml"; Filename: "notepad.exe"; Parameters: """{%USERPROFILE}\.walgit\walgit.toml"""
-Name: "{autodesktop}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"
+; IconFilename 逐条写明(v0.8.8 之前四条都没有):默认取的是目标 exe 自己的图标资源,
+; 而那时的二进制连资源目录都没有,桌面快捷方式于是只剩标签文字。显式指 .ico 之后,
+; 图标来源不再依赖"每个 exe 都记得编图标"。
+Name: "{userprograms}\walgit"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\walgit.ico"
+Name: "{group}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\walgit.ico"
+Name: "{group}\walgit 配置文件 walgit.toml"; Filename: "notepad.exe"; Parameters: """{%USERPROFILE}\.walgit\walgit.toml"""; IconFilename: "{app}\walgit.ico"
+Name: "{autodesktop}\walgit 托盘"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\walgit.ico"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "walgit-tray"; ValueData: """{app}\walgit-tray.exe"""; Flags: uninsdeletevalue; Tasks: autostart
