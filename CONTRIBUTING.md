@@ -29,9 +29,9 @@ Conventional Commits（`feat|fix|chore|docs|refactor|test|perf(scope): 描述`�
 
 ## 发布
 
-- 版本语义化（semver）：`v<major>.<minor>.<patch>`；在 walgit 侧打 tag 并 push `origin`，**再手动跑一次**
-  `bash ~/.walgit/sync-to-github.sh --once` 把 tag 带到 GitHub——推 tag 不会自动到 GitHub，镜像**只按需跑、
-  不得常驻**（AGENTS.md D57）——然后 `release.yml` 才会触发（构建 linux/windows 产物、从 Conventional Commits
-  生成 changelog、挂到 GitHub Release）。
+- 版本语义化（semver）：`v<major>.<minor>.<patch>`；在 walgit 侧打 tag 并 push `origin`，**再手动
+  `git push github v<major>.<minor>.<patch>`** 把 tag 推到 GitHub——发布由 GitHub Actions 统一执行，
+  tag 到不了 GitHub 就没有 release（AGENTS.md D57）——然后 `release.yml` 触发（构建 linux/windows/macOS
+  产物、从 Conventional Commits 生成 changelog、挂到 GitHub Release）。镜像脚本不在发布路径里。
 - 发布本身是一个工作单元：开 `batch` issue 列发布清单（里程碑 `v0.1` 是首个目标）。
 - 里程碑与批次的关系：一个里程碑一个版本，issue 挂里程碑表示"进这个版本"。

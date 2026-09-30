@@ -21,13 +21,14 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 
 - **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
   board are signed entries in the D1 collaboration layer (`refs/collab/*`, `walgit collab ...`), not GitHub.
-- **GitHub is a mirror plus the release pipeline** — `github = gqf2008/walgit-d1`. The mirror runs **on demand
-  and only on demand**: pushing a `v*` tag to walgit does **not** reach GitHub by itself — a release is not
-  out until someone runs the sync command below by hand, and only then does `.github/workflows/release.yml`
-  fire. **Never run the mirror as a resident loop** — not a `screen`/watch loop, not a
+- **GitHub is the release pipeline** — `github = gqf2008/walgit-d1`. **Releases go through GitHub Actions, and
+  the tag gets there by hand**: after the tag is on walgit, `git push github vX.Y.Z` — nothing else carries it,
+  and only then does `.github/workflows/release.yml` fire (build linux/windows/macOS, changelog from
+  Conventional Commits, GitHub Release). The `~/.walgit/sync-to-github.sh` mirror is **not** part of the
+  release path: **never run it as a resident loop** — not a `screen`/watch loop, not a
   launchd/Task-Scheduler/cron job (one was installed 2026-09-29 and removed 2026-09-30; D57): a loop makes
   releases land without anyone deciding to publish them, and it pushes branch deletions while nobody is
-  watching. Never push branches to the GitHub remote by hand, and never double-push.
+  watching. Branches are never hand-pushed and nothing mirrors them, so GitHub keeps Releases and Actions only.
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
@@ -704,15 +705,16 @@ decision in §4 — or the PR is; never "fix later".
   version again (the menu still can) — without that, "install → rollback → the helper relaunches the
   old tray → it detects the same release" would repeat forever. Consumer-facing statement in
   `web/SKILL.md` (Host upgrades), `skills/walgit/SKILL.md` and `deploy/tray/README.md`.
-- **D57** **The GitHub mirror is an on-demand command, never a resident loop (2026-09-30,
-  cc-ai-mirror-on-demand).** D-fact, not a new policy: the rule dates from 2026-09-23 (f7635f9, "the GitHub
-  mirror is an on-demand command, not a 60 s screen loop") and lives in "Where this repository lives" above —
-  pushing a `v*` tag to walgit reaches GitHub only when someone runs
-  `bash ~/.walgit/sync-to-github.sh --once`. This entry exists because the rule was silently violated: a
-  launchd job (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) started mirroring continuously on
-  2026-09-29, and on 2026-09-30 a release reached GitHub by itself because of it. The job was booted out and
-  its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). A release must be a deliberate act:
-  tag it, push it to walgit, then run the sync by hand — never install the mirror under a scheduler.
+- **D57** **The tag reaches GitHub by hand; the mirror is never a resident loop (2026-09-30,
+  cc-ai-mirror-on-demand, amended by cc-ai-release-push-github).** A release is a deliberate act: tag on
+  walgit (`git push origin vX.Y.Z`), then `git push github vX.Y.Z` — that hand-push is what triggers
+  `.github/workflows/release.yml`, which owns the whole publish (three platform builds, changelog, GitHub
+  Release). The `~/.walgit/sync-to-github.sh` mirror is **not** in that path and must never be installed under
+  a scheduler (`screen`/watch, launchd, Task Scheduler, cron): a launchd job
+  (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) started mirroring continuously on 2026-09-29, and
+  on 2026-09-30 two releases reached GitHub without anyone deciding to publish them because of it; the job was
+  booted out and its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). The 2026-09-23 rule
+  (f7635f9) said the same thing about loops — it was violated in practice, which is why this entry exists.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
