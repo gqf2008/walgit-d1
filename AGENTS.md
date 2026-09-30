@@ -29,8 +29,8 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   release path: **never run it as a resident loop** — not a `screen`/watch loop, not a
   launchd/Task-Scheduler/cron job (one was installed 2026-09-29 and removed 2026-09-30; D57): a loop makes
   releases land without anyone deciding to publish them, and it pushes branch deletions while nobody is
-  watching. Outside those two refs nothing is pushed and nothing is mirrored: feature branches stay on walgit
-  (below: Releases and Actions keep working; the pre-2026-09-16 PR history stays as history).
+  watching. Outside that release path nothing is pushed and nothing is mirrored by default: feature branches
+  stay on walgit (below: Releases and Actions keep working; the pre-2026-09-16 PR history stays as history).
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
@@ -706,14 +706,16 @@ decision in §4 — or the PR is; never "fix later".
   version again (the menu still can) — without that, "install → rollback → the helper relaunches the
   old tray → it detects the same release" would repeat forever. Consumer-facing statement in
   `web/SKILL.md` (Host upgrades), `skills/walgit/SKILL.md` and `deploy/tray/README.md`.
-- **D57** **The tag reaches GitHub by hand; the mirror is never a resident loop (2026-09-30,
+- **D57** **Release refs reach GitHub by hand; the mirror is never a resident loop (2026-09-30,
   cc-ai-mirror-on-demand, amended by cc-ai-release-push-github).** The release recipe has one home — "Where
   this repository lives" above. This entry is the incident that made it worth stating: a launchd job
   (`com.sqb.walgit-sync-github`, `RunAtLoad` + `KeepAlive`) mirrored continuously from 2026-09-29, and on
   2026-09-30 two releases reached GitHub without anyone deciding to publish them; the job was booted out and
   its plist moved to `~/.walgit/removed-launchagents/` (kept, not deleted). The 2026-09-23 rule (f7635f9) had
   already said the mirror is an on-demand command, not a loop, and it was violated in practice — so: push
-  `main` and the tag by hand at release, never install the mirror under a scheduler.
+  `main` by hand whenever it moves (`git push github main`; the reviewer of this very change caught that
+  main had been pushed three times in ten minutes) and the tag at release, and never install the mirror
+  under a scheduler.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
@@ -803,7 +805,7 @@ Decision identifiers are stable; gaps in the numbering are intentional.
 > walgit's D1 collaboration layer (`refs/collab/*`, `walgit collab ...`) — see "Where this repository
 > lives" above and the `walgit` skill. The GitHub claim/ship samples in §6.2 below are historical. What
 > still applies: §6.3 (reading the CI signals that run on the GitHub mirror) and §6.4's ruleset/release
-> facts (a `v*` tag is pushed to GitHub by hand, where `release.yml` publishes).
+> facts (`main` and a `v*` tag are pushed to GitHub by hand, where `release.yml` publishes).
 
 How this repository works as an agent-native collaboration platform: work units carry a
 machine-readable lifecycle, CI reports its own expected-red noise, and every state change an
@@ -869,7 +871,7 @@ gh issue edit <n> --add-label needs-review --remove-label in-progress
 # check CI for a PR (conclusion per job + failing steps)
 gh pr checks <pr> --repo gqf2008/walgit-d1
 gh run view <run> --repo gqf2008/walgit-d1 --json jobs --jq '.jobs[]|{n:.name,c:.conclusion,f:[.steps[]|select(.conclusion=="failure")|.name]}'
-# releases: push the tag to walgit, then `git push github vX.Y.Z` by hand; release.yml publishes it
+# releases: push main + the tag to walgit, then `git push github main` + `git push github vX.Y.Z` by hand
 ```
 
 ### 6.3 Reading CI signals
@@ -890,10 +892,12 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
 
 ### 6.4 Governance and releases
 
-- The **GitHub mirror's** `main` is protected by a ruleset: PR required, required checks
-  (`warnings + test`, `e2e`, `windows fast tier`; clippy excluded), linear history. The
-  canonical `main` lives in walgit and is moved by a signed collab `merge_result` plus a
-  direct push to `origin`.
+- The **GitHub mirror's** `main` is protected by a ruleset — live shape, verified 2026-09-30:
+  `pull_request` (0 required approvals), `deletion`, `non_fast_forward`, `required_linear_history`,
+  and **no required status checks**; the repository-admin role carries `bypass_mode: always`, which is
+  what lets a release push `main` directly. The canonical `main` lives in walgit and is moved by a
+  signed collab `merge_result` plus a direct push to `origin`; GitHub's copy follows by hand
+  (`git push github main`, D57).
 - Design decisions and Q&A: historically GitHub **Discussions** (Announcements/General/
   Ideas/Polls/Q&A/Show and tell); discussions are disabled on the mirror now — put the "why"
   in the walgit collab thread (`comment` entries) instead.
