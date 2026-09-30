@@ -217,8 +217,9 @@ them with signed `ci_claim` entries and publishes signed results into `ci-*` thr
 ## 8. Known pitfalls
 
 - Keep the binary path free of non-UTF-8 characters (`env::args()` panics).
-- Long-running watchers (mirror loops, `collab watch`) need `screen`/`nohup`: the service lifecycle does
-  not own them, and a service restart can orphan them.
+- Long-running watchers (`collab watch`) need `screen`/`nohup`: the service lifecycle does not own them, and a
+  service restart can orphan them. The **GitHub mirror is not one of these** — it must be run by hand
+  (`~/.walgit/sync-to-github.sh --once`) and never as a loop (AGENTS.md D57).
 - A stale local `objects/pack/multi-pack-index` can make pushes fail with a misleading
   `connectivity: … object could not be found`; verify the object with `git cat-file`/`verify-pack`, then
   stop the service and rebuild (or move aside) the index before retrying.

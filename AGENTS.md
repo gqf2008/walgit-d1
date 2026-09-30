@@ -655,6 +655,8 @@ decision in §4 — or the PR is; never "fix later".
   `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` and waits for it; `DETACHED_PROCESS` is not used
   (with no console to inherit, a console-subsystem child allocates a fresh one — a new window under
   Windows Terminal);
+  *(the GitHub mirror is no longer one of those periodic tasks — it is on-demand, D57; the rule
+  still governs any scheduler that remains)*
   `walgit-service-host.exe` (`crates/walgit-cli/src/bin/walgit-service-host.rs`) is the reference
   implementation, `deploy/windows/README.md` carries the copy-paste registration template, and
   `deploy/windows/task-action-check.ps1` is the post-registration assertion (PE subsystem == GUI,

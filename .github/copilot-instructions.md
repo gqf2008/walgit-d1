@@ -13,7 +13,9 @@ outrank any generic convention.
   GitHub is a read-only mirror plus the release pipeline. Work units, PRs, reviews and the
   board are signed entries in walgit's D1 collaboration layer (`refs/collab/*`): follow the
   `walgit` skill's flow (`walgit collab entry --kind issue|status|patch|review|merge_result`),
-  not GitHub labels/PRs. Never push branches to the GitHub remote by hand; never double-push.
+  not GitHub labels/PRs. Never push branches to the GitHub remote by hand; never double-push. The
+  mirror is an on-demand command, never a loop: run `~/.walgit/sync-to-github.sh --once` when a ref
+  should reach GitHub (AGENTS.md D57).
 - Work in a worktree off `origin/main` (walgit), one worktree per issue, and run the merge
   locally after the signed review approves: merge into `main`, push `origin`, then record
   `merge_result {"merged": true}` (card → `merged`; `status done` is the gated equivalent,
