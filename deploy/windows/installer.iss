@@ -217,6 +217,59 @@ begin
     Result := ResultCode = 0;
 end;
 
+// 被挪开的旧映像的名字。带版本号是为了可追踪:残留(旧进程还持有它)时一眼能看出
+// 是哪一版的二进制,下一次安装会先清掉它。
+function MovedAsidePath(const ExeName: String): String;
+begin
+  Result := ExpandConstant('{app}\') + ExeName + '.old-{#MyAppVersion}';
+end;
+
+// 清掉上一次升级留下的 *.old-* 残渣(可能正被某个还在跑旧映像的进程持有 → 失败只记日志)。
+procedure DeleteMovedAsideBinaries;
+var
+  Names: array[0..3] of String;
+  I: Integer;
+begin
+  Names[0] := 'walgit.exe';
+  Names[1] := 'walgit-tray.exe';
+  Names[2] := 'walgit-service-host.exe';
+  Names[3] := 'walgit-upgrade-helper.exe';
+  for I := 0 to 3 do
+    if FileExists(MovedAsidePath(Names[I])) then
+      if not DeleteFile(MovedAsidePath(Names[I])) then
+        Log('note: ' + Names[I] + '.old-* is still held; leaving it for the next run');
+end;
+
+// 清扫之后的第二道保险:**运行中的映像删不掉,但可以改名**。
+// 2026-10-01 实机:StopWalgit 的按目录清扫执行时是干净的,可安装要跑几十秒——期间 agent
+// 车道的看护层/别的工具会重新从 {app} 拉起 walgit.exe(现场 30 秒内就冒出了新的 collab
+// 聚合进程),Inno 复制到 walgit.exe 时又撞 DeleteFile 失败(错误 5 / 拒绝访问),交互装
+// 卡在重试对话框、静默升级遇到同一个对话框行为未定义。先把四个 exe 改名挪开,目标路径就是
+// 空的:安装窗口内新起的进程只会拿到改名后的旧映像,不影响本次替换。
+procedure MoveAsideExistingBinaries;
+var
+  Names: array[0..3] of String;
+  Src: String;
+  I: Integer;
+begin
+  Names[0] := 'walgit.exe';
+  Names[1] := 'walgit-tray.exe';
+  Names[2] := 'walgit-service-host.exe';
+  Names[3] := 'walgit-upgrade-helper.exe';
+  for I := 0 to 3 do
+  begin
+    Src := ExpandConstant('{app}\') + Names[I];
+    if FileExists(Src) then
+    begin
+      if RenameFile(Src, MovedAsidePath(Names[I])) then
+        Log('moved aside ' + Src)
+      else
+        // 失败不是致命的:清扫已经尽力,真撞上了还有 Inno 自己的重试对话框兜底。
+        Log('WARNING: could not move aside ' + Src);
+    end;
+  end;
+end;
+
 procedure StopWalgit(AskAboutUnknown: Boolean);
 var
   ResultCode: Integer;
@@ -318,6 +371,9 @@ begin
   begin
     MigrateLegacyState;
     StopWalgit(True);
+    // 上一轮的残渣先清,再把当前四个 exe 挪开(见 MoveAsideExistingBinaries)。
+    DeleteMovedAsideBinaries;
+    MoveAsideExistingBinaries;
   end;
   if CurStep = ssPostInstall then
     // 安装目录标记:托盘据此识别自定义 {app}(默认目录另有路径判据)。这个
@@ -329,6 +385,8 @@ begin
       SaveStringToFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'), '', False)
     else
       DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
+    // 新文件已就位:能删就把这次的残渣清掉(有旧进程仍持有时留到下一次安装)。
+    DeleteMovedAsideBinaries;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -357,5 +415,7 @@ begin
     end;
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
     DeleteFile(ExpandConstant('{app}\.walgit-install'));
+    // 升级留下的 *.old-* 也要跟着走(它们不在 Inno 的安装清单里)。
+    DeleteMovedAsideBinaries;
   end;
 end;

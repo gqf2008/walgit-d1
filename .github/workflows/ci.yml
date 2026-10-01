@@ -484,6 +484,15 @@ jobs:
             echo 'task-ownership.ps1 must be installed as a normal {app} file' >&2
             exit 1
           }
+          # 升级前必须把 {app} 里的四个 exe "改名挪开"再复制:运行中的映像 DeleteFile
+          # 会失败(错误 5),而安装要跑几十秒——期间 agent 车道/看护层会重新从 {app}
+          # 拉起 walgit.exe,于是复制又撞上占用(2026-10-01 实机 v0.8.9 升级卡死,
+          # 线程 win-installer-locked-binary)。ISCC 编译不会因为你删掉这个调用而报错,
+          # 所以这一步要单独钉住。
+          grep -nqE '^\s*MoveAsideExistingBinaries;$' deploy/windows/installer.iss || {
+            echo 'installer.iss must move the running binaries aside before replacing them' >&2
+            exit 1
+          }
           # `/SUPPRESSMSGBOXES` only auto-answers **SuppressibleMsgBox**; a bare
           # `MsgBox` in [Code] shows a modal even under /VERYSILENT, which hangs a
           # silent install (and the tray's upgrade path) forever — measured on a

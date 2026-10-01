@@ -20,6 +20,13 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
   (配置保留)。托盘菜单升级会先下载并校验新/旧两个安装器，再把
   `walgit-upgrade-helper.exe` 复制到 `%USERPROFILE%\.walgit\update\<pid>`
   后由它执行静默安装、健康校验和失败回滚。
+- **升级时"改名挪开"再复制**(2026-10-01,线程 `win-installer-locked-binary`):运行中的
+  映像 `DeleteFile` 会失败(错误 5 / 拒绝访问),而安装要跑几十秒——期间 agent 车道的
+  看护层、别的脚本完全可能重新从 `{app}` 拉起 `walgit.exe`(现场实测 30 秒内就冒出新的
+  `collab` 聚合进程),于是 Inno 复制时又撞上占用,交互装卡在"重试"对话框、静默升级遇到
+  同一个对话框行为未定义。现在 `[Code]` 在清扫之后把四个 exe 改名成 `*.old-<版本>`
+  (**运行中的映像不能删、但可以改名**),目标路径随即变空,新文件照常落位;安装窗口内新起的
+  进程只会拿到改名后的旧映像。残渣在下次安装/卸载时清掉(被持有就留到再下一次)。
 - 卸载:删程序与快捷方式、清自启键、注销任务计划程序里的 `walgit` 任务；
   `%USERPROFILE%\.walgit` 下的 `walgit.toml`、`cache`、`keys`、`tray.log` 保留为
   用户数据。（Windows 已无 `walgit.pid` —— 服务归任务计划程序，D48。）
