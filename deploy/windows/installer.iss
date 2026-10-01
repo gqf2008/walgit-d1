@@ -217,27 +217,36 @@ begin
     Result := ResultCode = 0;
 end;
 
-// 被挪开的旧映像的名字。带版本号是为了可追踪:残留(旧进程还持有它)时一眼能看出
-// 是哪一版的二进制,下一次安装会先清掉它。
+// 被挪开的旧映像的名字。带版本号只为可追踪(残留时一眼看出是哪一版留下的);
+// 清理**不依赖**版本号匹配,见 DeleteMovedAsideBinaries。
 function MovedAsidePath(const ExeName: String): String;
 begin
   Result := ExpandConstant('{app}\') + ExeName + '.old-{#MyAppVersion}';
 end;
 
-// 清掉上一次升级留下的 *.old-* 残渣(可能正被某个还在跑旧映像的进程持有 → 失败只记日志)。
+// 清掉历史升级留下的 *.old-* 残渣(可能正被某个还在跑旧映像的进程持有 → 失败只记日志)。
+//
+// 必须按**模式**枚举,不能只认本次安装器的版本号:残渣的名字里带的是"被挪开那一刻"的
+// 旧版本(例如装 v0.9.0 时留下 walgit.exe.old-0.9.0),而它当时正被持有、删不掉;下次装
+// v0.9.1 若只探测 walgit.exe.old-0.9.1,那份 .old-0.9.0 就再没有任何安装/卸载路径会碰到,
+// 每次被持有的升级都永久漏一个全尺寸 exe(独立审查 e4efa346 的阻塞项)。
 procedure DeleteMovedAsideBinaries;
 var
-  Names: array[0..3] of String;
-  I: Integer;
+  FindRec: TFindRec;
 begin
-  Names[0] := 'walgit.exe';
-  Names[1] := 'walgit-tray.exe';
-  Names[2] := 'walgit-service-host.exe';
-  Names[3] := 'walgit-upgrade-helper.exe';
-  for I := 0 to 3 do
-    if FileExists(MovedAsidePath(Names[I])) then
-      if not DeleteFile(MovedAsidePath(Names[I])) then
-        Log('note: ' + Names[I] + '.old-* is still held; leaving it for the next run');
+  if FindFirst(ExpandConstant('{app}\*.old-*'), FindRec) then
+  begin
+    try
+      repeat
+        // 同前缀的目录理论上也会被匹配到:DeleteFile 对它只是失败,不致命,所以不引入
+        // FILE_ATTRIBUTE_* 判断(那需要多一个本机无法编译验证的常量)。
+        if not DeleteFile(ExpandConstant('{app}\') + FindRec.Name) then
+          Log('note: ' + FindRec.Name + ' is still held; leaving it for the next run');
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
 end;
 
 // 清扫之后的第二道保险:**运行中的映像删不掉,但可以改名**。

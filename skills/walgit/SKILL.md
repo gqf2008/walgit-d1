@@ -43,6 +43,13 @@ pins a machine to manual, and a version that rolled back once is never auto-retr
   checkout (`WALGIT_REPO`, default `~/walgit-repo`), it offers **source upgrade** (ff-merge,
   build, health check, rollback); otherwise upgrade through the package/service workflow used to
   install the host.
+- **Before upgrading Windows: stop your own agent lanes.** A `collab watch` loop, an MCP server or
+  any long-running `walgit <subcommand>` runs the binary **from the install directory**, and a
+  running image cannot be deleted while the installer replaces it (2026-10-01: a machine with three
+  lanes' worth of `collab` processes sat in the installer's "retry" dialog with `DeleteFile error 5`).
+  Installers from the build after that day move the four exes aside before copying, so a lane that
+  gets *re-spawned* mid-install no longer blocks the upgrade — but stopping them first is still the
+  clean path (a stopped lane also comes back on the **new** binary instead of the renamed old one).
 
 ## 3. MCP subscriptions (optional)
 
