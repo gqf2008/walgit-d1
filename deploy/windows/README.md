@@ -105,7 +105,7 @@ fixture 之后、`release.yml` 的托盘构建与打包之间(发版路径)。`c
 
 | 位置 | 内容 |
 |---|---|
-| `deploy/tray/tray-rs/src/main.rs` 的 **menu watchdog** | 独立看守线程每 5s 采样自己 GUI 线程的菜单模式;持续 ≥90s 就向菜单宿主投 `WM_CANCELMODE`,`MENU_ESCALATE`(30s)后仍卡着再投一次,最多 3 次;每次处置写 `tray.log`(`menu watchdog: …`) |
+| `deploy/tray/tray-rs/src/main.rs` 的 **menu watchdog** | 独立看守线程每 5s 采样自己 GUI 线程的菜单模式;持续 ≥90s 就投 `WM_CANCELMODE`——菜单宿主窗口优先,宿主与捕获窗口不同时两个都投;`MENU_ESCALATE`(30s)后仍卡着再投一次,最多 3 次;每次处置写 `tray.log`(`menu watchdog: …`) |
 | `tray-input-health.ps1` | 真机巡检:采样 `GetGUIThreadInfo`,连续菜单模式超过 `-StuckSeconds` 判 FAIL,并打印可立即执行的处置命令;`-SelfTest` 只跑判据本身(CI 的 windows leg 跑它) |
 
 看守**必须是独立线程**:卡住时 GUI 线程正停在模态循环里,winit 的定时器回调不会被调用。

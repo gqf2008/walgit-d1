@@ -28,7 +28,8 @@ param(
     [string] $ProcessName = 'walgit-tray',
     [int] $Seconds = 120,
     [int] $IntervalSeconds = 5,
-    [int] $StuckSeconds = 60,
+    # 默认必须比看守的阈值(90s)更松:卡死但自愈正常的机器上,巡检不该先报红。
+    [int] $StuckSeconds = 120,
     [string] $LogPath = "$env:USERPROFILE\.walgit\tray.log",
     [switch] $SelfTest
 )

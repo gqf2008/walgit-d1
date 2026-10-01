@@ -1952,16 +1952,21 @@ fn single_instance_ok() -> bool {
 /// `WM_CANCELMODE` 打断循环,并在 `tray.log` 留痕。看守**必须是独立线程**——
 /// GUI 线程正卡在模态循环里,winit 的定时器回调根本不会被调用。
 /// 正常浏览托盘菜单是秒级,阈值放得很宽,不会误伤。
+#[cfg(any(target_os = "windows", test))]
 const MENU_STUCK: Duration = Duration::from_secs(90);
 /// 第一次处置后仍卡在菜单模式多久 → 升级为再处置一次。
+#[cfg(any(target_os = "windows", test))]
 const MENU_ESCALATE: Duration = Duration::from_secs(30);
 /// 最多处置几次:自愈失败也不能变成无限投递。
+#[cfg(any(target_os = "windows", test))]
 const MENU_MAX_ATTEMPTS: u8 = 3;
-/// 采样间隔。
+/// 采样间隔(只有看守线程用;非 Windows 的 test 构建里同样没人用,所以单独门)。
+#[cfg(target_os = "windows")]
 const MENU_SAMPLE: Duration = Duration::from_secs(5);
 
 /// 自愈决策:纯函数,只吃"采样时刻 + 此刻是否处于菜单模式"。抽出来是为了能单测
 /// ——真机上诱发一次卡死不可控,判据必须能在 CI 里被断言。
+#[cfg(any(target_os = "windows", test))]
 #[derive(Debug, Default)]
 struct MenuWatch {
     stuck_since: Option<Instant>,
@@ -1969,6 +1974,7 @@ struct MenuWatch {
     attempts: u8,
 }
 
+#[cfg(any(target_os = "windows", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum MenuAction {
     Idle,
@@ -1978,6 +1984,7 @@ enum MenuAction {
     Escalate,
 }
 
+#[cfg(any(target_os = "windows", test))]
 impl MenuWatch {
     fn observe(&mut self, now: Instant, in_menu: bool) -> MenuAction {
         if !in_menu {
