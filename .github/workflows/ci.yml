@@ -532,8 +532,9 @@ jobs:
         #
         # 同一趟还断言用户 PATH 的两条契约(2026-10-07,线程 win-installer-user-path):
         # 装完 `{app}` 有且只有一条(重跑安装也不加第二条),卸载把它摘掉、用户 PATH
-        # 的其余内容**逐字节**不变。读的是原文(DoNotExpandEnvironmentNames)——展开读
-        # 会把别人的 %USERPROFILE% 变成字面量,"逐字节还原"就无从断言了。
+        # 的其余内容**逐字节**不变、类型仍是 REG_EXPAND_SZ。读的是原文
+        # (DoNotExpandEnvironmentNames)——展开读会把别人的 %USERPROFILE% 变成字面量,
+        # "逐字节还原"就无从断言了;所以这一步先自己塞一条 %VAR% 条目再比对。
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -549,15 +550,28 @@ jobs:
               return $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
             } finally { $key.Close() }
           }
-          # 安装器判等的形态:去首尾空白、去成对引号、去结尾反斜杠(大小写不敏感)。
+          # 与 user-path.iss 的判等形态一致:去首尾空白、去引号、去结尾反斜杠(大小写不敏感)。
           function Normalize-PathEntry([string] $Entry) { return $Entry.Trim().Trim('"').TrimEnd('\') }
+          function Set-RawUserPath([string] $Value) {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            if ($null -eq $key) { throw 'HKCU\Environment could not be opened for write' }
+            try { $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+            finally { $key.Close() }
+          }
           function Get-PathEntryCount([string] $Value, [string] $Directory) {
             if ($null -eq $Value) { return 0 }
             $want = Normalize-PathEntry $Directory
             return @($Value -split ';' | Where-Object { $_ -ne '' -and (Normalize-PathEntry $_) -ieq $want }).Count
           }
 
-          $pathBefore = Get-RawUserPath
+          # 先给自己塞一条 %VAR% 形态的条目:安装器必须按**原文**读写它(不展开),卸载后
+          # 逐字节还原的比对也以这个种子为准。runner 是一次性的,这条种子留在它的 PATH 里无害。
+          $probeEntry = '%USERPROFILE%\walgit-ci-path-probe'
+          $pathBefore = [string](Get-RawUserPath)
+          if ($pathBefore -notlike "*$probeEntry*") {
+            $pathBefore = if ($pathBefore -eq '') { $probeEntry } else { "$pathBefore;$probeEntry" }
+            Set-RawUserPath $pathBefore
+          }
           function Invoke-Silent {
             param([string] $Exe, [string] $Arguments, [int] $Seconds)
             $p = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru
@@ -572,7 +586,14 @@ jobs:
           if ($code -ne 0) { throw "silent install exited $code (see $log)" }
           if (-not (Test-Path -LiteralPath (Join-Path $dir 'unins000.exe'))) { throw "the silent install left no uninstaller under $dir" }
           if (Select-String -Path $log -Pattern 'Message box' -Quiet) { throw "the silent install showed a message box; see $log" }
-          $hits = Get-PathEntryCount (Get-RawUserPath) $dir
+          $rawAfterInstall = [string](Get-RawUserPath)
+          if ($rawAfterInstall -notlike "*$probeEntry*") {
+            throw "the installer expanded or dropped another application's %VAR% PATH entry"
+          }
+          if ((Get-Item 'HKCU:\Environment').GetValueKind('Path').ToString() -ne 'ExpandString') {
+            throw 'the installer rewrote the user PATH as REG_SZ; it must stay REG_EXPAND_SZ'
+          }
+          $hits = Get-PathEntryCount $rawAfterInstall $dir
           if ($hits -ne 1) { throw "the installer registered '$dir' on the user PATH $hits times (want exactly 1)" }
           # 升级就是再跑一遍安装器:第二条只能是零。
           $code = Invoke-Silent $setup $install 180
@@ -581,8 +602,9 @@ jobs:
           if ($hits -ne 1) { throw "re-running the installer left $hits copies of '$dir' on the user PATH (want exactly 1)" }
           $code = Invoke-Silent (Join-Path $dir 'unins000.exe') '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' 180
           if ($code -ne 0) { throw "silent uninstall exited $code" }
-          $pathAfter = Get-RawUserPath
-          if ([string]$pathAfter -cne [string]$pathBefore) {
+          # 空串与"值不存在"在这里等价([string]$null == ''),语义相同:两者都是"没有用户 PATH"。
+          $pathAfter = [string](Get-RawUserPath)
+          if ($pathAfter -cne $pathBefore) {
             throw "the uninstall did not restore the user PATH byte for byte (before='$pathBefore' after='$pathAfter')"
           }
           Write-Host 'silent install + uninstall completed without a prompt; the user PATH entry was added once, kept at one across a re-install, and removed again'

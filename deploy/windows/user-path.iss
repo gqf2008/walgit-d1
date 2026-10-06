@@ -5,8 +5,9 @@
 //
 // 契约(前两条由 CI windows leg 的静默安装步骤对真实 setup.exe 断言):
 //   1. 安装:把 {app} 追加进用户 PATH;幂等——大小写、结尾反斜杠、带引号的等价写法算同一条。
-//   2. 卸载:只摘掉自己那一条,其余条目**逐字节**不变;摘空则删掉整个值
-//      (安装前没有这个值 → 卸载后仍然没有)。
+//   2. 卸载:只摘掉自己那一条,其余条目**逐字节**不变(含以 ';' 结尾的空条目);摘空则删掉
+//      整个值。两个表示层面的例外,语义等价:安装前"存在但是空串"的,卸载后是"不存在";
+//      原值是 REG_SZ 的,写入后按 REG_EXPAND_SZ 存(文本不变,类型变)。
 //   3. 一律按 REG_EXPAND_SZ 的**原文**读写:用户 PATH 里别人的 %USERPROFILE% 之类不许被展开成
 //      字面量(展开写回会永久改掉别人的条目),自己写回去的也仍是 REG_EXPAND_SZ。
 //   4. 写失败只记日志,不让安装/卸载失败——少一条 PATH 不该让整次安装回滚(静默安装里
@@ -17,6 +18,8 @@
 //
 // 追加在**末尾**(不抢先):别人的 walgit 在前就还是他们的,我们只保证"能用"而不是"用我们的"。
 // 用户自己早就手加过同一条 → 安装是 no-op,卸载会把它摘掉——它指向的正是将被删除的程序目录。
+// 已知边界:判据只有当前 {app}。装了 A 目录、又改到 B 目录(UsePreviousAppDir=no 允许)之后,
+// A 那条会留在 PATH 里(它仍指向旧程序目录);要清得手动删。换目录不是常态,不引入"上次注册目录"状态。
 //
 // 为什么走 [Code] 而不是 [Registry] + {olddata}:卸载侧 Inno 只能整值删除,表达不了
 // "只摘掉自己那一条、其余原样留着"。
@@ -34,8 +37,9 @@ var
   S: String;
 begin
   S := Trim(Entry);
-  if (Length(S) >= 2) and (S[1] = '"') and (S[Length(S)] = '"') then
-    S := Copy(S, 2, Length(S) - 2);
+  // '"' 在 Windows 目录名里非法,所以引号一律去掉:PATH 里带引号的条目(不推荐但合法)与不带
+  // 引号说的是同一个目录;只去"成对"引号会漏掉 "C:\dir\" 这种写法。
+  StringChangeEx(S, '"', '', True);
   while (Length(S) > 0) and (S[Length(S)] = '\') do
     Delete(S, Length(S), 1);
   Result := S;
@@ -126,9 +130,10 @@ begin
       Result := True;
       exit;
     end;
-  // 值不存在或为空 → 不带前导 ';';已以分隔符结尾 → 不写重复分隔符。
-  if (Value = '') or (Value[Length(Value)] = ';') then
-    NewValue := Value + Dir
+  // 只追加,一个字节都不改写别人的:值非空就无条件再补一个分隔符。
+  // (值以 ';' 结尾时,那个分号本身是一个**空条目**;直接拼 Dir 会把它吃掉,卸载就还原不回原样。)
+  if Value = '' then
+    NewValue := Dir
   else
     NewValue := Value + ';' + Dir;
   if not RegWriteExpandStringValue(HKEY_CURRENT_USER, SubKey, UserEnvPathValue, NewValue) then
