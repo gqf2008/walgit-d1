@@ -30,6 +30,10 @@ DefaultGroupName=walgit
 Compression=lzma2/max
 ; 两个大 exe 的载荷,SolidCompression 无尺寸收益只有编译耗时
 CloseApplications=no
+; 安装/卸载改的是**用户级** PATH(HKCU\Environment):不设这条,已经开着的资源管理器会把旧
+; 环境块传给新开的终端,用户得重新登录才看得见 `walgit`(Inno:yes 时安装结束会通知其他
+; 应用重读环境变量)。用户 PATH 本身见 [Code] 的 AddAppToUserPath/RemoveAppFromUserPath。
+ChangesEnvironment=yes
 OutputDir=Output
 OutputBaseFilename=walgit-setup-{#MyAppVersion}-x64
 UninstallDisplayName={#MyAppName}
@@ -91,6 +95,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchTray}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+// 用户 PATH 的增删是单独一段 [Code](判据探针与安装器 include 同一份源码)。
+#include "user-path.iss"
+
 function LegacyProgramDir: String;
 begin
   Result := ExpandConstant('{%USERPROFILE}\walgit');
@@ -384,7 +391,16 @@ begin
     DeleteMovedAsideBinaries;
     MoveAsideExistingBinaries;
   end;
+  // ssPostInstall 的三件事必须整体受这一步约束:此前只有第一句带 then,后面的语句在
+  // 每个 CurStepChanged(ssInstall/ssPostInstall/ssDone)都会执行一遍——ssInstall 那次会
+  // 紧跟 MoveAsideExistingBinaries 把刚挪开的 exe 再删一遍(2026-10-07 与 PATH 注册同批修)。
   if CurStep = ssPostInstall then
+  begin
+    // 程序目录进**用户** PATH:装完在任意新开的终端里 `walgit` 就能用,不必自己翻到
+    // %LOCALAPPDATA%\Programs\walgit(2026-10-07,线程 win-installer-user-path)。
+    // 幂等(升级/重装不写第二条);失败只记日志——少一条 PATH 不该让整次安装失败。
+    if not AddAppToUserPath then
+      Log('WARNING: could not register on the user PATH');
     // 安装目录标记:托盘据此识别自定义 {app}(默认目录另有路径判据)。这个
     // 标记是只读部署信息，不写用户状态。
     SaveStringToFile(ExpandConstant('{app}\.walgit-install'), '{#MyAppVersion}', False);
@@ -396,6 +412,7 @@ begin
       DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
     // 新文件已就位:能删就把这次的残渣清掉(有旧进程仍持有时留到下一次安装)。
     DeleteMovedAsideBinaries;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -422,6 +439,9 @@ begin
         '/C schtasks /Delete /TN walgit /F >NUL 2>&1',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
+    // 只摘掉自己那一条,用户 PATH 的其余条目逐字节保留;失败同样只记日志。
+    if not RemoveAppFromUserPath then
+      Log('WARNING: could not remove from the user PATH');
     DeleteFile(ExpandConstant('{%USERPROFILE}\.walgit\service.autostart'));
     DeleteFile(ExpandConstant('{app}\.walgit-install'));
     // 升级留下的 *.old-* 也要跟着走(它们不在 Inno 的安装清单里)。

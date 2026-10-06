@@ -14,8 +14,20 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 | 开始菜单 | 顶层 `walgit`(直接出现在「所有应用」里)+ 文件夹里的「walgit 托盘」「walgit 配置文件 walgit.toml」 |
 | 桌面快捷方式 | **总是创建**(不做成可选项:Inno 的 `checkedonce` 只在首次安装生效,升级会沿用上次选择,老机器永远补不上) |
 | 开机自启(HKCU `Run`) | 默认勾选,可取消 |
+| 用户 PATH(HKCU `Environment`) | 追加 `{app}`——装完在任意新开的终端里 `walgit` 就能用;卸载只摘掉这一条 |
 
 - 每用户安装(`PrivilegesRequired=lowest`),不需要管理员。
+- **终端入口**(2026-10-07,线程 `win-installer-user-path`):安装器把 `{app}` 追加进**用户级**
+  PATH(HKCU `Environment`,免管理员),卸载只摘掉自己那一条——其余条目逐字节保留,摘空则删掉
+  整个值。判等按「去首尾空白 / 去成对引号 / 去结尾反斜杠 / 忽略大小写」,所以升级重跑安装器
+  或用户自己写的 `c:\...\walgit\`、`"…\walgit"` 这类等价写法都不会变成第二条。实现是单独
+  一份 `user-path.iss`(`installer.iss` `#include` 它);CI 的静默安装步骤对真实 `setup.exe`
+  断言「加一条 / 重跑仍是一条 / 卸载后逐字节还原」。
+- 按 REG_EXPAND_SZ **原文**读写用户 PATH:别人的 `%USERPROFILE%` 这类引用不会被展开成字面量
+  (展开写回会永久改掉别人的条目);写成 REG_SZ 则会让这些引用在下次登录时不再展开。
+- 生效时机:`[Setup]` 的 `ChangesEnvironment=yes` 让安装结束时通知其他应用重读环境变量——
+  **新开**的终端立刻能敲 `walgit`;**已经开着**的终端/进程要重开(或重新登录)才看得到。
+  卸载同样只改注册表:卸载那一刻已经开着的终端,在重新登录前仍带着旧环境(那条指向已删除的目录,无害)。
 - 升级 = 再跑一遍 setup:替换二进制前自动结束在跑的托盘与服务
   (配置保留)。托盘菜单升级会先下载并校验新/旧两个安装器，再把
   `walgit-upgrade-helper.exe` 复制到 `%USERPROFILE%\.walgit\update\<pid>`
@@ -29,7 +41,7 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
   进程只会拿到改名后的旧映像。残渣按 `*.old-*` **模式**清(不是只认本次版本号——被挪开的
   那一刻留下的是旧版本号,只认新版本号会让它永远清不掉),在 ssInstall 开头、ssPostInstall
   与卸载路径各清一次;被持有就留到下一次。
-- 卸载:删程序与快捷方式、清自启键、注销任务计划程序里的 `walgit` 任务；
+- 卸载:删程序与快捷方式、清自启键、注销任务计划程序里的 `walgit` 任务、从用户 PATH 里摘掉 `{app}`；
   `%USERPROFILE%\.walgit` 下的 `walgit.toml`、`cache`、`keys`、`tray.log` 保留为
   用户数据。（Windows 已无 `walgit.pid` —— 服务归任务计划程序，D48。）
 

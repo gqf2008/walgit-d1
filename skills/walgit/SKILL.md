@@ -25,6 +25,10 @@ walgit service restart
 
 The `walgit` CLI is a symlink to the installed binary (app bundle / install dir); user state lives in
 `~/.walgit/` (`walgit.toml`, `cache/`, `keys/`, `server.log`). Never copy the binary into the state dir.
+On **Windows** there is no symlink: the installer appends the install directory
+(`%LOCALAPPDATA%\Programs\walgit`) to the **user** PATH (HKCU `Environment`) and removes that one
+entry at uninstall, so `walgit` resolves in every shell opened *after* the install — a shell that was
+already open keeps its old environment until it is restarted. Deep dives: `deploy/windows/README.md`.
 
 ## 2. Host upgrades (tray)
 

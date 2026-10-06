@@ -106,7 +106,9 @@ back is never auto-retried (the menu still offers it).
 installed service. Validate or print the effective configuration with `walgit config check` /
 `walgit config dump`. Cross-repository principals are managed with `walgit principal …`. The
 installed ops skill (`skills/walgit/SKILL.md`, published through the public installer) has the
-full operator lifecycle and maintenance runbooks.
+full operator lifecycle and maintenance runbooks. On Windows the installer registers its install
+directory on the **user** PATH (HKCU `Environment`, removed again at uninstall), so `walgit` resolves
+in any shell opened after the install — one that was already open needs a restart.
 
 ## Discover
 
