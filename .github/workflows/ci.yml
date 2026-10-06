@@ -550,10 +550,11 @@ jobs:
               return $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
             } finally { $key.Close() }
           }
-          # 与 user-path.iss 的判等形态一致:去首尾空白、去引号、去结尾反斜杠(大小写不敏感)。
-          function Normalize-PathEntry([string] $Entry) { return $Entry.Trim().Trim('"').TrimEnd('\') }
+          # 与 user-path.iss 的判等形态一致:去首尾空白、去掉**所有**引号、去结尾反斜杠(大小写不敏感)。
+          function Normalize-PathEntry([string] $Entry) { return $Entry.Trim().Replace('"', '').TrimEnd('\') }
           function Set-RawUserPath([string] $Value) {
-            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            # CreateSubKey 而不是 OpenSubKey:被测的 RegWriteExpandStringValue 也会按需建键。
+            $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
             if ($null -eq $key) { throw 'HKCU\Environment could not be opened for write' }
             try { $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
             finally { $key.Close() }
@@ -606,6 +607,10 @@ jobs:
           $pathAfter = [string](Get-RawUserPath)
           if ($pathAfter -cne $pathBefore) {
             throw "the uninstall did not restore the user PATH byte for byte (before='$pathBefore' after='$pathAfter')"
+          }
+          $envKey = Get-Item 'HKCU:\Environment'
+          if (($envKey.GetValueNames() -contains 'Path') -and $envKey.GetValueKind('Path').ToString() -ne 'ExpandString') {
+            throw 'the uninstaller rewrote the user PATH as REG_SZ; it must stay REG_EXPAND_SZ'
           }
           Write-Host 'silent install + uninstall completed without a prompt; the user PATH entry was added once, kept at one across a re-install, and removed again'
       - name: Task ownership runtime smoke

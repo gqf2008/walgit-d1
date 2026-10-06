@@ -14,7 +14,7 @@ release 附件名 `walgit-setup-<version>-x64.exe`(version = tag 去掉 `v`,
 | 开始菜单 | 顶层 `walgit`(直接出现在「所有应用」里)+ 文件夹里的「walgit 托盘」「walgit 配置文件 walgit.toml」 |
 | 桌面快捷方式 | **总是创建**(不做成可选项:Inno 的 `checkedonce` 只在首次安装生效,升级会沿用上次选择,老机器永远补不上) |
 | 开机自启(HKCU `Run`) | 默认勾选,可取消 |
-| 用户 PATH(HKCU `Environment`) | 追加 `{app}`——装完在任意新开的终端里 `walgit` 就能用;卸载只摘掉这一条 |
+| 用户 PATH(HKCU `Environment`) | 追加 `{app}`——装完重开终端即可直接敲 `walgit`;卸载只摘掉这一条 |
 
 - 每用户安装(`PrivilegesRequired=lowest`),不需要管理员。
 - **终端入口**(2026-10-07,线程 `win-installer-user-path`):安装器把 `{app}` 追加进**用户级**
