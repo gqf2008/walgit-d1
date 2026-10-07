@@ -719,6 +719,6 @@ mod tests {
         let a = instance_id();
         let b = instance_id();
         assert_eq!(a, b);
-        assert!(!a.is_empty());
+        assert_ne!(a.len(), 0);
     }
 }

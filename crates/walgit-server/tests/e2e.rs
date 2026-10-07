@@ -2306,7 +2306,7 @@ async fn settings_describe_validate_and_policy_dry_run() -> TestResult {
         .json()
         .await?;
     let strategies = describe["strategies"].as_array().unwrap();
-    assert!(!strategies.is_empty());
+    assert_ne!(strategies.len(), 0);
     let weekly = strategies.iter().find(|item| item["name"] == "weekly").unwrap();
     assert_eq!(weekly["kind"], "full");
     assert!(

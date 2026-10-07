@@ -3022,7 +3022,7 @@ mod gc_tests {
             )
             .trim()
             .to_string();
-            assert!(!snap_oid.is_empty());
+            assert_ne!(snap_oid.len(), 0);
             fingerprint(&repo)
         };
 
@@ -3085,7 +3085,7 @@ mod gc_tests {
         assert_eq!(ev.kind, "snapshot");
         assert_eq!(ev.actor, "alice");
         assert!(ev.verified, "snapshot verifies against the folder's registered key");
-        assert!(ev.thread.is_empty());
+        assert_eq!(ev.thread.len(), 0);
     }
 }
 

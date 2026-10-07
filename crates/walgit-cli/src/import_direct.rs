@@ -1373,16 +1373,17 @@ mod tests {
         git(&src, &["commit", "-q", "-m", "two"]);
         let ahead = git(&src, &["rev-parse", "HEAD"]);
 
-        assert!(
+        assert_eq!(
             verify_refs_in_packs(&packs, std::slice::from_ref(&main_tip), true)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         let missing =
             verify_refs_in_packs(&packs, &[main_tip.clone(), ahead.clone()], false).unwrap();
         assert_eq!(missing, vec![ahead.clone()], "the tip itself is missing");
         let missing = verify_refs_in_packs(&packs, &[main_tip, ahead], true).unwrap();
-        assert!(!missing.is_empty());
+        assert_ne!(missing.len(), 0);
     }
 
     /// Tips present but a blob of their closure is not (exactly a large repository's 1,952 blobs).

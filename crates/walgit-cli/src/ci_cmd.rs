@@ -2494,7 +2494,7 @@ command = "cargo test"
         assert_eq!(t.refs, vec!["refs/heads/*"], "default refs");
         assert_eq!(t.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(t.max_attempts, 1);
-        assert!(t.env_allow.is_empty());
+        assert_eq!(t.env_allow.len(), 0);
         assert_eq!(r.matching("refs/heads/main").len(), 1);
         assert!(
             r.matching("refs/tags/v1").is_empty(),

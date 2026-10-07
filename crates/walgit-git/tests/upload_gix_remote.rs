@@ -172,7 +172,7 @@ async fn diff_sized_fetch_without_base_pack_data() {
     let inc_cs = ingest(&served, inc_pack).await;
     set_main(&served, &base_tip, &c3);
     served.update_commit_graph(&[inc_cs], false).await.unwrap();
-    assert!(!served.commit_graph_chain().unwrap().is_empty());
+    assert_ne!(served.commit_graph_chain().unwrap().len(), 0);
     // Not a raw unlink: refresh() pre-warmed this process's mappings of the
     // base index and Windows refuses to delete a mapped file. The library's
     // own remover releases them first (and drops rev/bitmap beside pack+idx,

@@ -487,7 +487,7 @@ force_path_style = true
 
         // Nothing anywhere: no warning (the wizard's own GCS/ADC shape).
         let none_lookup = |_: &str| None;
-        assert!(credential_env_warnings(&file, &running, none_lookup).is_empty());
+        assert_eq!(credential_env_warnings(&file, &running, none_lookup).len(), 0);
 
         // A WALGIT__-style override reached the running config only.
         running.store.s3.access_key = Some("from-override".into());

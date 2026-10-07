@@ -335,7 +335,7 @@ async fn v1_surface_and_browser_lane() -> TestResult {
             "{name}"
         );
         assert_eq!(hdr(&h, "cache-control"), "no-cache");
-        assert!(!hdr(&h, "etag").is_empty());
+        assert_ne!(hdr(&h, "etag").len(), 0);
         // D27: the SDK puts the lane after the repository (`/o/r/api` | `/o/r/api-browser`) and
         // opens `/api-browser/v1/authenticate`; it never emits the deleted lane-first forms.
         assert!(

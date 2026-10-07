@@ -814,7 +814,7 @@ async fn remote_objects_conformance() -> TestResult {
         .find(|r| r["kind"] == "remote-index")
         .expect("remote-index task");
     assert_eq!(ri["ok"], true);
-    assert!(t["running"].as_array().unwrap().is_empty());
+    assert_eq!(t["running"].as_array().unwrap().len(), 0);
     // Attach to the finished task: replay + result.
     let (st, text, h) = get_h(
         &small,

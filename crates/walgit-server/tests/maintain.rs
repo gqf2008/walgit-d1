@@ -130,7 +130,7 @@ async fn pass_checkpoints_due_repos_refs_level_and_reports_tasks() -> anyhow::Re
     )?;
     let m = h.manifest();
     assert_eq!(m.checkpoint.as_ref().map(|c| c.seq), Some(3));
-    assert!(m.log_segments.is_empty());
+    assert_eq!(m.log_segments.len(), 0);
     assert!(
         h.local().packs()?.is_empty(),
         "refs-level: no pack downloaded"

@@ -1905,7 +1905,7 @@ mod tests {
             "the file's exclude must not survive an env group override: {:?}",
             c.placement.serve_exclude
         );
-        assert!(c.placement.maintain_exclude.is_empty());
+        assert_eq!(c.placement.maintain_exclude.len(), 0);
         assert_eq!(c.placement.serve, vec!["*"]);
         assert!(c.placement.serves("acme", "monorepo"));
         // No PLACEMENT env at all: the file's section stands.

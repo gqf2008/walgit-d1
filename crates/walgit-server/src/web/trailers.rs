@@ -150,11 +150,11 @@ mod tests {
         let (rest, tr) = split_trailers(
             "Body.\n\nThis paragraph explains\nthe reason: it was slow\nand we fixed it.",
         );
-        assert!(tr.is_empty());
+        assert_eq!(tr.len(), 0);
         assert!(rest.ends_with("fixed it."));
         // A bare URL as the last line is never a trailer.
         let (_, tr) = split_trailers("See\n\nhttps://bot.example.com/x");
-        assert!(tr.is_empty());
+        assert_eq!(tr.len(), 0);
     }
 
     #[test]

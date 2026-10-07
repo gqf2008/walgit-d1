@@ -331,7 +331,7 @@ async fn ls_refs_prefixes_over_many_refs_are_ranges_and_the_cache_tracks_writes(
     assert_eq!(overlap.len(), 2_000 + 1, "{}", overlap.len());
     assert_eq!(overlap.iter().filter(|l| l.name == "HEAD").count(), 1);
     // A prefix matching nothing.
-    assert!(
+    assert_eq!(
         repo.ls_refs(&LsRefsArgs {
             ref_prefixes: vec!["refs/heads/zzz".into()],
             symrefs: false,
@@ -339,7 +339,8 @@ async fn ls_refs_prefixes_over_many_refs_are_ranges_and_the_cache_tracks_writes(
             unborn: false
         })
         .unwrap()
-        .is_empty()
+        .len(),
+        0
     );
 
     // Cache: same Arc until a write.

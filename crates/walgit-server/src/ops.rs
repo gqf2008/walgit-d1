@@ -379,7 +379,7 @@ async fn gc_wal_objects(
         let Some(newest_entry) = entries.iter().max_by_key(|e| e.seq) else {
             continue; // an empty/corrupt segment has no age proof
         };
-        let newest = newest_entry.created_at.as_ref().and_then(&valid_time);
+        let newest = newest_entry.created_at.as_ref().and_then(valid_time);
         if !older_than(newest) {
             continue;
         }
@@ -413,7 +413,7 @@ async fn gc_wal_objects(
         let refs_key = keys::checkpoint_refs_key(seq);
         let timestamp = if let Some((_, bytes)) = handle.store().get_bytes(&cp_key).await.map_err(|e| e.to_string())? {
             match walgit_proto::v1::Checkpoint::decode(bytes.as_ref()) {
-                Ok(cp) => cp.created_at.as_ref().and_then(&valid_time),
+                Ok(cp) => cp.created_at.as_ref().and_then(valid_time),
                 Err(e) => {
                     tracing::warn!(key = %cp_key, error = %e, "gc: unreadable checkpoint; keeping it");
                     None
@@ -428,7 +428,7 @@ async fn gc_wal_objects(
             timestamp
         } else if let Some((_, bytes)) = handle.store().get_bytes(&refs_key).await.map_err(|e| e.to_string())? {
             match walgit_proto::v1::RefSnapshot::decode(bytes.as_ref()) {
-                Ok(rs) => rs.created_at.as_ref().and_then(&valid_time),
+                Ok(rs) => rs.created_at.as_ref().and_then(valid_time),
                 Err(e) => {
                     tracing::warn!(key = %refs_key, error = %e, "gc: unreadable refs snapshot; keeping it");
                     None
@@ -527,12 +527,12 @@ fn reclaim_deadline(
     claim
         .fence_until
         .as_ref()
-        .and_then(&valid_time)
+        .and_then(valid_time)
         .or_else(|| {
             claim
                 .since
                 .as_ref()
-                .and_then(&valid_time)
+                .and_then(valid_time)
                 .and_then(|t| t.checked_add(grace))
         })
 }

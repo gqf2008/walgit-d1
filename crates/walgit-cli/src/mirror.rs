@@ -679,7 +679,7 @@ mod tests {
         // Nothing moved: no push, no ls-remote needed.
         let out = m.tick().await.unwrap();
         assert!(!out.fetched_anything);
-        assert!(out.pushed.is_empty());
+        assert_eq!(out.pushed.len(), 0);
 
         // Fast-forward on the source → destination follows.
         let c2 = commit(&work, "b");
@@ -722,7 +722,7 @@ mod tests {
             &["push", "-q", "--force", dst.to_str().unwrap(), "main:main"],
         );
         let out = m.tick().await.unwrap();
-        assert!(out.pushed.is_empty());
+        assert_eq!(out.pushed.len(), 0);
         assert_eq!(m.pushed.get("refs/heads/main").unwrap(), &c3);
 
         m.repack().await.unwrap();

@@ -1486,10 +1486,11 @@ mod listener_parse_tests {
             listeners_on(netstat, "127.0.0.1:8081", 8081).unwrap(),
             vec![4242, 4243]
         );
-        assert!(
+        assert_eq!(
             listeners_on(netstat, "127.0.0.1:1234", 1234)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         // Read as a `::1`-only configuration, the v4 row stays out too.
         assert_eq!(

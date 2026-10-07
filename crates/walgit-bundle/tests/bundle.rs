@@ -340,7 +340,7 @@ async fn full_bundle_passes_verify() {
     assert!(entry.tips.iter().any(|t| t.name == "refs/heads/main"));
     assert!(entry.tips.iter().any(|t| t.name == "refs/tags/v1.0"));
     assert_eq!(entry.kind, "full");
-    assert!(entry.base_id.is_empty());
+    assert_eq!(entry.base_id.len(), 0);
 }
 
 #[tokio::test]
@@ -1247,11 +1247,12 @@ async fn strategies_matching_no_refs_are_blocked_in_the_plan_with_the_reason() {
         ),
         other => panic!("expected blocked, got {other:?}"),
     }
-    assert!(
+    assert_eq!(
         bundler
             .run_due(&id, std::time::SystemTime::now())
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
 }

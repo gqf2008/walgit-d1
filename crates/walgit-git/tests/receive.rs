@@ -91,10 +91,10 @@ async fn parse_receive_no_commands() {
     encode_flush(&mut body);
     // No pack follows.
     let (txn, _caps, mut reader) = receive::parse(&body[..]).await.unwrap();
-    assert!(txn.updates.is_empty());
+    assert_eq!(txn.updates.len(), 0);
     let mut got = Vec::new();
     let _ = reader.read_to_end(&mut got).await;
-    assert!(got.is_empty());
+    assert_eq!(got.len(), 0);
 }
 
 #[tokio::test]

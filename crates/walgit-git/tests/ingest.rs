@@ -30,7 +30,7 @@ async fn ingest_pack_objects_present_fsck_ok() {
     let src = cm::SourceRepo::new(); // commit A: file1
     let b = src.commit_file("file2.txt", "world\n", "second"); // commit B
     let pack = src.pack(&["HEAD"], &[], false);
-    assert!(!pack.is_empty());
+    assert_ne!(pack.len(), 0);
 
     // Pack checksum = trailing 20 bytes.
     let checksum = gix_hash::ObjectId::try_from(&pack[pack.len() - 20..]).unwrap();
@@ -134,7 +134,7 @@ async fn ingest_thin_pack_resolves_against_odb() {
 
     // Thin pack: B minus A.
     let thin = src.pack(&[b.as_str()], &[a.as_str()], true);
-    assert!(!thin.is_empty());
+    assert_ne!(thin.len(), 0);
     let ingested = repo
         .ingest_pack(
             cm::cursor(thin),
