@@ -255,6 +255,19 @@ jobs:
           # `style(...)`), and scripts/check-release-changelog-filter.sh pins the set — dropping
           # one turns that guard red.
           git log --pretty=format:'%s' "$range" | grep -E '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]*\))?!?:' > changelog.txt || true
+          # An empty changelog is a silent failure mode of its own: v0.8.12 shipped a Release with an
+          # empty body because its only commit's type was missing from the filter (2026-10-07). The
+          # type list is pinned by scripts/check-release-changelog-filter.sh; a range whose subjects
+          # are *none* conventional would still land empty, so make that loud and put the raw subjects
+          # in the body rather than publishing nothing.
+          if [ ! -s changelog.txt ]; then
+            echo "::warning::changelog is empty for ${range}: no Conventional Commits subject matched"
+            {
+              printf '本次发布没有符合 Conventional Commits 的提交(区间 `%s`);原始提交标题:\n' "${range}"
+              printf '\n'
+              git log --pretty=format:'- %s' "$range"
+            } > changelog.txt
+          fi
           echo "generated from ${range:-HEAD}"
       - uses: actions/download-artifact@v4
         with:
