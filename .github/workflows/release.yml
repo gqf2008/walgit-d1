@@ -249,8 +249,12 @@ jobs:
           # the range empty or start at a pre-release.
           prev=$(git tag --sort=-version:refname | grep -v "^${GITHUB_REF#refs/tags/}$" | sed -n '1p')
           if [ -n "$prev" ]; then range="$prev..HEAD"; else range="HEAD"; fi
-          # Conventional Commits: optional scope and optional breaking `!` before `:`.
-          git log --pretty=format:'%s' "$range" | grep -E '^(feat|fix|docs|refactor|test|perf|chore)(\([^)]*\))?!?:' > changelog.txt || true
+          # Conventional Commits: the full type set, optional scope and optional breaking `!`
+          # before `:`. Keep the list COMPLETE: a type missing here is dropped from the release
+          # body **silently** (v0.8.12: the body came out empty because its only commit was
+          # `style(...)`), and scripts/check-release-changelog-filter.sh pins the set — dropping
+          # one turns that guard red.
+          git log --pretty=format:'%s' "$range" | grep -E '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]*\))?!?:' > changelog.txt || true
           echo "generated from ${range:-HEAD}"
       - uses: actions/download-artifact@v4
         with:
