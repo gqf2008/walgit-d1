@@ -68,8 +68,8 @@ pub enum CollabAction {
         /// Thread id (shared by every entry of the thread).
         #[arg(long)]
         id: String,
-        /// Principal whose inbox receives the entry (default: the project
-        /// identity at `<git-common-dir>/walgit/identity`).
+        /// Principal whose inbox receives the entry (default: this worktree's
+        /// project identity).
         #[arg(long)]
         actor: Option<String>,
         /// Previous entry's oid in the thread, or empty for the root.
@@ -106,11 +106,12 @@ pub enum CollabAction {
         #[arg(long, default_value_t = 10_000)]
         fold_threshold: usize,
     },
-    /// Join this project as a collaborator: materialize the project-local
-    /// identity under `<git-common-dir>/walgit/` (shared by every worktree of
-    /// the clone, never tracked, never touched by `git clean`), generate the
-    /// Ed25519 seed when none exists, and register the public key at
-    /// `refs/collab/meta/principals/<principal>` (`docs/D1_PROTOCOL.md` §4.3).
+    /// Join this worktree as a collaborator: materialize the worktree-local
+    /// identity under `<git-dir>/walgit/` (never tracked, never touched by
+    /// `git clean`), generate the Ed25519 seed when none exists, and register the
+    /// public key at `refs/collab/meta/principals/<principal>`
+    /// (`docs/D1_PROTOCOL.md` §4.3). Each worktree has its own identity, so one
+    /// clone can host several collaborators.
     Join {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -428,30 +429,20 @@ pub(crate) fn read_signing_key(path: &std::path::Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&bytes))
 }
 
-// ---- project-local identity (`<git-common-dir>/walgit`) -----------------------
+// ---- project-local identity (`<worktree-git-dir>/walgit`) ---------------------
 //
-// Collaboration identity is project-scoped: one principal + key per
-// collaborator, materialized next to the repository rather than in a shared
-// `~/.walgit/keys/` pile. The state lives under the git common dir, so every
-// worktree of the clone shares it, it is never tracked and never removed by
-// `git clean`.
+// Collaboration identity is project-scoped and per-worktree: one principal +
+// key per collaborator, materialized in *that worktree's* git dir rather than a
+// shared `~/.walgit/keys/` pile. The worktrees of one clone are therefore
+// distinct collaborators (the main checkout is one of them), which is what lets
+// a single project run several background sub-agents with different principals.
+// The state is never tracked and never removed by `git clean`.
 
-/// The project identity directory: `<git-common-dir>/walgit`.
+/// The project identity directory for this worktree: `<git-dir>/walgit`
+/// (`<repo>/.git/walgit` in the main checkout,
+/// `<repo>/.git/worktrees/<n>/walgit` in a linked worktree).
 pub(crate) fn project_identity_dir(repo: &Path) -> Result<PathBuf> {
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .context("git rev-parse --git-common-dir")?;
-    if !out.status.success() {
-        bail!("{} is not a git checkout", repo.display());
-    }
-    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if common.is_empty() {
-        bail!("git rev-parse --git-common-dir returned no path");
-    }
-    Ok(PathBuf::from(common).join("walgit"))
+    Ok(absolute_git_dir(repo)?.join("walgit"))
 }
 
 /// The on-disk identity pointer (`<dir>/identity`): which principal this

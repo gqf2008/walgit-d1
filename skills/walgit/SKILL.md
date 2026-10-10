@@ -120,12 +120,12 @@ the full topology and copyable checklist.
 walgit collab join --repo <checkout> --principal <principal> --push origin
 ```
 
-`collab join` is project-local: it generates the 32-byte Ed25519 seed at
-`<git-common-dir>/walgit/keys/<principal>.ed25519` (`0600`) when none exists, records the
-identity at `<git-common-dir>/walgit/identity`, and registers the public key. The git
-common dir is shared by every worktree of the clone, never tracked, and never removed by
-`git clean`; keep one key per collaborator there — never pile several principals' keys in
-a shared directory. `--key` (a file path) adopts an existing seed instead; never paste
+`collab join` is project-local and **per-worktree**: it generates the 32-byte Ed25519 seed
+at `<git-dir>/walgit/keys/<principal>.ed25519` (`0600`) when none exists, records the
+identity at `<git-dir>/walgit/identity`, and registers the public key. The worktree's git
+dir is never tracked and never removed by `git clean`; **one worktree carries one identity**
+(the main checkout is one of them), so a clone's worktrees are distinct collaborators — keep
+one key per collaborator there, never pile several principals' keys in a shared directory. `--key` (a file path) adopts an existing seed instead; never paste
 seed contents on the command line. On other `collab` commands `--actor`/`--principal` and
 `--key` default to this identity, so a project only ever references its own. Names are
 agent-side bookkeeping: walgit stores
@@ -195,6 +195,27 @@ state files by hand.
 **Reviews, tests and decision discipline: see `/SKILL.md` §3–§4** — an independent party with its own
 principal/key runs them (the author's self-test is not evidence), and `needs-human` is reserved for
 what genuinely needs the human; a decidable judgment is made and recorded, not parked.
+
+## 5b. Autonomous delivery — one console per project (D59)
+
+人类只做两端：**布置任务**与**观察**；验收由**验收子代理**独立判定，无阻塞项**自合并**。人类不传话、
+不逐步批准、不点合并。一个项目只开**一个控制台**（人类界面），中间全是后台子代理。完整规范见
+`/SKILL.md` §0d。
+
+- **协调者 orchestrator**（控制台 agent 或它起的常驻客户端循环）：watch `refs/collab/*` → 派卡 → 起/收
+  子代理 → 记录合并。**客户端行为，无服务器端点、无新持久状态**（D46/D49/D55）。
+- **worker 子代理**：一卡一 owner 一 worktree（各自身份）；实现 → push 分支 → `patch` → `needs-review`。
+- **验收子代理**：与作者**不同 principal**，按卡的机器可校验验收项独立判定，签 `review`
+  （`approve` / `request_changes` + Critical/Important/Minor findings + 实际跑过的证据）。
+- **自合并**：验收无 Critical/Important 且验收项全绿 → orchestrator 本地合并、push、记一条
+  `merge_result`，再 `status: closed`。门禁就是 `merge_rule_eval` 已强制的“非作者、已验签 approve”，
+  无需人类点。
+- **阻塞路由**：Critical/Important 或验收不过 → 打回 worker（新 `status: in-progress`）或派 fixer；
+  需求歧义/授权/外部输入 → `needs-human`（唯一的人类介入点）；Minor 不阻塞。
+- **子代理与监督**：orchestrator 用宿主起短命后台子代理（如 `pi -p`），一卡一个、各自 worktree 与 key；
+  它负责超时/预算/崩溃重启/日志，以及合并后清 worktree/branch。进程状态本地可丢，持久事实只在
+  `refs/collab/*`。
+- 并发上限 2–4 worker + 1–2 验收；改动同一文件/schema 的卡串行。
 
 ## 6. Listening for events (pull, never push)
 

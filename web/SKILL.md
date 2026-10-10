@@ -311,15 +311,18 @@ everyone re-derives the same view from the refs.
 ### 0. Identity — register the team before the work
 
 - One principal per collaborator, one Ed25519 key (`32` raw bytes as hex). The key is
-  **project-local**: `walgit collab join --principal <name>` materializes it at
-  `<git-common-dir>/walgit/keys/<name>.ed25519` (`0600`) next to the repository, records
-  the identity at `<git-common-dir>/walgit/identity`, and registers
-  `refs/collab/meta/principals/<name>`. Each collaborator owns its key: never pile several
-  principals' private keys in one directory, and never share a key across agents or roles.
-- The git **common dir** (never the work tree) is where this state lives: every worktree of
-  the clone shares it, it is never tracked, and `git clean -fdx` cannot remove it. One
-  clone therefore carries **one** project identity; run a separate clone per principal, or
-  pass `--principal`/`--key` explicitly to act as another one.
+  **project-local and per-worktree**: `walgit collab join --principal <name>` materializes
+  it at `<git-dir>/walgit/keys/<name>.ed25519` (`0600`) — `.git/walgit/` in the main
+  checkout, `.git/worktrees/<n>/walgit/` in a linked worktree — records the identity at
+  `<git-dir>/walgit/identity`, and registers `refs/collab/meta/principals/<name>`. Each
+  collaborator owns its key: never pile several principals' private keys in one directory,
+  and never share a key across agents or roles.
+- The **worktree's git dir** (never the work tree) is where this state lives: it is never
+  tracked and `git clean -fdx` cannot remove it. **One worktree carries one project
+  identity**, so a clone's main checkout and each of its worktrees are distinct
+  collaborators — that is what lets one project run several background sub-agents with
+  different principals (see §0d). In the main checkout, act as another principal with an
+  explicit `--principal`/`--key`.
 - `--key`, when given, always takes a **file path** (never paste the seed contents into the
   command line or shell history). `collab join` generates a fresh seed when none exists and
   adopts an existing one when `--key` points at it.
@@ -368,15 +371,15 @@ roster:
    (`git for-each-ref refs/collab/meta/principals` after a fetch) to read the project's
    `<proj>` prefix and role pattern (`<proj>-worker-N`, `<proj>-reviewer-N`,
    `<proj>-coordinator`).
-2. **Adopt the existing identity, or take the next free name.** If this checkout's
-   `<git-common-dir>/walgit/identity` already names a principal registered in this
+2. **Adopt the existing identity, or take the next free name.** If this worktree's
+   `<git-dir>/walgit/identity` already names a principal registered in this
    repo, it is this agent's — keep it. Otherwise pick `<proj>-<role>-N` with the next
    free index after the highest registered one for that role. Never reuse another
    collaborator's name or key.
 3. **Ensure the identity exists.**
    `walgit collab join --repo "$checkout" --principal <me> --push origin` generates the
-   32-byte Ed25519 seed at `<git-common-dir>/walgit/keys/<me>.ed25519` (`0600`) when none
-   exists, writes `<git-common-dir>/walgit/identity`, and registers the public key. A
+   32-byte Ed25519 seed at `<git-dir>/walgit/keys/<me>.ed25519` (`0600`) when none
+   exists, writes `<git-dir>/walgit/identity`, and registers the public key. A
    rejected registration is a hard stop: do not start writing entries under an
    unregistered principal.
 4. **Sync the collaboration view.** Fetch the collab refs
@@ -400,7 +403,8 @@ Parallel work is a topology, not simply "use more agents." Start from this defau
   identities the coordinator must compare. The merge rule counts **distinct
   non-author** verified approvals (a patch author's own approve and duplicate
   approves never count), so the automated gate agrees with this paragraph.
-- **The coordinator merges and archives.** After approval, the coordinator merges the
+- **The coordinator merges and archives — automatically when unblocked (see §0d).**
+  After the independent approval, the coordinator merges the
   branch locally and pushes the result. Record the merge with **one** entry, which also
   moves the card:
   1. `merge_result` with `{"merged":true,"oid":"<sha>","result":"merged","note":"..."}`;
@@ -423,9 +427,10 @@ replay.
 
 **Copyable start checklist** (set `checkout=/path/to/checkout` first, replace the
 remaining `<...>` values, and use the returned oid as the next `--parent`). Run each
-role in its **own clone** after `walgit collab join --principal <role> --push origin`;
-with a project identity in place, `--actor` and `--key` resolve from
-`<git-common-dir>/walgit/identity`, so the commands below omit `--key`:
+role in its **own worktree** (its own identity) — or its own clone for a fully separate
+checkout — after `walgit collab join --principal <role> --push origin`; with a worktree-local
+identity in place, `--actor` and `--key` resolve from `<git-dir>/walgit/identity`, so the
+commands below omit `--key`:
 
 ```sh
 # 1. File the card (coordinator). The issue names the objective, roles, owner,
@@ -588,6 +593,61 @@ The worker is yours to write — that is where the model, the tools and the deci
 drains the queue and runs the loop shape above for each event it chooses to act on; re-drains
 are idempotent because the same `key` is the same entry. `walgit ci run` is this shape applied
 to CI tasks, and is the worked example to copy from.
+
+### 0d. Autonomous delivery — one console per project (D59)
+
+The human's job is two ends: **assign tasks** and **observe**; acceptance is judged by an
+**acceptance sub-agent**, and clean work **merges itself**. The human does not relay work
+between agents, approve each step, or consent to each merge. One project runs from **one
+console** (the human's surface); everything in between is background sub-agents.
+
+**Roles.**
+
+- **Human (one console).** Files the card(s) — one `issue`, a checklist for a batch — then
+  observes the board/threads. Pulled in only by a `needs-human` card.
+- **Orchestrator** (the console agent, or a resident client loop it starts). Watches
+  `refs/collab/*`, dispatches cards, spawns/reaps sub-agents, records the merge. It is
+  **client-side**: no server endpoint, no new durable state (D46/D49/D55).
+- **Worker sub-agent(s).** One card, one owner, one worktree (its own identity, §0). Implements,
+  pushes the branch, attaches the `patch`, moves the card to `needs-review`.
+- **Acceptance sub-agent.** A **different principal** from the author. Independently judges the
+  diff against the card's **machine-checkable acceptance** and posts a `review` with
+  severity-tagged findings (Critical / Important / Minor) and the evidence it ran.
+
+**The loop.**
+
+1. **Assign** (human): `issue` with objective, owner, and machine-checkable acceptance; batch
+   several units into one checklist.
+2. **Dispatch**: on a `ready`/unowned card, spawn a worker in its own worktree with its own
+   identity; claim it with a `status` entry (`owner` / `worktree` / `branch` / `work`).
+   **One owner per card.**
+3. **Work** → `patch` + `status: needs-review`.
+4. **Accept**: spawn the acceptance sub-agent (different principal) on the pinned commit; it
+   posts `review`: `approve`, or `request_changes` with findings.
+5. **Merge automatically when unblocked**: if the acceptance has **no Critical/Important**
+   finding and the machine-checkable acceptance is green, the orchestrator merges locally,
+   pushes, and records **one** `merge_result {"merged":true,"oid":…}`, then a
+   `status: closed`. The gate is the distinct non-author **verified approve** already enforced
+   by `merge_rule_eval` — no human click.
+6. **Route blockers**: Critical/Important or a failed acceptance → back to the worker (new
+   `status: in-progress`) or a fixer sub-agent; genuine ambiguity / authorization / external
+   input → `needs-human` (the only human pull-in). Minor/nit does not block.
+
+**Sub-agents and supervision.**
+
+- A sub-agent is a short-lived background process (e.g. `pi -p`, `claude -p`, `codex exec`)
+  started by the orchestrator, one per card, in that card's worktree. It never shares a
+  checkout or a key with another sub-agent.
+- The **orchestrator** owns the process lifecycle: launch, timeout, budget, restart on a
+  crash, capture the log, and remove the worktree/branch after the card is closed. Sub-agent
+  process state is local and disposable; the durable truth stays in `refs/collab/*`.
+- Cap the active set (2–4 workers + 1–2 acceptance) to what the host can run; serialize work
+  that touches the same files/schema (§0b).
+- Never let a sub-agent sit silently: its claim, progress and result are entries; the human
+  watches the board, not a terminal.
+
+The trigger is `walgit collab watch` (§0c) or an MCP resource subscription (§3 / D52); the
+decision logic is the orchestrator's. `walgit ci run` is the closest worked example.
 
 ### 1. Work unit = one thread
 

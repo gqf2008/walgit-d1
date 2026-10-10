@@ -1481,11 +1481,40 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
     );
     let issue_oid = issue.split_whitespace().nth(1).expect("entry oid").to_string();
 
-    // A worktree shares the same identity and key (git common dir).
+    // A worktree is a separate collaborator: with no identity of its own, a
+    // default write refuses instead of borrowing the main checkout's.
     let wt = tempfile::tempdir()?;
     let wt_path = wt.path().to_str().expect("utf-8 path");
     git_in(repo.path(), &["worktree", "add", "-q", wt_path, "-b", "wt"])?;
-    let comment = run_in(
+    let borrowed = std::process::Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .args([
+            "collab",
+            "entry",
+            "--kind",
+            "comment",
+            "--id",
+            "t1",
+            "--parent",
+            &issue_oid,
+            "--body",
+            r#"{"note":"no-identity"}"#,
+        ])
+        .current_dir(wt.path())
+        .output()?;
+    assert!(
+        !borrowed.status.success(),
+        "a worktree must not silently borrow the main checkout's identity"
+    );
+    assert!(
+        String::from_utf8_lossy(&borrowed.stderr).contains("collab join"),
+        "{}",
+        String::from_utf8_lossy(&borrowed.stderr)
+    );
+    // Join the worktree as carol: it signs with its own identity there.
+    run_in(wt.path(), &["collab", "join", "--principal", "carol"])?;
+    let carol = run_in(
         wt.path(),
         &[
             "collab",
@@ -1501,8 +1530,28 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
         ],
     )?;
     assert!(
-        comment.contains("refs/collab/inbox/alice/"),
-        "the worktree uses the project identity: {comment}"
+        carol.contains("refs/collab/inbox/carol/"),
+        "the worktree signs with its own identity: {carol}"
+    );
+    // The main checkout keeps alice.
+    let alice_again = run_in(
+        repo.path(),
+        &[
+            "collab",
+            "entry",
+            "--kind",
+            "comment",
+            "--id",
+            "t1",
+            "--parent",
+            &issue_oid,
+            "--body",
+            r#"{"note":"main-still-alice"}"#,
+        ],
+    )?;
+    assert!(
+        alice_again.contains("refs/collab/inbox/alice/"),
+        "the main checkout keeps its own identity: {alice_again}"
     );
 
     // Rebinding a bound project to another principal is refused without --force.

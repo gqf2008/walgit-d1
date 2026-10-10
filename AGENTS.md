@@ -672,8 +672,8 @@ decision in §4 — or the PR is; never "fix later".
   own bookkeeping, formed by one self-registration each; roster changes are new registrations
   or revocations by the agents, never edits to a central list. Private keys stay agent-side
   at `~/.walgit/keys/<principal>.ed25519` (`0600`); the registry carries only public keys.
-  *(Key location amended by D58: project-local at
-  `<git-common-dir>/walgit/keys/<principal>.ed25519`; the binding rule above stands.)*
+  *(Key location amended by D58/D59: project-local and per-worktree at
+  `<git-dir>/walgit/keys/<principal>.ed25519`; the binding rule above stands.)*
   Consumer-facing statement in `web/SKILL.md` §0/§0a (the automatic first-contact routine)
   and `skills/walgit/SKILL.md` §5.
 - **D55** **There is no wait / long-poll lane; refs-level polling and adapter-side subscriptions are
@@ -732,6 +732,31 @@ decision in §4 — or the PR is; never "fix later".
   operator mint the whole team's keys there are removed. walgit does not constrain the key path
   (`--key` still takes any file), and the host-wide registry of `docs/D1_PROTOCOL.md` §4.4 is out of
   scope here. Normative statement in `docs/D1_PROTOCOL.md` §4.1.
+  *(Amended by D59 (2026-10-10): the identity is **per worktree**, not per clone — a clone's main
+  checkout and each linked worktree carry their own `<git-dir>/walgit/` identity, which is what
+  lets one project run several background sub-agents with different principals. The rest of D58
+  stands.)*
+- **D59** **One console per project; the human assigns and observes, sub-agents implement and
+  accept, clean work merges itself (2026-10-10, cc-ai-autonomous-collab).** Parallel work is not
+  N human-driven consoles: it is **one human console per project** plus background sub-agents the
+  console's orchestrator spawns. The human does two ends only — files the task card(s) (an `issue`
+  with one owner and machine-checkable acceptance; batch units as a checklist) and observes the
+  board — and is pulled in only by a `needs-human` card. Everything between is automated: the
+  **orchestrator** (a client-side loop, e.g. driven by `walgit collab watch`; never a server
+  endpoint, no new durable state — D46/D49/D55) dispatches each unowned card to a **worker
+  sub-agent** in **its own worktree with its own identity** (identity is per worktree, D58
+  amended), and, on `needs-review`, to an **acceptance sub-agent** with a **different principal**
+  that independently judges the diff against the card's machine-checkable acceptance and posts a
+  `review` with severity-tagged findings. **No Critical/Important finding and all acceptance green
+  ⇒ the orchestrator merges itself** (local merge + push + one `merge_result` + `status: closed`):
+  the gate is the distinct non-author verified `approve` that `merge_rule_eval` already enforces,
+  so no human click is needed. Blockers route back to the worker (new `status: in-progress`) or a
+  fixer sub-agent; genuine ambiguity/authorization/external input goes to `needs-human`; Minor does
+  not block. Sub-agents are short-lived background processes (e.g. `pi -p`) supervised by the
+  orchestrator (launch / timeout / budget / restart / log / worktree cleanup); one card, one
+  owner, one worktree, never a shared checkout or key. Durable truth stays in `refs/collab/*`;
+  process state is local and disposable. Normative statement in `web/SKILL.md` §0d (and §0/§0b)
+  and `skills/walgit/SKILL.md` §5b.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
