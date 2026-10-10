@@ -1657,6 +1657,14 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+    // The refusal must not have touched the identity: it still names carol's
+    // adopted key. This is what makes the guard ordering a regression test —
+    // if the guard moves back after `write_identity`, this fails.
+    let after_refusal = std::fs::read_to_string(identity_dir.join("identity"))?;
+    assert!(
+        after_refusal.contains(&adoption_str),
+        "a refused rotation must leave the identity untouched: {after_refusal}"
+    );
     run_in(
         repo.path(),
         &[
@@ -1680,5 +1688,42 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
         ],
     )?;
     assert!(comment.contains("refs/collab/inbox/carol/"), "{comment}");
+
+    // A malformed registration (no string public_key) fails closed instead of
+    // silently skipping the rotation guard.
+    let bad_oid = {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(br#"{"principal":"carol"}"#)?;
+        let out = child.wait_with_output()?;
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git_in(
+        repo.path(),
+        &["update-ref", "refs/collab/meta/principals/carol", bad_oid.as_str()],
+    )?;
+    let malformed = std::process::Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .args(["collab", "join", "--principal", "carol"])
+        .current_dir(repo.path())
+        .output()?;
+    assert!(!malformed.status.success());
+    assert!(
+        String::from_utf8_lossy(&malformed.stderr).contains("no string public_key"),
+        "{}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
     Ok(())
 }

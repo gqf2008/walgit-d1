@@ -627,9 +627,6 @@ fn run_join(
     use rand::Rng as _;
     ref_segment("principal", principal)?;
     let dir = project_identity_dir(repo)?;
-    // The identity directory itself stays project-private (it holds `keys/`
-    // and the identity pointer).
-    make_private_dir(&dir)?;
     let identity_path = dir.join("identity");
     if identity_path.exists() && !force {
         let existing = read_identity_at(&dir)?;
@@ -679,6 +676,8 @@ fn run_join(
              pass --force to rotate"
         );
     }
+    // All guards passed: only now mutate local state (0700 dir, seed, identity).
+    make_private_dir(&dir)?;
     if let Some(seed) = seed_to_write {
         let parent = key_path.parent().unwrap_or(&dir);
         make_private_dir(parent)?;
