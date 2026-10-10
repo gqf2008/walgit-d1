@@ -20,8 +20,7 @@ deploy/tray/macos/dist/
 
 # built web assets (embedded into the binary at build time; `just web-build`)
 web/dist/
-web/node_modules/
-node_modules/
+node_modules
 
 # nix build outputs
 result
