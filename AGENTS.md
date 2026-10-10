@@ -758,6 +758,19 @@ decision in §4 — or the PR is; never "fix later".
   owner, one worktree, never a shared checkout or key. Durable truth stays in `refs/collab/*`;
   process state is local and disposable. Normative statement in `web/SKILL.md` §0d (and §0/§0b)
   and `skills/walgit/SKILL.md` §5b.
+- **D60** **The bundled UI can carry an operator-supplied admin token in the bearer lane
+  (2026-10-10, cc-ai-token-mode-store-ui).** A `token`-mode instance has no browser sign-in
+  (only oidc mints a session cookie — `auth.rs`), but the first-run wizard *produces* token
+  mode, so the admin storage editor and every admin surface were unreachable from the UI:
+  `GET /api/v1/store` answered 401, `/setup` fell back to its "already configured" card, and
+  the top-bar「存储配置」entry was hidden behind `me.admin`. That is the reported failure — an
+  operator whose bucket credential was rotated had no UI to fix it and hand-edited
+  `walgit.toml`. Fix: the top-bar entry is always shown; `/setup`'s configured face asks for an
+  admin credential when the store read is 401/403, and the SPA carries it in the **bearer**
+  lane (`Authorization: Bearer`, the credential git already uses) kept in `sessionStorage`
+  (dies with the tab; never `localStorage`). No server auth path changes — `require_admin`
+  already accepts bearer, and oidc keeps its session cookie and sign-in popup. Only `/setup`
+  self-selects; no other page changes lanes.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

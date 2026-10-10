@@ -70,6 +70,10 @@ export function SetupPage() {
   const [restart, setRestart] = useState<"supervisor" | "manual" | null>(null);
   const [saveWarnings, setSaveWarnings] = useState<string[]>([]);
   const [phase, setPhase] = useState<Phase>("form");
+  // #127 follow-up: an operator-supplied admin token for `token`-mode hosts
+  // (no browser sign-in exists there — the storage editor was unreachable).
+  const [storeToken, setStoreToken] = useState("");
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   // Load once: wizard, editor, or neither.
   useEffect(() => {
@@ -112,6 +116,32 @@ export function SetupPage() {
       cancelled = true;
     };
   }, []);
+
+  /** Open the storage editor with an operator-supplied admin token. */
+  const submitToken = async () => {
+    const token = storeToken.trim();
+    if (!token) return;
+    setTokenError(null);
+    api.setAdminToken(token);
+    try {
+      const s = await api.store.get();
+      setSnapshot(s);
+      setPayload({
+        backend: s.backend === "gcs" ? "gcs" : "s3",
+        bucket: s.bucket,
+        endpoint: s.endpoint,
+        region: s.region || "auto",
+        access_key: "",
+        secret_key: "",
+        force_path_style: s.force_path_style,
+      });
+      setMode("edit");
+    } catch (e) {
+      // A rejected token must not stick and shadow the session lane.
+      api.setAdminToken(null);
+      setTokenError(e instanceof ApiError ? e.message : String(e));
+    }
+  };
 
   const set = (k: keyof SetupPayload, v: string | boolean) =>
     setPayload((p) => ({ ...p, [k]: v }));
@@ -227,11 +257,37 @@ export function SetupPage() {
     return (
       <main className="setup">
         <div className="setup-card">
-          <h1>{t("setup.title")}</h1>
+          <h1>{t("store.title")}</h1>
           <p className="muted">{t("setup.already")}</p>
-          <Link className="btn primary" to="/">
-            {t("setup.open")}
-          </Link>
+          <p>{t("store.token.lede")}</p>
+          <form
+            className="setup-grid"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitToken();
+            }}
+          >
+            <label className="setup-field">
+              <span>{t("store.token.label")}</span>
+              <input
+                type="password"
+                value={storeToken}
+                onChange={(e) => setStoreToken(e.target.value)}
+                autoComplete="off"
+                placeholder="wgt_… / static token"
+              />
+              <small className="muted">{t("store.token.hint")}</small>
+            </label>
+            <p>
+              <button className="btn primary" type="submit" disabled={!storeToken.trim()}>
+                {t("store.token.submit")}
+              </button>{" "}
+              <Link className="btn" to="/">
+                {t("setup.open")}
+              </Link>
+            </p>
+          </form>
+          {tokenError && <div className="setup-warn">{tokenError}</div>}
         </div>
       </main>
     );

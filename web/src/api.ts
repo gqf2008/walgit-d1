@@ -71,8 +71,34 @@ function onProgress(p: Progress) {
   }
 }
 
-/** The SDK client for this origin. Same-origin lane: `/api/v1`; identity is the session cookie. */
-export const client = createClient({ base: window.location.origin, lane: "same-origin", onProgress, interactive: false });
+/**
+ * #127 follow-up: an admin token the operator pasted into the UI. A
+ * `token`-mode instance has no browser sign-in (only oidc does), so the bundled
+ * UI carries the same static token / `wgt_…` credential git uses. Kept in
+ * `sessionStorage` (dies with the tab), never `localStorage`.
+ */
+const ADMIN_TOKEN_KEY = "walgit.admin_token";
+const savedAdminToken = (): string | undefined => {
+  try {
+    return sessionStorage.getItem(ADMIN_TOKEN_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+};
+const initialAdminToken = savedAdminToken();
+
+/**
+ * The SDK client for this origin. Same-origin lane by default (`/api/v1`,
+ * session cookie); an operator-supplied admin token switches it to the bearer
+ * lane, the only way to reach admin surfaces in `token` mode.
+ */
+export const client = createClient({
+  base: window.location.origin,
+  lane: initialAdminToken ? "bearer" : "same-origin",
+  token: initialAdminToken,
+  onProgress,
+  interactive: false,
+});
 
 /**
  * 401 = the session lapsed (fetches are not redirected): reload so the sign-in
@@ -128,6 +154,22 @@ export const api = {
     get: () => track(client.store.get()),
     test: (edit: StoreEdit) => track(client.store.test(edit)),
     save: (edit: StoreEdit) => track(client.store.save(edit)),
+  },
+  /**
+   * #127 follow-up: carry an operator-supplied admin credential in this tab.
+   * A `token`-mode instance has no browser sign-in, so without this the admin
+   * storage editor (and every admin surface) is unreachable from the UI.
+   * `null` clears it and returns to the same-origin session lane.
+   */
+  setAdminToken: (token: string | null) => {
+    try {
+      if (token) sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+      else sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    } catch {
+      /* private mode: the client still carries it for this page's lifetime */
+    }
+    if (token) client.configure({ token, lane: "bearer" });
+    else client.configure({ token: undefined, lane: "same-origin" });
   },
   /** Unified/stat/name-status diff between two revisions (D1 PR review). */
   diff: (repo: string, from: string, to: string, format: "patch" | "stat" | "name-status" = "patch") =>

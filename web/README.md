@@ -27,6 +27,27 @@ use `/{owner}/{repo}/api-browser/*`, and only non-repository discovery/authentic
 uses `/api/v1/*` (D26/D27). Changing the API means changing `sdk/repos.ts` and
 `API.md` in the same commit.
 
+## Admin surfaces in `token` mode (#127 follow-up, D60)
+
+The first-run wizard produces `server.auth.mode = "token"`, but browser sign-in
+exists only in `oidc` mode (`auth.rs`: the session cookie comes from the OIDC
+flow). On a token-mode host the bundled UI is therefore anonymous by default and
+every admin surface is unreachable — the reported case was a rotated bucket
+credential with no UI to fix it.
+
+`src/api.ts` carries an operator-supplied admin credential:
+
+* `api.setAdminToken(token)` stores it in `sessionStorage` (**never**
+  `localStorage`) and configures the SDK client to the **bearer** lane
+  (`Authorization: Bearer`, the same static token / `wgt_…` git uses);
+  `api.setAdminToken(null)` clears it and returns to the same-origin session lane.
+* `SetupPage`'s configured face shows the token field when `GET /api/v1/store`
+  answers 401/403, then opens the editor on success; a rejected token is cleared so
+  it cannot shadow the session lane.
+* The top-bar「存储配置」entry is always shown (`Layout`); `/setup` self-selects the
+  wizard, the editor, or the token prompt. No other page changes lanes, and no
+  server auth path changed.
+
 ## Markdown rendering and the XSS boundary (issue #112)
 
 - **Pipeline**: `components/Markdown.tsx` → lazy `MarkdownRenderer` —

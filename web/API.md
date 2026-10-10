@@ -328,8 +328,12 @@ Two contracts distinguish this from the wizard's surface:
   temp-file + rename (#129), so a crash or ENOSPC mid-save cannot destroy
   the credentials' only carrier; concurrent PUTs are last-writer-wins.
 
-The SPA renders this as `/setup`'s admin face (pre-filled form, the top-bar
-「存储配置」entry for `me.admin`); the SDK maps all three
+The SPA renders this as `/setup`'s admin face (pre-filled form). The top-bar
+「存储配置」entry is **always shown** (issue #127 follow-up): a `token`-mode
+instance has no browser sign-in, so when `GET /api/v1/store` answers `401`/`403`
+the page asks for an admin credential (`[[server.auth.tokens]]`, or a `wgt_…`
+access token) and carries it in the **bearer** lane — kept in `sessionStorage`,
+never `localStorage` (D60). The SDK maps all three
 (`client.store.get/test/save`, D20). The save-success phase of the same page
 lists `warnings` in a warning box (`StoreSaveResult.warnings`, #134) — on
 both faces, the wizard's `POST /api/v1/setup/save` and the editor's `PUT` —

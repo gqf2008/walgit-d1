@@ -744,6 +744,14 @@ const en = {
   "store.nosave": "This instance was not started from a config file, so the editor cannot save — edit walgit.toml by hand and restart.",
   "store.saved": "Saved. The service restarts and serves the new bucket once it is back.",
   "store.saved.manual": "Saved — restart the service manually (start it again, or the tray's 启动服务) to pick up the new storage settings.",
+  // #127 follow-up: `token`-mode hosts have no browser sign-in, so the editor
+  // asks the operator to paste the admin credential.
+  "store.token.lede":
+    "This tab is not an admin yet. `token`-mode instances have no browser sign-in — paste the instance's admin credential to edit storage.",
+  "store.token.label": "Admin token",
+  "store.token.hint":
+    "The static token in walgit.toml ([[server.auth.tokens]]), or a `wgt_…` access token. Kept in this tab only.",
+  "store.token.submit": "Use this token",
 } as const;
 
 export type I18nKey = keyof typeof en;
@@ -1464,6 +1472,10 @@ const zhCN: Record<I18nKey, string> = {
   "store.nosave": "本实例不是从配置文件启动的,无法保存——请手编 walgit.toml 后重启。",
   "store.saved": "已保存。服务将重启,恢复后即为新存储。",
   "store.saved.manual": "已保存——请手动重启服务(重新启动,或托盘的「启动服务」)以启用新存储配置。",
+  "store.token.lede": "当前标签页还不是管理员。`token` 模式没有浏览器登录——粘贴实例的管理员凭据即可编辑存储。",
+  "store.token.label": "管理员 token",
+  "store.token.hint": "walgit.toml 的 [[server.auth.tokens]] 静态 token，或 `/_auth/tokens` 生成的 `wgt_…`。仅保存在当前标签页。",
+  "store.token.submit": "使用此 token",
 };
 
 const zhTW: Record<I18nKey, string> = {
@@ -2182,6 +2194,10 @@ const zhTW: Record<I18nKey, string> = {
   "store.nosave": "本實例不是從設定檔啟動的,無法儲存——請手動編輯 walgit.toml 後重啟。",
   "store.saved": "已儲存。服務將重啟,恢復後即為新儲存。",
   "store.saved.manual": "已儲存——請手動重啟服務(重新啟動,或託盤的「啟動服務」)以啟用新儲存設定。",
+  "store.token.lede": "目前分頁還不是管理員。`token` 模式沒有瀏覽器登入——貼上實例的管理員憑證即可編輯儲存。",
+  "store.token.label": "管理員 token",
+  "store.token.hint": "walgit.toml 的 [[server.auth.tokens]] 靜態 token，或 `/_auth/tokens` 產生的 `wgt_…`。僅保存在目前分頁。",
+  "store.token.submit": "使用此 token",
 };
 
 const DICTS: Record<Lang, Record<I18nKey, string>> = { en, "zh-CN": zhCN, "zh-TW": zhTW };
