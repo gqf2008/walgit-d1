@@ -118,7 +118,8 @@ pub enum CollabAction {
         #[arg(long)]
         principal: String,
         /// Adopt an existing Ed25519 seed (hex) instead of generating one; a
-        /// relative path is resolved under the project identity directory.
+        /// relative path is resolved against the current directory, and a
+        /// missing path is an error (never a new key).
         #[arg(long)]
         key: Option<PathBuf>,
         /// Remote to push the registration to (omit for a local-only write).
@@ -484,8 +485,21 @@ fn resolve_key_path(dir: &Path, principal: &str, key: Option<&str>) -> PathBuf {
     }
 }
 
+/// Resolve a relative path against the current directory so an explicit
+/// `--key` is persisted exactly (a relative `--key` means what it means on the
+/// command line; it is adopted, never generated).
+fn absolutize(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 /// The public key currently registered for `principal` in this repository, if
-/// any. No registration ref is `None`; a malformed ref is an error.
+/// any. No registration ref is `None`; a present-but-malformed ref is an error
+/// (a missing/non-string `public_key` must not silently skip the rotation
+/// guard).
 fn registered_public_key(repo: &Path, principal: &str) -> Result<Option<String>> {
     let ref_name = format!("refs/collab/meta/principals/{principal}");
     let out = std::process::Command::new("git")
@@ -499,10 +513,11 @@ fn registered_public_key(repo: &Path, principal: &str) -> Result<Option<String>>
     }
     let value: serde_json::Value =
         serde_json::from_slice(&out.stdout).context("parse registered principal")?;
-    Ok(value
+    let public_key = value
         .get("public_key")
         .and_then(|v| v.as_str())
-        .map(str::to_string))
+        .ok_or_else(|| anyhow::anyhow!("registration for {principal} has no string public_key"))?;
+    Ok(Some(public_key.to_string()))
 }
 
 /// Resolve `--principal`/`--key` against the project identity. Explicit values
@@ -626,38 +641,34 @@ fn run_join(
             );
         }
     }
-    // A relative `--key` is resolved under the identity directory (the same
-    // convention `resolve_identity` reads it back with), so it round-trips
-    // exactly and never lands in the work tree.
-    let (key_path, generated) = match key {
-        Some(k) => (
-            resolve_key_path(&dir, principal, Some(&k.to_string_lossy())),
-            false,
-        ),
-        None => (resolve_key_path(&dir, principal, None), true),
+    // Load the candidate key without mutating anything: an existing file is
+    // read, a missing default is generated in memory (written only after every
+    // guard below has passed), and a missing explicit `--key` is an error so a
+    // typo cannot silently fork the identity.
+    let explicit_key = key.is_some();
+    let key_path = match key {
+        Some(k) => absolutize(&k)?,
+        None => resolve_key_path(&dir, principal, None),
     };
-    if key_path.exists() {
-        read_signing_key(&key_path)
-            .with_context(|| format!("existing key {}", key_path.display()))?;
+    let (key, seed_to_write) = if key_path.exists() {
+        (
+            read_signing_key(&key_path)
+                .with_context(|| format!("existing key {}", key_path.display()))?,
+            None,
+        )
+    } else if explicit_key {
+        bail!("--key {} does not exist", key_path.display());
     } else {
-        let parent = key_path.parent().unwrap_or(&dir);
-        if generated {
-            make_private_dir(parent)?;
-        } else {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
         let mut seed = [0u8; 32];
         rand::rng().fill(&mut seed);
-        write_private_file(&key_path, format!("{}\n", hex::encode(seed)).as_bytes())?;
-    }
-    write_identity(&dir, principal, &key_path)?;
-    let key = read_signing_key(&key_path)?;
+        (SigningKey::from_bytes(&seed), Some(seed))
+    };
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
     // Rotation is destructive: the registry remembers one key per principal, so
     // a changed public key turns every past signature by this principal
-    // unverified (D1_PROTOCOL §4.3). Refuse it without `--force`.
+    // unverified (D1_PROTOCOL §4.3). Refuse it without `--force` — before any
+    // local mutation, so a refused rotation leaves the identity untouched.
     if !force
         && let Some(registered) = registered_public_key(repo, principal)?
         && registered != public_key
@@ -668,6 +679,12 @@ fn run_join(
              pass --force to rotate"
         );
     }
+    if let Some(seed) = seed_to_write {
+        let parent = key_path.parent().unwrap_or(&dir);
+        make_private_dir(parent)?;
+        write_private_file(&key_path, format!("{}\n", hex::encode(seed)).as_bytes())?;
+    }
+    write_identity(&dir, principal, &key_path)?;
     let (ref_name, oid) = publish_principal(repo, principal, &public_key, push)?;
     println!(
         "{ref_name} {oid} principal={principal} key={} identity={}",

@@ -1518,6 +1518,33 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+
+    // --force performs the rebind: a new project identity that signs as bob.
+    run_in(
+        repo.path(),
+        &["collab", "join", "--principal", "bob", "--force"],
+    )?;
+    let rebound = std::fs::read_to_string(identity_dir.join("identity"))?;
+    assert!(rebound.contains("\"principal\": \"bob\""), "{rebound}");
+    let bob_issue = run_in(
+        repo.path(),
+        &[
+            "collab",
+            "entry",
+            "--kind",
+            "comment",
+            "--id",
+            "t1",
+            "--parent",
+            &issue_oid,
+            "--body",
+            r#"{"note":"bob"}"#,
+        ],
+    )?;
+    assert!(
+        bob_issue.contains("refs/collab/inbox/bob/"),
+        "the rebound identity signs as bob: {bob_issue}"
+    );
     Ok(())
 }
 
@@ -1563,23 +1590,45 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
         String::from_utf8_lossy(&bare.stderr)
     );
 
-    // A relative `--key` resolves under the identity dir, never the work tree.
+    // An explicit relative `--key` is adopted from the cwd and persisted
+    // absolute, so the identity round-trips exactly (and never regenerates).
+    let adoption_seed = repo.path().join("adopted.ed25519");
+    std::fs::write(&adoption_seed, "22".repeat(32))?;
     run_in(
         repo.path(),
         &[
-            "collab", "join", "--principal", "carol", "--key", "myseed.ed25519",
+            "collab", "join", "--principal", "carol", "--key", "adopted.ed25519",
         ],
     )?;
     let identity_dir = repo.path().join(".git/walgit");
-    assert!(identity_dir.join("myseed.ed25519").exists());
+    let identity = std::fs::read_to_string(identity_dir.join("identity"))?;
+    let adoption_str = adoption_seed.to_string_lossy().to_string();
     assert!(
-        !repo.path().join("myseed.ed25519").exists(),
-        "the seed must never land in the work tree"
+        identity.contains(&adoption_str),
+        "the identity persists the adopted key as an absolute path: {identity}"
     );
+
+    // A missing explicit --key is an error, never a silently generated key.
+    let missing = std::process::Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .args([
+            "collab",
+            "join",
+            "--principal",
+            "carol",
+            "--key",
+            "does-not-exist.ed25519",
+        ])
+        .current_dir(repo.path())
+        .output()?;
+    assert!(!missing.status.success());
     assert!(
-        std::fs::read_to_string(identity_dir.join("identity"))?.contains("myseed.ed25519"),
-        "the identity stores the same relative path it reads back"
+        String::from_utf8_lossy(&missing.stderr).contains("does not exist"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
     );
+    assert!(!repo.path().join("does-not-exist.ed25519").exists());
 
     // Default resolution signs as carol with the adopted key.
     let issue = run_in(
