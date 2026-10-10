@@ -120,6 +120,11 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 
 - **私钥文件**：32 字节 Ed25519 种子的 hex 文本（64 个 hex 字符，可带尾随换行）；CLI 的
   `--key` 参数是**文件路径**，不是内容（传内容会在报错里把私钥回显到终端）。
+- **存储位置（约定，非协议）**：私钥属于**项目**，不属于共享目录。`walgit collab join
+  --principal <p>` 把 seed 写到 `<git-common-dir>/walgit/keys/<p>.ed25519`（`0600`），
+  身份指针写到 `<git-common-dir>/walgit/identity`，并注册公钥。git common dir 被该 clone
+  的所有 worktree 共享、永不被跟踪、`git clean -fdx` 也删不掉；每个协作者只保留自己的
+  key，不把多人的私钥堆在一个目录。`--key` 仍接受任意路径，协议只规定格式。
 - **公钥**：32 字节原始 Ed25519 公钥的 **base64（标准字母表）**，示例
   `6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=`。
 - 算法：Ed25519（RFC 8032），验签用严格模式（拒绝弱公钥/可延展签名）。
@@ -759,18 +764,18 @@ $W collab report [--format text|markdown|html] [--rules r.json]
 $W collab board  [--format text|markdown|json|hash] [--board f] [--rules r.json]
 ```
 
-写（`--key` 传**文件路径**；`--push <remote>` 才上服务器）：
+写（`--key` 缺省取项目身份，传则必须是**文件路径**；`--push <remote>` 才上服务器）：
 
 ```sh
-$W collab principal-register --principal alice --key ~/.walgit/keys/alice.ed25519 [--push origin]
+$W collab join --principal alice [--push origin]     # 建项目身份 + 注册（key 在 <git-common-dir>/walgit/keys/）
 $W collab entry --kind issue --id cc-ai-demo --actor alice --parent "" \
-   --body '{"title":"…","body":"…"}' --key ~/.walgit/keys/alice.ed25519 --push origin \
+   --body '{"title":"…","body":"…"}' --push origin \
    [--auto-fold --fold-threshold 10000]     # 机会式折叠（阈值默认 10000）
 # 后续条目：--parent 填上一条命令输出第二列的 oid
 $W collab principal-revoke  --principal alice [--push origin]
 $W collab principal-fetch   [--remote origin] [--token $WALGIT_TOKEN]
 $W collab watch --remote origin --interval 10 [--once] [--exec '<cmd>'] [--state <file>]
-$W collab gc --actor alice --key ~/.walgit/keys/alice.ed25519 [--push origin] [--truncate]
+$W collab gc --actor alice [--push origin] [--truncate]
 ```
 
 host 注册表：`walgit principal register|rotate|list|revoke --url <host> [--principal p] [--key f]`。

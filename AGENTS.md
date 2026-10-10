@@ -716,6 +716,20 @@ decision in §4 — or the PR is; never "fix later".
   `main` by hand whenever it moves (`git push github main`; the reviewer of this very change caught that
   main had been pushed three times in ten minutes) and the tag at release, and never install the mirror
   under a scheduler.
+- **D58** **Collaboration keys are project-local; walgit stores only the principal→key binding
+  (2026-10-10, cc-ai-project-identity).** A collaborator's private key belongs to the project, not
+  to a host-wide pile next to the deployment: `walgit collab join --principal <p>` writes the
+  Ed25519 seed at `<git-common-dir>/walgit/keys/<p>.ed25519` (`0600`), the identity pointer at
+  `<git-common-dir>/walgit/identity`, and registers `refs/collab/meta/principals/<p>`. The git
+  common dir is shared by every worktree of the clone, is never tracked, and is never removed by
+  `git clean -fdx`; one clone therefore carries one project identity (separate clones, or an
+  explicit `--principal`/`--key`, for a second one). `collab entry` / `principal-register` / `gc`
+  resolve `--principal`/`--actor` and `--key` from that identity, so a project only ever references
+  its own. Each collaborator keeps only its own key: never pile several principals' keys in one
+  directory — the old `~/.walgit/keys/` convention and the `web/SKILL.md` example that had one
+  operator mint the whole team's keys there are removed. walgit does not constrain the key path
+  (`--key` still takes any file), and the host-wide registry of `docs/D1_PROTOCOL.md` §4.4 is out of
+  scope here. Normative statement in `docs/D1_PROTOCOL.md` §4.1.
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

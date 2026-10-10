@@ -68,9 +68,10 @@ pub enum CollabAction {
         /// Thread id (shared by every entry of the thread).
         #[arg(long)]
         id: String,
-        /// Principal whose inbox receives the entry (refname-safe).
+        /// Principal whose inbox receives the entry (default: the project
+        /// identity at `<git-common-dir>/walgit/identity`).
         #[arg(long)]
-        actor: String,
+        actor: Option<String>,
         /// Previous entry's oid in the thread, or empty for the root.
         #[arg(long, default_value = "")]
         parent: String,
@@ -81,9 +82,10 @@ pub enum CollabAction {
         base: Option<String>,
         #[arg(long)]
         head: Option<String>,
-        /// Ed25519 signing key: 32 raw bytes as hex.
+        /// Ed25519 signing key: 32 raw bytes as hex (default: the project
+        /// identity key).
         #[arg(long)]
-        key: PathBuf,
+        key: Option<PathBuf>,
         /// Entry oid this entry relates to (repeatable; issue #75 ③).
         #[arg(long = "related")]
         related: Vec<String>,
@@ -104,16 +106,40 @@ pub enum CollabAction {
         #[arg(long, default_value_t = 10_000)]
         fold_threshold: usize,
     },
+    /// Join this project as a collaborator: materialize the project-local
+    /// identity under `<git-common-dir>/walgit/` (shared by every worktree of
+    /// the clone, never tracked, never touched by `git clean`), generate the
+    /// Ed25519 seed when none exists, and register the public key at
+    /// `refs/collab/meta/principals/<principal>` (`docs/D1_PROTOCOL.md` §4.3).
+    Join {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Principal name for this project (refname-safe).
+        #[arg(long)]
+        principal: String,
+        /// Adopt an existing Ed25519 seed (hex) instead of generating one; the
+        /// path is recorded in the identity file.
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// Remote to push the registration to (omit for a local-only write).
+        #[arg(long)]
+        push: Option<String>,
+        /// Rebind a project already bound to a different principal.
+        #[arg(long)]
+        force: bool,
+    },
     /// First-use registration of a principal's public key at
     /// `refs/collab/meta/principals/<principal>` (`docs/D1_PROTOCOL.md` §4.3).
     PrincipalRegister {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Principal name (default: the project identity).
         #[arg(long)]
-        principal: String,
-        /// The signing key seed; the public key is derived from it.
+        principal: Option<String>,
+        /// The signing key seed; the public key is derived from it (default:
+        /// the project identity key).
         #[arg(long)]
-        key: PathBuf,
+        key: Option<PathBuf>,
         #[arg(long)]
         push: Option<String>,
     },
@@ -177,12 +203,13 @@ pub enum CollabAction {
     Gc {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        /// Principal recorded as the folder (its key signs the snapshot).
+        /// Principal recorded as the folder (default: the project identity).
         #[arg(long)]
-        actor: String,
-        /// Ed25519 signing key of the folder: 32 raw bytes as hex.
+        actor: Option<String>,
+        /// Ed25519 signing key of the folder: 32 raw bytes as hex (default:
+        /// the project identity key).
         #[arg(long)]
-        key: PathBuf,
+        key: Option<PathBuf>,
         /// Remote to push the fold to (omit for a local-only fold).
         #[arg(long)]
         push: Option<String>,
@@ -268,29 +295,42 @@ pub async fn run(action: CollabAction) -> Result<()> {
             attach,
             auto_fold,
             fold_threshold,
-        } => run_entry(&EntryArgs {
+        } => {
+            let (actor, key) = resolve_identity(&repo, actor.as_deref(), key.as_deref())?;
+            run_entry(&EntryArgs {
+                repo,
+                push,
+                kind,
+                id,
+                actor,
+                parent,
+                body,
+                base,
+                head,
+                key,
+                related,
+                depends_on,
+                attach,
+                auto_fold,
+                fold_threshold,
+            })?;
+        }
+        CollabAction::Join {
             repo,
-            push,
-            kind,
-            id,
-            actor,
-            parent,
-            body,
-            base,
-            head,
+            principal,
             key,
-            related,
-            depends_on,
-            attach,
-            auto_fold,
-            fold_threshold,
-        })?,
+            push,
+            force,
+        } => run_join(&repo, &principal, key, push.as_deref(), force)?,
         CollabAction::PrincipalRegister {
             repo,
             principal,
             key,
             push,
-        } => run_principal_register(&repo, &principal, &key, push.as_deref())?,
+        } => {
+            let (principal, key) = resolve_identity(&repo, principal.as_deref(), key.as_deref())?;
+            run_principal_register(&repo, &principal, &key, push.as_deref())?;
+        }
         CollabAction::PrincipalRevoke {
             repo,
             principal,
@@ -303,6 +343,7 @@ pub async fn run(action: CollabAction) -> Result<()> {
             push,
             truncate,
         } => {
+            let (actor, key) = resolve_identity(&repo, actor.as_deref(), key.as_deref())?;
             run_gc(
                 &repo,
                 &actor,
@@ -384,6 +425,213 @@ pub(crate) fn read_signing_key(path: &std::path::Path) -> Result<SigningKey> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("key {} must be 32 bytes", path.display()))?;
     Ok(SigningKey::from_bytes(&bytes))
+}
+
+// ---- project-local identity (`<git-common-dir>/walgit`) -----------------------
+//
+// Collaboration identity is project-scoped: one principal + key per
+// collaborator, materialized next to the repository rather than in a shared
+// `~/.walgit/keys/` pile. The state lives under the git common dir, so every
+// worktree of the clone shares it, it is never tracked and never removed by
+// `git clean`.
+
+/// The project identity directory: `<git-common-dir>/walgit`.
+pub(crate) fn project_identity_dir(repo: &Path) -> Result<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .context("git rev-parse --git-common-dir")?;
+    if !out.status.success() {
+        bail!("{} is not a git checkout", repo.display());
+    }
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if common.is_empty() {
+        bail!("git rev-parse --git-common-dir returned no path");
+    }
+    Ok(PathBuf::from(common).join("walgit"))
+}
+
+/// The on-disk identity pointer (`<dir>/identity`): which principal this
+/// project works as, and (optionally) where its key lives.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Identity {
+    principal: String,
+    /// Key path, relative to the identity file's directory unless absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+}
+
+fn read_identity_at(dir: &Path) -> Result<Identity> {
+    let path = dir.join("identity");
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("read identity {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse identity {}", path.display()))
+}
+
+fn resolve_key_path(dir: &Path, principal: &str, key: Option<&str>) -> PathBuf {
+    match key {
+        Some(k) => {
+            let p = Path::new(k);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                dir.join(p)
+            }
+        }
+        None => dir.join("keys").join(format!("{principal}.ed25519")),
+    }
+}
+
+/// Resolve `--principal`/`--key` against the project identity. Explicit values
+/// always win; otherwise the identity supplies the missing half, and a bare
+/// principal falls back to the conventional project key path.
+pub(crate) fn resolve_identity(
+    repo: &Path,
+    principal: Option<&str>,
+    key: Option<&Path>,
+) -> Result<(String, PathBuf)> {
+    if let (Some(p), Some(k)) = (principal, key) {
+        return Ok((p.to_string(), k.to_path_buf()));
+    }
+    let dir = project_identity_dir(repo)?;
+    let identity = if dir.join("identity").exists() {
+        Some(read_identity_at(&dir)?)
+    } else {
+        None
+    };
+    let principal = match principal {
+        Some(p) => p.to_string(),
+        None => identity
+            .as_ref()
+            .map(|i| i.principal.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no --principal and no project identity at {}; run `walgit collab join --principal <name>` first",
+                    dir.join("identity").display()
+                )
+            })?,
+    };
+    let key = match key {
+        Some(k) => k.to_path_buf(),
+        None => match identity {
+            Some(id) if id.principal == principal => {
+                resolve_key_path(&dir, &principal, id.key.as_deref())
+            }
+            _ => resolve_key_path(&dir, &principal, None),
+        },
+    };
+    Ok((principal, key))
+}
+
+fn write_identity(dir: &Path, principal: &str, key: &Path) -> Result<()> {
+    let key_str = match key.strip_prefix(dir) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => key.to_string_lossy().to_string(),
+    };
+    let doc = serde_json::json!({ "principal": principal, "key": key_str });
+    write_private_file(
+        &dir.join("identity"),
+        serde_json::to_string_pretty(&doc)?.as_bytes(),
+    )
+}
+
+/// Write `bytes` to `path` with `0600` (created `0600`, an existing file is
+/// re-chmodded). fsync before returning: a seed is the only copy.
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("write {}", path.display()))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 0700 {}", dir.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    Ok(())
+}
+
+/// `walgit collab join`: create the project-local identity (key + `identity`)
+/// and register the public key. Idempotent: an existing key is reused and an
+/// existing same-principal binding is left in place.
+fn run_join(
+    repo: &Path,
+    principal: &str,
+    key: Option<PathBuf>,
+    push: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    use rand::Rng as _;
+    ref_segment("principal", principal)?;
+    let dir = project_identity_dir(repo)?;
+    let identity_path = dir.join("identity");
+    if identity_path.exists() && !force {
+        let existing = read_identity_at(&dir)?;
+        if existing.principal != principal {
+            bail!(
+                "this project is already bound to principal {:?} ({}); pass --force to rebind",
+                existing.principal,
+                identity_path.display()
+            );
+        }
+    }
+    let (key_path, generated) = match key {
+        Some(k) => (k, false),
+        None => (resolve_key_path(&dir, principal, None), true),
+    };
+    if key_path.exists() {
+        read_signing_key(&key_path)
+            .with_context(|| format!("existing key {}", key_path.display()))?;
+    } else {
+        let parent = key_path.parent().unwrap_or(&dir);
+        if generated {
+            make_private_dir(parent)?;
+        } else {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let mut seed = [0u8; 32];
+        rand::rng().fill(&mut seed);
+        write_private_file(&key_path, format!("{}\n", hex::encode(seed)).as_bytes())?;
+    }
+    write_identity(&dir, principal, &key_path)?;
+    let key = read_signing_key(&key_path)?;
+    let public_key =
+        base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+    let (ref_name, oid) = publish_principal(repo, principal, &public_key, push)?;
+    println!(
+        "{ref_name} {oid} principal={principal} key={} identity={}",
+        key_path.display(),
+        identity_path.display()
+    );
+    Ok(())
 }
 
 pub(crate) fn entry_uuid() -> String {
@@ -722,6 +970,19 @@ fn run_principal_register(
     let key = read_signing_key(key_path)?;
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+    let (ref_name, oid) = publish_principal(repo, principal, &public_key, push)?;
+    println!("{ref_name} {oid}");
+    Ok(())
+}
+
+/// Write/replace the registration blob and its ref (`docs/D1_PROTOCOL.md`
+/// §4.3). Returns `(ref_name, oid)`.
+fn publish_principal(
+    repo: &Path,
+    principal: &str,
+    public_key: &str,
+    push: Option<&str>,
+) -> Result<(String, String)> {
     let content = serde_json::to_string_pretty(&serde_json::json!({
         "version": 1,
         "principal": principal,
@@ -737,8 +998,7 @@ fn run_principal_register(
         // key), so the refspec carries `+`.
         git_push_refspecs(repo, remote, &[format!("+{ref_name}")], false, &[])?;
     }
-    println!("{ref_name} {oid}");
-    Ok(())
+    Ok((ref_name, oid))
 }
 
 /// `collab principal-fetch`: pull the host-global registry and cache it as local

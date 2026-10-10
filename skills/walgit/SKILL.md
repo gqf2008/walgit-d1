@@ -24,7 +24,8 @@ walgit service restart
 ```
 
 The `walgit` CLI is a symlink to the installed binary (app bundle / install dir); user state lives in
-`~/.walgit/` (`walgit.toml`, `cache/`, `keys/`, `server.log`). Never copy the binary into the state dir.
+`~/.walgit/` (`walgit.toml`, `cache/`, `server.log`). Never copy the binary into the state dir.
+Collaboration keys are not state-dir-wide: they are project-local (see §5).
 On **Windows** there is no symlink: the installer appends the install directory
 (`%LOCALAPPDATA%\Programs\walgit`) to the **user** PATH (HKCU `Environment`) and removes that one
 entry at uninstall. A shell started **after** the install (from Explorer or the Start menu) therefore
@@ -116,20 +117,25 @@ then no longer distinguish implementer, reviewer, and merger. See `/SKILL.md` §
 the full topology and copyable checklist.
 
 ```bash
-walgit collab principal-register --repo <checkout> --principal <principal> \
-  --key ~/.walgit/keys/<principal>.ed25519 --push origin
+walgit collab join --repo <checkout> --principal <principal> --push origin
 ```
 
-`--key` is a file path: generate each principal's 32-byte Ed25519 seed with your own
-key-generation flow, store it `0600` at `~/.walgit/keys/<principal>.ed25519`, and never
-paste its contents on the command line. Names are agent-side bookkeeping: walgit stores
+`collab join` is project-local: it generates the 32-byte Ed25519 seed at
+`<git-common-dir>/walgit/keys/<principal>.ed25519` (`0600`) when none exists, records the
+identity at `<git-common-dir>/walgit/identity`, and registers the public key. The git
+common dir is shared by every worktree of the clone, never tracked, and never removed by
+`git clean`; keep one key per collaborator there — never pile several principals' keys in
+a shared directory. `--key` (a file path) adopts an existing seed instead; never paste
+seed contents on the command line. On other `collab` commands `--actor`/`--principal` and
+`--key` default to this identity, so a project only ever references its own. Names are
+agent-side bookkeeping: walgit stores
 only the `principal → public key` binding (`refs/collab/meta/principals/<principal>`;
 D1_PROTOCOL.md §4.3) and verifies signatures against it — the team list (who is in,
 what they are called) is maintained by the agents themselves, one self-registration each.
 On first contact with a repo an agent runs the automatic routine in `/SKILL.md` §0a —
 discover the naming convention from the registered principals, adopt its existing
-identity or take the next free name, ensure its key, register, and sync the board —
-before doing any work.
+identity or take the next free name, ensure its identity (`collab join`), and sync the
+board — before doing any work.
 Reviewer principals must not start with `svc-`; `merge_rule_eval` excludes `svc-*`
 actors from human approvals.
 
@@ -149,7 +155,7 @@ next `--parent`):
 ```bash
 W collab entry --kind <issue|comment|patch|review|merge_result|status> \
   --id <thread-id> --actor <principal> --parent <oid|""> \
-  --body '<json>' --key ~/.walgit/keys/<principal>.ed25519 --push origin \
+  --body '<json>' --push origin \
   [--base refs/heads/main --head refs/heads/<branch>]   # patch only
   [--auto-fold --fold-threshold 10000]                  # opportunistic fold
 
@@ -157,7 +163,7 @@ W collab entry --kind <issue|comment|patch|review|merge_result|status> \
 # Over the 64 MiB snapshot cap the fold is refused unless --truncate drops the
 # oldest records and marks the ledger complete:false (--truncate also repairs
 # an already over-cap snapshot with an empty tail).
-W collab gc --actor <principal> --key ~/.walgit/keys/<principal>.ed25519 \
+W collab gc --actor <principal> \
   [--push origin] [--truncate]
 ```
 

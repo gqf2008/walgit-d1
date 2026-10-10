@@ -1411,3 +1411,112 @@ async fn watch_fetch_prunes_revoked_registry_refs() -> TestResult {
     );
     Ok(())
 }
+
+/// Project-level collaboration identity (D58): `collab join` materializes the
+/// key + identity under `<git-common-dir>/walgit/` (never the work tree, never
+/// tracked, shared by every worktree), and `collab entry` resolves
+/// `--actor`/`--key` from it so a project only ever references its own
+/// identity. Local-only writes: no server involved.
+#[test]
+fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let run_in = |dir: &Path, args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .current_dir(dir)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    let repo = tempfile::tempdir()?;
+    git_in(repo.path(), &["init", "-q", "-b", "main"])?;
+    git_in(repo.path(), &["config", "user.email", "t@t"])?;
+    git_in(repo.path(), &["config", "user.name", "T"])?;
+
+    run_in(repo.path(), &["collab", "join", "--principal", "alice"])?;
+    let identity_dir = repo.path().join(".git/walgit");
+    let key = identity_dir.join("keys/alice.ed25519");
+    assert!(key.exists(), "key lives under the git common dir");
+    assert!(
+        !repo.path().join(".walgit/keys").exists(),
+        "nothing is written into the tracked work tree"
+    );
+    let identity = std::fs::read_to_string(identity_dir.join("identity"))?;
+    assert!(identity.contains("\"principal\": \"alice\""), "{identity}");
+    assert!(identity.contains("keys/alice.ed25519"), "{identity}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the seed is 0600, got {mode:o}");
+    }
+    // Local identity state is invisible to git (never tracked, never offered).
+    assert_eq!(git_in(repo.path(), &["status", "--porcelain"])?.trim(), "");
+
+    // A later entry resolves actor + key from the identity alone.
+    let issue = run_in(
+        repo.path(),
+        &[
+            "collab",
+            "entry",
+            "--kind",
+            "issue",
+            "--id",
+            "t1",
+            "--body",
+            r#"{"title":"x"}"#,
+        ],
+    )?;
+    assert!(
+        issue.contains("refs/collab/inbox/alice/"),
+        "signed as alice: {issue}"
+    );
+    let issue_oid = issue.split_whitespace().nth(1).expect("entry oid").to_string();
+
+    // A worktree shares the same identity and key (git common dir).
+    let wt = tempfile::tempdir()?;
+    let wt_path = wt.path().to_str().expect("utf-8 path");
+    git_in(repo.path(), &["worktree", "add", "-q", wt_path, "-b", "wt"])?;
+    let comment = run_in(
+        wt.path(),
+        &[
+            "collab",
+            "entry",
+            "--kind",
+            "comment",
+            "--id",
+            "t1",
+            "--parent",
+            &issue_oid,
+            "--body",
+            r#"{"note":"from-worktree"}"#,
+        ],
+    )?;
+    assert!(
+        comment.contains("refs/collab/inbox/alice/"),
+        "the worktree uses the project identity: {comment}"
+    );
+
+    // Rebinding a bound project to another principal is refused without --force.
+    let refused = std::process::Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .args(["collab", "join", "--principal", "bob"])
+        .current_dir(repo.path())
+        .output()?;
+    assert!(!refused.status.success(), "rebinding needs --force");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("already bound"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    Ok(())
+}

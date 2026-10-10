@@ -310,29 +310,30 @@ everyone re-derives the same view from the refs.
 
 ### 0. Identity — register the team before the work
 
-- One principal per agent, one Ed25519 key (`32` raw bytes as hex, keep at
-  `~/.walgit/keys/<principal>.ed25519`). Each agent owns its key; never share one
-  key across agents or roles.
-- `--key` always takes a **file path**. walgit has no key-generation subcommand:
-  each principal must have its own 32-byte Ed25519 seed (64 hex characters) created
-  by your own key-generation flow, stored in a `0600` file. Pass only the path;
-  never paste the file contents into the command line or shell history.
+- One principal per collaborator, one Ed25519 key (`32` raw bytes as hex). The key is
+  **project-local**: `walgit collab join --principal <name>` materializes it at
+  `<git-common-dir>/walgit/keys/<name>.ed25519` (`0600`) next to the repository, records
+  the identity at `<git-common-dir>/walgit/identity`, and registers
+  `refs/collab/meta/principals/<name>`. Each collaborator owns its key: never pile several
+  principals' private keys in one directory, and never share a key across agents or roles.
+- The git **common dir** (never the work tree) is where this state lives: every worktree of
+  the clone shares it, it is never tracked, and `git clean -fdx` cannot remove it. One
+  clone therefore carries **one** project identity; run a separate clone per principal, or
+  pass `--principal`/`--key` explicitly to act as another one.
+- `--key`, when given, always takes a **file path** (never paste the seed contents into the
+  command line or shell history). `collab join` generates a fresh seed when none exists and
+  adopts an existing one when `--key` points at it.
 - Before the first thread, register the whole team, not one lone identity: a worker
   pool, a reviewer pool, and a coordinator. A practical default is
-  `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, and `<proj>-coordinator`. Each agent
-  registers only its own line:
+  `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, and `<proj>-coordinator`. Each
+  collaborator runs only its own line, in its own clone (the key stays inside that
+  clone's `.git/`, so no shared key directory exists to get wrong):
 
   ```sh
   checkout=/path/to/checkout
   proj=my-project
-  walgit collab principal-register --repo "$checkout" --principal "${proj}-worker-1" \
-    --key "$HOME/.walgit/keys/${proj}-worker-1.ed25519" --push origin
-  walgit collab principal-register --repo "$checkout" --principal "${proj}-worker-2" \
-    --key "$HOME/.walgit/keys/${proj}-worker-2.ed25519" --push origin
-  walgit collab principal-register --repo "$checkout" --principal "${proj}-reviewer-1" \
-    --key "$HOME/.walgit/keys/${proj}-reviewer-1.ed25519" --push origin
-  walgit collab principal-register --repo "$checkout" --principal "${proj}-coordinator" \
-    --key "$HOME/.walgit/keys/${proj}-coordinator.ed25519" --push origin
+  walgit collab join --repo "$checkout" --principal "${proj}-worker-1" --push origin
+  # one clone + one `join` per principal (worker-2, reviewer-1, coordinator, …)
   ```
 
 - Register once per repository. `--push origin` publishes the public key so other agents
@@ -367,19 +368,18 @@ roster:
    (`git for-each-ref refs/collab/meta/principals` after a fetch) to read the project's
    `<proj>` prefix and role pattern (`<proj>-worker-N`, `<proj>-reviewer-N`,
    `<proj>-coordinator`).
-2. **Adopt the existing identity, or take the next free name.** If a principal whose
-   key this agent holds (`~/.walgit/keys/<principal>.ed25519`) is already registered
-   in this repo, it is this agent's — keep it. Otherwise pick `<proj>-<role>-N` with
-   the next free index after the highest registered one for that role. Never reuse
-   another agent's name or key.
-3. **Ensure the key exists.** `~/.walgit/keys/<principal>.ed25519` — a `0600` file
-   with the agent's own 32-byte Ed25519 seed (64 hex characters). Generate it with the
-   agent's own key-generation flow if missing; walgit never generates keys.
-4. **Register.**
-   `walgit collab principal-register --repo "$checkout" --principal <me> --key ~/.walgit/keys/<me>.ed25519 --push origin`.
-   A rejected registration is a hard stop: do not start writing entries under an
+2. **Adopt the existing identity, or take the next free name.** If this checkout's
+   `<git-common-dir>/walgit/identity` already names a principal registered in this
+   repo, it is this agent's — keep it. Otherwise pick `<proj>-<role>-N` with the next
+   free index after the highest registered one for that role. Never reuse another
+   collaborator's name or key.
+3. **Ensure the identity exists.**
+   `walgit collab join --repo "$checkout" --principal <me> --push origin` generates the
+   32-byte Ed25519 seed at `<git-common-dir>/walgit/keys/<me>.ed25519` (`0600`) when none
+   exists, writes `<git-common-dir>/walgit/identity`, and registers the public key. A
+   rejected registration is a hard stop: do not start writing entries under an
    unregistered principal.
-5. **Sync the collaboration view.** Fetch the collab refs
+4. **Sync the collaboration view.** Fetch the collab refs
    (`git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*'
    '+refs/collab/meta/*:refs/collab/meta/*'`) and read `walgit collab board`
    before filing or claiming anything; sign every entry with this principal and key.
@@ -422,7 +422,10 @@ coordinator should keep the smallest possible write set so the merge path stays 
 replay.
 
 **Copyable start checklist** (set `checkout=/path/to/checkout` first, replace the
-remaining `<...>` values, and use the returned oid as the next `--parent`):
+remaining `<...>` values, and use the returned oid as the next `--parent`). Run each
+role in its **own clone** after `walgit collab join --principal <role> --push origin`;
+with a project identity in place, `--actor` and `--key` resolve from
+`<git-common-dir>/walgit/identity`, so the commands below omit `--key`:
 
 ```sh
 # 1. File the card (coordinator). The issue names the objective, roles, owner,
@@ -430,13 +433,13 @@ remaining `<...>` values, and use the returned oid as the next `--parent`):
 walgit collab entry --repo "$checkout" --kind issue --id <thread> \
   --actor <proj>-coordinator \
   --body '{"title":"<title>","body":"objective; roles; machine-checkable acceptance"}' \
-  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+  --push origin
 
 # 2. Claim it (worker). status fields are the claim ledger; use the issue entry oid as parent.
 walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-worker-1 --parent <issue-oid> \
   --body '{"status":"in-progress","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"<one-line plan>"}' \
-  --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
+  --push origin
 
 # 3. Work on exactly that card.
 git -C "$checkout" worktree add "$checkout/.worktrees/wt-<thread>" -b feat/<thread> <base>
@@ -447,17 +450,17 @@ walgit collab entry --repo "$checkout" --kind patch --id <thread> \
   --actor <proj>-worker-1 --parent <status-oid> \
   --base refs/heads/main --head refs/heads/feat/<thread> \
   --body '{"title":"<patch title>","message":"<what changed and why>"}' \
-  --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
+  --push origin
 walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-worker-1 --parent <patch-oid> \
   --body '{"status":"needs-review","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"ready for independent review"}' \
-  --key ~/.walgit/keys/<proj>-worker-1.ed25519 --push origin
+  --push origin
 
-# 5. Review with a different principal. Full findings go in note; the key is the identity.
+# 5. Review with a different principal (its own clone). Full findings go in note.
 walgit collab entry --repo "$checkout" --kind review --id <thread> \
   --actor <proj>-reviewer-1 --parent <review-request-oid> \
   --body '{"decision":"approve","agent":"<proj>-reviewer-1","note":"location; problem; suggestion; reproducible verification"}' \
-  --key ~/.walgit/keys/<proj>-reviewer-1.ed25519 --push origin
+  --push origin
 
 # 6. Coordinator only: merge, push, then record the merge (one entry records the oid
 #    and moves the card to `merged`).
@@ -467,11 +470,11 @@ git -C "$checkout" push origin main
 walgit collab entry --repo "$checkout" --kind merge_result --id <thread> \
   --actor <proj>-coordinator --parent <review-oid> \
   --body '{"merged":true,"oid":"<merged-oid>","result":"merged","note":"merged feat/<thread> into main"}' \
-  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+  --push origin
 walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --actor <proj>-coordinator --parent <merged-entry-oid> \
   --body '{"status":"closed","owner":"<proj>-coordinator","worktree":"wt-<thread>","branch":"main","work":"merged and verified"}' \
-  --key ~/.walgit/keys/<proj>-coordinator.ed25519 --push origin
+  --push origin
 ```
 
 The anti-pattern is a single identity serially doing the whole job, or several agents
