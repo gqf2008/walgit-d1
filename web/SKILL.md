@@ -105,15 +105,15 @@ back is never auto-retried (the menu still offers it).
 `walgit serve` runs a standalone host; `walgit service start|stop|status|restart` manages the
 installed service. Validate or print the effective configuration with `walgit config check` /
 `walgit config dump`. Cross-repository principals are managed with
-`walgit principal register|rotate|list|revoke` (host registry over HTTP: `--url` plus
-`--principal`/`--key`; self-only writes). The
+`walgit principal register|rotate --url --principal --key`, `walgit principal list --url`,
+and `walgit principal revoke --url --principal` (host registry over HTTP; self-only writes). The
 installed ops skill (`skills/walgit/SKILL.md`, published through the public installer) has the
 full operator lifecycle and maintenance runbooks. On Windows the installer registers its install
 directory on the **user** PATH (HKCU `Environment`, removed again at uninstall), so a shell started after
 the install finds `walgit`; one that was already running (or a child of it) needs a restart.
 
 If the bucket credentials are rotated and the host can no longer reach the bucket, fix it from the
-web UI's top-bar「存储」/Storage entry: a `token`-mode instance has no browser sign-in, so the
+web UI's top-bar「存储配置」/Storage entry: a `token`-mode instance has no browser sign-in, so the
 page asks for the admin token when the storage read is refused — paste the static token from
 `walgit.toml` (`[[server.auth.tokens]]`) or a `wgt_…` access token (D60; server auth unchanged).
 

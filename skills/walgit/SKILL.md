@@ -139,11 +139,12 @@ walgit repo create [--object-format sha1|sha256] <owner/name>   # + repo list / 
 walgit repo policy get|set|clear <owner/name>               # push policy (writes are admin)
 walgit repo settings show|set|clear|history <owner/name>    # per-repo TOML (D24)
 walgit principal register|rotate --url <host> --principal <p> --key <file>
-walgit principal list|revoke     --url <host> [--principal <p>]   # self-only
+walgit principal list            --url <host>                     # self-only
+walgit principal revoke          --url <host> --principal <p>     # self-only
 ```
 
 Collab-registry ops live in §5 too: `collab principal-register|revoke|fetch` and
-`collab thread-heads`. The admin storage editor is the web UI top-bar「存储」entry
+`collab thread-heads`. The admin storage editor is the web UI top-bar「存储配置」entry
 (`GET|PUT /api/v1/store`, D44/D60).
 
 ## 5. D1 collaboration bookkeeping (`walgit collab …`)
@@ -321,6 +322,6 @@ them with signed `ci_claim` entries and publishes signed results into `ci-*` thr
   stop the service and rebuild (or move aside) the index before retrying.
 - `[events]` (or `roles = ["events"]`) in `walgit.toml` is a hard parse error since the D46 removal.
 - Rotated an object-store credential and the host can no longer reach the bucket? Fix it from the web
-  UI's top-bar「存储」entry: a `token`-mode instance has no browser sign-in, so the page asks for the admin
+  UI's top-bar「存储配置」entry: a `token`-mode instance has no browser sign-in, so the page asks for the admin
   token (the static token in `walgit.toml` or a `wgt_…` access token) and carries it in the bearer lane
   for this tab only (D60). Editing `walgit.toml` by hand and restarting also works.
