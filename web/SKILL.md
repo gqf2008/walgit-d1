@@ -655,7 +655,8 @@ console** (the human's surface); everything in between is background sub-agents.
 - Never let a sub-agent sit silently: its claim, progress and result are entries; the human
   watches the board, not a terminal.
 
-The trigger is `walgit collab watch` (§0c) or an MCP resource subscription (§3 / D52); the
+The trigger is `walgit collab watch` (§0c) or an MCP resource subscription (the MCP section
+above; D52); the
 decision logic is the orchestrator's. `walgit ci run` is the closest worked example.
 
 ### 1. Work unit = one thread
