@@ -752,7 +752,8 @@ decision in §4 — or the PR is; never "fix later".
   the gate is the distinct non-author verified `approve` that `merge_rule_eval` already enforces,
   so no human click is needed. Blockers route back to the worker (new `status: in-progress`) or a
   fixer sub-agent; genuine ambiguity/authorization/external input goes to `needs-human`; Minor does
-  not block. Sub-agents are short-lived background processes (e.g. `pi -p`) supervised by the
+  not block. Sub-agents are short-lived background processes started with the host agent's own
+  capability (walgit does not prescribe the runtime), supervised by the
   orchestrator (launch / timeout / budget / restart / log / worktree cleanup); one card, one
   owner, one worktree, never a shared checkout or key. Durable truth stays in `refs/collab/*`;
   process state is local and disposable. Normative statement in `web/SKILL.md` §0d (and §0/§0b)

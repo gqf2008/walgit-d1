@@ -212,9 +212,9 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
   无需人类点。
 - **阻塞路由**：Critical/Important 或验收不过 → 打回 worker（新 `status: in-progress`）或派 fixer；
   需求歧义/授权/外部输入 → `needs-human`（唯一的人类介入点）；Minor 不阻塞。
-- **子代理与监督**：orchestrator 用宿主起短命后台子代理（如 `pi -p`），一卡一个、各自 worktree 与 key；
-  它负责超时/预算/崩溃重启/日志，以及合并后清 worktree/branch。进程状态本地可丢，持久事实只在
-  `refs/collab/*`。
+- **子代理与监督**：orchestrator 用**宿主 agent 自身的能力**起短命后台子代理（**不规定 runtime**：CLI agent、
+  编程式会话、远端 worker 皆可），一卡一个、各自 worktree 与 key；它负责超时/预算/崩溃重启/日志，以及合并后清
+  worktree/branch。进程状态本地可丢，持久事实只在 `refs/collab/*`。
 - 并发上限 2–4 worker + 1–2 验收；改动同一文件/schema 的卡串行。
 
 ## 6. Listening for events (pull, never push)

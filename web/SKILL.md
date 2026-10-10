@@ -635,9 +635,11 @@ console** (the human's surface); everything in between is background sub-agents.
 
 **Sub-agents and supervision.**
 
-- A sub-agent is a short-lived background process (e.g. `pi -p`, `claude -p`, `codex exec`)
-  started by the orchestrator, one per card, in that card's worktree. It never shares a
-  checkout or a key with another sub-agent.
+- A sub-agent is a short-lived background process started by the orchestrator, one per card,
+  in that card's worktree, using **whatever sub-agent / background capability the host agent
+  itself provides** — walgit does not prescribe the runtime (a CLI agent, a programmatic
+  session, a remote worker all qualify). It never shares a checkout or a key with another
+  sub-agent.
 - The **orchestrator** owns the process lifecycle: launch, timeout, budget, restart on a
   crash, capture the log, and remove the worktree/branch after the card is closed. Note that a
   worktree's identity lives in that worktree's git dir, so **removing the worktree retires its
