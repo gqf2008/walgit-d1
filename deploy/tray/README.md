@@ -87,7 +87,7 @@ macOS 0.5.x/0.6.0 升级到新布局时，新 tray 会临时建立
 
 - **程序目录**:macOS 在 `walgit-tray.app/Contents/Resources/walgit`；
   Windows/Linux 在安装目录或 `/usr/bin`。程序不再复制到用户状态目录。
-- **状态目录**:`~/.walgit`，只放 `walgit.toml`、`cache/`、`keys/`、
+- **状态目录**:`~/.walgit`，只放 `walgit.toml`、`cache/`、
   `server.log`、`walgit.pid`、`.r2-credentials` 等用户状态。macOS 首次
   启动只初始化缺失的 `walgit.toml`，并优先建 `/usr/local/bin/walgit` 软链
   指向 App Bundle 内的程序；该位置不可写时回退到 `~/.local/bin/walgit`。

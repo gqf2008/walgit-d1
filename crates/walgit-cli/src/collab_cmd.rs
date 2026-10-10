@@ -117,8 +117,8 @@ pub enum CollabAction {
         /// Principal name for this project (refname-safe).
         #[arg(long)]
         principal: String,
-        /// Adopt an existing Ed25519 seed (hex) instead of generating one; the
-        /// path is recorded in the identity file.
+        /// Adopt an existing Ed25519 seed (hex) instead of generating one; a
+        /// relative path is resolved under the project identity directory.
         #[arg(long)]
         key: Option<PathBuf>,
         /// Remote to push the registration to (omit for a local-only write).
@@ -484,6 +484,27 @@ fn resolve_key_path(dir: &Path, principal: &str, key: Option<&str>) -> PathBuf {
     }
 }
 
+/// The public key currently registered for `principal` in this repository, if
+/// any. No registration ref is `None`; a malformed ref is an error.
+fn registered_public_key(repo: &Path, principal: &str) -> Result<Option<String>> {
+    let ref_name = format!("refs/collab/meta/principals/{principal}");
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args(["cat-file", "-p", &ref_name])
+        .output()
+        .context("git cat-file principals ref")?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parse registered principal")?;
+    Ok(value
+        .get("public_key")
+        .and_then(|v| v.as_str())
+        .map(str::to_string))
+}
+
 /// Resolve `--principal`/`--key` against the project identity. Explicit values
 /// always win; otherwise the identity supplies the missing half, and a bare
 /// principal falls back to the conventional project key path.
@@ -591,6 +612,9 @@ fn run_join(
     use rand::Rng as _;
     ref_segment("principal", principal)?;
     let dir = project_identity_dir(repo)?;
+    // The identity directory itself stays project-private (it holds `keys/`
+    // and the identity pointer).
+    make_private_dir(&dir)?;
     let identity_path = dir.join("identity");
     if identity_path.exists() && !force {
         let existing = read_identity_at(&dir)?;
@@ -602,8 +626,14 @@ fn run_join(
             );
         }
     }
+    // A relative `--key` is resolved under the identity directory (the same
+    // convention `resolve_identity` reads it back with), so it round-trips
+    // exactly and never lands in the work tree.
     let (key_path, generated) = match key {
-        Some(k) => (k, false),
+        Some(k) => (
+            resolve_key_path(&dir, principal, Some(&k.to_string_lossy())),
+            false,
+        ),
         None => (resolve_key_path(&dir, principal, None), true),
     };
     if key_path.exists() {
@@ -625,6 +655,19 @@ fn run_join(
     let key = read_signing_key(&key_path)?;
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+    // Rotation is destructive: the registry remembers one key per principal, so
+    // a changed public key turns every past signature by this principal
+    // unverified (D1_PROTOCOL §4.3). Refuse it without `--force`.
+    if !force
+        && let Some(registered) = registered_public_key(repo, principal)?
+        && registered != public_key
+    {
+        bail!(
+            "principal {principal} is already registered with a different public key; \
+             rotating it makes every past signature by this principal unverified — \
+             pass --force to rotate"
+        );
+    }
     let (ref_name, oid) = publish_principal(repo, principal, &public_key, push)?;
     println!(
         "{ref_name} {oid} principal={principal} key={} identity={}",

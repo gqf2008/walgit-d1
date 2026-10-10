@@ -1520,3 +1520,116 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
     );
     Ok(())
 }
+
+/// A relative `--key` stays project-local and round-trips; a key rotation is
+/// refused without `--force` (it would make every past signature unverified).
+#[test]
+fn collab_join_relative_key_and_rotation_guard() -> TestResult {
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let run_in = |dir: &Path, args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .current_dir(dir)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    let repo = tempfile::tempdir()?;
+    git_in(repo.path(), &["init", "-q", "-b", "main"])?;
+    git_in(repo.path(), &["config", "user.email", "t@t"])?;
+    git_in(repo.path(), &["config", "user.name", "T"])?;
+
+    // No identity yet: a default write fails with the `collab join` hint.
+    let bare = std::process::Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .args([
+            "collab", "entry", "--kind", "issue", "--id", "t0", "--body", r#"{"title":"x"}"#,
+        ])
+        .current_dir(repo.path())
+        .output()?;
+    assert!(!bare.status.success());
+    assert!(
+        String::from_utf8_lossy(&bare.stderr).contains("collab join"),
+        "{}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+
+    // A relative `--key` resolves under the identity dir, never the work tree.
+    run_in(
+        repo.path(),
+        &[
+            "collab", "join", "--principal", "carol", "--key", "myseed.ed25519",
+        ],
+    )?;
+    let identity_dir = repo.path().join(".git/walgit");
+    assert!(identity_dir.join("myseed.ed25519").exists());
+    assert!(
+        !repo.path().join("myseed.ed25519").exists(),
+        "the seed must never land in the work tree"
+    );
+    assert!(
+        std::fs::read_to_string(identity_dir.join("identity"))?.contains("myseed.ed25519"),
+        "the identity stores the same relative path it reads back"
+    );
+
+    // Default resolution signs as carol with the adopted key.
+    let issue = run_in(
+        repo.path(),
+        &[
+            "collab", "entry", "--kind", "issue", "--id", "t1", "--body", r#"{"title":"x"}"#,
+        ],
+    )?;
+    assert!(issue.contains("refs/collab/inbox/carol/"), "{issue}");
+    let issue_oid = issue.split_whitespace().nth(1).expect("entry oid").to_string();
+
+    // Rotating carol's key is destructive and needs --force.
+    let other_dir = tempfile::tempdir()?;
+    let other = other_dir.path().join("other.ed25519");
+    std::fs::write(&other, "11".repeat(32))?;
+    let other_s = other.to_str().expect("utf-8");
+    let refused = std::process::Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .args(["collab", "join", "--principal", "carol", "--key", other_s])
+        .current_dir(repo.path())
+        .output()?;
+    assert!(!refused.status.success(), "rotation needs --force");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("different public key"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    run_in(
+        repo.path(),
+        &[
+            "collab", "join", "--principal", "carol", "--key", other_s, "--force",
+        ],
+    )?;
+    // The identity points at the rotated key and still signs.
+    let comment = run_in(
+        repo.path(),
+        &[
+            "collab",
+            "entry",
+            "--kind",
+            "comment",
+            "--id",
+            "t1",
+            "--parent",
+            &issue_oid,
+            "--body",
+            r#"{"note":"after rotation"}"#,
+        ],
+    )?;
+    assert!(comment.contains("refs/collab/inbox/carol/"), "{comment}");
+    Ok(())
+}

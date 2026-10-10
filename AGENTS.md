@@ -672,6 +672,8 @@ decision in §4 — or the PR is; never "fix later".
   own bookkeeping, formed by one self-registration each; roster changes are new registrations
   or revocations by the agents, never edits to a central list. Private keys stay agent-side
   at `~/.walgit/keys/<principal>.ed25519` (`0600`); the registry carries only public keys.
+  *(Key location amended by D58: project-local at
+  `<git-common-dir>/walgit/keys/<principal>.ed25519`; the binding rule above stands.)*
   Consumer-facing statement in `web/SKILL.md` §0/§0a (the automatic first-contact routine)
   and `skills/walgit/SKILL.md` §5.
 - **D55** **There is no wait / long-poll lane; refs-level polling and adapter-side subscriptions are

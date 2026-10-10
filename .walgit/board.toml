@@ -24,8 +24,8 @@ direction = "desc" # desc(默认,新在前) | asc
 # 示例：
 #   walgit --config ~/.walgit/walgit.toml collab entry --kind status \
 #     --id <thread-id> --actor <you> --parent <issue-oid> \
-#     --body '{"status":"in-progress","owner":"<principal>","worktree":"wt-x","branch":"feat/x","work":"..."}' \
-#     --key ~/.walgit/keys/<principal>.ed25519 --push origin
+#     --body '{"status":"in-progress","owner":"<principal>","worktree":"wt-x","branch":"feat/x","work":"..."}' --push origin
+# `--principal`/`--actor`/`--key` 缺省取项目身份 (`walgit collab join`)
 
 # 一列一个谓词；只声明你真正想看到的列。
 # 字段：name(必填)、kind、status、merge、unverified
