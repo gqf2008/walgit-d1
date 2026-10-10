@@ -139,12 +139,6 @@ export const api = {
   /** Who am I (principal + write + admin + anonymous) — D1 collab identity. */
   me: () => authRedirect(client.me()),
   /**
-   * Identity for chrome decisions (the 存储配置 nav entry, #127): like
-   * `me()` but **no reload on 401** — an unauthenticated visitor on a
-   * sign-in-required host must not be reload-looped by its own top bar.
-   */
-  identity: () => track(client.me()),
-  /**
    * #127: the admin storage surface. **No authRedirect**: a 401 here is an
    * expected answer (not-an-admin / not-signed-in visitor opening `/setup`),
    * and reload-on-401 in that spot would loop the page. Callers render the

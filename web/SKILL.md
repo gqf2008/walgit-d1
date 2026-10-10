@@ -110,6 +110,11 @@ full operator lifecycle and maintenance runbooks. On Windows the installer regis
 directory on the **user** PATH (HKCU `Environment`, removed again at uninstall), so a shell started after
 the install finds `walgit`; one that was already running (or a child of it) needs a restart.
 
+If the bucket credentials are rotated and the host can no longer reach the bucket, fix it from the
+web UI's top-bar「存储」/Storage entry: a `token`-mode instance has no browser sign-in, so the
+page asks for the admin token when the storage read is refused — paste the static token from
+`walgit.toml` (`[[server.auth.tokens]]`) or a `wgt_…` access token (D60; server auth unchanged).
+
 ## Discover
 
 - `GET /api/v1` — the discovery document (lanes, endpoint list).

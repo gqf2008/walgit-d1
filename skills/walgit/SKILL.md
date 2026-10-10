@@ -264,3 +264,7 @@ them with signed `ci_claim` entries and publishes signed results into `ci-*` thr
   `connectivity: … object could not be found`; verify the object with `git cat-file`/`verify-pack`, then
   stop the service and rebuild (or move aside) the index before retrying.
 - `[events]` (or `roles = ["events"]`) in `walgit.toml` is a hard parse error since the D46 removal.
+- Rotated an object-store credential and the host can no longer reach the bucket? Fix it from the web
+  UI's top-bar「存储」entry: a `token`-mode instance has no browser sign-in, so the page asks for the admin
+  token (the static token in `walgit.toml` or a `wgt_…` access token) and carries it in the bearer lane
+  for this tab only (D60). Editing `walgit.toml` by hand and restarting also works.
