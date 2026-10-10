@@ -99,6 +99,53 @@ walgit repo list                                     # repos visible in the conf
 Credentials come from the env vars the config names (e.g. `R2_ACCESS_KEY` / `R2_SECRET_KEY`) or the
 installer-managed credentials file; never print them.
 
+## 4b. Maintenance & administration
+
+Serving instances are disposable; heavy maintenance runs on a host with real disk
+(`maintenance.disk = "ssd"`), same binary and config. The maintainer loop does these
+automatically (D22) — the commands below are the manual forms and the repair tools.
+
+**Compaction & bundles.**
+```bash
+walgit compact --all                    # geometric fold of fresh packs (leased leader)
+walgit compact --base <owner/name>      # rebuild the tier-2 base: repack -adb + bitmap +
+                                        # commit-graph (weekly VM job; needs the pack set local)
+walgit bundle compose <owner/name>      # header ∘ base (server-side compose); run after --base
+walgit bundle plan <owner/name>         # slot table: built / missing / unavailable / wrong-host
+walgit bundle run [--repo r] [--strategy s]   # build due bundles now
+walgit bundle rm <owner/name> <id>...   # drop wrong bundles (CAS) and delete their objects
+```
+
+**WAL provenance & pack repair.**
+```bash
+walgit wal head <owner/name> [--fresh]  # refs-level head seq (no pack sync)
+walgit wal ls <owner/name> [--from s] [--to s] / wal show <owner/name> <seq>
+walgit wal materialize <owner/name> --at-seq <n> --out <dir>
+walgit wal rev-index <pack-<sha>.idx>   # derive .rev from .idx in seconds
+walgit wal annotate-pack <owner/name> <checksum> [--rev f] [--bitmap f] [--commit-graph f]
+walgit wal add-pack <owner/name> <pack-<sha>.pack> [--history-of <base>] [--tier 2]
+```
+
+**Import / mirror.**
+```bash
+walgit import <owner/name> --from <git-dir|worktree> [--reuse-packs]
+walgit import <owner/name> --from <dir> --direct [--packs <dir> --replace --force]
+walgit mirror --from <src-url> --to <dst-url> --dir <bare-buffer> [--ref r] [--once] [--force]
+```
+
+**Repository & principal administration.**
+```bash
+walgit repo create [--object-format sha1|sha256] <owner/name>   # + repo list / repo info <r>
+walgit repo policy get|set|clear <owner/name>               # push policy (writes are admin)
+walgit repo settings show|set|clear|history <owner/name>    # per-repo TOML (D24)
+walgit principal register|rotate --url <host> --principal <p> --key <file>
+walgit principal list|revoke     --url <host> [--principal <p>]   # self-only
+```
+
+Collab-registry ops live in §5 too: `collab principal-register|revoke|fetch` and
+`collab thread-heads`. The admin storage editor is the web UI top-bar「存储」entry
+(`GET|PUT /api/v1/store`, D44/D60).
+
 ## 5. D1 collaboration bookkeeping (`walgit collab …`)
 
 Issues, PRs, reviews, status and the board are **append-only signed entries** in `refs/collab/*`; the
@@ -146,6 +193,7 @@ W collab ls                     # thread ids
 W collab board                  # work-unit board (.walgit/board.toml; read-only projection)
 W collab report                 # threads / PRs / verification / activity
 W collab thread <id>            # parent-ordered, per-entry signature verification
+W collab thread-heads           # thread id -> head oid index, one pass
 W collab pr <id>                # aggregated PR view + merge-rule evaluation
 ```
 
@@ -165,6 +213,13 @@ W collab entry --kind <issue|comment|patch|review|merge_result|status> \
 # an already over-cap snapshot with an empty tail).
 W collab gc --actor <principal> \
   [--push origin] [--truncate]
+
+# Registry: publish/rotate a principal's key, tombstone it, or cache the host
+# registry (one registration verifies in every repository of that host; a
+# repo-local registration still wins).
+W collab principal-register --principal <p> [--key <file>] [--push origin]
+W collab principal-revoke   --principal <p> [--push origin]
+W collab principal-fetch    [--remote origin] [--token $WALGIT_TOKEN]
 ```
 
 | kind | body (required) | use |
@@ -251,7 +306,8 @@ long work in the hook, unverified input) and a copyable hook are in the host gui
 
 The server holds no CI logic: `.walgit/ci.toml` in the tested commit declares tasks; a runner claims
 them with signed `ci_claim` entries and publishes signed results into `ci-*` threads
-(`walgit ci validate`, `walgit ci run --once`, `walgit ci status`).
+(`walgit ci validate`, `walgit ci run --once`, `walgit ci status`, `walgit ci log [<run>]`,
+`walgit ci artifacts [<run>] [--out <dir>]`).
 
 ## 8. Known pitfalls
 

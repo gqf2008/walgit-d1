@@ -104,7 +104,9 @@ back is never auto-retried (the menu still offers it).
 
 `walgit serve` runs a standalone host; `walgit service start|stop|status|restart` manages the
 installed service. Validate or print the effective configuration with `walgit config check` /
-`walgit config dump`. Cross-repository principals are managed with `walgit principal …`. The
+`walgit config dump`. Cross-repository principals are managed with
+`walgit principal register|rotate|list|revoke` (host registry over HTTP: `--url` plus
+`--principal`/`--key`; self-only writes). The
 installed ops skill (`skills/walgit/SKILL.md`, published through the public installer) has the
 full operator lifecycle and maintenance runbooks. On Windows the installer registers its install
 directory on the **user** PATH (HKCU `Environment`, removed again at uninstall), so a shell started after
@@ -147,6 +149,8 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
   - `walgit collab ls` — thread ids on `refs/collab/inbox/*`.
   - `walgit collab thread <id>` — one thread, parent-ordered, per-entry
     signature verification.
+  - `walgit collab thread-heads` — the `thread id → head oid` index in one
+    aggregation pass (cheap: no per-thread materialization).
   - `walgit collab pr <id>` — aggregated PR view + merge-rule evaluation.
   - `walgit collab board` — the work-unit board: threads projected under
     `.walgit/board.toml`. Read-only — moving a card is a signed `status`
@@ -155,7 +159,12 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     verification health, activity.
 - Write (construct + sign + deliver):
   - Before a parallel workstream: register the whole team, one principal per
-    agent (see §0b); `walgit collab principal-register` publishes a public key.
+    agent (see §0b). `walgit collab principal-register` publishes (or
+    re-registers = rotates) a principal's public key; `principal-revoke`
+    tombstones it (deletes the registry ref); `principal-fetch` caches the
+    **host** registry (issue #76: one registration verifies in every repo of
+    that host) under `refs/walgit/principals/*` for offline verification — a
+    repo-local registration always wins.
   - `walgit collab entry --kind <kind> --id <thread> --actor <principal>
     --body '<json>' --key <keyfile> [--base … --head …] --push <remote>
     [--auto-fold --fold-threshold <n>]`
@@ -187,6 +196,10 @@ The server holds no CI logic. A runner is a client:
   race: both may run, exactly one result is effective (deterministic winner
   rule), the others are kept for audit.
 - `walgit ci status` — every run in the checkout's collab log, aggregated.
+- `walgit ci log [<run>]` — a run's full captured log (the `log_sha256` blob,
+  fetched on demand; falls back to the entry's stored summary); `walgit ci
+  artifacts [<run>] [--out <dir>]` downloads a run's artifacts,
+  sha256-verified. Both default to the newest run.
 
 ### Listening for events (pull, never push — D46)
 
@@ -266,16 +279,35 @@ bucket access; a host URL and (on token/oidc hosts) a bearer suffice:
 
 ### Repository management & ops
 
-- `walgit repo create|list|info` — manage repositories (bucket-direct:
-  needs the host config; the reads above do not).
-- `walgit repo policy` — per-repo push rules (`policy.json`).
-- `walgit repo settings` — per-repo TOML overrides (`[bundles]`,
-  `[maintenance]`, `[compaction]`) published through the WAL.
-- `walgit wal ls|show|materialize` — provenance: every push, repack,
-  checkpoint is a log entry you can read and replay.
-- `walgit mirror` — follow another git host's refs into walgit.
-- `walgit import` — import an existing repository; `walgit compact`,
-  `walgit bundle` — maintainer operations (compaction, static bundles).
+- `walgit repo create [--object-format sha1|sha256] <owner/name>` /
+  `walgit repo list` / `walgit repo info <owner/name>` — manage repositories
+  (bucket-direct: needs the host config; the HTTP reads above do not).
+- `walgit repo policy get|set|clear <owner/name>` — per-repo push rules
+  (`policy.json`); writes are admin.
+- `walgit repo settings show|set|clear|history <owner/name>` — per-repo TOML
+  overrides (`[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`)
+  published through the WAL (D24); writes are admin.
+- `walgit wal head|ls|show <owner/name>` — provenance: every push, repack and
+  checkpoint is a log entry; `walgit wal materialize <owner/name> --at-seq <n>
+  --out <dir>` rebuilds the repository at a historical sequence.
+- Maintainer operations (disk/CPU heavy — run on an SSD host, never a serving
+  instance; the maintainer also does these automatically, D22):
+  - `walgit compact [<owner/name>|--all] [--once]` folds fresh packs
+    geometrically; `--base` rebuilds the tier-2 base (full `repack -adb` +
+    bitmap + commit-graph), then run `walgit bundle compose <owner/name>`.
+  - `walgit bundle run [--repo <r>] [--strategy <s>]` builds due static
+    bundles; `bundle plan <owner/name>` prints the slot table;
+    `bundle compose <owner/name>` publishes a full bundle from the base;
+    `bundle rm <owner/name> <id>...` drops wrong entries.
+  - `walgit wal add-pack <owner/name> <pack-<sha>.pack> [--history-of <base>]`
+    publishes an already built pack; `walgit wal annotate-pack <owner/name>
+    <checksum> [--rev f] [--bitmap f] [--commit-graph f]` retrofits side-files;
+    `walgit wal rev-index <pack.idx>` derives the `.rev` from the `.idx`.
+  - `walgit import <owner/name> --from <git-dir|worktree> [--reuse-packs]`, or
+    `--direct [--packs <dir>] [--replace] [--force]` to publish straight into
+    the bucket; `walgit mirror --from <src> --to <dst> --dir <buffer>
+    [--ref <r>] [--once] [--force]` keeps a walgit repo's refs equal to another
+    host's.
 
 ## HTTP API
 
