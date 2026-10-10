@@ -329,14 +329,14 @@ everyone re-derives the same view from the refs.
 - Before the first thread, register the whole team, not one lone identity: a worker
   pool, a reviewer pool, and a coordinator. A practical default is
   `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, and `<proj>-coordinator`. Each
-  collaborator runs only its own line, in its own clone (the key stays inside that
-  clone's `.git/`, so no shared key directory exists to get wrong):
+  collaborator runs only its own line, in its own worktree (its own identity; the key
+  stays inside that worktree's git dir, so no shared key directory exists to get wrong):
 
   ```sh
   checkout=/path/to/checkout
   proj=my-project
   walgit collab join --repo "$checkout" --principal "${proj}-worker-1" --push origin
-  # one clone + one `join` per principal (worker-2, reviewer-1, coordinator, …)
+  # one worktree + one `join` per principal (worker-2, reviewer-1, coordinator, …)
   ```
 
 - Register once per repository. `--push origin` publishes the public key so other agents
@@ -461,7 +461,7 @@ walgit collab entry --repo "$checkout" --kind status --id <thread> \
   --body '{"status":"needs-review","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"ready for independent review"}' \
   --push origin
 
-# 5. Review with a different principal (its own clone). Full findings go in note.
+# 5. Review with a different principal (its own worktree). Full findings go in note.
 walgit collab entry --repo "$checkout" --kind review --id <thread> \
   --actor <proj>-reviewer-1 --parent <review-request-oid> \
   --body '{"decision":"approve","agent":"<proj>-reviewer-1","note":"location; problem; suggestion; reproducible verification"}' \
@@ -639,8 +639,10 @@ console** (the human's surface); everything in between is background sub-agents.
   started by the orchestrator, one per card, in that card's worktree. It never shares a
   checkout or a key with another sub-agent.
 - The **orchestrator** owns the process lifecycle: launch, timeout, budget, restart on a
-  crash, capture the log, and remove the worktree/branch after the card is closed. Sub-agent
-  process state is local and disposable; the durable truth stays in `refs/collab/*`.
+  crash, capture the log, and remove the worktree/branch after the card is closed. Note that a
+  worktree's identity lives in that worktree's git dir, so **removing the worktree retires its
+  identity** — preserve the seed before removal if the principal must outlive the worktree.
+  Sub-agent process state is local and disposable; the durable truth stays in `refs/collab/*`.
 - Cap the active set (2–4 workers + 1–2 acceptance) to what the host can run; serialize work
   that touches the same files/schema (§0b).
 - Never let a sub-agent sit silently: its claim, progress and result are entries; the human

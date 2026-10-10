@@ -1413,8 +1413,8 @@ async fn watch_fetch_prunes_revoked_registry_refs() -> TestResult {
 }
 
 /// Project-level collaboration identity (D58): `collab join` materializes the
-/// key + identity under `<git-common-dir>/walgit/` (never the work tree, never
-/// tracked, shared by every worktree), and `collab entry` resolves
+/// key + identity under `<git-dir>/walgit/` (never the work tree, never tracked —
+/// one identity per worktree, the main checkout included), and `collab entry` resolves
 /// `--actor`/`--key` from it so a project only ever references its own
 /// identity. Local-only writes: no server involved.
 #[test]
@@ -1444,7 +1444,7 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
     run_in(repo.path(), &["collab", "join", "--principal", "alice"])?;
     let identity_dir = repo.path().join(".git/walgit");
     let key = identity_dir.join("keys/alice.ed25519");
-    assert!(key.exists(), "key lives under the git common dir");
+    assert!(key.exists(), "key lives under the worktree git dir");
     assert!(
         !repo.path().join(".walgit/keys").exists(),
         "nothing is written into the tracked work tree"
