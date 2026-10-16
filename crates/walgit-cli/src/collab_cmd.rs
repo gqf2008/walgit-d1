@@ -179,6 +179,15 @@ pub enum CollabAction {
         /// Merge-rules JSON file (same shape as `pr --rules`).
         #[arg(long)]
         rules: Option<PathBuf>,
+        /// Compare the local `refs/collab/*` against this remote and print
+        /// `unpushed: N` — how many of this checkout's collab refs the remote
+        /// does not have. Read commands are local-only by design
+        /// (`docs/D1_PROTOCOL.md` §3.2); this flag is the explicit way out of
+        /// that lane. The remote is read with `git ls-remote` (no walgit API),
+        /// and an unreachable remote is an error — never a silent
+        /// `unpushed: 0`.
+        #[arg(long)]
+        remote: Option<String>,
     },
     /// The work-unit board (`docs/D1_PROTOCOL.md` §7.4/§8): the threads projected under the board
     /// definition at `.walgit/board.toml` (HEAD). Read-only: moving a card is
@@ -364,7 +373,8 @@ pub async fn run(action: CollabAction) -> Result<()> {
             repo,
             format,
             rules,
-        } => run_report(&repo, &format, rules.as_deref())?,
+            remote,
+        } => run_report(&repo, &format, rules.as_deref(), remote.as_deref())?,
         CollabAction::Board {
             repo,
             format,
@@ -913,6 +923,15 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
     git_update_ref(&args.repo, &ref_name, Some(&oid))?;
     if let Some(remote) = &args.push {
         git_push(&args.repo, remote, &ref_name)?;
+    } else {
+        // Local-only is a deliberate mode (`--push` omitted), and the write
+        // path used to say nothing: the entry is in this checkout's aggregation
+        // and invisible to everyone else until it is pushed. Say so at the one
+        // moment it is cheap to fix. stdout stays `ref oid` (scripts parse it).
+        eprintln!(
+            "note: {ref_name} written to this checkout only — no remote sees it until \
+             `--push <remote>`, or `git push <remote> 'refs/collab/inbox/*:refs/collab/inbox/*'`"
+        );
     }
     println!("{ref_name} {oid}");
     if args.auto_fold && args.push.is_some() {
@@ -1200,6 +1219,17 @@ fn git_push_refspecs(
 /// trip either way (every push below re-fetches the same advertisement), and
 /// the pruning must not depend on ls-remote's glob semantics.
 fn git_ls_remote_inbox(repo: &Path, remote: &str) -> Result<HashMap<String, String>> {
+    git_ls_remote_collab(repo, remote, "refs/collab/inbox/")
+}
+
+/// The remote's `refs/collab/*` under `prefix` as `refname -> oid`. The whole
+/// advertisement is read in one round trip and filtered here (the gc's inbox
+/// view rides the same call — see `git_ls_remote_inbox`).
+fn git_ls_remote_collab(
+    repo: &Path,
+    remote: &str,
+    prefix: &str,
+) -> Result<HashMap<String, String>> {
     let out = std::process::Command::new("git")
         .args(["-C"])
         .arg(repo)
@@ -1216,7 +1246,7 @@ fn git_ls_remote_inbox(repo: &Path, remote: &str) -> Result<HashMap<String, Stri
         .lines()
         .filter_map(|l| l.split_once('\t'))
         .map(|(oid, name)| (name.trim().to_string(), oid.to_string()))
-        .filter(|(name, _)| name.starts_with("refs/collab/inbox/"))
+        .filter(|(name, _)| name.starts_with(prefix))
         .collect())
 }
 
@@ -1474,7 +1504,7 @@ fn unit_label<'a>(title: &'a str, id: &'a str) -> &'a str {
     }
 }
 
-fn render_report_text(r: &Report) -> String {
+fn render_report_text(r: &Report, unpushed: Option<&Unpushed>) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -1484,6 +1514,11 @@ fn render_report_text(r: &Report) -> String {
         r.verified_entries,
         r.total_entries
     );
+    // Appended only under `--remote`: the default report stays byte-identical
+    // to what every existing reader (and its tests) sees.
+    if let Some(u) = unpushed {
+        let _ = writeln!(out, "{}\n", u.line());
+    }
     let _ = writeln!(out, "threads");
     for t in &r.threads {
         let _ = writeln!(
@@ -1512,7 +1547,7 @@ fn render_report_text(r: &Report) -> String {
     out
 }
 
-fn render_report_markdown(r: &Report) -> String {
+fn render_report_markdown(r: &Report, unpushed: Option<&Unpushed>) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -1522,6 +1557,9 @@ fn render_report_markdown(r: &Report) -> String {
         r.verified_entries,
         r.total_entries
     );
+    if let Some(u) = unpushed {
+        let _ = writeln!(out, "{}\n", u.line());
+    }
     let _ = writeln!(
         out,
         "## threads\n\n| title | entries | verified | kinds | last |\n|---|---|---|---|---|"
@@ -1552,7 +1590,7 @@ fn render_report_markdown(r: &Report) -> String {
     out
 }
 
-fn render_report_html(r: &Report) -> String {
+fn render_report_html(r: &Report, unpushed: Option<&Unpushed>) -> String {
     let mut rows = String::new();
     for t in &r.threads {
         let _ = writeln!(
@@ -1576,11 +1614,14 @@ fn render_report_html(r: &Report) -> String {
             p.merge_allowed
         );
     }
+    let unpushed_html = unpushed.map_or_else(String::new, |u| {
+        format!("<p>unpushed: {} (vs {})</p>", u.count, esc(&u.remote))
+    });
     format!(
         "<!doctype html><html><head><meta charset=utf-8><title>walgit collab</title>\
 <style>body{{font-family:system-ui;margin:2rem;color:#111}}table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:.3rem .6rem;text-align:left}}</style>\
 </head><body><h1>collab report</h1>\
-<p>{} threads, {} PRs, {}/{} entries verified</p>\
+<p>{} threads, {} PRs, {}/{} entries verified</p>{unpushed_html}\
 <h2>threads</h2><table><tr><th>title</th><th>entries</th><th>verified</th><th>kinds</th><th>last</th></tr>{}</table>\
 <h2>PRs</h2><table><tr><th>title</th><th>status</th><th>approvals</th><th>merge</th></tr>{}</table>\
 </body></html>",
@@ -1630,12 +1671,75 @@ fn load_merge_rules(repo: &Path, rules_path: Option<&Path>) -> Result<MergeRules
     serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("refs/collab/meta/rules: {e}"))
 }
 
-fn run_report(repo: &Path, format: &str, rules_path: Option<&Path>) -> Result<()> {
+/// How many of this checkout's `refs/collab/{inbox,meta}` refs the remote does
+/// not have (`report --remote`). This is the answer the local-only read path
+/// cannot give: every aggregation command reads the local refs
+/// (`docs/D1_PROTOCOL.md` §3.2), so "N/N entries verified" says nothing about
+/// what other clones can see. Counting the meta namespace too is deliberate —
+/// a fold moves the ledger into `meta/snapshot` and deletes the inbox refs, so
+/// an inbox-only count would read `unpushed: 0` on a folded, unpublished
+/// checkout, which is exactly the silent failure this line exists to remove.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unpushed {
+    pub remote: String,
+    pub count: usize,
+}
+
+impl Unpushed {
+    /// The two namespaces a peer mirrors, in the same shape the fetch recipe
+    /// names them (`docs/D1_PROTOCOL.md` §3.2 / `web/SKILL.md`) — the push is
+    /// that recipe's reverse, and it never carries `refs/walgit/*`.
+    fn fix(&self) -> String {
+        format!(
+            "git push {} 'refs/collab/inbox/*:refs/collab/inbox/*' 'refs/collab/meta/*:refs/collab/meta/*'",
+            self.remote
+        )
+    }
+
+    /// One line, plus the fix on its own indented line when there is something
+    /// to push. Same wording for text and markdown (plain text renders as
+    /// itself in both); HTML escapes it.
+    fn line(&self) -> String {
+        let head = format!("unpushed: {} (vs {})", self.count, self.remote);
+        if self.count == 0 {
+            head
+        } else {
+            format!("{head}\n  fix: {}", self.fix())
+        }
+    }
+}
+
+/// Compare the local collab refs against a remote (`report --remote`). A
+/// remote we cannot read is an **error**, not an empty answer: "not checked"
+/// must never render as `unpushed: 0` — the same fail-closed rule the
+/// signature checks follow.
+fn unpushed_vs_remote(repo: &Path, remote: &str) -> Result<Unpushed> {
+    let local = CollabReader::new(repo).syncable_refs()?;
+    let remote_refs = git_ls_remote_collab(repo, remote, "refs/collab/")?;
+    let count = local
+        .iter()
+        .filter(|(name, oid)| remote_refs.get(name) != Some(oid))
+        .count();
+    Ok(Unpushed {
+        remote: remote.to_string(),
+        count,
+    })
+}
+
+fn run_report(
+    repo: &Path,
+    format: &str,
+    rules_path: Option<&Path>,
+    remote: Option<&str>,
+) -> Result<()> {
     let reader = CollabReader::new(repo);
     let (entries, principals) = reader.load()?;
     let refs: Vec<&EntryRef> = entries.iter().collect();
     let rules = load_merge_rules(repo, rules_path)?;
     let report = build_report(&refs, &principals, &rules, chrono::Utc::now().timestamp());
+    // `--remote` is the only thing here that touches the network; absent it,
+    // the report stays the local-only view it has always been.
+    let unpushed = remote.map(|r| unpushed_vs_remote(repo, r)).transpose()?;
     // The snapshot's completeness marker (§9): a truncated fold says so in the
     // report instead of silently reading like the whole ledger.
     let truncated = CollabReader::new(repo)
@@ -1655,17 +1759,17 @@ fn run_report(repo: &Path, format: &str, rules_path: Option<&Path>) -> Result<()
     match format {
         "text" => print!(
             "{banner}{}\nci runs\n{}",
-            render_report_text(&report),
+            render_report_text(&report, unpushed.as_ref()),
             crate::ci_cmd::ci_runs_text(&runs)
         ),
         "markdown" => print!(
             "{banner}{}\n## CI runs\n\n{}",
-            render_report_markdown(&report),
+            render_report_markdown(&report, unpushed.as_ref()),
             crate::ci_cmd::ci_runs_markdown(&runs)
         ),
         "html" => {
             let section = crate::ci_cmd::ci_runs_html(&runs);
-            let html = render_report_html(&report);
+            let html = render_report_html(&report, unpushed.as_ref());
             let html = if let Some(n) = truncated {
                 html.replace(
                     "<body>",
@@ -2251,6 +2355,31 @@ impl CollabReader {
             .collect())
     }
 
+    /// Every local `refs/collab/{inbox,meta}` ref as `(refname, oid)` — the
+    /// refs a peer needs for this checkout's aggregation (entries plus the
+    /// principals/snapshot/rules the fold and the verification read).
+    /// `refs/walgit/principals/*` stays out: it is a client-local cache of the
+    /// host registry, never part of a repository's protocol
+    /// (`docs/D1_PROTOCOL.md` §3).
+    fn syncable_refs(&self) -> Result<Vec<(String, String)>> {
+        let out = self.git(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/collab/inbox",
+            "refs/collab/meta",
+        ])?;
+        Ok(String::from_utf8_lossy(&out)
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split_whitespace();
+                match (it.next(), it.next()) {
+                    (Some(r), Some(o)) => Some((r.to_string(), o.to_string())),
+                    _ => None,
+                }
+            })
+            .collect())
+    }
+
     /// The repository's object format; snapshot records carry either 40- or
     /// 64-hex oids and must be validated in the same hash domain.
     fn object_format(&self) -> Result<ObjectFormat> {
@@ -2649,13 +2778,16 @@ mod tests {
 
         // Determinism: identical input -> identical text render.
         let r2 = build_report(&refs, &principals, &rules, 1_700_000_000);
-        assert_eq!(render_report_text(&r1), render_report_text(&r2));
-        assert_eq!(render_report_markdown(&r1), render_report_markdown(&r2));
-        assert_eq!(render_report_html(&r1), render_report_html(&r2));
-        assert!(render_report_html(&r1).contains("<!doctype html>"));
-        assert!(render_report_html(&r1).contains("</html>"));
+        assert_eq!(render_report_text(&r1, None), render_report_text(&r2, None));
+        assert_eq!(
+            render_report_markdown(&r1, None),
+            render_report_markdown(&r2, None)
+        );
+        assert_eq!(render_report_html(&r1, None), render_report_html(&r2, None));
+        assert!(render_report_html(&r1, None).contains("<!doctype html>"));
+        assert!(render_report_html(&r1, None).contains("</html>"));
         // Lists lead with the title, not the bare id (issue #131).
-        let text = render_report_text(&r1);
+        let text = render_report_text(&r1, None);
         assert!(text.contains("  t: "), "thread row is titled: {text}");
         assert!(text.contains("  t [open]"), "PR row is titled: {text}");
         assert!(!text.contains("pr1"), "the id hides behind a title: {text}");
@@ -3534,5 +3666,133 @@ mod capped_snapshot_tests {
                 .all(|r| r.oid != format!("{:040x}", 1)),
             "oldest dropped"
         );
+    }
+}
+
+#[cfg(test)]
+mod unpushed_tests {
+    //! `report --remote` (issue: collab entry 漏推是静默的). Every read command
+    //! answers from the **local** refs (`docs/D1_PROTOCOL.md` §3.2), so the
+    //! report's "N/N entries verified" cannot say what a peer clone sees; the
+    //! `unpushed: N` line is that missing answer, and it must never be produced
+    //! by a comparison that did not actually happen.
+    use super::*;
+
+    fn repo_with_remote(dir: &Path) -> (PathBuf, PathBuf) {
+        let remote = dir.join("remote.git");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let ok = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let ok = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["remote", "add", "origin"])
+            .arg(&remote)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        (repo, remote)
+    }
+
+    /// Write an inbox ref the way `collab entry` does, optionally pushing it.
+    fn inbox_ref(repo: &Path, name: &str, pushed: bool) {
+        let oid = git_write_blob(repo, &format!("{{\"n\":\"{name}\"}}")).unwrap();
+        let refname = format!("refs/collab/inbox/alice/{name}");
+        git_update_ref(repo, &refname, Some(&oid)).unwrap();
+        if pushed {
+            git_push(repo, "origin", &refname).unwrap();
+        }
+    }
+
+    #[test]
+    fn counts_the_local_refs_the_remote_does_not_have() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _remote) = repo_with_remote(tmp.path());
+        inbox_ref(&repo, "pushed", true);
+        inbox_ref(&repo, "local-only", false);
+
+        let u = unpushed_vs_remote(&repo, "origin").unwrap();
+        assert_eq!(u.count, 1, "one local-only inbox ref");
+        assert_eq!(u.remote, "origin");
+    }
+
+    /// The fold moves the ledger into `meta/snapshot` and deletes the inbox
+    /// refs: an inbox-only count would read `unpushed: 0` on a folded, never
+    /// published checkout — the exact silent failure this line exists to end.
+    #[test]
+    fn counts_meta_refs_too_so_a_folded_ledger_is_not_reported_as_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _remote) = repo_with_remote(tmp.path());
+        let snapshot = git_write_blob(&repo, "{\"entries\":[]}").unwrap();
+        git_update_ref(&repo, "refs/collab/meta/snapshot", Some(&snapshot)).unwrap();
+        // The client-local host-registry cache is not part of the protocol and
+        // must not count (docs/D1_PROTOCOL.md §3).
+        let host = git_write_blob(&repo, "{\"version\":1}").unwrap();
+        git_update_ref(&repo, "refs/walgit/principals/alice", Some(&host)).unwrap();
+
+        let u = unpushed_vs_remote(&repo, "origin").unwrap();
+        assert_eq!(u.count, 1, "only the unpublished snapshot counts");
+    }
+
+    /// A remote we cannot read is an error. Rendering `unpushed: 0` here would
+    /// turn "not checked" into "checked, all good" — the fail-open shape the
+    /// incident was about.
+    #[test]
+    fn an_unreadable_remote_is_an_error_not_a_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _remote) = repo_with_remote(tmp.path());
+        inbox_ref(&repo, "local-only", false);
+        let err = unpushed_vs_remote(&repo, "no-such-remote").unwrap_err();
+        assert!(
+            err.to_string().contains("git ls-remote"),
+            "the failure is named: {err}"
+        );
+    }
+
+    /// The line rides `--remote` only: the default report keeps its bytes.
+    #[test]
+    fn the_line_only_exists_when_the_comparison_ran() {
+        let report = Report::default();
+        for text in [
+            render_report_text(&report, None),
+            render_report_markdown(&report, None),
+            render_report_html(&report, None),
+        ] {
+            assert!(
+                !text.contains("unpushed"),
+                "default stays local-only: {text}"
+            );
+        }
+        let u = Unpushed {
+            remote: "origin".into(),
+            count: 3,
+        };
+        let text = render_report_text(&report, Some(&u));
+        assert!(text.contains("unpushed: 3 (vs origin)"), "{text}");
+        assert!(
+            text.contains("fix: git push origin 'refs/collab/inbox/*:refs/collab/inbox/*'"),
+            "the fix travels with the count: {text}"
+        );
+        assert!(render_report_markdown(&report, Some(&u)).contains("unpushed: 3 (vs origin)"));
+        assert!(render_report_html(&report, Some(&u)).contains("<p>unpushed: 3 (vs origin)</p>"));
+        let zero = Unpushed {
+            remote: "origin".into(),
+            count: 0,
+        };
+        let text = render_report_text(&report, Some(&zero));
+        assert!(text.contains("unpushed: 0 (vs origin)"), "{text}");
+        assert!(!text.contains("fix:"), "nothing to fix at zero: {text}");
     }
 }

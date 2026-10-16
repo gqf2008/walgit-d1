@@ -157,6 +157,11 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     entry, not an edit.
   - `walgit collab report` — global dashboard: threads, PR status,
     verification health, activity.
+    It reads the **local** `refs/collab/*` only, so "N/N entries verified"
+    says nothing about what other clones can see; `report --remote <name>`
+    is the explicit way out of that lane — it compares the local collab refs
+    against the remote and prints `unpushed: N` (with the `git push` that
+    fixes it). An unreachable remote is an error, never a silent `unpushed: 0`.
 - Write (construct + sign + deliver):
   - Before a parallel workstream: register the whole team, one principal per
     agent (see §0b). `walgit collab principal-register` publishes (or
@@ -170,6 +175,10 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     [--auto-fold --fold-threshold <n>]`
     — appends a signed entry and pushes it. Nobody edits state; a change is
     a new signed entry whose parent chain anyone can replay and verify.
+    **Without `--push` the entry stays in this checkout** (a deliberate
+    local-only mode) and no remote will see it until it is pushed; the
+    command says so on stderr, and `report --remote` counts what is missing
+    remotely.
     `--auto-fold` (threshold default 10000) folds the inbox with the same
     actor/key once the unfolded refs pass the threshold — the server's
     aggregate read budget is 20000 refs.

@@ -193,10 +193,18 @@ W() { walgit --config ~/.walgit/walgit.toml "$@"; }
 W collab ls                     # thread ids
 W collab board                  # work-unit board (.walgit/board.toml; read-only projection)
 W collab report                 # threads / PRs / verification / activity
+W collab report --remote origin # … plus `unpushed: N` vs that remote
 W collab thread <id>            # parent-ordered, per-entry signature verification
 W collab thread-heads           # thread id -> head oid index, one pass
 W collab pr <id>                # aggregated PR view + merge-rule evaluation
 ```
+
+Read commands answer from the **local** `refs/collab/*` only (`docs/D1_PROTOCOL.md` §3.2 / `/SKILL.md`
+§3): a board that looks complete on one machine can be missing entries other clones never received.
+`W collab report --remote <remote>` is the explicit way out of that lane — it prints `unpushed: N`
+(the local collab refs the remote does not have) and the `git push` that fixes it; an unreadable
+remote fails loudly instead of rendering `unpushed: 0`. Symmetrically, `collab entry` **without**
+`--push` writes to this checkout only and says so on stderr.
 
 Write entries (one signed entry per push; the printed second column is the entry oid that becomes the
 next `--parent`):
