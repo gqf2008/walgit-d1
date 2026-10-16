@@ -1615,7 +1615,17 @@ fn render_report_html(r: &Report, unpushed: Option<&Unpushed>) -> String {
         );
     }
     let unpushed_html = unpushed.map_or_else(String::new, |u| {
-        format!("<p>unpushed: {} (vs {})</p>", u.count, esc(&u.remote))
+        if u.count == 0 {
+            format!("<p>unpushed: 0 (vs {})</p>", esc(&u.remote))
+        } else {
+            // The fix travels with the count in every format, HTML included.
+            format!(
+                "<p>unpushed: {} (vs {}) — fix: <code>{}</code></p>",
+                u.count,
+                esc(&u.remote),
+                esc(&u.fix())
+            )
+        }
     });
     format!(
         "<!doctype html><html><head><meta charset=utf-8><title>walgit collab</title>\
@@ -3786,7 +3796,9 @@ mod unpushed_tests {
             "the fix travels with the count: {text}"
         );
         assert!(render_report_markdown(&report, Some(&u)).contains("unpushed: 3 (vs origin)"));
-        assert!(render_report_html(&report, Some(&u)).contains("<p>unpushed: 3 (vs origin)</p>"));
+        let html = render_report_html(&report, Some(&u));
+        assert!(html.contains("<p>unpushed: 3 (vs origin)"), "{html}");
+        assert!(html.contains("fix: <code>git push origin"), "{html}");
         let zero = Unpushed {
             remote: "origin".into(),
             count: 0,
@@ -3794,5 +3806,8 @@ mod unpushed_tests {
         let text = render_report_text(&report, Some(&zero));
         assert!(text.contains("unpushed: 0 (vs origin)"), "{text}");
         assert!(!text.contains("fix:"), "nothing to fix at zero: {text}");
+        let html = render_report_html(&report, Some(&zero));
+        assert!(html.contains("<p>unpushed: 0 (vs origin)</p>"), "{html}");
+        assert!(!html.contains("fix:"), "nothing to fix at zero: {html}");
     }
 }
