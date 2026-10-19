@@ -100,7 +100,7 @@ dev-store-stop:
 # api_cli, follow, policy, policy_inbox — 21 tests, ~6 s on ubuntu) were evaluated
 # platform-clean for windows in #137 (no cfg/shell/signal/file-mode seams; the
 # same hermetic harness the windows-approved suites use since issue #2).
-SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test budgets --test setup_wizard --test api_cli --test follow --test policy --test policy_inbox"
+SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test budgets --test setup_wizard --test api_cli --test follow --test policy --test policy_inbox --test forward"
 
 # tests/ files that are not suites: harness.rs is the shared module the suites
 # `mod` in (it has no #[test] of its own); e2e/sim are separate tiers with their

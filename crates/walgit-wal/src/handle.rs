@@ -1366,6 +1366,11 @@ impl RepoHandle {
         synced: bool,
         created_at: Option<prost_types::Timestamp>,
     ) -> Result<PublishResult, WalError> {
+        if pack.is_some() && txn.updates.is_empty() {
+            return Err(WalError::Invalid(
+                "a push pack requires a nonempty ref transaction".into(),
+            ));
+        }
         let staged_checksum = pack.as_ref().map(|p| p.checksum.to_string());
         // Keep the pack protected until the publisher has produced its final
         // result. The guard is owned by a detached task below, not by the

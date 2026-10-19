@@ -53,6 +53,7 @@ use walgit_store::{ObjectStore, Prefixed, PutBody, PutMode, PutOptions, StoreErr
 
 /// Per-ref result within a publish.
 pub struct PublishResult {
+    /// Committed entry seq, or zero for a no-op/rejection (inspect `per_ref`).
     pub seq: u64,
     pub per_ref: Vec<(String, Result<(), RefError>)>,
 }
@@ -296,6 +297,8 @@ pub(crate) struct LogSlot {
     pub(crate) key: String,
     pub(crate) version: walgit_store::Version,
     pub(crate) first_seq: u64,
+    /// Exact attempt-unique immutable bytes, retained until the CAS resolves.
+    pub(crate) bytes: bytes::Bytes,
     /// Orphan segments (key, version as observed) whose seqs were burned to
     /// get here; CAS-deleted after our commit.
     pub(crate) burned: Vec<(String, walgit_store::Version)>,
@@ -341,9 +344,23 @@ pub(crate) async fn claim_log_slot(
     let mut burned: Vec<(String, walgit_store::Version)> = Vec::new();
     loop {
         let key = keys::log_segment_key(seq);
-        let bytes = encode(seq);
+        let encoded = encode(seq);
+        let (mut entries, consumed) = frame::decode_entries(&encoded)
+            .map_err(|error| WalError::Corrupt(format!("candidate log: {error}")))?;
+        if consumed != encoded.len() || entries.is_empty() {
+            return Err(WalError::Corrupt("incomplete candidate log".into()));
+        }
+        // Content-based version tokens can repeat after delete/recreate. A
+        // fresh nonce prevents a delayed delete from matching a later attempt.
+        if let Some(first) = entries.first_mut() {
+            first.meta.insert(
+                "walgit.publication_nonce".into(),
+                uuid::Uuid::new_v4().to_string(),
+            );
+        }
+        let bytes = frame::encode_entries(&entries);
         match store
-            .put(&key, PutBody::Bytes(bytes), PutMode::Create.into())
+            .put(&key, PutBody::Bytes(bytes.clone()), PutMode::Create.into())
             .await
         {
             Ok(meta) => {
@@ -351,6 +368,7 @@ pub(crate) async fn claim_log_slot(
                     key,
                     version: meta.version,
                     first_seq: seq,
+                    bytes,
                     burned,
                 }));
             }
@@ -413,18 +431,31 @@ pub(crate) async fn drop_own_slot(store: &Prefixed, slot: &LogSlot) {
 }
 
 /// After a manifest CAS failed with a non-412 error: did the write land?
-/// `Ok(Some(manifest))` when the fresh manifest lists our segment (committed),
-/// `Ok(None)` when it does not (not committed; leave the orphan alone).
+/// `Ok(Some(manifest))` only when the fresh manifest lists exactly our segment
+/// **and** the object at its key is byte-for-byte the attempt we wrote
+/// (committed), `Ok(None)` when evidence is absent (unknown, not rejection;
+/// leave it alone).
 pub(crate) async fn cas_landed(
     store: &Prefixed,
     slot: &LogSlot,
 ) -> Result<Option<Manifest>, WalError> {
-    let fresh = read_manifest_fresh(store).await?;
-    Ok(fresh.filter(|m| {
-        m.log_segments
-            .iter()
-            .any(|s| s.key == slot.key && s.first_seq == slot.first_seq)
-    }))
+    use walgit_store::ObjectStoreExt;
+    let Some(manifest) = read_manifest_fresh(store).await? else {
+        return Ok(None);
+    };
+    // Key and sequence alone are not identity: a delete/recreate cycle can put
+    // different bytes at the same key, and a content-token store aliases them.
+    let listed = manifest.log_segments.iter().any(|s| {
+        s.key == slot.key && s.first_seq == slot.first_seq && s.size == slot.bytes.len() as u64
+    });
+    if !listed {
+        return Ok(None);
+    }
+    let exact = store
+        .get_bytes(&slot.key)
+        .await?
+        .is_some_and(|(_, bytes)| bytes == slot.bytes);
+    Ok(exact.then_some(manifest))
 }
 
 /// Verify a ref transaction against a working ref map. Returns per-ref results.
@@ -722,6 +753,22 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         let mut diag_snaps: HashMap<String, walgit_git::RefsDiag> = HashMap::new();
         for req in &batch {
             let mut per_ref = verify_txn(&req.txn, &working_refs);
+            // A submission that changes nothing still validates its
+            // preconditions and reports success, but must not manufacture a
+            // log entry or claim a sibling's seq.
+            let changes = req.pack.is_some()
+                || req.txn.updates.iter().any(|update| {
+                    if !update.new_symbolic_target.is_empty() {
+                        return update.name != "HEAD"
+                            || update.new_symbolic_target != working_refs.head_target();
+                    }
+                    let current = working_refs.get(&update.name).unwrap_or_default();
+                    if is_null_oid(&update.new_oid) {
+                        !current.is_empty()
+                    } else {
+                        current != update.new_oid
+                    }
+                });
             // Issue #4 (WALGIT_TEST_REFS_DIAG): an update that is about to pass
             // (old == working view) while the disk tip disagrees means the
             // working view lost committed applies — dump the mechanism the
@@ -766,7 +813,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                             *r = Err(RefError::Rejected(msg.clone()));
                         }
                     }
-                if per_ref.iter().all(|(_, r)| r.is_ok()) {
+                if changes && per_ref.iter().all(|(_, r)| r.is_ok()) {
                     floor = Some(t);
                 }
             }
@@ -842,10 +889,24 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             }
             if all_ok {
                 apply_txn_to_map(&req.txn, &mut working_refs);
+            } else {
+                // C5: a complete submission commits all-or-none. Report the
+                // refs that passed their preconditions as rejected too, so the
+                // receipt never claims a partial success.
+                for (_, status) in &mut per_ref {
+                    if status.is_ok() {
+                        *status = Err(RefError::Rejected(
+                            "another ref in the submission was rejected".into(),
+                        ));
+                    }
+                }
             }
             verified.push(Verified {
                 per_ref,
-                valid: all_ok,
+                // A no-op still validates its preconditions and reports
+                // success, but must not manufacture a log entry or claim a
+                // sibling's seq.
+                valid: all_ok && changes,
             });
         }
 
@@ -919,12 +980,9 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             Ok::<(), WalError>(())
         }
         .instrument(span.clone());
-        let mut frame_len = 0usize;
         let claim = claim_log_slot(&handle.store, head_seq, |first_seq| {
             let (entries, _) = build(first_seq);
-            let b = frame::encode_entries(entries.iter());
-            frame_len = b.len();
-            b
+            frame::encode_entries(entries.iter())
         })
         .instrument(span.clone());
         let (pack_result, claim_result) = tokio::join!(pack_uploads, claim);
@@ -978,7 +1036,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             key: slot.key.clone(),
             first_seq,
             last_seq,
-            size: frame_len as u64,
+            size: slot.bytes.len() as u64,
             sealed: true,
         };
         updated.log_segments.push(seg_ref);
@@ -1315,7 +1373,11 @@ fn finish_with_error_msg(
 ) -> Result<(), WalError> {
     let _ = valid_indices;
     for req in batch {
-        let _ = req.response.send(Err(WalError::Corrupt(msg.to_string())));
+        // C7/C8: the CAS may still land. Absence of evidence is not a
+        // rejection — the caller must hear a typed unknown, never `ng`.
+        let _ = req
+            .response
+            .send(Err(WalError::CommitUnknown(msg.to_owned())));
     }
     Err(err)
 }
@@ -1502,11 +1564,8 @@ pub(crate) async fn publish_compact_impl(
             meta: HashMap::new(),
             settings: None,
         };
-        let mut frame_len = 0usize;
         let slot = match claim_log_slot(&handle.store, manifest.head_seq, |seq| {
-            let b = frame::encode_entries(std::iter::once(&make_entry(seq)));
-            frame_len = b.len();
-            b
+            frame::encode_entries(std::iter::once(&make_entry(seq)))
         })
         .await?
         {
@@ -1539,7 +1598,7 @@ pub(crate) async fn publish_compact_impl(
             key: slot.key.clone(),
             first_seq: seq,
             last_seq: seq,
-            size: frame_len as u64,
+            size: slot.bytes.len() as u64,
             sealed: true,
         };
         updated.log_segments.push(seg_ref);
@@ -1844,11 +1903,8 @@ pub(crate) async fn publish_settings_impl(
             ]),
             settings: Some(settings.clone()),
         };
-        let mut frame_len = 0usize;
         let slot = match claim_log_slot(&handle.store, manifest.head_seq, |seq| {
-            let b = frame::encode_entries(std::iter::once(&make_entry(seq)));
-            frame_len = b.len();
-            b
+            frame::encode_entries(std::iter::once(&make_entry(seq)))
         })
         .await?
         {
@@ -1869,7 +1925,7 @@ pub(crate) async fn publish_settings_impl(
             key: slot.key.clone(),
             first_seq: seq,
             last_seq: seq,
-            size: frame_len as u64,
+            size: slot.bytes.len() as u64,
             sealed: true,
         });
         updated.log_segments.sort_by_key(|s| s.first_seq);
@@ -1942,5 +1998,62 @@ mod tests {
                 "{name} no longer matches rebuild.rs's `.tmp` skip rule"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use walgit_store::ObjectStoreExt;
+
+    /// `LogSlotClaim`: content-addressed version tokens can repeat after a
+    /// delete/recreate, so every attempt carries a fresh nonce and a lost-CAS
+    /// resolution must compare exact bytes, not just key + sequence.
+    #[tokio::test]
+    async fn recreated_claims_have_distinct_bytes_and_resolution_checks_identity()
+    -> anyhow::Result<()> {
+        let truth = walgit_store::memory::MemoryStore::shared();
+        let store = Prefixed::new(truth, "repos/o/claims/");
+        let encode = |seq| {
+            frame::encode_entries([&LogEntry {
+                seq,
+                kind: EntryKind::Push as i32,
+                ..Default::default()
+            }])
+        };
+        let ClaimOutcome::Claimed(first) = claim_log_slot(&store, 0, encode).await? else {
+            anyhow::bail!("uncontended claim expected");
+        };
+        drop_own_slot(&store, &first).await;
+        let ClaimOutcome::Claimed(second) = claim_log_slot(&store, 0, encode).await? else {
+            anyhow::bail!("uncontended recreated claim expected");
+        };
+        assert_ne!(
+            first.bytes, second.bytes,
+            "content-based tokens must not alias attempts"
+        );
+        let manifest = Manifest {
+            format_version: walgit_proto::WAL_FORMAT_VERSION,
+            object_format: "sha1".into(),
+            head_seq: 1,
+            min_seq: 1,
+            log_segments: vec![LogSegmentRef {
+                key: second.key.clone(),
+                first_seq: 1,
+                last_seq: 1,
+                size: second.bytes.len() as u64,
+                sealed: true,
+            }],
+            ..Default::default()
+        };
+        store
+            .put_bytes(keys::MANIFEST, manifest.encode_to_vec(), PutMode::Create)
+            .await?;
+        assert!(
+            cas_landed(&store, &first).await?.is_none(),
+            "same key and sequence are insufficient"
+        );
+        assert!(cas_landed(&store, &second).await?.is_some());
+        Ok(())
     }
 }

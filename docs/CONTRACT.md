@@ -207,6 +207,9 @@ impl RepoHandle {
   /// cas_update manifest (head_seq+1, packs+=, log_segments+=); on PreconditionFailed: re-sync, re-verify
   /// old values (RefConflict per ref → whole push rejected unless !atomic and per-ref reporting), retry.
   /// Then apply refs locally. Coalesces concurrent publishes on this handle (wal.batch_window/max_batch).
+  /// A submission that changes nothing settles with `seq = 0` and publishes no log entry; an empty
+  /// ref transaction with a pack is `WalError::Invalid`; a lost CAS whose landing cannot be proven is
+  /// `WalError::CommitUnknown` (never a definite rejection).
   pub async fn publish_push(&self, pack: Option<IngestedPack>, txn: RefTransaction, meta: HashMap<String,String>)
       -> Result<PublishResult, WalError>;
   pub struct PublishResult { pub seq: u64, pub per_ref: Vec<(String, Result<(), RefError>)> }
