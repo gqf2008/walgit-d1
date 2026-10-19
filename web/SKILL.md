@@ -74,11 +74,70 @@ walgit --config ~/.walgit/walgit.toml mcp --repo /path/to/checkout \
  "params":{"uri":"walgit://collab/board/acme/repo"}}
 ```
 
-An observed version change arrives as
-`{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"…"}}`; a vanished
-resource arrives as `notifications/resources/list_changed`. Notifications can be missed on process
-restart or instance change, so a durable sidecar must keep its own cursor and use the pull lanes
-(`git ls-remote`, `walgit wal ls`, `walgit collab watch`) as the source of truth.
+A project is covered end to end by two subscriptions (one `resources/subscribe` call each):
+
+```jsonc
+{ "subscribe": [
+    "walgit://refs/<owner>/<repo>",           // every git action — push, branch/tag — plus refs/collab/inbox/*
+    "walgit://collab/board/<owner>/<repo>"    // the whole board projection: new threads, replies, status flow
+] }
+```
+
+The refs subscription is the digest of `git ls-remote --refs`, so a push, a branch/tag move and a new
+`refs/collab/inbox/*` entry all bump it; the board subscription covers the projection instead
+(new thread, new reply, status transition) without diffing refs yourself.
+
+`notifications/resources/updated` carries only the `uri` — no content and no version. The read is
+mandatory, and it is where the version check happens:
+
+```jsonc
+{"jsonrpc":"2.0","id":5,"method":"resources/read",
+ "params":{"uri":"walgit://collab/board/acme/repo"}}
+```
+
+The reply puts the content in `result.contents[0]`: `text` is a JSON string of the form
+`{"data": …, "_meta":{"version":"…"}}`, and the same `version` is repeated on the content item's
+`_meta`. Compare it with the last version you processed for that URI and ignore an unchanged one
+(a notification can race another or repeat). Two other notifications end a subscription instead:
+`notifications/resources/list_changed` (the resource vanished — e.g. a thread with no entries —
+and the subscription stops; re-list and re-subscribe if it is back) and `notifications/message`
+with `level: "error"` and `data.uri` (three consecutive probe failures; the subscription stops, so
+back off and re-subscribe once the cause is fixed).
+
+Then act — the read is a trigger for a fresh decision, not a snapshot to act on blindly. A refs
+update says *something* moved (the read is a bounded summary; fetch or `resources/read` the
+specific thread for the details), a board update names the cards, and a thread read gives you the
+head oid to reply against. Confirm at that head oid that the card is still unowned or yours
+before you write.
+
+**Writing is one tool: `collab_entry`.** It is absent from the read-only surface; start the
+process with `--allow-write --key <this agent's seed>`:
+
+```jsonc
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"collab_entry","arguments":{
+  "kind":"status","id":"bug-42","actor":"acme-worker-1","parent":"<head-oid>",
+  "body":"{\"status\":\"in-progress\",\"owner\":\"acme-worker-1\",\"worktree\":\"wt-bug-42\",\"branch\":\"feat/bug-42\",\"work\":\"fix it\"}"}}}
+```
+
+`body` is a JSON **object string**; `parent` is the previous entry's oid (`""` for a root);
+`patch` also takes `base`/`head`; `actor` must be the principal bound to the process's key. Every
+call signs and **pushes to the process's `--remote`** (default `origin`), so it returns only after
+the entry is published; the reply's text is `<ref> <oid>` — keep that oid as the next `parent`.
+There is no local-only write over MCP (use the CLI for that). Nothing is edited: a move is a new
+signed entry, and `collab_board` stays read-only.
+
+**Many agents, unattended.** One `walgit mcp` process per agent, each in its own worktree with
+its own principal and key (§0b, D58/D59); never share a process or a key. Subscribe both URIs
+above: the orchestrator acts on `walgit://collab/board/…` (unowned cards to dispatch), workers on
+`walgit://refs/…` (their thread moved) and then re-read that thread. On startup — and after any
+restart — read both resources once instead of waiting for an event, and keep the last processed
+version as the cursor: subscriptions are process-local and notifications are best-effort, so a
+restart must not be read as "nothing happened". Filter your own writes by the head entry's
+`actor` so a self-triggered update is not answered with another write; a claim counts only after
+re-reading the thread and finding no other owner. Heavy work (build, test, `git push`) runs
+outside the tool call — the server handles one request line at a time — and ends with one
+`collab_entry` that records it. The pull lanes (`git ls-remote`, `walgit wal ls`, `walgit collab
+watch`) remain the source of truth; the role topology and merge gate are §0b–§0d.
 
 ## Host upgrades (tray)
 

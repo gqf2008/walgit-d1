@@ -77,6 +77,19 @@ Subscribe and read over JSON-RPC (newline-delimited on stdio):
  "params":{"uri":"walgit://collab/board/acme/repo"}}
 ```
 
+A project is covered end to end by two subscriptions (one `resources/subscribe` call each):
+
+```jsonc
+{ "subscribe": [
+    "walgit://refs/<owner>/<repo>",           // every git action — push, branch/tag — plus refs/collab/inbox/*
+    "walgit://collab/board/<owner>/<repo>"    // the whole board projection: new threads, replies, status flow
+] }
+```
+
+The refs subscription is the digest of `git ls-remote --refs`, so a push, a branch/tag move and a new
+`refs/collab/inbox/*` entry all bump it; the board subscription covers the projection instead
+(new thread, new reply, status transition) without diffing refs yourself.
+
 Subscriptions are client-side polling, **per-instance** and **best-effort** (D52), rather than a
 server push channel. Version changes arrive as `notifications/resources/updated` with the resource
 `uri`; disappearance arrives as `notifications/resources/list_changed`. `--subscribe-interval-ms`
@@ -84,6 +97,24 @@ defaults to `5000` and must be at least `1000`; `--max-subscriptions` defaults t
 subscriptions are rejected. The four URI forms and the full `resources/list|read|subscribe|unsubscribe`
 semantics are documented in the public host `/SKILL.md` under **MCP (optional, client-side)**; use
 that as the single detailed reference.
+
+After an update notification, `resources/read` the same `uri` — the notification carries no content
+or version. The reply's `result.contents[0].text` is `{"data": …, "_meta":{"version":"…"}}`; compare
+that version with the last one you processed for the URI, then re-read the specific thread before
+acting. `notifications/resources/list_changed` means the resource vanished (the subscription stops —
+re-list and re-subscribe); three consecutive probe failures send `notifications/message` with
+`level: "error"` and stop the subscription. Write with `tools/call` `collab_entry` (registered only
+under `--allow-write --key`): `kind`/`id`/`actor`/`parent`/`body` (a JSON object string), plus
+`base`/`head` for `patch`. Each call signs and pushes to the process's `--remote` and returns
+`<ref> <oid>` as its text — that oid is the next `parent`. There is no local-only write over MCP.
+
+For unattended multi-agent work, run **one process per agent/worktree/principal**, subscribing
+`walgit://refs/<owner>/<repo>` and `walgit://collab/board/<owner>/<repo>` (plus the thread URIs it
+owns), and read them once at startup so a restart is never mistaken for "nothing new". Only
+`collab_entry` writes; the board is a projection of signed entries, never editable. Keep builds,
+tests and `git push` outside the tool call (one request line is handled at a time) and post one
+entry when the step is done. The role topology, ownership and merge gate are in the public guide
+§0b–§0d.
 
 ## 4. What this host stores (read from config, never hardcode)
 
