@@ -61,6 +61,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/WINDOWS.md` | Developing on a Windows host: prerequisites, test surface, `dev-store` equivalent, NTFS symlink coverage. |
 | `docs/TRAY_LINUX_BACKEND.md` | Anyone touching the tray's Linux backend, the glib/gtk dependency chain, or the Dependabot glib advisory. Evaluation of ksni vs tray-icon/gtk + migration plan. |
 | `docs/ROUNDTRIPS.md` | **Anyone touching a protocol that talks to the bucket** (publish, sync, checkpoints, compaction/leases, bundles, remote reader, store backends). Round trips are the cost model; correct is not sufficient. |
+| `docs/spec/README.md` | Anyone running `just spec` or auditing the WAL contract: bounded TLA+ models, the C1–C16/B2–B6 map to this repo's code and tests, and the open gaps. Models are bounded checks, never a refinement proof. |
 | `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
@@ -820,7 +821,9 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   change it with the code.
 - Test tiers: `just test` (fast, < 1 min: lib/bins, the wildcard crates, the server integration set),
   `just test-cli` (the walgit-cli suites), `just e2e`, `just sim`, `just warnings`, `just clippy` (the
-  `[workspace.lints]` set, `-D warnings`), `just ci` = all of them; the **simulation
+  `[workspace.lints]` set, `-D warnings`), `just ci` = all of them; `just spec` / `just spec-fragments` / `just spec-full`
+  run the bounded TLA+/TLC contract checks in `docs/spec/` (not part of `just ci`; CI runs the
+  four-model fragment subset in its own bounded job); the **simulation
   suite** `cargo test -p walgit-server --test sim` (fault links per instance over one truth store: crash,
   partition, stale, lost response, orphan scenarios + randomized seeds `WALGIT_SIM_SEEDS`/`WALGIT_SIM_SEED`);
   CI runs sim on both ubuntu (build-test) and the windows leg, e2e on ubuntu and the windows leg,

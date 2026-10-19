@@ -267,3 +267,16 @@ store-test-s3:
 # Run all walgit-store tests (memory + S3 if env set).
 store-test-all:
     cargo test -p walgit-store
+
+# Bounded TLA+/TLC contract checks (docs/spec/README.md). `spec` runs the matrix
+# plus the bounded reference and its old-value control; `spec-fragments` omits
+# those two reference runs; `spec-full` adds the larger serial reference arms.
+# WALGIT_SPEC_MODELS narrows a run to named modules (CI's first batch uses it).
+spec:
+    scripts/run-spec.sh fast
+
+spec-fragments:
+    scripts/run-spec.sh fragments
+
+spec-full:
+    scripts/run-spec.sh full

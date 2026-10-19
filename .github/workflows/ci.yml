@@ -295,6 +295,41 @@ jobs:
             python3 scripts/mcp-subscribe-smoke.py \
               target/debug/walgit walgit.standalone.toml "owner/repo"
 
+  # Bounded TLA+/TLC contract checks (docs/spec/README.md). Only the four
+  # first-batch models run here; the full matrix stays a developer/manual lane.
+  # Recorded wall caps: 1800 s per TLC invocation (WALGIT_TLC_TIMEOUT) and the
+  # job's timeout-minutes. One fixed arm (LogSlotClaim) enumerates tens of
+  # millions of states, so a tighter per-invocation cap would fail it
+  # spuriously. Rust test tiers are unchanged; suite-guard.sh is untouched.
+  spec-contract:
+    name: spec (bounded TLC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install spec runner dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: First-batch contract models
+        env:
+          WALGIT_SPEC_MODELS: PublicationView WALCheckpoint LogSlotClaim FrontReplay
+          WALGIT_TLC_JOBS: 1
+          WALGIT_TLC_WORKERS: 4
+          WALGIT_TLC_HEAP: 4g
+          WALGIT_TLC_TIMEOUT: 1800
+        run: just spec-fragments
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spec-evidence
+          path: target/test-logs/spec-*
+
   # Known-red until the debt lands (issue #1, ~1300 pre-existing pedantic
   # hits): the gate fails by design, so it is a separate job with
   # continue-on-error — never a merge blocker, always visible. A PR must keep
