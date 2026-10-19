@@ -363,6 +363,8 @@ spins a core client-side for > 35 min before any request reaches the server; dev
 - [ ] Land the filter-matching patch in a patched git before advertising full and blobless families together
   (`docs/patches/README.md`, §6b).
 - [ ] Reduce client-side indexing of full/history bundles; evaluate pre-indexed delivery or a shallower history family (§7).
-- [ ] `packfile-uris` evaluation (serve the base pack itself as a static URI inside upload-pack) — likely
-      redundant with bundle-uri + D18; measure before building.
+- [x] `packfile-uris` evaluation (serve the base pack itself as a static URI inside upload-pack) —
+      **keep bundle-uri; do not add the channel** (2026-10-19): authentication, eviction semantics,
+      coverage proof and engine coverage each fail for it in this repository; see
+      `docs/PACKFILE_URI_EVALUATION.md` (and §5 there for the conditions that re-open the decision).
 - [ ] CDN in front of `/{o}/{r}/bundles/*` (immutable + Range already in place).
