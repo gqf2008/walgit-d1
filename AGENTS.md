@@ -61,7 +61,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/WINDOWS.md` | Developing on a Windows host: prerequisites, test surface, `dev-store` equivalent, NTFS symlink coverage. |
 | `docs/TRAY_LINUX_BACKEND.md` | Anyone touching the tray's Linux backend, the glib/gtk dependency chain, or the Dependabot glib advisory. Evaluation of ksni vs tray-icon/gtk + migration plan. |
 | `docs/ROUNDTRIPS.md` | **Anyone touching a protocol that talks to the bucket** (publish, sync, checkpoints, compaction/leases, bundles, remote reader, store backends). Round trips are the cost model; correct is not sufficient. |
-| `docs/spec/README.md` | Anyone running `just spec` or auditing the WAL contract: bounded TLA+ models, the C1–C16/B2–B6 map to this repo's code and tests, and the open gaps. Models are bounded checks, never a refinement proof. |
+| `docs/spec/README.md` | Anyone running `just spec` or auditing the WAL contract: bounded TLA+ models, the contract map to this repo's code and tests (C1–C10/C15/C16/B2/B5/B6; C11–C14 by construction or out of batch), and the open gaps. Models are bounded checks, never a refinement proof. |
 | `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |

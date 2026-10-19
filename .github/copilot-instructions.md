@@ -23,9 +23,10 @@ outrank any generic convention.
   `status closed` archives) in the thread.
 - **Commits are Conventional Commits** (`fix(git): …`, one logical change each,
   message says why).
-- **`just ci`** = warnings + clippy + test + test-cli + e2e + sim — everything a merge
-  needs. Run the relevant tiers locally before pushing (Windows notes: `docs/WINDOWS.md`;
-  the cli suites are ubuntu-only, seams at the justfile's `CLI_TESTS`).
+- **`just ci`** = warnings + clippy + test + test-cli + e2e + sim — the Rust tiers a merge
+  needs; CI additionally runs the bounded `spec-contract` TLA+/TLC lane (`just spec-ci`),
+  which `just ci` does not cover. Run the relevant tiers locally before pushing (Windows
+  notes: `docs/WINDOWS.md`; the cli suites are ubuntu-only, seams at the justfile's `CLI_TESTS`).
 
 ## Reading CI
 

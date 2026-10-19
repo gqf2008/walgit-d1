@@ -295,12 +295,16 @@ jobs:
             python3 scripts/mcp-subscribe-smoke.py \
               target/debug/walgit walgit.standalone.toml "owner/repo"
 
-  # Bounded TLA+/TLC contract checks (docs/spec/README.md). Only the four
-  # first-batch models run here; the full matrix stays a developer/manual lane.
-  # Recorded wall caps: 1800 s per TLC invocation (WALGIT_TLC_TIMEOUT) and the
-  # job's timeout-minutes. One fixed arm (LogSlotClaim) enumerates tens of
-  # millions of states, so a tighter per-invocation cap would fail it
-  # spuriously. Rust test tiers are unchanged; suite-guard.sh is untouched.
+  # Bounded TLA+/TLC contract checks (docs/spec/README.md). Only the first-
+  # batch models run here; the model set lives in the justfile
+  # (SPEC_CI_MODELS, exposed as `just spec-ci`) and the full matrix stays a
+  # developer/manual lane. Caps: WALGIT_TLC_TIMEOUT per invocation,
+  # WALGIT_SPEC_BUDGET for the whole suite (the runner shrinks each remaining
+  # arm to the remaining budget and still writes per-arm verdicts), and the
+  # job's timeout-minutes as the last resort. One fixed arm (LogSlotClaim)
+  # enumerates tens of millions of states, so a tighter per-invocation cap
+  # would fail it spuriously. Rust test tiers are unchanged; suite-guard.sh is
+  # untouched.
   spec-contract:
     name: spec (bounded TLC)
     runs-on: ubuntu-latest
@@ -318,12 +322,12 @@ jobs:
           tool: just
       - name: First-batch contract models
         env:
-          WALGIT_SPEC_MODELS: PublicationView WALCheckpoint LogSlotClaim FrontReplay
           WALGIT_TLC_JOBS: 1
           WALGIT_TLC_WORKERS: 4
           WALGIT_TLC_HEAP: 4g
           WALGIT_TLC_TIMEOUT: 1800
-        run: just spec-fragments
+          WALGIT_SPEC_BUDGET: 2400
+        run: just spec-ci
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -903,6 +907,12 @@ jobs:
                 lines.push(`- ✅ **${j.name}** (${j.conclusion})`);
               } else if (j.name === 'clippy (known-red debt)') {
                 lines.push(`- ⚠️ **${j.name}** — expected-red (known debt, issue #1); not a merge blocker`);
+              } else if ((j.conclusion === 'cancelled' || j.conclusion === 'timed_out')
+                         && j.name === 'spec (bounded TLC)') {
+                // A job killed at timeout-minutes reports `cancelled` (not
+                // `timed_out`). For the contract lane that means no per-arm
+                // verdicts were produced, so it must never read as mergeable.
+                lines.push(`- ❌ **${j.name}** — ${j.conclusion} at the job cap; no contract verdict`);
               } else if (j.conclusion === 'cancelled' || j.conclusion === 'neutral' || j.conclusion === 'timed_out') {
                 lines.push(`- ⏭️ **${j.name}** — ${j.conclusion}, not a failure`);
               } else if (failed.length > 0 && failed.every(f => rerun_once.test(f))) {
@@ -911,7 +921,10 @@ jobs:
                 lines.push(`- ❌ **${j.name}** — real red: ${failed.join(', ') || j.conclusion}`);
               }
             }
-            const red = jobs.filter(j => j.conclusion === 'failure' && j.name !== 'clippy (known-red debt)').length;
+            const red = jobs.filter(j => j.name !== 'clippy (known-red debt)'
+              && (j.conclusion === 'failure'
+                  || ((j.conclusion === 'cancelled' || j.conclusion === 'timed_out')
+                      && j.name === 'spec (bounded TLC)'))).length;
             const verdict = red === 0
               ? '**可合并**(无真实红;known-red clippy 除外)'
               : `**需处理**:${red} 个 job 真实失败`;

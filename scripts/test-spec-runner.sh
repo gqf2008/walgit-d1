@@ -21,13 +21,24 @@ footer() {
   echo 'State 1: <Initial predicate>'
   footer
 } > "$work/temporal"
+# TLC's initial-state violation prints no footer/trace/State 1 block; the
+# fixture must not invent one, or the classifier's leniency goes untested.
+{
+  echo 'Error: Invariant Expected is violated by the initial state:'
+  echo '/\ x = 0'
+} > "$work/initial"
 "$check" 0 pass "$work/pass"
 "$check" 12 Expected "$work/negative"
+"$check" 12 Expected "$work/initial"
 "$check" 13 temporal:Terminates "$work/temporal"
 reject() {
   if "$check" "$@"; then echo "classifier wrongly accepted: $*" >&2; exit 1; fi
 }
 reject 12 Different "$work/negative"
+reject 12 Different "$work/initial"
+reject 13 temporal:Terminates "$work/initial"
+{ echo 'Error: Invariant Expected is violated.'; echo 'Error: The behavior up to this point is:'; echo 'State 1: <Initial predicate>'; echo 'Error: Invariant Expected is violated by the initial state:'; footer; } > "$work/both"
+reject 12 Expected "$work/both"
 reject 0 Expected "$work/negative"
 reject 255 Expected "$work/negative"
 reject 12 pass "$work/negative"

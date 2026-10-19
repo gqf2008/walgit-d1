@@ -223,7 +223,8 @@ check-release-changelog-filter:
 clippy:
     {{t15}} cargo clippy --workspace --all-targets -- -D warnings
 
-# Everything that must be green before a merge (what CI runs). A body, not a
+# The Rust tiers that must be green before a merge (CI runs these plus its
+# separate bounded spec-contract lane, `just spec-ci`). A body, not a
 # dependency list, so the cli tier gets its timeout guard like its siblings
 # (`just ci` has never been windows-runnable — `warnings` uses the {{t15}}
 # probe; the ubuntu-only verdict for test-cli is argued at CLI_TESTS).
@@ -268,10 +269,16 @@ store-test-s3:
 store-test-all:
     cargo test -p walgit-store
 
+# The CI fragment's model set: the one source for the spec lane (ci.yml runs
+# `just spec-ci`). Setting WALGIT_SPEC_MODELS also skips the two reference runs,
+# because they are not matrix rows.
+SPEC_CI_MODELS := "PublicationView WALCheckpoint LogSlotClaim FrontReplay"
+
 # Bounded TLA+/TLC contract checks (docs/spec/README.md). `spec` runs the matrix
 # plus the bounded reference and its old-value control; `spec-fragments` omits
-# those two reference runs; `spec-full` adds the larger serial reference arms.
-# WALGIT_SPEC_MODELS narrows a run to named modules (CI's first batch uses it).
+# those two reference runs; `spec-full` adds the larger serial reference arms;
+# `spec-ci` is the bounded CI lane. `spec-full`'s per-arm default cap is
+# 3600 s (the MC arm exceeds the 600 s fast-mode cap).
 spec:
     scripts/run-spec.sh fast
 
@@ -280,3 +287,6 @@ spec-fragments:
 
 spec-full:
     scripts/run-spec.sh full
+
+spec-ci:
+    WALGIT_SPEC_MODELS="{{SPEC_CI_MODELS}}" scripts/run-spec.sh fragments
