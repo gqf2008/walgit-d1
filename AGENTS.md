@@ -31,6 +31,13 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   releases land without anyone deciding to publish them, and it pushes branch deletions while nobody is
   watching. Outside that release path nothing is pushed and nothing is mirrored by default: feature branches
   stay on walgit (below: Releases and Actions keep working; the pre-2026-09-16 PR history stays as history).
+- **Release push credentials are not in this repository.** Only the `gqf2008` account can push to
+  `gqf2008/walgit-d1`; its token lives in the private `sqb-private` repository at
+  `secrets/keychain/github-gqf2008-oauth.txt` (also served by the macOS Keychain entry
+  `GitHub - https://api.github.com`). The normally active `gh` account (`aerodesk-io`) has only `pull` on
+  the mirror, so `403 Permission … denied to aerodesk-io` on a release push means "authenticate as
+  gqf2008", not "retry". Never copy the token itself into this repository, an issue, a commit or a
+  command line.
 - The deep CI matrix still runs on the GitHub mirror's Actions (its secrets live there); walgit holds the
   code and the collaboration history. The mirror's **Issues, Wiki, Projects and Discussions are disabled**
   (2026-09-16): for collaboration it keeps only PR history (by project policy — GitHub does not enforce it)
