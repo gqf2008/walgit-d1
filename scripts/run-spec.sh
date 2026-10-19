@@ -24,7 +24,13 @@ run_timed() {
   "$@" &
   local child=$!
   (
-    sleep "$limit"
+    sleep "$limit" &
+    sleeper=$!
+    # The parent kills this subshell on the happy path; without this trap the
+    # `sleep` child would be orphaned once per arm on hosts with neither
+    # timeout nor gtimeout.
+    trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+    wait "$sleeper" || exit 0
     kill -TERM "$child" 2>/dev/null || exit 0
     sleep 2
     kill -KILL "$child" 2>/dev/null || true
@@ -126,6 +132,17 @@ fi
 if [[ "$mode" != fragments && -z "${WALGIT_SPEC_MODELS:-}" ]]; then
   enqueue reference-fast "$root/docs/spec/tlc/MC.tla" "$root/docs/spec/tlc/MC_fast.cfg" pass
   enqueue reference-bug "$root/docs/spec/tlc/MC_bug.tla" "$root/docs/spec/tlc/MC_bug.cfg" HistPreconds
+fi
+
+# Every requested model must name a matrix module: a typo in a list otherwise
+# silently runs the other tokens and exits green.
+if [[ -n "${WALGIT_SPEC_MODELS:-}" ]]; then
+  for model in $WALGIT_SPEC_MODELS; do
+    if ! awk -v m="$model" '!/^#/ && $2 == m { found = 1 } END { exit !found }' docs/spec/tlc/cases.tsv; then
+      echo "WALGIT_SPEC_MODELS matched no matrix case: $model" >&2
+      exit 2
+    fi
+  done
 fi
 
 selected=0

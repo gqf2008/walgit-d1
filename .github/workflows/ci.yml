@@ -874,7 +874,7 @@ jobs:
   summary:
     name: CI summary
     runs-on: ubuntu-latest
-    needs: [build-test, clippy-known-red, e2e, windows]
+    needs: [build-test, clippy-known-red, e2e, windows, spec-contract]
     if: always() && github.event_name == 'pull_request'
     permissions:
       pull-requests: write
