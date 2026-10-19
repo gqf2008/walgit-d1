@@ -411,7 +411,8 @@ bucket access; a host URL and (on token/oidc hosts) a bearer suffice:
 Any job that needs more than one agent — code, content, research, ops — runs on this host
 as **signed threads on `refs/collab/*`**. Agents never collaborate out-of-band (no private
 chat, no shared scratch files as the source of truth): the thread is the only shared memory,
-everyone re-derives the same view from the refs.
+everyone re-derives the same view from the refs. **If you were handed a goal rather than a
+step list, §0e is the runbook** — read it before you write anything.
 
 ### 0. Identity — register the team before the work
 
@@ -721,8 +722,10 @@ console** (the human's surface); everything in between is background sub-agents.
 
 **The loop.**
 
-1. **Assign** (human): `issue` with objective, owner, and machine-checkable acceptance; batch
-   several units into one checklist.
+1. **Assign**: `issue` with objective, owner, and machine-checkable acceptance; batch several
+   units into one checklist. The human files it — when the human hands over a *goal* instead,
+   writing the card is the coordinator's delegated first task (the goal is the assignment;
+   never start work without a card).
 2. **Dispatch**: on a `ready`/unowned card, spawn a worker in its own worktree with its own
    identity; claim it with a `status` entry (`owner` / `worktree` / `branch` / `work`).
    **One owner per card.**
@@ -758,6 +761,79 @@ console** (the human's surface); everything in between is background sub-agents.
 The trigger is `walgit collab watch` (§0c) or an MCP resource subscription (the MCP section
 above; D52); the
 decision logic is the orchestrator's. `walgit ci run` is the closest worked example.
+
+### 0e. From a goal to done — the runbook an agent follows
+
+Read once and run: an agent handed a **goal** (not a step list) can complete it with this
+section plus §0a–§0d and §1–§5. Nothing here waits for a human except §9.
+
+**1. Orient, then classify yourself.** If you have no checkout yet, clone the target repo
+(**Git: clone / fetch / push**). Then run §0a (identity, `collab join`, fetch the collab refs,
+read the board), and classify yourself:
+
+| You were given | You are | First action |
+|---|---|---|
+| a goal, and you can start other agents | coordinator | file the card(s) (step 2), then drive the loop |
+| a card/thread id | worker | claim it (step 5), or stop if another owner holds it |
+| a patch or thread to judge | acceptance | review the pinned commit as your own principal (§4) |
+| only this document | observer | read the board; do not claim or write |
+
+**2. A goal becomes a card before any work.** Work without a card is invisible to everyone
+else and cannot be reviewed or merged. File one `issue` per deliverable (objective, one owner,
+**machine-checkable acceptance**: commands, expected output, artifacts), then claim it with a
+`status` naming owner/worktree/branch/work. The human may have filed it already; if not, this
+is your first task, not a reason to stop.
+
+**3. Decompose by write set.** One card = one owner = one worktree = one identity. Split units
+whose files/interfaces do not overlap (§0b); serialize units that touch the same file/schema —
+reference the earlier entry with `--depends-on <oid>` instead of letting two workers collide.
+
+**4. Dispatch (coordinator).** Spawn one worker sub-agent per unowned card, with a brief that
+contains everything it needs (it may be a fresh process with no context):
+
+```
+Your card: <thread id>. Read it, then <host>/SKILL.md §0a and §0e–§5.
+Work only on that card, in worktree <wt>, as principal <name>.
+Re-read the thread at its head oid and claim it with a status entry before you start.
+Implement, push the branch, attach a patch, move it to needs-review — then stop.
+Do not review your own patch, do not merge, do not touch another card.
+```
+
+Cap the active set (2–4 workers, 1–2 reviewers) and record the cap you chose. One card, one
+owner, one worktree, one key — never share a checkout or a key between sub-agents.
+
+**5. Work (worker).** Re-read the thread at its head oid → claim (`status: in-progress`) →
+implement in your worktree → push the branch → `patch` → `status: needs-review`. Then **stop**:
+do not poll for a reviewer; the coordinator's trigger wakes the next actor. A decision you can
+make yourself is made and recorded in a `comment`; a decision you cannot make goes to
+`needs-human` (step 9). Never sit silent.
+
+**6. Accept (a different principal).** Re-read the card and the patch, run the card's
+acceptance commands yourself at the pinned commit, and post `review` with `approve` or
+`request_changes` plus findings and the evidence you ran (§4). You may not approve a patch you
+authored; if the orchestrator implemented the card, it may not be the approver.
+
+**7. Merge and close (coordinator).** Merge only on a **verified non-author approve** with no
+Critical/Important finding and a green machine-checkable acceptance: merge locally (ff
+preferred), push, post one `merge_result` (`merged: true`, `oid`), move the card to `closed`,
+then remove the worktree/branch and verify. Anything else routes back (§0d 6).
+
+**8. Stay live without being poked.** Your trigger is an MCP subscription or `collab watch`
+(§0c): an event means *re-read*, never "act on this payload". Read the board and your threads
+once on startup — and after any restart — and keep the last processed version as your cursor;
+missed notifications are expected, so never read a quiet period as "nothing happened". Filter
+your own writes by the head entry's `actor`, park events durably, and do the work in a worker,
+not in the trigger handler.
+
+**9. Stop and ask a human only for:** authorization, priority, a destructive or irreversible
+action outside the card, genuine ambiguity with materially different outcomes, or a gate you
+cannot satisfy with the principals available (e.g. no second principal for review). Park the
+card as `needs-human` with the decision and its options; do not guess on these, and never
+clear another agent's `needs-human`. Everything else is yours to decide and record.
+
+**Done** = every card closed with a verified non-author approval and its merge recorded, no
+card silently abandoned, the board reflecting the real state, and the worktrees removed. The
+goal is done when its cards are.
 
 ### 1. Work unit = one thread
 

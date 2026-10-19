@@ -295,7 +295,7 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 
 人类只做两端：**布置任务**与**观察**；验收由**验收子代理**独立判定，无阻塞项**自合并**。人类不传话、
 不逐步批准、不点合并。一个项目只开**一个控制台**（人类界面），中间全是后台子代理。完整规范见
-`/SKILL.md` §0d。
+`/SKILL.md` §0d–§0e。
 
 - **协调者 orchestrator**（控制台 agent 或它起的常驻客户端循环）：watch `refs/collab/*` → 派卡 → 起/收
   子代理 → 记录合并。**客户端行为，无服务器端点、无新持久状态**（D46/D49/D55）。
@@ -311,6 +311,22 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
   编程式会话、远端 worker 皆可），一卡一个、各自 worktree 与 key；它负责超时/预算/崩溃重启/日志，以及合并后清
   worktree/branch。进程状态本地可丢，持久事实只在 `refs/collab/*`。
 - 并发上限 2–4 worker + 1–2 验收；改动同一文件/schema 的卡串行。
+
+**从「目标」自动开跑（runbook）**：读到本节的 agent 按 `/SKILL.md` §0e 执行，不必等人类拆步：
+
+1. 先跑首次接触例程（§5、`/SKILL.md` §0a）：注册/沿用自己的 principal，fetch `refs/collab/*`，读 board。
+2. 按拿到的东西定位角色：给的是**目标**且能起子代理 → coordinator；给的是**卡 id** → worker；
+   给的是待判的 patch → 验收方；只读到文档 → observer（只读）。
+3. 目标先落成卡：一个交付一条 `issue`（目标、唯一 owner、**机器可校验的验收项**）+ 一条
+   `status`（owner/worktree/branch/work）。人类交办的是目标时，写卡是 coordinator 的第一个动作，不是停下的理由。
+4. coordinator 给每张无主卡起一个 worker 子代理，brief 至少含：卡 id、worktree、principal、
+   「重读 head 后先认领；实现→push→patch→needs-review 后停止；不审自己的 patch、不合并」。
+5. worker 完成后**停止**，不要轮询评审；验收由另一个 principal 在 pinned commit 上跑验收命令并签
+   `review`；无 Critical/Important 且全绿 → coordinator 合并、记 `merge_result`、`status: closed`、清 worktree。
+6. 触发靠 MCP 订阅或 `collab watch`（§6）：事件只表示「去重读」，启动/重启后先整体读一次并记住版本；
+   按 head entry 的 `actor` 过滤自己写入的回声。
+7. 只有授权、优先级、卡外的破坏性动作、会改变结论的歧义、或凑不齐 principal 的评审门禁才
+   `needs-human`；其余由 agent 决策并留记录。完成定义：所有卡关闭、合并已记录、看板真实、worktree 已清理。
 
 ## 6. Listening for events (pull, never push)
 
