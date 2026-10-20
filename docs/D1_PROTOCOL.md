@@ -524,7 +524,8 @@ issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已�
   {"ttl": 300, "worktree": "wt-x", "branch": "feat/x", "work": "one-line plan"}
   ```
 
-  `ttl` 秒，∈[1,86400]，缺省 300；其余三个字段可选（字符串）。`ttl` 越界、字段类型错误或
+  `ttl` 秒，∈[1,86400]，缺省 300；`worktree`/`branch`/`work`/`session` 可选（字符串；
+  `session` 只是审计用的会话标识，见下）。`ttl` 越界、字段类型错误或
   `parent` 非空的条目是 **malformed**：留在线程里可见、计入 `unverified`，但永不参与收敛。
   验签失败同理（docs/D1_PROTOCOL.md §4.5 的验证定义）。
 
@@ -548,10 +549,17 @@ issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已�
   **re-fetch 之前不得开始工作**。重复 claim 允许存在，重复执行不允许；两个并发认领各写一条
   根条目，重算后恰有一个 `winner.oid` 命中。比较的是 **claim 的 entry oid**，不是 `actor`：
   多个 agent 共用 principal 时 actor 无法区分执行者，entry oid 永远唯一（共用 key 仍会让审计
-  无法归属——部署侧应一 agent 一 key，不强制进协议）。本 worktree 上次发布的 claim oid 记在
-  `<git-dir>/walgit/claims/<digest>`（进程本地、可丢）：进程重启后若它仍是 winner 直接恢复，
-  不必等 TTL；丢了这个文件只损失一次等待。stand down **不需要**留 `comment`——claim 集合
-  本身就是裁决记录；想说明原因可留，但任何投影都不依赖它。
+  无法归属——部署侧应一 agent 一 key，不强制进协议）。**重启恢复是 session 作用域
+  （2026-10-21，thread `card-claim-resume-scope`）**：调用方用 `--session <id>`（或
+  `WALGIT_CLAIM_SESSION`）给一个稳定会话 id；该 session 上次发布的 claim oid 记在
+  `<git-dir>/walgit/claims/<digest(id,session)>`（进程本地、可丢）。重读时只有同时满足
+  「记下的 oid 仍是 live winner、winner 的 actor 是本人、claim body 的 `session` 相同」才
+  恢复，不必等 TTL；丢了这个文件只损失一次等待。**没有 session 就永不 resume**：同一
+  checkout 的多个会话共用 git-dir 与 principal，若无 session，第二个会话会把第一个会话的
+  claim 误认成自己的并同样报 `claimed: true`——正是 claim 要消除的重复执行。没有 session 时
+  第二个进程正常走 read → publish → 收敛并 stand down。CLI 无法强制「一 worktree 一 agent」，
+  所以 resume 是**按会话**的优化，绝不是 worktree 级共享锁。stand down **不需要**留
+  `comment`——claim 集合本身就是裁决记录；想说明原因可留，但任何投影都不依赖它。
 
 - **看板投影**（§8.2）：卡片有效状态为 `open`/`in-progress` 且存在 live winner 时，
   `owner` = winner 的 `actor`，`open` 置为 `in-progress`，上下文取 winner 自己签名的 `status`

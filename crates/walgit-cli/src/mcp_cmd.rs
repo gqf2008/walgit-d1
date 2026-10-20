@@ -242,7 +242,8 @@ fn tool_defs() -> Vec<Tool> {
                     "ttl": {"type": "integer", "description": "claim lifetime in seconds (1..=86400, default 300)"},
                     "worktree": {"type": "string", "description": "worktree the holder will work in"},
                     "branch": {"type": "string", "description": "branch the holder will work on"},
-                    "work": {"type": "string", "description": "one-line plan"}
+                    "work": {"type": "string", "description": "one-line plan"},
+                    "session": {"type": "string", "description": "session id for restart recovery; omit it to never resume (two sessions in one worktree then converge normally)"}
                 }),
                 json!(["id", "actor"]),
             ),
@@ -1271,6 +1272,7 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
                 ("worktree", "--worktree"),
                 ("branch", "--branch"),
                 ("work", "--work"),
+                ("session", "--session"),
             ] {
                 if let Some(value) = opt(arg)? {
                     v.push(flag(name, &value));

@@ -107,7 +107,7 @@ re-list and re-subscribe); three consecutive probe failures send `notifications/
 under `--allow-write --key`): `kind`/`id`/`actor`/`parent`/`body` (a JSON object string), plus
 `base`/`head` for `patch`. Each call signs and pushes to the process's `--remote` and returns
 `<ref> <oid>` as its text — that oid is the next `parent`. Claim a work card with `collab_claim`
-(`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`): it publishes a `card_claim`, re-reads
+(`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`/`session`): it publishes a `card_claim`, re-reads
 and succeeds only for the deterministic winner; a losing call returns `isError` whose text contains
 `stand-down:` and names the holder and expiry — do not start work. There is no local-only write
 over MCP.
@@ -278,7 +278,10 @@ claimable again — expiry is the only release mechanism:
 
 ```bash
 W collab claim --id <thread-id> --worktree wt-x --branch feat/x \
-  --work '<plan>' [--ttl 300] [--push origin] [--format text|json]
+  --work '<plan>' [--ttl 300] [--session <id>] [--push origin] [--format text|json]
+# Resume is per (worktree, session): pass a stable --session (or WALGIT_CLAIM_SESSION) for
+# restart recovery; without one the command never resumes — two sessions in one checkout then
+# converge normally (the later one stands down) instead of both reporting claimed:true.
 ```
 
 | kind | body (required) | use |

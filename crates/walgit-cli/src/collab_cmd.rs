@@ -239,6 +239,12 @@ pub enum CollabAction {
         /// Ed25519 signing key (default: the project identity key).
         #[arg(long)]
         key: Option<PathBuf>,
+        /// Session id for restart recovery (env: `WALGIT_CLAIM_SESSION`).
+        /// Resume is per (worktree, session): without one, `claim` never
+        /// resumes and always publishes a new claim — two sessions in one
+        /// checkout then converge normally (the later one stands down).
+        #[arg(long, env = "WALGIT_CLAIM_SESSION")]
+        session: Option<String>,
         /// Worktree the holder will work in (projected on the board).
         #[arg(long, default_value = "")]
         worktree: String,
@@ -399,6 +405,7 @@ pub async fn run(action: CollabAction) -> Result<()> {
             ttl,
             actor,
             key,
+            session,
             worktree,
             branch,
             work,
@@ -410,6 +417,7 @@ pub async fn run(action: CollabAction) -> Result<()> {
             ttl,
             actor.as_deref(),
             key.as_deref(),
+            session.as_deref(),
             &worktree,
             &branch,
             &work,
@@ -1999,35 +2007,53 @@ fn run_board(
 /// (the CI runner's "stand down", `docs/D1_CI_PROTOCOL.md` §6.2).
 const CLAIM_STAND_DOWN_EXIT: i32 = 2;
 
-/// Where this worktree remembers the claim oid it published, keyed by a digest
-/// of the thread id (thread ids are not refname-safe). Process state only —
+/// The remembered claim of one **session** (D1 §8.4): the oid it published and
+/// the session it was published for. A state file from another session is
+/// never resumed — two processes in one worktree share the git dir, not a
+/// session.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ClaimState {
+    claim: String,
+    session: String,
+}
+
+/// Where this worktree remembers the claim oid a session published, keyed by a
+/// digest of `(thread id, session)` (thread ids are not refname-safe; session
+/// ids are free-form, so neither goes into a path). Process state only —
 /// disposable, never protocol state: losing it costs a TTL wait, nothing else.
-fn claim_state_path(repo: &Path, id: &str) -> Result<PathBuf> {
+fn claim_state_path(repo: &Path, id: &str, session: &str) -> Result<PathBuf> {
     use sha2::Digest as _;
-    let digest = hex::encode(sha2::Sha256::digest(id.as_bytes()));
+    let digest = hex::encode(sha2::Sha256::digest(
+        format!("{id}\u{1f}{session}").as_bytes(),
+    ));
     Ok(project_identity_dir(repo)?.join("claims").join(digest))
 }
 
-fn read_claim_state(repo: &Path, id: &str) -> Option<String> {
-    let path = claim_state_path(repo, id).ok()?;
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+fn read_claim_state(repo: &Path, id: &str, session: &str) -> Option<ClaimState> {
+    let path = claim_state_path(repo, id, session).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(raw.trim()).ok()
 }
 
-fn write_claim_state(repo: &Path, id: &str, claim_oid: &str) -> Result<()> {
-    let path = claim_state_path(repo, id)?;
+fn write_claim_state(repo: &Path, id: &str, session: &str, claim_oid: &str) -> Result<()> {
+    let path = claim_state_path(repo, id, session)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::write(&path, format!("{claim_oid}\n"))
+    let doc = ClaimState {
+        claim: claim_oid.to_string(),
+        session: session.to_string(),
+    };
+    std::fs::write(&path, serde_json::to_string(&doc)?)
         .with_context(|| format!("write {}", path.display()))
 }
 
 /// The state file is process-local and disposable (losing it costs a TTL
 /// wait): a write failure must never turn a published, winning claim into an
 /// error exit.
-fn save_claim_state(repo: &Path, id: &str, claim_oid: &str) {
-    if let Err(e) = write_claim_state(repo, id, claim_oid) {
+fn save_claim_state(repo: &Path, id: &str, session: &str, claim_oid: &str) {
+    if let Err(e) = write_claim_state(repo, id, session, claim_oid) {
         eprintln!("warning: could not record the claim state ({e:#}); a restart re-claims after the TTL");
     }
 }
@@ -2114,6 +2140,7 @@ fn run_claim(
     ttl: u64,
     actor: Option<&str>,
     key: Option<&Path>,
+    session: Option<&str>,
     worktree: &str,
     branch: &str,
     work: &str,
@@ -2131,6 +2158,14 @@ fn run_claim(
     // The actor becomes an inbox path segment; reject what git (or the
     // server's per-principal inbox sharding) would mangle, like run_entry.
     ref_segment("claim.actor", &actor)?;
+    let session = session.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(session) = session {
+        anyhow::ensure!(
+            session.len() <= 128,
+            "--session is {} bytes, over the 128-byte cap",
+            session.len()
+        );
+    }
     let signing = read_signing_key(&key_path)?;
 
     // Step 1: read the log as the remote has it now.
@@ -2143,13 +2178,19 @@ fn run_claim(
         card_claim_governs(&status),
         "card {id} is {status} — not claimable; only open/in-progress cards take claims"
     );
-    // Restart recovery: this worktree's previous claim is still the winner —
-    // and still *this* identity's claim (a re-joined worktree must not resume
-    // the previous principal's card).
-    if let Some(prev) = read_claim_state(repo, id)
+    // Restart recovery is scoped to one **session** (D1 §8.4): without a
+    // session id there is nothing to resume, because a second process in the
+    // same worktree would otherwise mistake the first session's claim for its
+    // own and both would report `claimed: true` (thread
+    // card-claim-resume-scope). With one, the remembered claim must still be
+    // the live winner, by this identity, and carry the same session.
+    if let Some(session) = session
+        && let Some(prev) = read_claim_state(repo, id, session)
+        && prev.session == session
         && let Some(winner) = &view.winner
-        && winner.oid == prev
+        && winner.oid == prev.claim
         && winner.actor == actor
+        && winner.session == session
     {
         print_claim(format, true, id, &winner.actor, &winner.oid, winner.expires_at(), true);
         return Ok(());
@@ -2162,7 +2203,12 @@ fn run_claim(
     // race, not a reply; two concurrent claims are two roots and both stay.
     let mut body = serde_json::Map::new();
     body.insert("ttl".into(), serde_json::json!(ttl));
-    for (field, value) in [("worktree", worktree), ("branch", branch), ("work", work)] {
+    for (field, value) in [
+        ("worktree", worktree),
+        ("branch", branch),
+        ("work", work),
+        ("session", session.unwrap_or("")),
+    ] {
         if !value.is_empty() {
             body.insert(field.into(), serde_json::json!(value));
         }
@@ -2193,8 +2239,11 @@ fn run_claim(
     // Remember the oid before the push: a kill between push and re-read would
     // otherwise orphan a winning claim, and the retry's own earlier claim
     // would stand it down until the TTL. The file is only honored when that
-    // oid is the remote-visible winner, so an unpublished claim never resumes.
-    save_claim_state(repo, id, &oid);
+    // oid is the remote-visible winner *for this session*, so an unpublished
+    // claim never resumes and another session's claim is never adopted.
+    if let Some(session) = session {
+        save_claim_state(repo, id, session, &oid);
+    }
     // Push by oid, then point the local ref at it: a failed push leaves no
     // local-only claim ref behind to pollute the next attempt's view (the
     // convergence view is this checkout's refs, so it must match the remote's).

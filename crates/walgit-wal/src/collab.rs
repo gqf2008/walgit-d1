@@ -977,6 +977,10 @@ pub struct CardClaim {
     pub worktree: String,
     pub branch: String,
     pub work: String,
+    /// Optional caller-supplied session id (D1 §8.4): the holder's own key for
+    /// restart recovery. Two processes in one worktree are different sessions
+    /// even when they share a principal; resume must never cross them.
+    pub session: String,
 }
 
 impl CardClaim {
@@ -1058,6 +1062,7 @@ pub fn parse_card_claim(r: &EntryRef) -> Option<CardClaim> {
         worktree: optional_body_str(body, "worktree")?,
         branch: optional_body_str(body, "branch")?,
         work: optional_body_str(body, "work")?,
+        session: optional_body_str(body, "session")?,
     })
 }
 
@@ -2584,6 +2589,44 @@ name = "everything else"
             board.columns.iter().all(|c| c.cards.is_empty()),
             "a thread with nothing but claims has no card (as for pure CI threads)"
         );
+    }
+
+    #[test]
+    fn a_claim_session_is_an_optional_string() {
+        let (sk_a, _) = claim_keys();
+        let ok = signed_entry(
+            &sk_a,
+            entry(
+                "t1",
+                CARD_CLAIM_KIND,
+                "alice",
+                "",
+                NOW - 10,
+                serde_json::json!({"ttl": 300, "session": "s-1"}),
+            ),
+        );
+        let refs = refs_of(&[ok]);
+        assert_eq!(
+            super::parse_card_claim(&refs[0]).map(|c| c.session),
+            Some("s-1".to_string())
+        );
+
+        // Absent is fine (older callers), but a wrong type is malformed.
+        let absent = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300})),
+        );
+        let refs = refs_of(&[absent]);
+        assert_eq!(
+            super::parse_card_claim(&refs[0]).map(|c| c.session),
+            Some(String::new())
+        );
+        let wrong = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300, "session": 7})),
+        );
+        let refs = refs_of(&[wrong]);
+        assert!(super::parse_card_claim(&refs[0]).is_none());
     }
 
     #[test]

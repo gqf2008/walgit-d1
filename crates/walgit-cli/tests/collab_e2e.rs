@@ -562,21 +562,22 @@ async fn card_claim_converges_and_ttl_releases_the_card() -> TestResult {
     ])?;
 
     // Alice claims first; the claim command returns the signed claim oid.
+    // Session ids are the restart-recovery scope (thread card-claim-resume-scope).
     let win = run(&[
         "collab", "claim", "--repo", repo_a, "--id", "t1", "--actor", "alice", "--key", alice_s,
         "--ttl", "120", "--worktree", "wt-a", "--branch", "feat/a", "--work", "do it",
-        "--push", "origin", "--format", "json",
+        "--session", "s-a", "--push", "origin", "--format", "json",
     ])?;
     let win: serde_json::Value = serde_json::from_str(win.trim())?;
     assert_eq!(win["claimed"], true, "{win}");
     assert_eq!(win["owner"], "alice");
     let claim_oid = win["claim"].as_str().unwrap().to_string();
 
-    // The same worktree claiming again resumes its own claim (process restart
+    // The same session claiming again resumes its own claim (process restart
     // inside the TTL): no second entry, exit 0.
     let (code, out, err) = run_code(&[
         "collab", "claim", "--repo", repo_a, "--id", "t1", "--actor", "alice", "--key", alice_s,
-        "--push", "origin",
+        "--session", "s-a", "--push", "origin",
     ])?;
     assert_eq!(code, 0, "resume must win; stderr: {err}");
     assert!(out.contains("already claimed"), "{out}");
@@ -591,6 +592,33 @@ async fn card_claim_converges_and_ttl_releases_the_card() -> TestResult {
             .count(),
         1,
         "resume must not publish a second claim"
+    );
+
+    // A *different* session in the same worktree must not adopt that claim:
+    // the state file is per session, so it stands down like any other client
+    // instead of reporting `claimed: true` a second time (the bug this scope
+    // fixes). It publishes nothing.
+    let (code, out, err) = run_code(&[
+        "collab", "claim", "--repo", repo_a, "--id", "t1", "--actor", "alice", "--key", alice_s,
+        "--session", "s-b", "--push", "origin",
+    ])?;
+    assert_eq!(code, 2, "a different session must stand down; stderr: {err}");
+    assert!(out.contains("stand-down"), "{out}");
+    assert!(
+        !out.contains("already claimed"),
+        "a different session must not resume: {out}"
+    );
+    let thread = run(&["collab", "thread", "t1", "--repo", repo_a])?;
+    let thread: serde_json::Value = serde_json::from_str(&thread)?;
+    assert_eq!(
+        thread
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["entry"]["kind"] == "card_claim")
+            .count(),
+        1,
+        "the losing session published nothing"
     );
 
     // Bob reads the same card: the live claim is already visible, so he stands

@@ -114,7 +114,8 @@ before you write.
 `--allow-write --key <this agent's seed>`.** `collab_entry` appends a signed entry; `collab_claim`
 claims a work card (D1 §8.4) — publish + re-read + winner check in one call, failing with an
 `isError` result whose text contains `stand-down:` when another claim won, so a race converges
-on exactly one worker:
+on exactly one worker. `session` (optional) scopes resume to one agent session; omit it and a
+call never resumes another session's claim in the same worktree:
 
 ```jsonc
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"collab_entry","arguments":{
@@ -251,14 +252,16 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     actor/key once the unfolded refs pass the threshold — the server's
     aggregate read budget is 20000 refs.
   - `walgit collab claim --id <thread> [--ttl 300] [--push origin] [--worktree … --branch …
-    --work …]` — the work-card convergence primitive (`docs/D1_PROTOCOL.md` §8.4): read →
+    --work …] [--session <id>]` — the work-card convergence primitive (`docs/D1_PROTOCOL.md` §8.4): read →
     publish a signed `card_claim` root → re-read → exit **0** only if this claim won,
     **2** to stand down (another claim holds the card — do not start work; 2 is also the
     usage-error code, so match the `stand-down:` line / `"claimed": false`, not the bare
     code), **1** on error. Only `open`/`in-progress` cards are claimable.
     Duplicate claims are legal; duplicate execution is not. A claim is live through `ts + ttl`
     inclusive (default 300 s) — expiry is the self-healing release: no lease renew, no cleanup
-    process.
+    process. **`--session <id>` (or `WALGIT_CLAIM_SESSION`) scopes restart recovery to one
+    session**: omit it and the command never resumes, so two sessions in the same checkout
+    converge normally (the later one stands down). Never treat a worktree as one session.
 - Automate: `walgit collab watch` — the resident loop that turns `refs/collab/*`
   changes into process invocations (`--exec <cmd>`, each new/changed entry's JSON
   on stdin). How an agent builds an unattended loop on it: **§0c**.
