@@ -654,6 +654,9 @@ decision in §4 — or the PR is; never "fix later".
   the existing pull primitives: refs use a streaming `git ls-remote --refs` digest, WAL uses the
   refs-only manifest head seq, and collab resources share one session-level ref-level puller for
   `refs/collab/*`; board/thread versions are recomputed only after that shared ref signal changes.
+  *(Amended 2026-10-20, design-card-claim: the **board** version is also recomputed once it is 60 s
+  old — the board projection is a function of the wall clock too, because a `card_claim` TTL expiring
+  moves no ref (`docs/D1_PROTOCOL.md` §8.4). Everything else in this decision stands.)*
   The poller computes only a stable version probe; `resources/read` remains the client's opt-in
   content read, and refs reads return a bounded digest sample rather than the whole ref list. A version change
   emits `notifications/resources/updated` (URI only), disappearance emits
@@ -890,10 +893,15 @@ A work unit is a **walgit collab thread**; the board (`walgit collab board`, def
 projects it with **per-field inheritance**: `status` is the newest `status` entry carrying a string `status`
 (a `merge_result {"merged":true}` also lands the card on `merged`), while `owner` / `worktree` / `branch` /
 `work` each come from the newest `status` entry that names that field — later entries inherit what they omit,
-an explicit empty string clears it, and `work` falls back to that entry's `note`. Projection does **not** filter
+an explicit empty string clears it, and `work` falls back to that entry's `note`. **Exception (§8.4 claims):
+while an open/in-progress card has a live `card_claim` winner, `owner` is the winner's principal and the
+context comes from the winner's own *verified* `status` entries plus the claim body** — a bystander's (or
+forged-actor, unverified) status entry still moves the status column but never the owner fields. Otherwise the
+projection does **not** filter
 by signature: every entry's fields count, while verification feeds the `verified`/`unverified` counts, the merge
-rule (only verified approvals count) and the `done` gate. Filing a thread is therefore two entries: the `issue` root **and** a `status` entry naming
-`owner` (add `worktree`/`branch`/`work` when claimed); an issue-only thread projects as an unowned `open` card.
+rule (only verified approvals count) and the `done` gate. Filing a thread is the `issue` root; the worker then
+claims it with `walgit collab claim` (§8.4 — or, without claims, a `status` entry naming
+`owner`, adding `worktree`/`branch`/`work` when claimed); an issue-only thread projects as an unowned `open` card.
 Parked work still names its owner (`blocked` / `needs-human`). An owner written in a `comment` does not count —
 only the `status` entry's fields do.
 

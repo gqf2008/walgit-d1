@@ -792,7 +792,15 @@ fn canonical_root<'a>(
     ordered
         .iter()
         .copied()
-        .find(|r| r.entry.parent.is_empty() && r.is_verified(principals))
+        .find(|r| {
+            // A card_claim is a root by protocol (§8.4: a new round of the
+            // race, not a reply) but never a card's *identity*: with an equal
+            // or earlier (ts, actor) than the issue it would sort first and
+            // its title-less body would blank the card.
+            r.entry.parent.is_empty()
+                && r.entry.kind != CARD_CLAIM_KIND
+                && r.is_verified(principals)
+        })
         .or_else(|| ordered.first().copied())
 }
 
@@ -819,14 +827,12 @@ pub fn build_report(
     }
     let mut report = Report::default();
     for (id, group) in &by_thread {
-        // CI run threads are not work-unit cards (docs/D1_CI_PROTOCOL.md
-        // D1-CI §8.3): their surfaces are `walgit ci status`, the report's CI
-        // section and the SPA thread badge — on a board they would only ever
-        // be untitled "open" cards.
-        if group
-            .iter()
-            .all(|r| r.entry.kind == crate::ci::CI_CLAIM_KIND || r.entry.kind == crate::ci::CI_RESULT_KIND)
-        {
+        // Threads with no work-unit content are not cards: pure CI run threads
+        // (docs/D1_CI_PROTOCOL.md §8.3) and bare claims without a card
+        // (docs/D1_PROTOCOL.md §8.4) — their surfaces are `walgit ci status`,
+        // the report's CI section and the SPA thread badge, and on a board
+        // they would only ever be untitled "open" cards.
+        if group.iter().all(|r| non_card_kind(r.entry.kind.as_str())) {
             continue;
         }
         let ordered = thread(group);
@@ -946,12 +952,17 @@ pub const CARD_CLAIM_KIND: &str = "card_claim";
 
 /// Default claim lifetime when the body omits `ttl`.
 pub const CARD_CLAIM_TTL_DEFAULT_SECS: u64 = 300;
-pub const CARD_CLAIM_TTL_MIN_SECS: u64 = 1;
-pub const CARD_CLAIM_TTL_MAX_SECS: u64 = 86_400;
+/// The bounds are the CI claim's (`docs/D1_CI_PROTOCOL.md` §6.1): the two
+/// claim protocols share one convergence shape, so they share one range.
+pub const CARD_CLAIM_TTL_MIN_SECS: u64 = crate::ci::CLAIM_TTL_MIN_SECS;
+pub const CARD_CLAIM_TTL_MAX_SECS: u64 = crate::ci::CLAIM_TTL_MAX_SECS;
 
 /// A verified, well-formed `card_claim` entry. `actor` is the signing
 /// principal — ownership is never a body field a client could forge.
-#[derive(Serialize, Clone, Debug)]
+/// (Deliberately not `Serialize`: the wire shapes are `BoardClaim` and the
+/// CLI's claim printout, and an unused derive reads as a supported JSON
+/// contract.)
+#[derive(Clone, Debug)]
 pub struct CardClaim {
     pub oid: String,
     pub actor: String,
@@ -978,7 +989,7 @@ impl CardClaim {
 /// The card's claims as of `now`: verified well-formed claims (sorted by the
 /// winner order), the deterministic winner, and the count of claim entries
 /// that are visible but never drive ownership.
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CardClaimView {
     pub claims: Vec<CardClaim>,
     pub winner: Option<CardClaim>,
@@ -1061,7 +1072,10 @@ pub fn card_claim_view(
         if r.entry.kind != CARD_CLAIM_KIND {
             continue;
         }
-        match r.is_verified(principals).then(|| parse_card_claim(r)).flatten() {
+        // Parse before verifying: a malformed claim (reply, wrong-typed ttl)
+        // is rejected without paying for the signature check, and both failure
+        // modes already land in the same `unverified` bucket.
+        match parse_card_claim(r).filter(|_| r.is_verified(principals)) {
             Some(c) => claims.push(c),
             None => unverified += 1,
         }
@@ -1075,6 +1089,26 @@ pub fn card_claim_view(
         winner,
         unverified,
     }
+}
+
+/// The statuses a live claim governs (`docs/D1_PROTOCOL.md` §8.4): a claim
+/// owns an `open`/`in-progress` card; `needs-review` and everything after
+/// (`blocked`/`needs-human`/`merged`/`done`/`closed`, or any free-form status)
+/// is the status entries' business. One gate shared by the board projection
+/// and `walgit collab claim`'s refusal, so a granted claim always owns the
+/// card and a card the projection would ignore is refused up front.
+pub fn card_claim_governs(status: &str) -> bool {
+    matches!(status, "open" | "in-progress")
+}
+
+/// Kinds that never give a thread a work-card identity by themselves
+/// (`docs/D1_CI_PROTOCOL.md` §8.3, `docs/D1_PROTOCOL.md` §8.4): a thread with
+/// only these — a pure CI run, or claims without a card — has no card for the
+/// board or the report's thread list.
+pub fn non_card_kind(kind: &str) -> bool {
+    kind == crate::ci::CI_CLAIM_KIND
+        || kind == crate::ci::CI_RESULT_KIND
+        || kind == CARD_CLAIM_KIND
 }
 
 /// Where the board definition is versioned (repo-relative, in the tree).
@@ -1280,7 +1314,8 @@ pub struct BoardClaim {
     pub actor: String,
     pub ts: i64,
     pub ttl: u64,
-    /// `ts + ttl` — when the card becomes claimable again.
+    /// `ts + ttl` — the last live instant (`now <= ts + ttl`); the card is
+    /// claimable again after it.
     pub expires_at: i64,
 }
 
@@ -1338,28 +1373,42 @@ struct BoardWorkContext {
     worktree: String,
     branch: String,
     work: String,
+    /// Slots (worktree, branch, work) at least one replayed status entry set
+    /// as a string — including an explicit `""` clear. The claim body fills
+    /// only fields never mentioned, so a holder's clear is not refilled.
+    mentioned: [bool; 3],
 }
 
 /// Work context is inherited across status moves: a `needs-review` entry that
 /// only sets `status` keeps the owner/worktree/branch/work from the previous
 /// status. An explicit empty string clears a field; `work` falls back to the
 /// same status entry's `note` when absent.
-fn card_work_context(ordered: &[&EntryRef]) -> BoardWorkContext {
-    card_work_context_by(ordered, None)
+fn card_work_context(
+    ordered: &[&EntryRef],
+    principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+) -> BoardWorkContext {
+    card_work_context_by(ordered, None, principals)
 }
 
-/// The same replay, optionally restricted to one principal's `status` entries
-/// (`docs/D1_PROTOCOL.md` §8.4: while a claim holder owns an open card, only the
-/// holder's own status entries may refine its work context — a losing or
-/// bystander status entry still moves the card's status column, never the
-/// owner fields).
-fn card_work_context_by(ordered: &[&EntryRef], actor: Option<&str>) -> BoardWorkContext {
+/// The same replay, optionally restricted to one principal's **verified**
+/// `status` entries (`docs/D1_PROTOCOL.md` §8.4: while a claim holder owns an
+/// open card, only the holder's own signed status entries may refine its work
+/// context — a losing or bystander status entry still moves the card's status
+/// column, never the owner fields, and a forged `actor` string on an
+/// unverified entry is not the holder).
+fn card_work_context_by(
+    ordered: &[&EntryRef],
+    actor: Option<&str>,
+    principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+) -> BoardWorkContext {
     let mut ctx = BoardWorkContext::default();
     for r in ordered {
         if r.entry.kind != "status" {
             continue;
         }
-        if actor.is_some_and(|a| a != r.entry.actor) {
+        if let Some(a) = actor
+            && (a != r.entry.actor || !r.is_verified(principals))
+        {
             continue;
         }
         let body = &r.entry.body;
@@ -1369,12 +1418,21 @@ fn card_work_context_by(ordered: &[&EntryRef], actor: Option<&str>) -> BoardWork
             ("branch", &mut ctx.branch),
         ] {
             if let Some(v) = body.get(key).and_then(serde_json::Value::as_str) {
+                if key == "worktree" {
+                    ctx.mentioned[0] = true;
+                } else if key == "branch" {
+                    ctx.mentioned[1] = true;
+                }
                 *slot = v.to_string();
             }
         }
         if let Some(v) = body.get("work").and_then(serde_json::Value::as_str) {
+            ctx.mentioned[2] = true;
             ctx.work = v.to_string();
         } else if let Some(v) = body.get("note").and_then(serde_json::Value::as_str) {
+            // The note fallback sets `work` too, so it also counts as a
+            // mention: the claim body must not refill what a note cleared.
+            ctx.mentioned[2] = true;
             ctx.work = v.to_string();
         }
     }
@@ -1463,14 +1521,12 @@ pub fn build_board(
         })
         .collect();
     for (id, group) in &by_thread {
-        // CI run threads are not work-unit cards (docs/D1_CI_PROTOCOL.md
-        // D1-CI §8.3): their surfaces are `walgit ci status`, the report's CI
-        // section and the SPA thread badge — on a board they would only ever
-        // be untitled "open" cards.
-        if group
-            .iter()
-            .all(|r| r.entry.kind == crate::ci::CI_CLAIM_KIND || r.entry.kind == crate::ci::CI_RESULT_KIND)
-        {
+        // Threads with no work-unit content are not cards: pure CI run threads
+        // (docs/D1_CI_PROTOCOL.md §8.3) and bare claims without a card
+        // (docs/D1_PROTOCOL.md §8.4) — their surfaces are `walgit ci status`,
+        // the report's CI section and the SPA thread badge, and on a board
+        // they would only ever be untitled "open" cards.
+        if group.iter().all(|r| non_card_kind(r.entry.kind.as_str())) {
             continue;
         }
         let ordered = thread(group);
@@ -1489,32 +1545,40 @@ pub fn build_board(
         });
         let claim_view = card_claim_view(group, principals, now);
         let mut status = card_status(&ordered);
-        let mut work = card_work_context(&ordered);
         // D1_PROTOCOL §8.4: a live winner claim owns an open card. It moves
         // `open` to `in-progress` and supplies the work context from the
-        // holder's own status entries plus the claim body. `needs-review` and
-        // later statuses stay the status entries' business — a claim never
-        // drags a card backwards, and an expired claim releases ownership.
-        if matches!(status.as_str(), "open" | "in-progress")
-            && let Some(winner) = &claim_view.winner
-        {
-            work = card_work_context_by(&ordered, Some(&winner.actor));
+        // holder's own verified status entries plus the claim body.
+        // `needs-review` and later statuses stay the status entries' business
+        // — a claim never drags a card backwards, and an expired claim
+        // releases ownership.
+        let winner = if card_claim_governs(&status) {
+            claim_view.winner.as_ref()
+        } else {
+            None
+        };
+        let work = if let Some(winner) = winner {
+            let mut work = card_work_context_by(&ordered, Some(&winner.actor), principals);
             work.owner.clone_from(&winner.actor);
             // The claim body is the holder's declaration at claim time; the
-            // holder's own later status entries refine it field by field.
-            for (value, slot) in [
-                (&winner.worktree, &mut work.worktree),
-                (&winner.branch, &mut work.branch),
-                (&winner.work, &mut work.work),
+            // holder's own later status entries refine it field by field, and
+            // a field they explicitly cleared is not refilled.
+            let [worktree_mentioned, branch_mentioned, work_mentioned] = work.mentioned;
+            for (mentioned, value, slot) in [
+                (worktree_mentioned, &winner.worktree, &mut work.worktree),
+                (branch_mentioned, &winner.branch, &mut work.branch),
+                (work_mentioned, &winner.work, &mut work.work),
             ] {
-                if slot.is_empty() && !value.is_empty() {
+                if !mentioned && slot.is_empty() && !value.is_empty() {
                     slot.clone_from(value);
                 }
             }
             if status == "open" {
                 status = "in-progress".to_string();
             }
-        }
+            work
+        } else {
+            card_work_context(&ordered, principals)
+        };
         let card = BoardCard {
             id: (*id).to_string(),
             title: root_title(&ordered, principals),
@@ -2259,6 +2323,7 @@ name = "everything else"
         let card = card_of(&board, "t1");
         assert_eq!(card.status, "in-progress", "a claim claims the card");
         assert_eq!(card.owner, "alice", "the earliest live claim wins");
+        assert_eq!(card.title, "fix it", "the claim must not shadow the issue root");
         assert_eq!(card.worktree, "wt-a");
         assert_eq!(card.branch, "feat/a");
         let claim = card.claim.as_ref().expect("claim projection");
@@ -2410,22 +2475,111 @@ name = "everything else"
         assert_eq!(card.owner, "alice", "only the winner's own entries refine the context");
         assert_eq!(card.worktree, "wt-a");
 
-        // The winner's own later status entry does refine it.
-        let mine = entry(
+        // The winner's own later status entry refines it — but only when it is
+        // verifiably the winner's: an unsigned entry that merely *names* the
+        // winner's principal is a forgery and must not refine the context
+        // (docs/D1_PROTOCOL.md §8.4: the holder's own *signed* status entries).
+        let forged = entry(
             "t1",
             "status",
             "alice",
             &test_oid(&loser),
-            NOW - 8,
-            serde_json::json!({"status": "in-progress", "worktree": "wt-a2", "work": "step 2"}),
+            NOW - 9,
+            serde_json::json!({"status": "in-progress", "worktree": "wt-evil", "work": "forged"}),
         );
-        let owned = refs_of(&[claim, loser, mine]);
+        let mine = signed_entry(
+            &sk_a,
+            entry(
+                "t1",
+                "status",
+                "alice",
+                &test_oid(&forged),
+                NOW - 8,
+                serde_json::json!({"status": "in-progress", "worktree": "wt-a2", "work": "step 2"}),
+            ),
+        );
+        let owned = refs_of(&[claim, loser, forged, mine]);
         let refs: Vec<&EntryRef> = owned.iter().collect();
         let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
         let card = card_of(&board, "t1");
         assert_eq!(card.owner, "alice");
         assert_eq!(card.worktree, "wt-a2");
         assert_eq!(card.work, "step 2");
+    }
+
+    #[test]
+    fn the_holders_explicit_clear_is_not_refilled_from_the_claim_body() {
+        let (sk_a, _) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        let issue = entry("t1", "issue", "alice", "", NOW - 100, serde_json::json!({"title": "t"}));
+        let claim = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300, "worktree": "wt-a", "work": "plan"})),
+        );
+        // The holder clears worktree with an explicit "" (hand-off prep): the
+        // claim body must not refill what a signed status entry cleared.
+        let clear = signed_entry(
+            &sk_a,
+            entry(
+                "t1",
+                "status",
+                "alice",
+                &test_oid(&claim),
+                NOW - 9,
+                serde_json::json!({"status": "in-progress", "worktree": ""}),
+            ),
+        );
+        let owned = refs_of(&[issue, claim, clear]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.owner, "alice");
+        assert_eq!(card.worktree, "", "an explicit clear stays cleared");
+        assert_eq!(card.work, "plan", "never-mentioned fields still fill from the claim body");
+    }
+
+    #[test]
+    fn a_claim_is_a_root_but_never_the_cards_identity() {
+        let (sk_a, sk_b) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        // The issue's principal sorts *after* the claimant's at the same ts,
+        // so a claim treated as an ordinary root would win canonical_root.
+        principals.insert("zzz-filer".to_string(), pk(&sk_b));
+        let issue = signed_entry(
+            &sk_b,
+            entry("t1", "issue", "zzz-filer", "", NOW - 10, serde_json::json!({"title": "real title"})),
+        );
+        let claim = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300})),
+        );
+        let owned = refs_of(&[claim, issue]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.title, "real title", "the claim must not become the card's root");
+        assert_eq!(card.actor, "zzz-filer");
+        assert_eq!(card.owner, "alice");
+    }
+
+    #[test]
+    fn claims_without_a_card_are_not_a_card() {
+        let (sk_a, _) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        let claim = signed_entry(
+            &sk_a,
+            entry("run-7", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300})),
+        );
+        let owned = refs_of(&[claim]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        assert!(
+            board.columns.iter().all(|c| c.cards.is_empty()),
+            "a thread with nothing but claims has no card (as for pure CI threads)"
+        );
     }
 
     #[test]

@@ -108,7 +108,8 @@ under `--allow-write --key`): `kind`/`id`/`actor`/`parent`/`body` (a JSON object
 `base`/`head` for `patch`. Each call signs and pushes to the process's `--remote` and returns
 `<ref> <oid>` as its text — that oid is the next `parent`. Claim a work card with `collab_claim`
 (`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`): it publishes a `card_claim`, re-reads
-and succeeds only for the deterministic winner; an error starting `stand-down:` names the holder —
+and succeeds only for the deterministic winner; a losing call returns `isError` whose text contains
+`stand-down:` plus the JSON verdict (`{"claimed": false, "owner": …}`) naming the holder —
 do not start work. There is no local-only write over MCP.
 
 For unattended multi-agent work, run **one process per agent/worktree/principal**, subscribing
@@ -268,8 +269,12 @@ W collab principal-fetch    [--remote origin] [--token $WALGIT_TOKEN]
 Claim a work card before working on it (`docs/D1_PROTOCOL.md` §8.4). The command publishes a
 signed `card_claim`, re-reads the log and exits **0** only for the deterministic winner
 (earliest live claim by `(ts, actor, oid)`), **2** when another claim holds the card (stand
-down — do not start work) and **1** on error. Duplicate claims are legal, duplicate execution
-is not; a claim expires at `ts + ttl` (default 300 s), which is the only release mechanism:
+down — do not start work) and **1** on error. (2 is also the CLI's usage-error code: a stand-down
+prints the `stand-down:` line / `"claimed": false` — match that, not the bare code.) Only
+`open`/`in-progress` cards are claimable — later states are refused with exit 1, since the board
+never lets a claim own them. Duplicate claims are legal, duplicate execution
+is not; a claim is live through `ts + ttl` inclusive (default 300 s), after which the card is
+claimable again — expiry is the only release mechanism:
 
 ```bash
 W collab claim --id <thread-id> --worktree wt-x --branch feat/x \
@@ -279,7 +284,7 @@ W collab claim --id <thread-id> --worktree wt-x --branch feat/x \
 | kind | body (required) | use |
 |---|---|---|
 | `issue` | `{"title","body"}` | thread root |
-| `status` | `{"status","owner","worktree?","branch?","work","note?"}` | move the card / explicit hand-off |
+| `status` | `{"status","owner","worktree?","branch?","work","note?"}` | move the card / explicit hand-off (a live claim re-pins `owner` to its winner — hand a claimed card off by letting the claim lapse, or keep claims short) |
 | `card_claim` | `{"ttl":300,"worktree?","branch?","work?"}` (root entry, `parent=""`) | ownership claim before work (`collab claim`; convergence in §8.4) |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
 | `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review, run as its own party (own principal/key; a headless sub-agent counts); the merge rule drops `svc-*` actors and verified-patch authors, but the coordinator still checks the actor (an unverified patch does not populate the author set) |
@@ -292,8 +297,9 @@ entry carrying a string `status` (`merge_result {"merged":true}` also lands on `
 entries inherit what they omit, an explicit empty string clears it, `work` falls back to that entry's
 `note`. While a card is `open`/`in-progress` **and a live `card_claim` exists**, the winner owns it:
 `owner` is the winner's principal, `open` projects as `in-progress`, and the context comes from the
-winner's own `status` entries plus the claim body (a losing or bystander `status` entry still moves
-the status column but cannot take the owner fields). Projection does **not** filter by signature;
+winner's own **verified** `status` entries plus the claim body (a losing or bystander `status` entry
+still moves the status column but cannot take the owner fields; nor can an unverified entry that
+merely names the winner). Projection does **not** filter by signature;
 verification shows in the `verified`/`unverified` counts, in the merge rule (only verified approvals
 count) and in the `done` gate. An issue-only thread therefore projects as an **unowned `open` card** —
 file the `issue`, then the worker claims it (or, without claims, add a `status` entry naming `owner`);

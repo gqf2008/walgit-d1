@@ -21,8 +21,9 @@ use walgit_wal::collab::{
     CARD_CLAIM_TTL_MAX_SECS, CARD_CLAIM_TTL_MIN_SECS, COLLAB_ENTRY_MAX_BYTES,
     COLLAB_SNAPSHOT_MAX_BYTES, CardClaim, Entry, EntryRef, EntryRefs, EntrySet, MergeRules, Report,
     SNAPSHOT_REF, Snapshot, SnapshotRecord, build_board, build_report, build_snapshot,
-    build_snapshot_truncated, card_claim_view, card_status, default_board, merge_rule_eval,
-    parse_board_def, parse_snapshot, pr_view, sign_entry, thread, verify_snapshot,
+    build_snapshot_truncated, card_claim_governs, card_claim_view, card_status, default_board,
+    merge_rule_eval, non_card_kind, parse_board_def, parse_snapshot, pr_view, sign_entry, thread,
+    verify_snapshot,
 };
 
 // ---- CLI commands --------------------------------------------------------------
@@ -213,8 +214,10 @@ pub enum CollabAction {
     /// (`docs/D1_PROTOCOL.md` §8.4): read → publish → re-read → the
     /// deterministic winner (earliest live claim by `(ts, actor, oid)`)
     /// proceeds. Exit 0 = this claim won, 2 = stood down (another claim holds
-    /// the card — do not start work), 1 = error. Duplicate claims are legal;
-    /// duplicate execution is not.
+    /// the card — do not start work), 1 = error. Note that 2 is also clap's
+    /// usage-error code: a stand-down is recognizable by the `stand-down:`
+    /// line (text) or `"claimed": false` (json), not by the code alone.
+    /// Duplicate claims are legal; duplicate execution is not.
     Claim {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -225,8 +228,8 @@ pub enum CollabAction {
         /// claim that is not pushed is invisible to every other client.
         #[arg(long, default_value = "origin")]
         push: String,
-        /// Claim TTL in seconds (1..=86400, default 300). The card becomes
-        /// claimable again at `ts + ttl`.
+        /// Claim TTL in seconds (1..=86400, default 300). The claim is live
+        /// through `ts + ttl` (inclusive); the card is claimable again after.
         #[arg(long, default_value_t = CARD_CLAIM_TTL_DEFAULT_SECS)]
         ttl: u64,
         /// Principal whose inbox receives the claim (default: this worktree's
@@ -2002,7 +2005,7 @@ const CLAIM_STAND_DOWN_EXIT: i32 = 2;
 fn claim_state_path(repo: &Path, id: &str) -> Result<PathBuf> {
     use sha2::Digest as _;
     let digest = hex::encode(sha2::Sha256::digest(id.as_bytes()));
-    Ok(absolute_git_dir(repo)?.join("walgit").join("claims").join(digest))
+    Ok(project_identity_dir(repo)?.join("claims").join(digest))
 }
 
 fn read_claim_state(repo: &Path, id: &str) -> Option<String> {
@@ -2020,6 +2023,15 @@ fn write_claim_state(repo: &Path, id: &str, claim_oid: &str) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))
 }
 
+/// The state file is process-local and disposable (losing it costs a TTL
+/// wait): a write failure must never turn a published, winning claim into an
+/// error exit.
+fn save_claim_state(repo: &Path, id: &str, claim_oid: &str) {
+    if let Err(e) = write_claim_state(repo, id, claim_oid) {
+        eprintln!("warning: could not record the claim state ({e:#}); a restart re-claims after the TTL");
+    }
+}
+
 /// The card's claim view and effective status over freshly read collab refs.
 fn claim_view_now(
     repo: &Path,
@@ -2030,6 +2042,12 @@ fn claim_view_now(
     anyhow::ensure!(
         !thread_entries.is_empty(),
         "no card with id {id:?} in this checkout (is the id right, and are refs/collab/* fetched?)"
+    );
+    anyhow::ensure!(
+        thread_entries
+            .iter()
+            .any(|e| !non_card_kind(e.entry.kind.as_str())),
+        "thread {id:?} has no work-card entries — a CI run or bare claims are not claimable"
     );
     let ordered = thread(&thread_entries);
     let status = card_status(&ordered);
@@ -2067,6 +2085,17 @@ fn print_claim(format: &str, claimed: bool, id: &str, holder: &str, oid: &str, e
 fn stand_down(id: &str, winner: &CardClaim, format: &str) -> Result<()> {
     print_claim(format, false, id, &winner.actor, &winner.oid, winner.expires_at(), false);
     let _ = std::io::stdout().flush();
+    if format == "json" {
+        // JSON mode's stdout is the machine channel; the human-readable
+        // stand-down signal goes to stderr so it also lands in the MCP tool
+        // error text (which prefers stderr) and in logs.
+        eprintln!(
+            "stand-down: card {id} is held by {} until {} (claim {}); do not start work",
+            winner.actor,
+            winner.expires_at(),
+            winner.oid
+        );
+    }
     std::process::exit(CLAIM_STAND_DOWN_EXIT)
 }
 
@@ -2099,19 +2128,28 @@ fn run_claim(
         "unknown claim format {format} (text|json)"
     );
     let (actor, key_path) = resolve_identity(repo, actor, key)?;
+    // The actor becomes an inbox path segment; reject what git (or the
+    // server's per-principal inbox sharding) would mangle, like run_entry.
+    ref_segment("claim.actor", &actor)?;
     let signing = read_signing_key(&key_path)?;
 
     // Step 1: read the log as the remote has it now.
     git_fetch_collab(repo, remote)?;
     let (view, status) = claim_view_now(repo, id)?;
+    // The same gate the board projection applies (§8.4): a claim owns only an
+    // open/in-progress card, so claiming any other state would exit 0 while
+    // the board ignored the claim — refuse up front instead.
     anyhow::ensure!(
-        !matches!(status.as_str(), "merged" | "done" | "closed"),
-        "card {id} is {status}; a terminal card is not claimable"
+        card_claim_governs(&status),
+        "card {id} is {status} — not claimable; only open/in-progress cards take claims"
     );
-    // Restart recovery: this worktree's previous claim is still the winner.
+    // Restart recovery: this worktree's previous claim is still the winner —
+    // and still *this* identity's claim (a re-joined worktree must not resume
+    // the previous principal's card).
     if let Some(prev) = read_claim_state(repo, id)
         && let Some(winner) = &view.winner
         && winner.oid == prev
+        && winner.actor == actor
     {
         print_claim(format, true, id, &winner.actor, &winner.oid, winner.expires_at(), true);
         return Ok(());
@@ -2141,26 +2179,61 @@ fn run_claim(
         sig: String::new(),
     };
     entry.sig = sign_entry(&mut entry, &signing);
-    let oid = git_write_blob(repo, &serde_json::to_string_pretty(&entry)?)?;
+    let content = serde_json::to_string_pretty(&entry)?;
+    // Readers skip oversized blobs silently (COLLAB_ENTRY_MAX_BYTES), which
+    // would make the claim invisible and the re-read below misdiagnose the
+    // miss — refuse while the error can still name the real cause.
+    anyhow::ensure!(
+        content.len() <= COLLAB_ENTRY_MAX_BYTES,
+        "claim entry is {} bytes, over the {}-byte collab entry cap",
+        content.len(),
+        COLLAB_ENTRY_MAX_BYTES
+    );
+    let oid = git_write_blob(repo, &content)?;
+    // Remember the oid before the push: a kill between push and re-read would
+    // otherwise orphan a winning claim, and the retry's own earlier claim
+    // would stand it down until the TTL. The file is only honored when that
+    // oid is the remote-visible winner, so an unpublished claim never resumes.
+    save_claim_state(repo, id, &oid);
+    // Push by oid, then point the local ref at it: a failed push leaves no
+    // local-only claim ref behind to pollute the next attempt's view (the
+    // convergence view is this checkout's refs, so it must match the remote's).
     let ref_name = format!("refs/collab/inbox/{actor}/{}", entry_uuid());
+    git_push_refspecs(repo, remote, &[format!("{oid}:{ref_name}")], false, &[])?;
     git_update_ref(repo, &ref_name, Some(&oid))?;
-    git_push(repo, remote, &ref_name)?;
 
     // Step 3: the convergence point. Re-read; only the deterministic winner
     // (computed over the claims both writers published) may start work.
     git_fetch_collab(repo, remote)?;
-    let (view, _) = claim_view_now(repo, id)?;
+    let (view, status) = claim_view_now(repo, id)?;
+    // The card may have left the claimable state while our claim published
+    // (e.g. the coordinator closed it): the fresh re-read decides, not the
+    // step-1 snapshot.
+    anyhow::ensure!(
+        card_claim_governs(&status),
+        "card {id} became {status} while the claim was publishing — not claimable; the claim stays in the log"
+    );
     match &view.winner {
         Some(w) if w.oid == oid => {
-            write_claim_state(repo, id, &oid)?;
             print_claim(format, true, id, &actor, &oid, w.expires_at(), false);
             Ok(())
         }
         Some(w) => stand_down(id, w, format),
-        None => bail!(
-            "claim {oid} was published but no live winner exists — it expired between \
-             publish and re-read; retry with a larger --ttl"
-        ),
+        None => {
+            if view.claims.iter().any(|c| c.oid == oid) {
+                // Ours parsed and verified but is already past ts + ttl.
+                bail!(
+                    "claim {oid} expired between publish and re-read; retry with a larger --ttl"
+                );
+            }
+            // Ours never entered the verified set: the signature does not
+            // match the principal's registered key (or the principal is
+            // not registered). A larger TTL cannot fix that.
+            bail!(
+                "claim {oid} was published but is not a live verified claim — check that \
+                 principal {actor} is registered and --key matches its registered public key"
+            )
+        }
     }
 }
 

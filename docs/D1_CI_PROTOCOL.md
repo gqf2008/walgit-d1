@@ -210,8 +210,8 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
 
 ### 6.3 TTL 与重认领（normative）
 
-- 认领在 `ts + ttl` 时刻过期（`ts` 是条目自己的签名字段）。过期认领不再参与胜者计算
-  （`decide` 给出 `Claim`，允许任何人重新认领）。
+- 认领的 live 区间含边界：`now <= ts + ttl` 时仍 live，`now > ts + ttl` 起过期（`ts` 是条目
+  自己的签名字段）。过期认领不再参与胜者计算（`decide` 给出 `Claim`，允许任何人重新认领）。
 - **过期重认领 = 发布一条新 claim**（新的 ts、新的 uuid ref）。旧 claim 留在日志里
   （追加式，不删不改）——它解释了"为什么前一次认领没有结果"。
 - runner 崩溃 → 没有 result → 认领过期 → 任何 runner（含崩溃者自己重启后）重新认领。
@@ -248,7 +248,7 @@ decide(run, actor, max_attempts) -> Decision      // §6.2 步骤 2 的规范实
 claims  = 已验证 ci_claim，按 body 解析成功者
 results = 已验证 ci_result，其 body.claim 指向 claims 中某个 oid 者
 
-valid(c)   = c.ts + c.ttl > now  且  c 未被 conclusion=="error" 的结果引用   // §6.3
+valid(c)   = c.ts + c.ttl >= now  且  c 未被 conclusion=="error" 的结果引用  // §6.3
 winner     = min by (ts, actor, oid) over { c ∈ claims | valid(c) }         // 最早者胜
 effective  = min by (ts, actor, oid) over { r ∈ results | r.claim == winner.oid }
            若 winner 不存在（全部过期/作废）但 results 非空：

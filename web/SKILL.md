@@ -112,8 +112,9 @@ before you write.
 
 **Writing is two tools, both absent from the read-only surface; start the process with
 `--allow-write --key <this agent's seed>`.** `collab_entry` appends a signed entry; `collab_claim`
-claims a work card (D1 §8.4) — publish + re-read + winner check in one call, failing with
-`stand-down:` when another claim won, so a race converges on exactly one worker:
+claims a work card (D1 §8.4) — publish + re-read + winner check in one call, failing with an
+`isError` result whose text contains `stand-down:` when another claim won, so a race converges
+on exactly one worker:
 
 ```jsonc
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"collab_entry","arguments":{
@@ -252,9 +253,12 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
   - `walgit collab claim --id <thread> [--ttl 300] [--push origin] [--worktree … --branch …
     --work …]` — the work-card convergence primitive (`docs/D1_PROTOCOL.md` §8.4): read →
     publish a signed `card_claim` root → re-read → exit **0** only if this claim won,
-    **2** to stand down (another claim holds the card — do not start work), **1** on error.
-    Duplicate claims are legal; duplicate execution is not. A claim expires at `ts + ttl`
-    (default 300 s), which is the self-healing release: no lease renew, no cleanup process.
+    **2** to stand down (another claim holds the card — do not start work; 2 is also the
+    usage-error code, so match the `stand-down:` line / `"claimed": false`, not the bare
+    code), **1** on error. Only `open`/`in-progress` cards are claimable.
+    Duplicate claims are legal; duplicate execution is not. A claim is live through `ts + ttl`
+    inclusive (default 300 s) — expiry is the self-healing release: no lease renew, no cleanup
+    process.
 - Automate: `walgit collab watch` — the resident loop that turns `refs/collab/*`
   changes into process invocations (`--exec <cmd>`, each new/changed entry's JSON
   on stdin). How an agent builds an unattended loop on it: **§0c**.
@@ -516,7 +520,8 @@ Parallel work is a topology, not simply "use more agents." Start from this defau
   --worktree … --branch … --push origin` publishes a signed `card_claim` root, re-reads the log
   and exits 0 only for the deterministic winner (earliest live claim by `(ts, actor, oid)`);
   exit 2 means another claim holds the card — stand down and do not start. Claims are the
-  mutex; TTL expiry (default 300 s) is the self-healing release. The first claim already
+  mutex; TTL expiry (default 300 s, live through `ts + ttl` inclusive) is the self-healing
+  release. The first claim already
   projects the card as `in-progress` with that owner; `status` entries still carry the explicit
   hand-off and later moves. Do not let two agents work the same card; split the work into a new
   thread instead.
@@ -745,7 +750,8 @@ console** (the human's surface); everything in between is background sub-agents.
    writing the card is the coordinator's delegated first task (the goal is the assignment;
    never start work without a card).
 2. **Dispatch**: on a `ready`/unowned card, spawn a worker in its own worktree with its own
-   identity; claim it with a `status` entry (`owner` / `worktree` / `branch` / `work`).
+   identity; the worker claims it with `walgit collab claim` (exit 0 before any work — the
+   claim projects `owner`/`worktree`/`branch`/`work` onto the board; exit 2 = stand down).
    **One owner per card.**
 3. **Work** → `patch` + `status: needs-review`.
 4. **Accept**: spawn the acceptance sub-agent (different principal) on the pinned commit; it
@@ -798,9 +804,9 @@ read the board), and classify yourself:
 
 **2. A goal becomes a card before any work.** Work without a card is invisible to everyone
 else and cannot be reviewed or merged. File one `issue` per deliverable (objective, one owner,
-**machine-checkable acceptance**: commands, expected output, artifacts), then claim it with a
-`status` naming owner/worktree/branch/work. The human may have filed it already; if not, this
-is your first task, not a reason to stop.
+**machine-checkable acceptance**: commands, expected output, artifacts), then the worker claims
+it (`walgit collab claim`; exit 0 required before any work, exit 2 = stand down). The human may
+have filed it already; if not, this is your first task, not a reason to stop.
 
 **3. Decompose by write set.** One card = one owner = one worktree = one identity. Split units
 whose files/interfaces do not overlap (§0b); serialize units that touch the same file/schema —
@@ -812,7 +818,7 @@ contains everything it needs (it may be a fresh process with no context):
 ```
 Your card: <thread id>. Read it, then <host>/SKILL.md §0a and §0e–§5.
 Work only on that card, in worktree <wt>, as principal <name>.
-Re-read the thread at its head oid and claim it with a status entry before you start.
+Claim it first: `walgit collab claim --id <card> --worktree <wt> --branch <branch> --push origin` — exit 0 before you start, exit 2 means stand down.
 Implement, push the branch, attach a patch, move it to needs-review — then stop.
 Do not review your own patch, do not merge, do not touch another card.
 ```
@@ -820,7 +826,8 @@ Do not review your own patch, do not merge, do not touch another card.
 Cap the active set (2–4 workers, 1–2 reviewers) and record the cap you chose. One card, one
 owner, one worktree, one key — never share a checkout or a key between sub-agents.
 
-**5. Work (worker).** Re-read the thread at its head oid → claim (`status: in-progress`) →
+**5. Work (worker).** Re-read the thread at its head oid → claim (`walgit collab claim`, exit 0
+before any work) →
 implement in your worktree → push the branch → `patch` → `status: needs-review`. Then **stop**:
 do not poll for a reviewer; the coordinator's trigger wakes the next actor. A decision you can
 make yourself is made and recorded in a `comment`; a decision you cannot make goes to

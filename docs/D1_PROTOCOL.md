@@ -528,7 +528,7 @@ issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已�
 - **胜者**（纯函数 `card_claim_view(entries, principals, now)`）：
 
   ```text
-  winner = min by (ts, actor, oid) over { c | verified(c) ∧ well-formed(c) ∧ c.ts + c.ttl > now }
+  winner = min by (ts, actor, oid) over { c | verified(c) ∧ well-formed(c) ∧ c.ts + c.ttl >= now }
   ```
 
   `ts` 是条目自己的签名字段。过期 claim 不参与：TTL 到期即自愈，任何客户端可发布新 claim
@@ -566,8 +566,10 @@ issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已�
   `claimed` = 有 live winner；`stale` = 有过认领但都已过期（任何人可再认领）；
   `pending` = 只有未验签/malformed 认领。
 
-- **终态**：`walgit collab claim` 在 `merged`/`done`/`closed` 卡上直接拒绝（退出码 1）。
-  `walgit collab gc` 照常折叠 claim 条目（D45），折叠前后聚合一致。
+- **终态与门禁**：`walgit collab claim` 只接受有效状态为 `open`/`in-progress` 的卡（与投影的
+  认领生效区间是同一个判断，退出码 1）——`needs-review` 及其后的状态（含 `blocked`/
+  `needs-human`/终态）不能被认领，因为认领在那里本就不产生 owner。发布与重读之间卡被关闭的，
+  重读时同样拒绝。`walgit collab gc` 照常折叠 claim 条目（D45），折叠前后聚合一致。
 
 ## 9. 折叠：快照 ∪ 尾部（D45）
 

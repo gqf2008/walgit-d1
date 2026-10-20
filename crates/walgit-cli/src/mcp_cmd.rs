@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
 use crate::proc_group::{kill_tree, spawn_in_own_group};
+use walgit_wal::collab::{CARD_CLAIM_TTL_MAX_SECS, CARD_CLAIM_TTL_MIN_SECS};
 
 /// Latest revision this adapter implements; the client's requested one is
 /// echoed when we know it (the spec lets the server choose and the client
@@ -44,6 +45,12 @@ const SUBSCRIBE_FAILURE_LIMIT: u32 = 3;
 const SUBSCRIBE_BACKOFF_MAX_MS: u64 = 60_000;
 const NOTIFY_QUEUE_CAPACITY: usize = 128;
 const REF_SAMPLE_BYTES: usize = 64 * 1024;
+/// The board projection depends on the wall clock (card-claim TTLs,
+/// `docs/D1_PROTOCOL.md` §8.4): a claim expiring moves no ref, so the ref-gated
+/// probe alone could hold a stale owner forever. A board subscription's
+/// version is recomputed at least this often even when the collab ref signal
+/// is unchanged.
+const BOARD_REPROBE_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -51,9 +58,9 @@ pub struct Options {
     pub repo: PathBuf,
     /// The CLI config handed to every child invocation.
     pub config: PathBuf,
-    /// Register the writing tools (`collab_entry`).
+    /// Register the writing tools (`collab_entry`, `collab_claim`).
     pub allow_write: bool,
-    /// Signing key for `collab_entry` (an Ed25519 seed file).
+    /// Signing key for the writing tools (an Ed25519 seed file).
     pub key: Option<PathBuf>,
     /// Remote the entry is pushed to (default `origin`).
     pub remote: String,
@@ -200,9 +207,10 @@ fn tool_defs() -> Vec<Tool> {
         Tool {
             name: "collab_entry",
             description: "Append one signed collab entry (issue/comment/patch/review/merge_result/status) and its \
-                 oid. Rules the board depends on: a thread needs an `issue` AND a `status` naming an \
-                 `owner`, otherwise it projects as an unowned open card; `patch` carries base/head refs; \
-                 only verified `approve` reviews count for the merge rule.",
+                 oid. Rules the board depends on: a thread needs an `issue` to be a card, and ownership \
+                 comes from `collab_claim` (or, without claims, a `status` naming an `owner`), otherwise \
+                 it projects as an unowned open card; `patch` carries base/head refs; only verified \
+                 `approve` reviews count for the merge rule.",
             write: true,
             schema: schema(
                 json!({
@@ -221,9 +229,11 @@ fn tool_defs() -> Vec<Tool> {
             name: "collab_claim",
             description: "Claim a work card before working on it (D1 protocol §8.4): publish a signed \
                  `card_claim`, re-read the collab log and succeed only for the deterministic winner \
-                 (earliest live claim by ts/actor/oid). The reply is the winner's claim object; a \
-                 losing call returns an error starting `stand-down:` — do not start work. Duplicate \
-                 claims are legal, duplicate execution is not; the claim expires after `ttl` seconds.",
+                 (earliest live claim by ts/actor/oid). The reply is the winner's claim JSON. A \
+                 losing call returns `isError` whose text contains `stand-down:` plus the JSON \
+                 verdict ({\"claimed\": false, \"owner\": …}) naming the holder — do not start work. \
+                 Duplicate claims are legal, duplicate execution is not; the claim expires after \
+                 `ttl` seconds.",
             write: true,
             schema: schema(
                 json!({
@@ -1250,10 +1260,10 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
                 "--format=json".into(),
             ];
             if let Some(ttl) = args.get("ttl").and_then(Value::as_u64) {
-                if !(1..=86_400).contains(&ttl) {
-                    return Err(ToolError::InvalidParams(
-                        "`ttl` must be between 1 and 86400 seconds".into(),
-                    ));
+                if !(CARD_CLAIM_TTL_MIN_SECS..=CARD_CLAIM_TTL_MAX_SECS).contains(&ttl) {
+                    return Err(ToolError::InvalidParams(format!(
+                        "`ttl` must be between {CARD_CLAIM_TTL_MIN_SECS} and {CARD_CLAIM_TTL_MAX_SECS} seconds"
+                    )));
                 }
                 v.push(flag("--ttl", &ttl.to_string()));
             }
@@ -1459,19 +1469,32 @@ fn subscription_delay_ms(interval_ms: u64, failures: u32) -> u64 {
 
 struct VersionTracker {
     last: String,
+    /// When the version was last computed — the board projection is also a
+    /// function of the wall clock (claim TTLs), so a ref-level signal alone
+    /// cannot keep it exact (`BOARD_REPROBE_AFTER`).
+    computed_at: std::time::Instant,
 }
 
 impl VersionTracker {
     fn new(last: String) -> Self {
-        Self { last }
+        Self {
+            last,
+            computed_at: std::time::Instant::now(),
+        }
     }
 
     fn changed(&mut self, version: &str) -> bool {
+        self.computed_at = std::time::Instant::now();
         if self.last == version {
             return false;
         }
         self.last = version.to_string();
         true
+    }
+
+    /// The version is older than the board's wall-clock freshness floor.
+    fn stale(&self) -> bool {
+        self.computed_at.elapsed() >= BOARD_REPROBE_AFTER
     }
 }
 
@@ -2178,7 +2201,13 @@ fn spawn_subscription(
                 if signal.generation == 0 && signal.digest.is_empty() && signal.error.is_none() {
                     continue;
                 }
-                if last_collab_generation == Some(signal.generation) {
+                // A board version also moves with the wall clock (a claim's
+                // TTL expiring changes the projection without moving a ref):
+                // an unchanged generation still reprobes once the last
+                // computed version is stale.
+                let board_stale =
+                    matches!(&parsed, ResourceUri::Board { .. }) && tracker.stale();
+                if last_collab_generation == Some(signal.generation) && !board_stale {
                     continue;
                 }
                 last_collab_generation = Some(signal.generation);

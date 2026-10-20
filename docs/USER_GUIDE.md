@@ -288,7 +288,7 @@ walgit mirror --from http://host/<owner>/<repo>.git \
 - **一个线程 = 一个工作单元**；复杂任务拆子线程并用 oid 互引（`--related` / `--depends-on`）。
 - **先读后写**：每次发言前 `collab thread` 取最后 oid 作 `--parent`，绝不凭记忆追加。
 - **状态用 kind 不用口语**：`status` / `review` / `merge_result`。
-- **自闭环**：issue → 认领(status in-progress) → 交付(status needs-review) → 评审(approve) → done。
+- **自闭环**：issue → 认领（`collab claim`，退出码 0 才开工）→ 交付(status needs-review) → 评审(approve) → done。
 - **触发**：用 `collab watch --exec`（或 refs 级轮询）做本地自动化；权威判定用线程读 + 验签。
 - **隔离**：每个 agent 一个 principal，只写自己收件箱；review 由独立 agent 完成，结论写全。
 
