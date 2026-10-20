@@ -1,0 +1,56 @@
+name: diag-win
+
+# Temporary Windows diagnostic: `walgit service start` stack-overflows in the
+# CI task-ownership smoke since 4f80757; 0a1a98a passes. This workflow isolates
+# whether the debug binary crashes at startup or only in the service path.
+# Delete after the investigation (thread: windows CI stack overflow).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: choco install protoc -y --no-progress
+        shell: bash
+      - name: Install the stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+        shell: bash
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the CLI (debug)
+        run: |
+          cargo build -p walgit-cli
+          if ($LASTEXITCODE -ne 0) { throw "cargo build exited $LASTEXITCODE" }
+        shell: pwsh
+      - name: Probe startup
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $bin = (Resolve-Path './target/debug/walgit.exe').Path
+          & $bin --version
+          Write-Host "== version rc=$LASTEXITCODE"
+          & $bin --help | Select-Object -First 3
+          Write-Host "== help rc=$LASTEXITCODE"
+        shell: pwsh
+      - name: Probe service path
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $bin = (Resolve-Path './target/debug/walgit.exe').Path
+          $root = Join-Path $env:TEMP "walgit-diag-$PID"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          . ./deploy/windows/free-port.ps1
+          $port = Get-WalgitFreePort
+          $cfg = Join-Path $root 'walgit.toml'
+          @('[server]', ('listen = "127.0.0.1:{0}"' -f $port), 'roles = []', '', '[server.auth]', 'mode = "none"', '', '[store]', 'backend = "memory"', 'memory_backend_intentional = true', '', '[cache]', ('dir = "{0}/cache"' -f ($root -replace '\\','/'))) | Set-Content -Path $cfg -Encoding ascii
+          & $bin service status --config $cfg
+          Write-Host "== service status rc=$LASTEXITCODE"
+          & $bin service start --config $cfg
+          Write-Host "== service start rc=$LASTEXITCODE"
+          & $bin service stop --config $cfg 2>$null | Out-Null
+          Get-ScheduledTask -TaskName 'walgit' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+        shell: pwsh
