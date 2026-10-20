@@ -233,6 +233,7 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 | `patch` | 挂实现分支 → 线程成 PR | `title`、`message`；分支在 **entry.refs** | report.prs / merge 判定 |
 | `review` | 评审结论 | `decision`（`approve` 计入；其余值原样展示，缺省当 `comment`）、`agent`、`note` | approvals（按 actor 去重、排除 patch 作者，§7.3） |
 | `status` | 工作单元状态/上下文 | `status`、`owner`、`worktree`、`branch`、`work`、`note`；规范取值：`open`/`in-progress`/`needs-review`/`blocked`/`needs-human`/`merged`/`done`/`closed`（自由字符串合法，投影只按值比较） | card_status / 看板上下文 / `done` 门禁 |
+| `card_claim` | 工作卡认领（收敛，§8.4） | 严格：`ttl`（秒，∈[1,86400]，缺省 300）、`worktree`/`branch`/`work`（可选字符串）；**`parent` 必须为 `""`** | live winner 决定看板 `owner`，并把 `open` 置为 `in-progress` |
 | `merge_result` | 合并落账 | **单条约定**：`{"merged":true,"oid":…,"result":"merged","note":…}`；只有 `merged == true` 生效 | card_status 与 PR status → `merged` |
 | `ci_claim` / `ci_result` | CI 认领/结果 | **见 `docs/D1_CI_PROTOCOL.md`**（严格 schema） | CI 聚合（report.runs） |
 | `<custom>` | 自定义/未来 | 自由 | 仅出现在 kinds / by_kind |
@@ -486,7 +487,7 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
 | `prose` | `canonical_root` 的 `text`→`body`→`note`→`message`→`summary` 第一个非空并 trim，缺失 `""` |
 | `actor` | `canonical_root` 的 `actor` |
 | `status` | `card_status`：按线程序重放，`status` 条目的字符串 `body.status` 覆盖；`merge_result {"merged":true}` 置 `merged`；更晚的 `status` 可再覆盖；默认 `open`。**刻意宽于 PR 状态机**：跟踪工作单元（in-progress/needs-review/blocked/needs-human…） |
-| `owner`/`worktree`/`branch`/`work` | 工作上下文：按线程序遍历 `status` 条目，字段为**字符串**时覆盖（含显式 `""` 清空）；字段缺失 = 继承上一份；`work` 缺失时回退该条目的 `note`；这条 `note` 回退也覆盖继承值 |
+| `owner`/`worktree`/`branch`/`work` | 工作上下文：按线程序遍历 `status` 条目，字段为**字符串**时覆盖（含显式 `""` 清空）；字段缺失 = 继承上一份；`work` 缺失时回退该条目的 `note`；这条 `note` 回退也覆盖继承值。**当卡片处于 `open`/`in-progress` 且存在 live winner `card_claim` 时**：`owner` = winner 的 `actor`；上下文只取 winner 自己签名的 `status` 条目，缺的字段由 claim body 补（§8.4） |
 | `created_ts` | `canonical_root` 的 `ts` |
 | `last_ts` | 线程内最大 `ts` |
 | `entries`/`verified`/`unverified` | 集合大小与验证计数 |
@@ -505,6 +506,68 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
   因此输出是全序、字节确定。
 - **纯 CI 线程（全部条目为 `ci_claim`/`ci_result`）不是看板卡片**，跳过；其展示面是
   report.runs / `walgit ci status` / SPA 线程徽标（CI 协议 §8.3）。
+
+### 8.4 工作卡认领收敛（`card_claim`，2026-10-20 design-card-claim）
+
+`status.owner` 是 **advisory** 的：`status` 是普通追加条目，两个并发认领都把 `parent` 指向
+issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已经开始执行的一方。工作卡认领
+复用 CI run 的收敛形状（`docs/D1_CI_PROTOCOL.md` §6），**不引入锁、租约、服务端 CAS 或心跳**，
+只增加一种条目和一个确定性规则。
+
+- **条目**：`kind = "card_claim"` 的**根条目**（`parent = ""`——认领是对卡的新一轮竞争，
+  不是对前一条目的回复）。`id` = 卡线程 id，`actor` = 签名 principal。body：
+
+  ```json
+  {"ttl": 300, "worktree": "wt-x", "branch": "feat/x", "work": "one-line plan"}
+  ```
+
+  `ttl` 秒，∈[1,86400]，缺省 300；其余三个字段可选（字符串）。`ttl` 越界、字段类型错误或
+  `parent` 非空的条目是 **malformed**：留在线程里可见、计入 `unverified`，但永不参与收敛。
+  验签失败同理（docs/D1_PROTOCOL.md §4.5 的验证定义）。
+
+- **胜者**（纯函数 `card_claim_view(entries, principals, now)`）：
+
+  ```text
+  winner = min by (ts, actor, oid) over { c | verified(c) ∧ well-formed(c) ∧ c.ts + c.ttl > now }
+  ```
+
+  `ts` 是条目自己的签名字段。过期 claim 不参与：TTL 到期即自愈，任何客户端可发布新 claim
+  重新竞争；旧 claim 留在日志里解释"上一次为什么没有结果"。没有 lease renew / 僵尸清理。
+
+- **客户端流程是硬规则**（`walgit collab claim` 实现）：
+
+  ```text
+  read（fetch refs/collab/*）→ 无 live winner ? publish claim : stand down（退出码 2）
+    → push → re-fetch → 重算 winner
+    → winner.oid == 我发布的 claim.oid ? 执行 : stand down（退出码 2，不开始任何工作）
+  ```
+
+  **re-fetch 之前不得开始工作**。重复 claim 允许存在，重复执行不允许；两个并发认领各写一条
+  根条目，重算后恰有一个 `winner.oid` 命中。比较的是 **claim 的 entry oid**，不是 `actor`：
+  多个 agent 共用 principal 时 actor 无法区分执行者，entry oid 永远唯一（共用 key 仍会让审计
+  无法归属——部署侧应一 agent 一 key，不强制进协议）。本 worktree 上次发布的 claim oid 记在
+  `<git-dir>/walgit/claims/<digest>`（进程本地、可丢）：进程重启后若它仍是 winner 直接恢复，
+  不必等 TTL；丢了这个文件只损失一次等待。stand down **不需要**留 `comment`——claim 集合
+  本身就是裁决记录；想说明原因可留，但任何投影都不依赖它。
+
+- **看板投影**（§8.2）：卡片有效状态为 `open`/`in-progress` 且存在 live winner 时，
+  `owner` = winner 的 `actor`，`open` 置为 `in-progress`，上下文取 winner 自己签名的 `status`
+  条目并用 claim body 补缺。其他 principal 的 `status` 条目仍推进状态列（投影不按签名者
+  过滤），但改不了 owner 字段——"抢 owner" 不生效。`needs-review` 及其后的状态
+  （`blocked`/`needs-human`/`merged`/`done`/`closed`）不被 claim 影响：认领不会把卡片拖回
+  `in-progress`，终态卡也不能被认领。**没有 `card_claim` 条目的旧卡投影完全不变。**
+  卡片带 `claim` 字段（无认领时为 `null`）：
+
+  ```json
+  {"state": "claimed|stale|pending", "oid": "<winner entry oid>", "actor": "...",
+   "ts": 1792505000, "ttl": 300, "expires_at": 1792505300}
+  ```
+
+  `claimed` = 有 live winner；`stale` = 有过认领但都已过期（任何人可再认领）；
+  `pending` = 只有未验签/malformed 认领。
+
+- **终态**：`walgit collab claim` 在 `merged`/`done`/`closed` 卡上直接拒绝（退出码 1）。
+  `walgit collab gc` 照常折叠 claim 条目（D45），折叠前后聚合一致。
 
 ## 9. 折叠：快照 ∪ 尾部（D45）
 
@@ -658,8 +721,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 - **HTTP SSE**：`text/event-stream` 信封，best-effort（可能丢包）；要无损 push 语义必须自建
   sidecar 从 pull 车道转发（D46）。
 - **MCP 客户端面**：`walgit mcp`（stdio，host 拉起）把同一离线聚合暴露为工具与 `walgit://`
-  资源：只读工具 `collab_ls/thread/pr/board/report`、`ci_status`；唯一写工具 `collab_entry`
-  （需 `--allow-write` + key）。资源 `walgit://collab/board/<o>/<r>`、
+  资源：只读工具 `collab_ls/thread/pr/board/report`、`ci_status`；写工具 `collab_entry` 与
+  `collab_claim`（均需 `--allow-write` + key；`collab_claim` 把工作卡认领收敛做成一次调用）。资源 `walgit://collab/board/<o>/<r>`、
   `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
   **adapter 侧轮询、best-effort**（同 D46，不是服务端推送）；字节不过 MCP（clone/fetch/push
   仍走 git/bundle-uri）。实现：`crates/walgit-cli/src/mcp_cmd.rs`，说明见 `web/SKILL.md`。
@@ -741,12 +804,12 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 | 锚点 | 锁死的性质 |
 |---|---|
-| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`）；长链递减 `ts` 全量解析（`thread_resolves_descending_ts_chains_without_truncation`）与截断后追加（`thread_keeps_chain_order_for_entries_appended_after_a_long_chain`）；canonical root 优先 verified（`board_identity_prefers_a_verified_root`） |
+| `walgit-wal/src/collab.rs::board_tests` | CI 线程不上板；board.toml fail-closed；同一集合任意读序字节一致；status 移动卡片；工作上下文继承/清空；未命中列不上板；根 title；report 投影排序（`report_lists_arrive_ordered_from_the_projection`）；长链递减 `ts` 全量解析（`thread_resolves_descending_ts_chains_without_truncation`）与截断后追加（`thread_keeps_chain_order_for_entries_appended_after_a_long_chain`）；canonical root 优先 verified（`board_identity_prefers_a_verified_root`）；card claim 收敛：最早 live claim 胜、ts/actor/oid 破平、TTL 过期回退 status owner、不覆盖 needs-review/终态、非 winner status 抢不走 owner、未验签/malformed/回复条目永不拥有卡片、无 claim 旧卡投影不变（`card_claim_*`） |
 | `walgit-wal/src/collab.rs::golden_tests` + `web/src/collab-canonical.test.ts` + `crates/walgit-server/tests/web_api.rs::collab_sdk_golden_entry_verifies_end_to_end` | 跨语言金标向量：SDK/WebCrypto 与 Rust 覆盖同一 canonical 字节串（含 `"sig":""`），且浏览器式条目经薄 API 聚合 verified |
 | `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好；完整性标记 round-trip（`snapshot_completeness_marker_round_trips`） |
 | `…::transition_tests` | `done` 门禁（needs-review + verified approve，且排除 patch 作者）；先 thread() 后判定；card prose 抽取；merge 去重/非作者（`merge_rule_counts_distinct_non_author_approvers` / `pr_view_collects_verified_patch_authors_only` / `done_gate_rejects_self_approval_by_the_patch_author`） |
 | `walgit-cli/src/collab_cmd.rs` 测试 | canonicalize 紧凑键序；签名/验签/篡改；gc key 匹配；折叠记录属主偏好；thread 链序/悬空；merge 只计非 `svc-`；report 确定性与计数；changed_refs；错收件箱不算 verified |
-| `crates/walgit-cli/tests/collab_e2e.rs` | 真服务器全流程（注册→issue→链式评论→approve→新克隆聚合验签）；watch 回调；CLI vs 服务端看板字节一致 + status 移动；gc 折叠前后聚合字节一致且尾部存活；过期基线 lease 失败与崩溃重跑收敛；sha256 仓库折叠 |
+| `crates/walgit-cli/tests/collab_e2e.rs` | 真服务器全流程（注册→issue→链式评论→approve→新克隆聚合验签）；watch 回调；CLI vs 服务端看板字节一致 + status 移动；两个 principal 并发认领一张卡：恰一个执行、另一个退出码 2、日志保留认领、看板（CLI 与服务端）同 oid；TTL 过期后第三方认领成功；重启恢复不重复认领；终态卡拒绝认领（`card_claim_converges_and_ttl_releases_the_card`）；gc 折叠前后聚合字节一致且尾部存活；过期基线 lease 失败与崩溃重跑收敛；sha256 仓库折叠 |
 | `crates/walgit-server/tests/web_api.rs` (`collab_*`) | 薄 API 签名条目（服务端不验签、聚合验）；report/thread 聚合；注册+verified；薄 API 遵守 policy；默认板投影；CI 产物按哈希供字节；超大快照物化前拒绝 |
 | `crates/walgit-server/src/policy.rs` 测试 + `crates/walgit-server/tests/policy_inbox.rs` | `{principal}` 段捕获与单规则收件箱隔离（`collab_inbox_shards_with_one_principal_relative_rule`，bypass 只放行被捕获的 owner）；token 模式按 actor 分片的字面规则版 |
 | `web/src/collab-text.test.ts` + Rust `card_prose_is_the_thread_page_field_walk` | 跨语言 prose 抽取同表（看板卡片与线程页不漂移） |
@@ -777,13 +840,17 @@ $W collab principal-revoke  --principal alice [--push origin]
 $W collab principal-fetch   [--remote origin] [--token $WALGIT_TOKEN]
 $W collab watch --remote origin --interval 10 [--once] [--exec '<cmd>'] [--state <file>]
 $W collab gc --actor alice [--push origin] [--truncate]
+# 工作卡收敛认领（§8.4）：退出 0 = 我持有；2 = 别人持有（stand down，禁止开工）；1 = 错误
+$W collab claim --id <thread> [--ttl 300] [--push origin] \
+   [--worktree wt-x --branch feat/x --work '…'] [--format text|json]
 ```
 
 host 注册表：`walgit principal register|rotate|list|revoke --url <host> [--principal p] [--key f]`。
 CI：`walgit ci validate|run|status|log|artifacts`（`docs/D1_CI_PROTOCOL.md`）。
 
-标准工作单元流程（与 `CONTRIBUTING.md` / `RULE_开发流程规范` 对齐）：issue → 开工
-`comment` + `status: in-progress`（带 owner/worktree/branch/work）→ 实现后 `patch`
+标准工作单元流程（与 `CONTRIBUTING.md` / `RULE_开发流程规范` 对齐）：issue → **开工前
+`collab claim`（§8.4；退出码非 0 不得开工）** → `status: in-progress`（带 owner/worktree/
+branch/work；claim 已让看板显示 owner，status 仍用于显式推进）→ 实现后 `patch`
 （base/head）+ `status: needs-review` → `review`（独立审查者）→ 合并后 **一次写入**
 `merge_result {"merged":true,"oid":…,"result":"merged","note":…}`（落看板）→
 `status: closed`（或经门禁的 `status: done`）；全程可查 `board` / `pr`。

@@ -611,6 +611,11 @@ decision in §4 — or the PR is; never "fix later".
   deletion, force-push) appear in **neither** the tool table nor the dispatch match: an agent must
   not be able to start a bucket-GC pass by naming a tool, and `tools/call` cannot reach what
   `tools/list` hides. Bytes never travel over MCP — clone/fetch/push stay git + bundle-uri.
+  *(Amended 2026-10-20, design-card-claim: a second writing tool, `collab_claim`, joins
+  `collab_entry` under `--allow-write --key`. It is `walgit collab claim` — read → publish →
+  re-read — so an MCP-only agent can take part in the card-claim convergence
+  (`docs/D1_PROTOCOL.md` §8.4) in one call. Still append-only and non-destructive; the excluded
+  destructive list is unchanged.)*
 
 - **D50** **The blob viewer embeds by type; the PDF case is an *accepted* risk (2026-09-18,
   cc-ai-blob-viewers).** `?raw` is the byte channel — content type by extension, a single `Range` →

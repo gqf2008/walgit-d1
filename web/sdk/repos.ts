@@ -212,7 +212,8 @@ export interface CollabBoardCard {
   actor: string;
   /** Effective work-unit status: the latest `status` entry's value. */
   status: string;
-  /** Current owner from the latest status entry that names one. */
+  /** Current owner: the live `card_claim` winner while the card is open/in-progress,
+      else the latest status entry that names one. */
   owner: string;
   /** Current worktree from the latest status entry that names one. */
   worktree: string;
@@ -231,6 +232,17 @@ export interface CollabBoardCard {
   last_oid: string;
   /** Merge-rule verdict when the thread has a patch, else null. */
   merge: { allowed: boolean; reason: string } | null;
+  /** Ownership-claim convergence (docs/D1_PROTOCOL.md §8.4); null when the thread
+      carries no `card_claim` entries. `oid` is the winning claim entry: compare it
+      with the oid your own claim returned — principals may be shared, oids never. */
+  claim: {
+    state: "claimed" | "stale" | "pending";
+    oid: string;
+    actor: string;
+    ts: number;
+    ttl: number;
+    expires_at: number;
+  } | null;
 }
 export interface CollabBoardColumn {
   name: string;

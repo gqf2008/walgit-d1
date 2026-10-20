@@ -2054,7 +2054,15 @@ async fn collab_board(
             let state = Box::pin(collab_load(&st2, &r)).await?;
             let board_def = load_board_def(&r).await?;
             let refs: Vec<&EntryRef> = state.entries.iter().collect();
-            let board: Board = build_board(&refs, &state.principals, &state.rules, &board_def);
+            let board: Board = build_board(
+                &refs,
+                &state.principals,
+                &state.rules,
+                &board_def,
+                // Claims expire by wall clock (`docs/D1_PROTOCOL.md` §8.4):
+                // the evaluation instant is part of the projection.
+                chrono::Utc::now().timestamp(),
+            );
             Ok(json_swr_hashed(&board))
         },
     )

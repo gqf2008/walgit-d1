@@ -935,6 +935,148 @@ pub fn build_report(
 // is an ordinary commit reviewed like any other). Moving a card is an ordinary
 // signed `status` entry; the projection re-derives the columns from it.
 
+// ---- work-card claims: ownership convergence (docs/D1_PROTOCOL.md §8.4) --------------------------
+
+/// Work-card ownership claim (`docs/D1_PROTOCOL.md` §8.4). The CI claim's
+/// convergence shape (`docs/D1_CI_PROTOCOL.md` §6) applied to a work-unit
+/// thread: claims are thread roots, the earliest live verified claim wins by
+/// `(ts, actor, oid)`, and a writer re-reads after publishing before it starts
+/// work. Duplicate claims are legal; duplicate execution is not.
+pub const CARD_CLAIM_KIND: &str = "card_claim";
+
+/// Default claim lifetime when the body omits `ttl`.
+pub const CARD_CLAIM_TTL_DEFAULT_SECS: u64 = 300;
+pub const CARD_CLAIM_TTL_MIN_SECS: u64 = 1;
+pub const CARD_CLAIM_TTL_MAX_SECS: u64 = 86_400;
+
+/// A verified, well-formed `card_claim` entry. `actor` is the signing
+/// principal — ownership is never a body field a client could forge.
+#[derive(Serialize, Clone, Debug)]
+pub struct CardClaim {
+    pub oid: String,
+    pub actor: String,
+    /// The entry's signed timestamp: the claim time the convergence uses.
+    pub ts: i64,
+    pub ttl_secs: u64,
+    /// Optional context the holder declared with the claim.
+    pub worktree: String,
+    pub branch: String,
+    pub work: String,
+}
+
+impl CardClaim {
+    /// A claim is live until `ts + ttl` inclusive (the CI claim's rule).
+    pub fn live(&self, now: i64) -> bool {
+        now <= self.ts.saturating_add_unsigned(self.ttl_secs)
+    }
+
+    pub fn expires_at(&self) -> i64 {
+        self.ts.saturating_add_unsigned(self.ttl_secs)
+    }
+}
+
+/// The card's claims as of `now`: verified well-formed claims (sorted by the
+/// winner order), the deterministic winner, and the count of claim entries
+/// that are visible but never drive ownership.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct CardClaimView {
+    pub claims: Vec<CardClaim>,
+    pub winner: Option<CardClaim>,
+    pub unverified: usize,
+}
+
+impl CardClaimView {
+    /// The board projection, `None` when the thread carries no claim entries at
+    /// all (an old card's projection is unchanged).
+    pub fn to_board(&self) -> Option<BoardClaim> {
+        if self.claims.is_empty() && self.unverified == 0 {
+            return None;
+        }
+        let (state, winner) = match &self.winner {
+            Some(w) => ("claimed", Some(w)),
+            None if self.claims.is_empty() => ("pending", None),
+            None => ("stale", None),
+        };
+        Some(BoardClaim {
+            state: state.to_string(),
+            oid: winner.map_or(String::new(), |w| w.oid.clone()),
+            actor: winner.map_or(String::new(), |w| w.actor.clone()),
+            ts: winner.map_or(0, |w| w.ts),
+            ttl: winner.map_or(0, |w| w.ttl_secs),
+            expires_at: winner.map_or(0, CardClaim::expires_at),
+        })
+    }
+}
+
+fn optional_body_str(body: &serde_json::Value, key: &str) -> Option<String> {
+    match body.get(key) {
+        None | Some(serde_json::Value::Null) => Some(String::new()),
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => None,
+    }
+}
+
+/// Parse a `card_claim` body (`docs/D1_PROTOCOL.md` §8.4). Strict like the CI
+/// claim: a reply (non-empty `parent`), a wrong-typed field or an
+/// out-of-range `ttl` makes the entry malformed — it stays visible in the
+/// thread, but never owns a card.
+pub fn parse_card_claim(r: &EntryRef) -> Option<CardClaim> {
+    if r.entry.kind != CARD_CLAIM_KIND || !r.entry.parent.is_empty() {
+        return None;
+    }
+    let body = &r.entry.body;
+    let ttl_secs = match body.get("ttl") {
+        None | Some(serde_json::Value::Null) => CARD_CLAIM_TTL_DEFAULT_SECS,
+        Some(v) => {
+            let n = v.as_u64()?;
+            if !(CARD_CLAIM_TTL_MIN_SECS..=CARD_CLAIM_TTL_MAX_SECS).contains(&n) {
+                return None;
+            }
+            n
+        }
+    };
+    Some(CardClaim {
+        oid: r.oid.clone(),
+        actor: r.entry.actor.clone(),
+        ts: r.entry.ts,
+        ttl_secs,
+        worktree: optional_body_str(body, "worktree")?,
+        branch: optional_body_str(body, "branch")?,
+        work: optional_body_str(body, "work")?,
+    })
+}
+
+/// The convergence function of a work-card thread (`docs/D1_PROTOCOL.md` §8.4):
+/// only verified, well-formed claims participate; the winner is
+/// `min(ts, actor, oid)` over the live ones. Pure in `(entries, principals,
+/// now)`, so every client holding the same refs computes the same owner.
+pub fn card_claim_view(
+    entries: &[&EntryRef],
+    principals: &HashMap<String, String, impl std::hash::BuildHasher>,
+    now: i64,
+) -> CardClaimView {
+    let mut claims = Vec::new();
+    let mut unverified = 0usize;
+    for r in entries {
+        if r.entry.kind != CARD_CLAIM_KIND {
+            continue;
+        }
+        match r.is_verified(principals).then(|| parse_card_claim(r)).flatten() {
+            Some(c) => claims.push(c),
+            None => unverified += 1,
+        }
+    }
+    claims.sort_by(|a, b| {
+        (a.ts, a.actor.as_str(), a.oid.as_str()).cmp(&(b.ts, b.actor.as_str(), b.oid.as_str()))
+    });
+    let winner = claims.iter().find(|c| c.live(now)).cloned();
+    CardClaimView {
+        claims,
+        winner,
+        unverified,
+    }
+}
+
 /// Where the board definition is versioned (repo-relative, in the tree).
 pub const BOARD_PATH: &str = ".walgit/board.toml";
 
@@ -1117,6 +1259,29 @@ pub struct BoardCard {
     pub last_oid: String,
     /// Merge-rule verdict when the thread has a patch, else `null`.
     pub merge: Option<BoardMergeCard>,
+    /// Ownership-claim convergence when the thread carries `card_claim`
+    /// entries (`docs/D1_PROTOCOL.md` §8.4), else `null`. An old card with no
+    /// claims projects exactly as before.
+    pub claim: Option<BoardClaim>,
+}
+
+/// The card's ownership claim as projected (`docs/D1_PROTOCOL.md` §8.4).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BoardClaim {
+    /// `"claimed"` (a live winner owns the card), `"stale"` (claims exist but
+    /// none is live — anyone may claim) or `"pending"` (only malformed or
+    /// unverified claims so far).
+    pub state: String,
+    /// The winning claim's entry oid, `""` when there is no live winner. A
+    /// client compares this with the oid its own claim published: actors may
+    /// share a principal, entry oids never collide.
+    pub oid: String,
+    /// The winner's principal.
+    pub actor: String,
+    pub ts: i64,
+    pub ttl: u64,
+    /// `ts + ttl` — when the card becomes claimable again.
+    pub expires_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1143,7 +1308,7 @@ pub struct Board {
 /// open/merged/closed state machine: the board tracks the work unit (`docs/D1_PROTOCOL.md` §5.2
 /// names in-progress / needs-review / blocked / needs-human), the PR view
 /// tracks merge state.
-fn card_status(ordered: &[&EntryRef]) -> String {
+pub fn card_status(ordered: &[&EntryRef]) -> String {
     let mut status = "open".to_string();
     for r in ordered {
         match r.entry.kind.as_str() {
@@ -1180,9 +1345,21 @@ struct BoardWorkContext {
 /// status. An explicit empty string clears a field; `work` falls back to the
 /// same status entry's `note` when absent.
 fn card_work_context(ordered: &[&EntryRef]) -> BoardWorkContext {
+    card_work_context_by(ordered, None)
+}
+
+/// The same replay, optionally restricted to one principal's `status` entries
+/// (`docs/D1_PROTOCOL.md` §8.4: while a claim holder owns an open card, only the
+/// holder's own status entries may refine its work context — a losing or
+/// bystander status entry still moves the card's status column, never the
+/// owner fields).
+fn card_work_context_by(ordered: &[&EntryRef], actor: Option<&str>) -> BoardWorkContext {
     let mut ctx = BoardWorkContext::default();
     for r in ordered {
         if r.entry.kind != "status" {
+            continue;
+        }
+        if actor.is_some_and(|a| a != r.entry.actor) {
             continue;
         }
         let body = &r.entry.body;
@@ -1266,6 +1443,7 @@ pub fn build_board(
     principals: &HashMap<String, String, impl std::hash::BuildHasher>,
     rules: &MergeRules,
     board: &BoardDef,
+    now: i64,
 ) -> Board {
     let mut by_thread: BTreeMap<&str, Vec<&EntryRef>> = BTreeMap::new();
     for e in entries {
@@ -1309,13 +1487,40 @@ pub fn build_board(
                 reason: eval.reason,
             }
         });
-        let work = card_work_context(&ordered);
+        let claim_view = card_claim_view(group, principals, now);
+        let mut status = card_status(&ordered);
+        let mut work = card_work_context(&ordered);
+        // D1_PROTOCOL §8.4: a live winner claim owns an open card. It moves
+        // `open` to `in-progress` and supplies the work context from the
+        // holder's own status entries plus the claim body. `needs-review` and
+        // later statuses stay the status entries' business — a claim never
+        // drags a card backwards, and an expired claim releases ownership.
+        if matches!(status.as_str(), "open" | "in-progress")
+            && let Some(winner) = &claim_view.winner
+        {
+            work = card_work_context_by(&ordered, Some(&winner.actor));
+            work.owner.clone_from(&winner.actor);
+            // The claim body is the holder's declaration at claim time; the
+            // holder's own later status entries refine it field by field.
+            for (value, slot) in [
+                (&winner.worktree, &mut work.worktree),
+                (&winner.branch, &mut work.branch),
+                (&winner.work, &mut work.work),
+            ] {
+                if slot.is_empty() && !value.is_empty() {
+                    slot.clone_from(value);
+                }
+            }
+            if status == "open" {
+                status = "in-progress".to_string();
+            }
+        }
         let card = BoardCard {
             id: (*id).to_string(),
             title: root_title(&ordered, principals),
             prose: root.map_or(String::new(), |r| entry_prose(&r.entry.body)),
             actor: root.map(|r| r.entry.actor.clone()).unwrap_or_default(),
-            status: card_status(&ordered),
+            status,
             owner: work.owner,
             worktree: work.worktree,
             branch: work.branch,
@@ -1328,6 +1533,7 @@ pub fn build_board(
             kinds,
             last_oid: ordered.last().map(|r| r.oid.clone()).unwrap_or_default(),
             merge,
+            claim: claim_view.to_board(),
         };
         if let Some((_, col)) = columns.iter_mut().find(|(def, _)| card_matches(&card, def)) {
             col.cards.push(card);
@@ -1344,6 +1550,10 @@ pub fn build_board(
 #[cfg(test)]
 mod board_tests {
     use super::*;
+
+    /// Fixed evaluation instant for the board projection (claims are TTL-based;
+    /// a pure function of `now` keeps byte equality meaningful).
+    const NOW: i64 = 1_800_000_000;
     use std::hash::{Hash, Hasher};
 
     fn keypair() -> (SigningKey, String) {
@@ -1422,7 +1632,7 @@ mod board_tests {
         let issue = entry("pr1", "issue", "alice", "", 900, serde_json::json!({"title": "add thing"}));
         let owned = refs_of(&[claim, result, issue]);
         let refs: Vec<&EntryRef> = owned.iter().collect();
-        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
         assert!(
             board
                 .columns
@@ -1552,7 +1762,7 @@ name = "everything else"
         let project = |list: &[Entry]| {
             let refs = refs_of(list);
             let borrowed: Vec<&EntryRef> = refs.iter().collect();
-            serde_json::to_vec(&build_board(&borrowed, &principals, &rules, &board_def))
+            serde_json::to_vec(&build_board(&borrowed, &principals, &rules, &board_def, NOW))
                 .expect("serialize")
         };
         let bytes = project(&es);
@@ -1602,7 +1812,7 @@ name = "everything else"
         let def = default_board();
         def.validate().expect("default board is valid");
 
-        let board = build_board(&borrowed, &principals, &rules, &def);
+        let board = build_board(&borrowed, &principals, &rules, &def, NOW);
         assert_eq!(column_of(&board, "open").cards.len(), 0, "status moved it out of open");
         assert_eq!(
             column_of(&board, "other").cards.len(),
@@ -1619,7 +1829,7 @@ name = "everything else"
         es2.push(done);
         let refs2 = refs_of(&es2);
         let borrowed2: Vec<&EntryRef> = refs2.iter().collect();
-        let board2 = build_board(&borrowed2, &principals, &rules, &def);
+        let board2 = build_board(&borrowed2, &principals, &rules, &def, NOW);
         assert_eq!(column_of(&board2, "merged").cards.len(), 1);
         assert_eq!(column_of(&board2, "merged").cards[0].id, "t1");
         // Newest first within a column; the id breaks ties. Both threads sit
@@ -1633,7 +1843,7 @@ name = "everything else"
         tie.push(t9_status);
         let refs3 = refs_of(&tie);
         let borrowed3: Vec<&EntryRef> = refs3.iter().collect();
-        let board3 = build_board(&borrowed3, &principals, &rules, &def);
+        let board3 = build_board(&borrowed3, &principals, &rules, &def, NOW);
         let other_col: Vec<&str> = column_of(&board3, "other").cards.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(other_col, vec!["t1", "t9"], "equal ts: id ascending");
     }
@@ -1672,7 +1882,7 @@ name = "everything else"
         ];
         let refs = refs_of(&entries);
         let borrowed: Vec<&EntryRef> = refs.iter().collect();
-        let board = build_board(&borrowed, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(&borrowed, &principals, &MergeRules::default(), &default_board(), NOW);
         let card = &column_of(&board, "other").cards[0];
         assert_eq!(card.owner, "agent-b");
         assert_eq!(card.worktree, "wt-a", "worktree inherits across status moves");
@@ -1696,7 +1906,7 @@ name = "everything else"
         entries.push(clear);
         let refs = refs_of(&entries);
         let borrowed: Vec<&EntryRef> = refs.iter().collect();
-        let board = build_board(&borrowed, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(&borrowed, &principals, &MergeRules::default(), &default_board(), NOW);
         let card = &column_of(&board, "other").cards[0];
         assert_eq!(card.owner, "");
         assert_eq!(card.worktree, "");
@@ -1710,7 +1920,7 @@ name = "everything else"
         let refs = refs_of(&[entry("t1", "issue", "alice", "", 1, serde_json::json!({"title": "x"}))]);
         let borrowed: Vec<&EntryRef> = refs.iter().collect();
         let def = parse_board_def("version = 1\n[[column]]\nname = \"only blocked\"\nstatus = \"blocked\"\n").expect("def");
-        let board = build_board(&borrowed, &principals, &MergeRules::default(), &def);
+        let board = build_board(&borrowed, &principals, &MergeRules::default(), &def, NOW);
         assert!(board.columns.len() == 1 && board.columns[0].cards.is_empty());
     }
 
@@ -1768,7 +1978,7 @@ name = "everything else"
             "the PR projection carries the same root title"
         );
         // One rule for all three projections: the board card agrees.
-        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
         let card = board
             .columns
             .iter()
@@ -1951,7 +2161,7 @@ name = "everything else"
         );
         let owned = refs_of(&[real, hijack]);
         let refs: Vec<&EntryRef> = owned.iter().collect();
-        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
         let card = board
             .columns
             .iter()
@@ -1968,7 +2178,7 @@ name = "everything else"
             entry("t2", "issue", "bob", "", 1, serde_json::json!({"title": "early"})),
         ]);
         let refs: Vec<&EntryRef> = legacy.iter().collect();
-        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board());
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
         let card = board
             .columns
             .iter()
@@ -1977,6 +2187,302 @@ name = "everything else"
             .expect("card");
         assert_eq!(card.title, "early");
         assert_eq!(card.actor, "bob");
+    }
+
+    // ---- card claims (docs/D1_PROTOCOL.md §8.4) --------------------------------
+
+    fn claim_keys() -> (SigningKey, SigningKey) {
+        (
+            SigningKey::from_bytes(&[11u8; 32]),
+            SigningKey::from_bytes(&[12u8; 32]),
+        )
+    }
+
+    fn pk(sk: &SigningKey) -> String {
+        base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes())
+    }
+
+    fn signed_entry(sk: &SigningKey, mut e: Entry) -> Entry {
+        e.sig = sign_entry(&mut e, sk);
+        e
+    }
+
+    fn card_of<'a>(board: &'a Board, id: &str) -> &'a BoardCard {
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("card {id} not on the board"))
+    }
+
+    #[test]
+    fn card_claim_winner_owns_an_open_card_and_moves_it_to_in_progress() {
+        let (sk_a, sk_b) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        principals.insert("bob".to_string(), pk(&sk_b));
+        let issue = entry(
+            "t1",
+            "issue",
+            "alice",
+            "",
+            NOW - 60,
+            serde_json::json!({"title": "fix it"}),
+        );
+        let a = signed_entry(
+            &sk_a,
+            entry(
+                "t1",
+                CARD_CLAIM_KIND,
+                "alice",
+                "",
+                NOW - 10,
+                serde_json::json!({"ttl": 300, "worktree": "wt-a", "branch": "feat/a"}),
+            ),
+        );
+        let b = signed_entry(
+            &sk_b,
+            entry(
+                "t1",
+                CARD_CLAIM_KIND,
+                "bob",
+                "",
+                NOW - 5,
+                serde_json::json!({"ttl": 300, "worktree": "wt-b", "branch": "feat/b"}),
+            ),
+        );
+        // Read order must not matter: the winner is a pure function.
+        let owned = refs_of(&[b, issue, a.clone()]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.status, "in-progress", "a claim claims the card");
+        assert_eq!(card.owner, "alice", "the earliest live claim wins");
+        assert_eq!(card.worktree, "wt-a");
+        assert_eq!(card.branch, "feat/a");
+        let claim = card.claim.as_ref().expect("claim projection");
+        assert_eq!(claim.state, "claimed");
+        assert_eq!(claim.oid, test_oid(&a));
+        assert_eq!(claim.actor, "alice");
+        assert_eq!(claim.expires_at, NOW - 10 + 300);
+        assert!(
+            column_of(&board, "other")
+                .cards
+                .iter()
+                .any(|c| c.id == "t1"),
+            "the card moved off the open column (the default board's catch-all holds it)"
+        );
+        assert!(
+            column_of(&board, "open").cards.iter().all(|c| c.id != "t1"),
+            "an open card with a live claim is no longer open"
+        );
+    }
+
+    #[test]
+    fn card_claim_tie_breaks_by_actor_then_oid() {
+        let (sk_a, sk_b) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        principals.insert("bob".to_string(), pk(&sk_b));
+        let a = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 5, serde_json::json!({"ttl": 300})),
+        );
+        let b = signed_entry(
+            &sk_b,
+            entry("t1", CARD_CLAIM_KIND, "bob", "", NOW - 5, serde_json::json!({"ttl": 300})),
+        );
+        let owned = refs_of(&[b, a]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let view = card_claim_view(&refs, &principals, NOW);
+        assert_eq!(view.winner.as_ref().unwrap().actor, "alice", "actor breaks the ts tie");
+
+        // Same ts and actor: the entry oid is the final deterministic tie-break.
+        let c1 = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 5, serde_json::json!({"ttl": 300, "work": "one"})),
+        );
+        let c2 = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 5, serde_json::json!({"ttl": 300, "work": "two"})),
+        );
+        let expected = if test_oid(&c1) < test_oid(&c2) { test_oid(&c1) } else { test_oid(&c2) };
+        let owned = refs_of(&[c2, c1]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let view = card_claim_view(&refs, &principals, NOW);
+        assert_eq!(view.winner.as_ref().unwrap().oid, expected);
+    }
+
+    #[test]
+    fn expired_card_claim_falls_back_to_the_status_owner() {
+        let (sk_a, _) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        let issue = entry("t1", "issue", "alice", "", NOW - 1000, serde_json::json!({"title": "t"}));
+        let expired = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 1000, serde_json::json!({"ttl": 60})),
+        );
+        let status = entry(
+            "t1",
+            "status",
+            "bob",
+            &test_oid(&issue),
+            NOW - 900,
+            serde_json::json!({"status": "in-progress", "owner": "bob", "worktree": "wt-b"}),
+        );
+        let owned = refs_of(&[issue, expired, status]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.status, "in-progress");
+        assert_eq!(card.owner, "bob", "an expired claim does not own the card");
+        assert_eq!(card.worktree, "wt-b");
+        let claim = card.claim.as_ref().expect("the claim stays visible");
+        assert_eq!(claim.state, "stale");
+        assert_eq!(claim.oid, "");
+    }
+
+    #[test]
+    fn a_claim_never_drags_needs_review_or_terminal_cards() {
+        let (sk_a, _) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        let claim = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300, "worktree": "wt-a"})),
+        );
+        let review = entry(
+            "t1",
+            "status",
+            "carol",
+            &test_oid(&claim),
+            NOW - 5,
+            serde_json::json!({"status": "needs-review", "owner": "carol", "worktree": "wt-c"}),
+        );
+        let owned = refs_of(&[claim.clone(), review.clone()]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.status, "needs-review", "status entries still move the column");
+        assert_eq!(card.owner, "carol", "a live claim does not override a review-stage owner");
+        assert_eq!(card.worktree, "wt-c");
+        assert_eq!(card.claim.as_ref().unwrap().state, "claimed");
+
+        // Terminal: the coordinator's close stays authoritative.
+        let closed = entry(
+            "t1",
+            "status",
+            "coord",
+            &test_oid(&review),
+            NOW - 1,
+            serde_json::json!({"status": "closed", "owner": "coord"}),
+        );
+        let owned = refs_of(&[closed]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        assert!(column_of(&board, "closed").cards.iter().any(|c| c.id == "t1"));
+    }
+
+    #[test]
+    fn non_winner_status_entries_cannot_steal_the_card() {
+        let (sk_a, sk_b) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        principals.insert("bob".to_string(), pk(&sk_b));
+        let claim = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300, "worktree": "wt-a"})),
+        );
+        let loser = entry(
+            "t1",
+            "status",
+            "bob",
+            &test_oid(&claim),
+            NOW - 9,
+            serde_json::json!({"status": "in-progress", "owner": "bob", "worktree": "wt-b"}),
+        );
+        let owned = refs_of(&[claim.clone(), loser.clone()]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.owner, "alice", "only the winner's own entries refine the context");
+        assert_eq!(card.worktree, "wt-a");
+
+        // The winner's own later status entry does refine it.
+        let mine = entry(
+            "t1",
+            "status",
+            "alice",
+            &test_oid(&loser),
+            NOW - 8,
+            serde_json::json!({"status": "in-progress", "worktree": "wt-a2", "work": "step 2"}),
+        );
+        let owned = refs_of(&[claim, loser, mine]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.owner, "alice");
+        assert_eq!(card.worktree, "wt-a2");
+        assert_eq!(card.work, "step 2");
+    }
+
+    #[test]
+    fn unverified_and_malformed_claims_never_own_a_card() {
+        let (sk_a, sk_b) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        let issue = entry("t1", "issue", "alice", "", NOW - 100, serde_json::json!({"title": "t"}));
+        // Signed by the wrong key: visible, never verified.
+        let hijack = signed_entry(
+            &sk_b,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": 300})),
+        );
+        // Correctly signed, but the ttl is not a number: malformed.
+        let malformed = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, serde_json::json!({"ttl": "soon"})),
+        );
+        // A claim that replies to another entry is not a claim (parent != "").
+        let reply = signed_entry(
+            &sk_a,
+            entry("t1", CARD_CLAIM_KIND, "alice", &test_oid(&issue), NOW - 10, serde_json::json!({"ttl": 300})),
+        );
+        let owned = refs_of(&[issue, hijack, malformed, reply]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let view = card_claim_view(&refs, &principals, NOW);
+        assert!(view.claims.is_empty());
+        assert!(view.winner.is_none());
+        assert_eq!(view.unverified, 3);
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.status, "open");
+        assert_eq!(card.owner, "");
+        assert_eq!(card.claim.as_ref().unwrap().state, "pending");
+    }
+
+    #[test]
+    fn cards_without_claims_keep_their_old_projection() {
+        let (sk_a, _) = claim_keys();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk(&sk_a));
+        let issue = entry("t1", "issue", "alice", "", NOW - 100, serde_json::json!({"title": "t"}));
+        let status = entry(
+            "t1",
+            "status",
+            "alice",
+            &test_oid(&issue),
+            NOW - 50,
+            serde_json::json!({"status": "in-progress", "owner": "alice", "worktree": "wt"}),
+        );
+        let owned = refs_of(&[issue, status]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let board = build_board(&refs, &principals, &MergeRules::default(), &default_board(), NOW);
+        let card = card_of(&board, "t1");
+        assert_eq!(card.status, "in-progress");
+        assert_eq!(card.owner, "alice");
+        assert!(card.claim.is_none(), "no claim entries: no claim projection");
     }
 }
 
@@ -2037,7 +2543,7 @@ mod snapshot_tests {
             require_human_approvals: 1,
         };
         let mut out = serde_json::to_vec(&build_report(refs, principals, &rules, i64::MAX)).unwrap();
-        out.extend_from_slice(&serde_json::to_vec(&build_board(refs, principals, &rules, &default_board())).unwrap());
+        out.extend_from_slice(&serde_json::to_vec(&build_board(refs, principals, &rules, &default_board(), i64::MAX)).unwrap());
         let mut ids: Vec<&str> = refs.iter().map(|r| r.entry.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();

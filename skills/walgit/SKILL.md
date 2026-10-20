@@ -106,12 +106,15 @@ re-list and re-subscribe); three consecutive probe failures send `notifications/
 `level: "error"` and stop the subscription. Write with `tools/call` `collab_entry` (registered only
 under `--allow-write --key`): `kind`/`id`/`actor`/`parent`/`body` (a JSON object string), plus
 `base`/`head` for `patch`. Each call signs and pushes to the process's `--remote` and returns
-`<ref> <oid>` as its text — that oid is the next `parent`. There is no local-only write over MCP.
+`<ref> <oid>` as its text — that oid is the next `parent`. Claim a work card with `collab_claim`
+(`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`): it publishes a `card_claim`, re-reads
+and succeeds only for the deterministic winner; an error starting `stand-down:` names the holder —
+do not start work. There is no local-only write over MCP.
 
 For unattended multi-agent work, run **one process per agent/worktree/principal**, subscribing
 `walgit://refs/<owner>/<repo>` and `walgit://collab/board/<owner>/<repo>` (plus the thread URIs it
 owns), and read them once at startup so a restart is never mistaken for "nothing new". Only
-`collab_entry` writes; the board is a projection of signed entries, never editable. Keep builds,
+`collab_entry`/`collab_claim` write; the board is a projection of signed entries, never editable. Keep builds,
 tests and `git push` outside the tool call (one request line is handled at a time) and post one
 entry when the step is done. The role topology, ownership and merge gate are in the public guide
 §0b–§0d.
@@ -262,10 +265,22 @@ W collab principal-revoke   --principal <p> [--push origin]
 W collab principal-fetch    [--remote origin] [--token $WALGIT_TOKEN]
 ```
 
+Claim a work card before working on it (`docs/D1_PROTOCOL.md` §8.4). The command publishes a
+signed `card_claim`, re-reads the log and exits **0** only for the deterministic winner
+(earliest live claim by `(ts, actor, oid)`), **2** when another claim holds the card (stand
+down — do not start work) and **1** on error. Duplicate claims are legal, duplicate execution
+is not; a claim expires at `ts + ttl` (default 300 s), which is the only release mechanism:
+
+```bash
+W collab claim --id <thread-id> --worktree wt-x --branch feat/x \
+  --work '<plan>' [--ttl 300] [--push origin] [--format text|json]
+```
+
 | kind | body (required) | use |
 |---|---|---|
 | `issue` | `{"title","body"}` | thread root |
-| `status` | `{"status","owner","worktree?","branch?","work","note?"}` | claim / move the card |
+| `status` | `{"status","owner","worktree?","branch?","work","note?"}` | move the card / explicit hand-off |
+| `card_claim` | `{"ttl":300,"worktree?","branch?","work?"}` (root entry, `parent=""`) | ownership claim before work (`collab claim`; convergence in §8.4) |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
 | `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review, run as its own party (own principal/key; a headless sub-agent counts); the merge rule drops `svc-*` actors and verified-patch authors, but the coordinator still checks the actor (an unverified patch does not populate the author set) |
 | `merge_result` | `{"merged":true,"oid":…,"result":"merged","note":…}` | merge record, **one entry** (the board/PR state keys on `merged:true`) |
@@ -275,15 +290,18 @@ W collab principal-fetch    [--remote origin] [--token $WALGIT_TOKEN]
 entry carrying a string `status` (`merge_result {"merged":true}` also lands on `merged`); `owner` /
 `worktree` / `branch` / `work` each come from the newest `status` entry that names that field — later
 entries inherit what they omit, an explicit empty string clears it, `work` falls back to that entry's
-`note`. Projection does **not** filter by signature; verification shows in the `verified`/`unverified`
-counts, in the merge rule (only verified approvals count) and in the `done` gate. An issue-only thread
-therefore projects as an **unowned `open` card** — file the `issue` **and** a `status` entry naming
-`owner`; parked work still names its owner (`blocked` / `needs-human`); an owner in a `comment` does
-not count.
+`note`. While a card is `open`/`in-progress` **and a live `card_claim` exists**, the winner owns it:
+`owner` is the winner's principal, `open` projects as `in-progress`, and the context comes from the
+winner's own `status` entries plus the claim body (a losing or bystander `status` entry still moves
+the status column but cannot take the owner fields). Projection does **not** filter by signature;
+verification shows in the `verified`/`unverified` counts, in the merge rule (only verified approvals
+count) and in the `done` gate. An issue-only thread therefore projects as an **unowned `open` card** —
+file the `issue`, then the worker claims it (or, without claims, add a `status` entry naming `owner`);
+parked work still names its owner (`blocked` / `needs-human`); an owner in a `comment` does not count.
 
-Standard flow: `issue` → `status: in-progress` (owner/worktree/branch) → work in a worktree →
-`patch` → `status: needs-review` → independent `review` by another principal → coordinator merges
-locally & pushes → `merge_result {"merged":true,"oid":…}` → `status: closed`.
+Standard flow: `issue` → **`collab claim` (exit 0 before any work)** → work in the claimed
+worktree → `patch` → `status: needs-review` → independent `review` by another principal →
+coordinator merges locally & pushes → `merge_result {"merged":true,"oid":…}` → `status: closed`.
 Remove the worktree after closure. Keep the board and the thread as the single record; never edit
 state files by hand.
 
@@ -299,7 +317,8 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 
 - **协调者 orchestrator**（控制台 agent 或它起的常驻客户端循环）：watch `refs/collab/*` → 派卡 → 起/收
   子代理 → 记录合并。**客户端行为，无服务器端点、无新持久状态**（D46/D49/D55）。
-- **worker 子代理**：一卡一 owner 一 worktree（各自身份）；实现 → push 分支 → `patch` → `needs-review`。
+- **worker 子代理**：一卡一 owner 一 worktree（各自身份）；**开工前先 `collab claim`，退出码非 0 不得开工**
+  （收敛认领，§8.4）→ 实现 → push 分支 → `patch` → `needs-review`。
 - **验收子代理**：与作者**不同 principal**，按卡的机器可校验验收项独立判定，签 `review`
   （`approve` / `request_changes` + Critical/Important/Minor findings + 实际跑过的证据）。
 - **自合并**：验收无 Critical/Important 且验收项全绿 → orchestrator 本地合并、push、记一条

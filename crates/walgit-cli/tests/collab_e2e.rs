@@ -493,6 +493,187 @@ async fn board_projection_is_byte_identical_across_clients_and_moves_with_status
     Ok(())
 }
 
+/// `docs/D1_PROTOCOL.md` §8.4 (design-card-claim): two clients claim the same
+/// card — the earliest live claim wins deterministically, the loser exits 2
+/// (stand down) and the board shows the winner; after the TTL passes the card
+/// is claimable again and ownership moves. `walgit collab claim` is the
+/// convergence primitive: read -> publish -> re-read -> only the winner
+/// proceeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn card_claim_converges_and_ttl_releases_the_card() -> TestResult {
+    let (base, _shutdown) = start_server().await?;
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let keydir = tempfile::tempdir()?;
+    let alice_key = keydir.path().join("alice");
+    let bob_key = keydir.path().join("bob");
+    std::fs::write(&alice_key, "07".repeat(32))?;
+    std::fs::write(&bob_key, "08".repeat(32))?;
+    let alice_s = alice_key.to_str().unwrap();
+    let bob_s = bob_key.to_str().unwrap();
+
+    let run = |args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+    let run_code = |args: &[&str]| -> TestResult<(i32, String, String)> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .output()?;
+        Ok((
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ))
+    };
+
+    // Two independent checkouts (one per principal), both pointed at the host.
+    let a = tempfile::tempdir()?;
+    git_in(a.path(), &["init", "-q", "-b", "main"])?;
+    git_in(a.path(), &["config", "user.email", "t@t"])?;
+    git_in(a.path(), &["config", "user.name", "T"])?;
+    git_in(a.path(), &["remote", "add", "origin", &format!("{base}/o/r.git")])?;
+    let repo_a = a.path().to_str().unwrap();
+    let b = tempfile::tempdir()?;
+    git_in(b.path(), &["init", "-q", "-b", "main"])?;
+    git_in(b.path(), &["remote", "add", "origin", &format!("{base}/o/r.git")])?;
+    let repo_b = b.path().to_str().unwrap();
+
+    for (repo, principal, key) in [(repo_a, "alice", alice_s), (repo_b, "bob", bob_s)] {
+        run(&[
+            "collab", "principal-register", "--repo", repo, "--principal", principal, "--key",
+            key, "--push", "origin",
+        ])?;
+    }
+    run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t1", "--actor", "alice",
+        "--body", r#"{"title":"design-card-claim demo"}"#, "--key", alice_s, "--push", "origin",
+    ])?;
+
+    // Alice claims first; the claim command returns the signed claim oid.
+    let win = run(&[
+        "collab", "claim", "--repo", repo_a, "--id", "t1", "--actor", "alice", "--key", alice_s,
+        "--ttl", "120", "--worktree", "wt-a", "--branch", "feat/a", "--work", "do it",
+        "--push", "origin", "--format", "json",
+    ])?;
+    let win: serde_json::Value = serde_json::from_str(win.trim())?;
+    assert_eq!(win["claimed"], true, "{win}");
+    assert_eq!(win["owner"], "alice");
+    let claim_oid = win["claim"].as_str().unwrap().to_string();
+
+    // The same worktree claiming again resumes its own claim (process restart
+    // inside the TTL): no second entry, exit 0.
+    let (code, out, err) = run_code(&[
+        "collab", "claim", "--repo", repo_a, "--id", "t1", "--actor", "alice", "--key", alice_s,
+        "--push", "origin",
+    ])?;
+    assert_eq!(code, 0, "resume must win; stderr: {err}");
+    assert!(out.contains("already claimed"), "{out}");
+    let thread = run(&["collab", "thread", "t1", "--repo", repo_a])?;
+    let thread: serde_json::Value = serde_json::from_str(&thread)?;
+    assert_eq!(
+        thread
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["entry"]["kind"] == "card_claim")
+            .count(),
+        1,
+        "resume must not publish a second claim"
+    );
+
+    // Bob reads the same card: the live claim is already visible, so he stands
+    // down before doing any work — exit 2, and his checkout published nothing.
+    let (code, out, err) = run_code(&[
+        "collab", "claim", "--repo", repo_b, "--id", "t1", "--actor", "bob", "--key", bob_s,
+        "--ttl", "120", "--push", "origin",
+    ])?;
+    assert_eq!(code, 2, "stand down must be exit 2; stderr: {err}");
+    assert!(out.contains("stand-down"), "{out}");
+    assert!(out.contains("alice"), "the loser learns who holds it: {out}");
+
+    // The board (CLI and server projection) shows the winner and the claim oid.
+    let board = run(&["collab", "board", "--repo", repo_b, "--format", "json"])?;
+    let board: serde_json::Value = serde_json::from_str(&board)?;
+    let card = board["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["cards"].as_array().unwrap())
+        .find(|c| c["id"] == "t1")
+        .expect("t1 on the board");
+    assert_eq!(card["status"], "in-progress");
+    assert_eq!(card["owner"], "alice");
+    assert_eq!(card["worktree"], "wt-a");
+    assert_eq!(card["claim"]["state"], "claimed");
+    assert_eq!(card["claim"]["oid"], claim_oid);
+    let server_board: serde_json::Value =
+        reqwest::get(format!("{base}/o/r/api/collab/board")).await?.json().await?;
+    let server_card = server_board["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["cards"].as_array().unwrap())
+        .find(|c| c["id"] == "t1")
+        .expect("t1 on the server board");
+    assert_eq!(server_card["owner"], "alice");
+    assert_eq!(server_card["claim"]["oid"], claim_oid);
+
+    // TTL expiry self-heals: a 1 s claim on a second card is stale two seconds
+    // later, and the other principal can claim it.
+    run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t2", "--actor", "alice",
+        "--body", r#"{"title":"short claim"}"#, "--key", alice_s, "--push", "origin",
+    ])?;
+    run(&[
+        "collab", "claim", "--repo", repo_a, "--id", "t2", "--actor", "alice", "--key", alice_s,
+        "--ttl", "1", "--push", "origin",
+    ])?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (code, out, err) = run_code(&[
+        "collab", "claim", "--repo", repo_b, "--id", "t2", "--actor", "bob", "--key", bob_s,
+        "--ttl", "120", "--worktree", "wt-b", "--push", "origin", "--format", "json",
+    ])?;
+    assert_eq!(code, 0, "an expired claim releases the card; stderr: {err}");
+    let won: serde_json::Value = serde_json::from_str(out.trim())?;
+    assert_eq!(won["claimed"], true, "{won}");
+    assert_eq!(won["owner"], "bob");
+    // The old claim stays in the log (audit), the new one owns the card.
+    let thread = run(&["collab", "thread", "t2", "--repo", repo_b])?;
+    let thread: serde_json::Value = serde_json::from_str(&thread)?;
+    let claims = thread
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["entry"]["kind"] == "card_claim")
+        .count();
+    assert_eq!(claims, 2, "both claims are kept: {thread}");
+
+    // A terminal card is not claimable.
+    run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "status", "--id", "t1", "--actor", "alice",
+        "--body", r#"{"status":"closed"}"#, "--key", alice_s, "--push", "origin",
+    ])?;
+    let (code, _out, err) = run_code(&[
+        "collab", "claim", "--repo", repo_b, "--id", "t1", "--actor", "bob", "--key", bob_s,
+        "--push", "origin",
+    ])?;
+    assert_eq!(code, 1, "a closed card is refused: {err}");
+    assert!(err.contains("not claimable"), "{err}");
+    Ok(())
+}
+
 /// D45 / `docs/D1_PROTOCOL.md` §9 (issue #160): the fold. A mixed history (issue/patch/
 /// review/status/comment + `ci_claim`/`ci_result`, with an unregistered actor and
 /// a wrong-key signature among them) is folded by `walgit collab gc --push`:

@@ -43,8 +43,8 @@ on stdio — host-spawned, so configure it as a command, not a URL:
 Its tools **are** this CLI, so they cannot drift from it — but the surface is deliberately partial:
 today `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_ls/thread/pr/board/report`,
 `ci_status` and `wal_ls`; everything else (`repo info/blame/commit`, `ci log/artifacts`,
-`collab watch`, …) still goes through the CLI directly. `collab_entry` is the only writing tool and
-exists only with `--allow-write`. Destructive operations (GC, compaction, import, settings/policy
+`collab watch`, …) still goes through the CLI directly. The writing tools are `collab_entry` and
+`collab_claim`, both only with `--allow-write`. Destructive operations (GC, compaction, import, settings/policy
 writes, ref deletion) are not exposed at all — and bytes never travel over MCP: clone/fetch/push
 stay git + bundle-uri.
 
@@ -110,8 +110,10 @@ specific thread for the details), a board update names the cards, and a thread r
 head oid to reply against. Confirm at that head oid that the card is still unowned or yours
 before you write.
 
-**Writing is one tool: `collab_entry`.** It is absent from the read-only surface; start the
-process with `--allow-write --key <this agent's seed>`:
+**Writing is two tools, both absent from the read-only surface; start the process with
+`--allow-write --key <this agent's seed>`.** `collab_entry` appends a signed entry; `collab_claim`
+claims a work card (D1 §8.4) — publish + re-read + winner check in one call, failing with
+`stand-down:` when another claim won, so a race converges on exactly one worker:
 
 ```jsonc
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"collab_entry","arguments":{
@@ -125,6 +127,12 @@ call signs and **pushes to the process's `--remote`** (default `origin`), so it 
 the entry is published; the reply's text is `<ref> <oid>` — keep that oid as the next `parent`.
 There is no local-only write over MCP (use the CLI for that). Nothing is edited: a move is a new
 signed entry, and `collab_board` stays read-only.
+
+`collab_claim` returns the winner's claim object (`{"claimed": true, "claim": "<entry oid>", …}`);
+the error text names the holder and the winning oid. **A card you have not claimed with exit 0 is
+not yours** — do not work it. The claim is also the read-visible signal: the board card carries
+`claim.oid`/`claim.expires_at` (compare with the oid your claim returned — principals may be
+shared, oids never).
 
 **Many agents, unattended.** One `walgit mcp` process per agent, each in its own worktree with
 its own principal and key (§0b, D58/D59); never share a process or a key. Subscribe both URIs
@@ -241,6 +249,12 @@ pushed as ordinary refs, so a local write becomes visible with one `--push`.
     `--auto-fold` (threshold default 10000) folds the inbox with the same
     actor/key once the unfolded refs pass the threshold — the server's
     aggregate read budget is 20000 refs.
+  - `walgit collab claim --id <thread> [--ttl 300] [--push origin] [--worktree … --branch …
+    --work …]` — the work-card convergence primitive (`docs/D1_PROTOCOL.md` §8.4): read →
+    publish a signed `card_claim` root → re-read → exit **0** only if this claim won,
+    **2** to stand down (another claim holds the card — do not start work), **1** on error.
+    Duplicate claims are legal; duplicate execution is not. A claim expires at `ts + ttl`
+    (default 300 s), which is the self-healing release: no lease renew, no cleanup process.
 - Automate: `walgit collab watch` — the resident loop that turns `refs/collab/*`
   changes into process invocations (`--exec <cmd>`, each new/changed entry's JSON
   on stdin). How an agent builds an unattended loop on it: **§0c**.
@@ -498,9 +512,13 @@ roster:
 Parallel work is a topology, not simply "use more agents." Start from this default:
 **N active agents = N principals/keys = N cards (threads) = N worktrees/branches**.
 
-- **One owner per card at a time.** The latest `status` entry's `owner`, `worktree`,
-  and `branch` are the claim ledger; ownership may hand off only through a new signed
-  `status` entry. Do not let two agents work the same card; split the work into a new
+- **One owner per card at a time.** Claim before you work: `walgit collab claim --id <card>
+  --worktree … --branch … --push origin` publishes a signed `card_claim` root, re-reads the log
+  and exits 0 only for the deterministic winner (earliest live claim by `(ts, actor, oid)`);
+  exit 2 means another claim holds the card — stand down and do not start. Claims are the
+  mutex; TTL expiry (default 300 s) is the self-healing release. The first claim already
+  projects the card as `in-progress` with that owner; `status` entries still carry the explicit
+  hand-off and later moves. Do not let two agents work the same card; split the work into a new
   thread instead.
 - **Reviewers are different principals.** The `review` entry must be signed by a
   principal other than the patch author (and, for the final review, other than the
@@ -546,11 +564,10 @@ walgit collab entry --repo "$checkout" --kind issue --id <thread> \
   --body '{"title":"<title>","body":"objective; roles; machine-checkable acceptance"}' \
   --push origin
 
-# 2. Claim it (worker). status fields are the claim ledger; use the issue entry oid as parent.
-walgit collab entry --repo "$checkout" --kind status --id <thread> \
-  --actor <proj>-worker-1 --parent <issue-oid> \
-  --body '{"status":"in-progress","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"<one-line plan>"}' \
-  --push origin
+# 2. Claim it (worker). Exit 0 = you hold the card; exit 2 = someone else does — stand down.
+walgit collab claim --repo "$checkout" --id <thread> \
+  --actor <proj>-worker-1 --worktree "wt-<thread>" --branch "feat/<thread>" \
+  --work "<one-line plan>" --push origin
 
 # 3. Work on exactly that card.
 git -C "$checkout" worktree add "$checkout/.worktrees/wt-<thread>" -b feat/<thread> <base>
@@ -650,9 +667,10 @@ walgit collab watch --repo "$checkout" --remote origin --interval 10 \
    against the registered key. Do not act on it, and do not treat it as a card you own.
 
 **The loop shape.** An event is a trigger to *re-read*, never a snapshot of truth: fetch the
-thread (`walgit collab thread <id>`), confirm at the head oid that the card is still unowned or
-yours, and claim it with a signed `status` entry — the claim is the mutex, and two agents
-racing a card converge only because both re-read first. Then the ordinary lifecycle (§1–§5):
+thread (`walgit collab thread <id>`) and run `walgit collab claim --id <card>` — it publishes a
+signed `card_claim` and re-reads; only the deterministic winner gets exit 0, so two agents racing
+a card converge on exactly one worker even when both started at the same instant (exit 2 = stand
+down, do not start). Then the ordinary lifecycle (§1–§5):
 work in the card's worktree → `patch` → `status: needs-review` → independent `review` →
 coordinator `merge_result` → `status: closed`. The card stays the record; your queue is your
 own business.

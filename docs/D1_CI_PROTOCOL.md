@@ -170,6 +170,11 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
 
 ## 6. 认领（claim）：`ci_claim`
 
+> 同一收敛形状也被工作卡复用：`card_claim`（`docs/D1_PROTOCOL.md` §8.4）用
+> `min(ts, actor, oid)` 在 live 且验签的认领里选唯一 winner，客户端同样
+> "publish → re-fetch → 重算"，同样允许重复认领、禁止重复执行。差别只在 body schema
+> （卡认领不带 task/ref/commit/attempt）与投影面（看板 `owner`，而不是 run 状态机）。
+
 ### 6.1 条目 schema（normative）
 
 `kind = "ci_claim"`，`id = run_id`，`actor = runner principal`，`ts = 认领时刻（entry 的

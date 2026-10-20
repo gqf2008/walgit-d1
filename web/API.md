@@ -839,7 +839,8 @@ a typo'd column rule must never silently fold cards into the wrong lane).
           "unverified": 0,
           "kinds": ["issue", "status"],
           "last_oid": "…",
-          "merge": null
+          "merge": null,
+          "claim": null
         }
       ]
     }
@@ -851,7 +852,14 @@ A card's `status` is decided in thread order and the last match wins:
 `status` entries set their `body.status`, a `merge_result` with
 `merged = true` sets `merged` (a later `status` entry still overrides it);
 default `open`. `last_oid` — the parent-chain tip — is what a follow-up
-entry chains to.
+entry chains to. `claim` is the card's ownership convergence
+(docs/D1_PROTOCOL.md §8.4): `null` when the thread carries no `card_claim`
+entries, else `{state, oid, actor, ts, ttl, expires_at}` with `state` ∈
+`claimed | stale | pending`; while a card is `open`/`in-progress` a live
+winner sets `owner` (and moves `open` to `in-progress`) regardless of the
+status entries. `claim.oid` is the winning entry's oid — the value a client
+compares with the oid its own claim returned to learn whether it holds the
+card.
 Column order is declaration order, **first matching column wins**, cards
 matching no column are omitted, and within a column cards sort by the
 definition's `sort` (default `last_ts` descending, card id as the total-order

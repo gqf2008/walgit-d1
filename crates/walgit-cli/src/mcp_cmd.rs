@@ -217,6 +217,26 @@ fn tool_defs() -> Vec<Tool> {
                 json!(["kind", "id", "actor", "body"]),
             ),
         },
+        Tool {
+            name: "collab_claim",
+            description: "Claim a work card before working on it (D1 protocol §8.4): publish a signed \
+                 `card_claim`, re-read the collab log and succeed only for the deterministic winner \
+                 (earliest live claim by ts/actor/oid). The reply is the winner's claim object; a \
+                 losing call returns an error starting `stand-down:` — do not start work. Duplicate \
+                 claims are legal, duplicate execution is not; the claim expires after `ttl` seconds.",
+            write: true,
+            schema: schema(
+                json!({
+                    "id": {"type": "string", "description": "card thread id"},
+                    "actor": {"type": "string"},
+                    "ttl": {"type": "integer", "description": "claim lifetime in seconds (1..=86400, default 300)"},
+                    "worktree": {"type": "string", "description": "worktree the holder will work in"},
+                    "branch": {"type": "string", "description": "branch the holder will work on"},
+                    "work": {"type": "string", "description": "one-line plan"}
+                }),
+                json!(["id", "actor"]),
+            ),
+        },
     ]
 }
 
@@ -1210,6 +1230,41 @@ fn argv_for(name: &str, args: &Value, opts: &Options) -> Result<Vec<String>, Too
             }
             if let Some(head) = opt("head")? {
                 v.push(flag("--head", &head));
+            }
+            v
+        }
+        "collab_claim" => {
+            let key = opts.key.as_ref().ok_or_else(|| {
+                ToolError::InvalidParams(
+                    "`collab_claim` needs `--key <ed25519 seed file>` on the server".into(),
+                )
+            })?;
+            let mut v = vec![
+                "collab".into(),
+                "claim".into(),
+                flag("--repo", &repo_path),
+                flag("--id", &req("id")?),
+                flag("--actor", &req("actor")?),
+                flag("--key", &key.display().to_string()),
+                flag("--push", &opts.remote),
+                "--format=json".into(),
+            ];
+            if let Some(ttl) = args.get("ttl").and_then(Value::as_u64) {
+                if !(1..=86_400).contains(&ttl) {
+                    return Err(ToolError::InvalidParams(
+                        "`ttl` must be between 1 and 86400 seconds".into(),
+                    ));
+                }
+                v.push(flag("--ttl", &ttl.to_string()));
+            }
+            for (arg, name) in [
+                ("worktree", "--worktree"),
+                ("branch", "--branch"),
+                ("work", "--work"),
+            ] {
+                if let Some(value) = opt(arg)? {
+                    v.push(flag(name, &value));
+                }
             }
             v
         }
@@ -2428,6 +2483,7 @@ mod tests {
             "ci_status",
             "wal_ls",
             "collab_entry",
+            "collab_claim",
         ];
         assert_eq!(names, expected);
         assert_eq!(
@@ -2436,8 +2492,8 @@ mod tests {
                 .filter(|t| t.write)
                 .map(|t| t.name)
                 .collect::<Vec<_>>(),
-            vec!["collab_entry"],
-            "exactly one writing tool"
+            vec!["collab_entry", "collab_claim"],
+            "the writing tools are exactly the two collab writes"
         );
         // Bytes must not travel over MCP: no tool may expose the raw channel.
         for tool in tool_defs() {
@@ -2466,6 +2522,8 @@ mod tests {
 
         let writable = reply(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, true).await;
         assert!(names(&writable).contains(&"collab_entry".to_string()));
+        assert!(names(&writable).contains(&"collab_claim".to_string()));
+        assert!(!names(&read_only).contains(&"collab_claim".to_string()));
 
         // The gate must hold on the call path too, not just in the listing.
         let denied = reply(
