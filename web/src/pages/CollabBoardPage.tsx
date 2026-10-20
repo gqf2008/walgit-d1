@@ -40,19 +40,31 @@ function fmtTime(ts: number): string {
  * Reopening with a backoff is the same reconnection semantics an EventSource
  * would apply; the first pass only seeds the digest, so mounting never
  * invalidates.
+ *
+ * The board projection is also a function of the wall clock — a `card_claim`
+ * TTL expiring changes no ref (docs/D1_PROTOCOL.md §8.4) — so the views are
+ * revalidated on a floor even when the digest is unchanged, mirroring the MCP
+ * board probe's 60 s recompute floor.
  */
+const BOARD_REFRESH_FLOOR_MS = 60_000;
+
 function useCollabLive(full: string) {
   useEffect(() => {
     const ctl = new AbortController();
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let seen = "";
+    let last = Date.now();
     const pass = async () => {
       const names: string[] = [];
       const { more } = await refListStream(full, "collab", { n: 1000 }, (r) => names.push(`${r.name} ${r.sha}`), ctl.signal);
       names.sort();
       const digest = `${more ? "more:" : ""}${names.join("|")}`;
-      if (seen && digest !== seen) invalidate(`collab:${full}`);
+      const moved = seen !== "" && digest !== seen;
+      if (moved || Date.now() - last >= BOARD_REFRESH_FLOOR_MS) {
+        invalidate(`collab:${full}`);
+        last = Date.now();
+      }
       seen = digest;
     };
     const tick = () => {

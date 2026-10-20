@@ -630,17 +630,20 @@ async fn card_claim_converges_and_ttl_releases_the_card() -> TestResult {
     assert_eq!(server_card["owner"], "alice");
     assert_eq!(server_card["claim"]["oid"], claim_oid);
 
-    // TTL expiry self-heals: a 1 s claim on a second card is stale two seconds
-    // later, and the other principal can claim it.
+    // TTL expiry self-heals: a 2 s claim on a second card is stale three
+    // seconds later, and the other principal can claim it. The TTL must
+    // outlast the claim command's own fetch → push → re-read round trip
+    // (a ttl of 1 leaves only ~1–2 s of wall clock and flakes on a loaded
+    // runner with `expired between publish and re-read`).
     run(&[
         "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t2", "--actor", "alice",
         "--body", r#"{"title":"short claim"}"#, "--key", alice_s, "--push", "origin",
     ])?;
     run(&[
         "collab", "claim", "--repo", repo_a, "--id", "t2", "--actor", "alice", "--key", alice_s,
-        "--ttl", "1", "--push", "origin",
+        "--ttl", "2", "--push", "origin",
     ])?;
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::thread::sleep(std::time::Duration::from_secs(3));
     let (code, out, err) = run_code(&[
         "collab", "claim", "--repo", repo_b, "--id", "t2", "--actor", "bob", "--key", bob_s,
         "--ttl", "120", "--worktree", "wt-b", "--push", "origin", "--format", "json",

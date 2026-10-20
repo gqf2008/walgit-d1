@@ -142,8 +142,8 @@ above: the orchestrator acts on `walgit://collab/board/…` (unowned cards to di
 restart — read both resources once instead of waiting for an event, and keep the last processed
 version as the cursor: subscriptions are process-local and notifications are best-effort, so a
 restart must not be read as "nothing happened". Filter your own writes by the head entry's
-`actor` so a self-triggered update is not answered with another write; a claim counts only after
-re-reading the thread and finding no other owner. Heavy work (build, test, `git push`) runs
+`actor` so a self-triggered update is not answered with another write; a card is yours only when
+`collab claim` exits 0 (the deterministic winner — re-reading a `status` owner is not a claim). Heavy work (build, test, `git push`) runs
 outside the tool call — the server handles one request line at a time — and ends with one
 `collab_entry` that records it. The pull lanes (`git ls-remote`, `walgit wal ls`, `walgit collab
 watch`) remain the source of truth; the role topology and merge gate are §0b–§0d.
@@ -522,9 +522,10 @@ Parallel work is a topology, not simply "use more agents." Start from this defau
   exit 2 means another claim holds the card — stand down and do not start. Claims are the
   mutex; TTL expiry (default 300 s, live through `ts + ttl` inclusive) is the self-healing
   release. The first claim already
-  projects the card as `in-progress` with that owner; `status` entries still carry the explicit
-  hand-off and later moves. Do not let two agents work the same card; split the work into a new
-  thread instead.
+  projects the card as `in-progress` with that owner; `status` entries still move the card and
+  record later context, but they cannot hand off a claimed card — a live claim re-pins `owner`,
+  so an explicit hand-off waits for the claim to lapse. Do not let two agents work the same
+  card; split the work into a new thread instead.
 - **Reviewers are different principals.** The `review` entry must be signed by a
   principal other than the patch author (and, for the final review, other than the
   merger). Treat the author's own `approve` as invalid: do not merge on it. The

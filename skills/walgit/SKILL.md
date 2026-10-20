@@ -109,8 +109,8 @@ under `--allow-write --key`): `kind`/`id`/`actor`/`parent`/`body` (a JSON object
 `<ref> <oid>` as its text — that oid is the next `parent`. Claim a work card with `collab_claim`
 (`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`): it publishes a `card_claim`, re-reads
 and succeeds only for the deterministic winner; a losing call returns `isError` whose text contains
-`stand-down:` plus the JSON verdict (`{"claimed": false, "owner": …}`) naming the holder —
-do not start work. There is no local-only write over MCP.
+`stand-down:` and names the holder and expiry — do not start work. There is no local-only write
+over MCP.
 
 For unattended multi-agent work, run **one process per agent/worktree/principal**, subscribing
 `walgit://refs/<owner>/<repo>` and `walgit://collab/board/<owner>/<repo>` (plus the thread URIs it

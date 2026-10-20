@@ -801,6 +801,10 @@ fn canonical_root<'a>(
                 && r.entry.kind != CARD_CLAIM_KIND
                 && r.is_verified(principals)
         })
+        // Unverified legacy threads keep their old identity rule, but still
+        // never take a claim as the identity (a revoked issue key must not
+        // hand the card to a verified claim that sorted earlier).
+        .or_else(|| ordered.iter().copied().find(|r| r.entry.kind != CARD_CLAIM_KIND))
         .or_else(|| ordered.first().copied())
 }
 

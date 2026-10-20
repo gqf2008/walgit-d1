@@ -230,8 +230,8 @@ fn tool_defs() -> Vec<Tool> {
             description: "Claim a work card before working on it (D1 protocol §8.4): publish a signed \
                  `card_claim`, re-read the collab log and succeed only for the deterministic winner \
                  (earliest live claim by ts/actor/oid). The reply is the winner's claim JSON. A \
-                 losing call returns `isError` whose text contains `stand-down:` plus the JSON \
-                 verdict ({\"claimed\": false, \"owner\": …}) naming the holder — do not start work. \
+                 losing call returns `isError` whose text contains `stand-down:` and names the \
+                 holder and expiry — do not start work. \
                  Duplicate claims are legal, duplicate execution is not; the claim expires after \
                  `ttl` seconds.",
             write: true,

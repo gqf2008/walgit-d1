@@ -416,8 +416,10 @@ report/threads/board；CLI 的 `pr`/`report`/`board`）；CLI 的 `--rules <file
 
 字段（`walgit-wal::collab::Report`，CLI 与服务端同源）：
 
-- `threads[]`：每个非纯 CI 线程的 `{id, title, entries, verified, last_ts, kinds}`；
-  `title` = canonical root 的 `body.title`（缺失为 `""`）；`kinds` = 去重升序。
+- `threads[]`：每个工作单元线程（纯 CI 线程与仅含 `card_claim` 的线程除外）的
+  `{id, title, entries, verified, last_ts, kinds}`；
+  `title` = canonical root 的 `body.title`（缺失为 `""`；`card_claim` 根条目永远不是
+  canonical root，§8.4）；`kinds` = 去重升序。
   **排序是投影的一部分**：`last_ts` 降序，`id` 升序破平；客户端照序渲染、不重排。
 - `prs[]`：含 `patch` 的线程的 `{id, title, base, head, status, approvals, merge_allowed, merge_reason}`；
   `approvals` = 可计数的批准者数（distinct、排除 `svc-` 与 patch 作者，与 §7.3 同源）；
@@ -504,7 +506,8 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
   `unverified=true` → `card.unverified > 0`。空字段 = 任意。
 - 排序：`by=ts` 按 `last_ts`，`by=id` 按 id；方向按 `direction`；**破平恒为 id 升序**，
   因此输出是全序、字节确定。
-- **纯 CI 线程（全部条目为 `ci_claim`/`ci_result`）不是看板卡片**，跳过；其展示面是
+- **纯 CI 线程（全部条目为 `ci_claim`/`ci_result`）不是看板卡片**，跳过；同样跳过的还有
+  **仅含 `card_claim` 的线程**（没有卡可认领，§8.4）。其展示面是
   report.runs / `walgit ci status` / SPA 线程徽标（CI 协议 §8.3）。
 
 ### 8.4 工作卡认领收敛（`card_claim`，2026-10-20 design-card-claim）
