@@ -714,14 +714,49 @@ fn load_config(path: &std::path::Path) -> Config {
     }
 }
 
+/// The CLI runs its whole main body — clap's command tree, config loading, the
+/// tokio runtime and the first polls of the dispatch future — on a thread with
+/// an explicit stack budget.
+///
+/// A *debug* build of this startup needs close to the platform's default
+/// main-thread stack, and Windows' default is 1 MiB. 4f80757 (one more clap
+/// subcommand variant, the card-claim command) grew the requirement by a few
+/// tens of KiB and `walgit service start` began dying with
+/// `STATUS_STACK_OVERFLOW` (0xC00000FD) in the CI task-ownership smoke, while
+/// the same commit passed on macOS' 8 MiB main stack. Measured floors on
+/// aarch64 macOS debug builds: 0a1a98a starts at 1000 KiB, 4f80757 needs
+/// 1010 KiB; Windows debug frames are larger still. Do not tune the command
+/// tree to stay under 1 MiB — give the CLI its own budget.
+const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn on_cli_stack<F>(body: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
+    let worker = std::thread::Builder::new()
+        .name("walgit".to_string())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(body)?;
+    match worker.join() {
+        Ok(result) => result,
+        // Re-raise on the caller's thread so a panic keeps its message and the
+        // process exit code.
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 pub fn main() -> Result<()> {
-    let cli = Cli::parse();
-    run(&cli.config, cli.command.unwrap_or(Command::Serve))
+    on_cli_stack(|| {
+        let cli = Cli::parse();
+        run(&cli.config, cli.command.unwrap_or(Command::Serve))
+    })
 }
 
 pub fn main_server() -> Result<()> {
-    let cli = ServerCli::parse();
-    run(&cli.config, Command::Serve)
+    on_cli_stack(|| {
+        let cli = ServerCli::parse();
+        run(&cli.config, Command::Serve)
+    })
 }
 
 fn run(config: &std::path::Path, command: Command) -> Result<()> {
@@ -894,5 +929,22 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
                 import::run(from, repo, reuse_packs, refs, &cfg).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::on_cli_stack;
+
+    #[test]
+    fn the_cli_stack_runner_propagates_results() {
+        assert!(on_cli_stack(|| Ok(())).is_ok());
+        assert!(on_cli_stack(|| anyhow::bail!("boom")).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "worker panic")]
+    fn the_cli_stack_runner_propagates_panics() {
+        let _ = on_cli_stack(|| panic!("worker panic"));
     }
 }
