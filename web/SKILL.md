@@ -212,6 +212,10 @@ One binary, subcommands by role. Everything below works against a **checkout**
 of a repository on this host (clone it first); entries are Ed25519-signed and
 pushed as ordinary refs, so a local write becomes visible with one `--push`.
 
+The everyday subset is also rendered in the bundled UI at **`/commands`** (top-nav
+「命令」/「指令」): the same commands in workflow order, each with a copy button. The
+page and this section are updated together.
+
 ### D1 collaboration — issues, PRs, the board (`walgit collab …`)
 
 - Read (JSON out — pipe through `jq`):

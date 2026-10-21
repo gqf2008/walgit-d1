@@ -810,7 +810,7 @@ details summary { cursor: pointer; margin-top: 8px; }
 .error-tray .dismiss-all { align-self: flex-end; }
 
 /* ---- top nav (right side of the title bar) + API page ---- */
-.topnav { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.topnav { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; row-gap: 0; }
 .topnav-link {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px;
   color: var(--fg); font-size: 14px; font-weight: 500;
@@ -1532,4 +1532,62 @@ table.kv.compact td { padding: 2px 0; }
   padding: 8px 12px;
   margin-top: 12px;
   overflow-wrap: anywhere;
+}
+
+/* ---- CLI cheat sheet (/commands, D61): static reference, copy-on-click ---- */
+.cmds-lead { margin: 0 0 12px; color: var(--muted); max-width: 860px; }
+.cmds-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.cmds-fact {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+}
+.cmds-fact strong { font-weight: 600; font-size: 13px; }
+.cmds-fact span { color: var(--muted); }
+.cmds-row { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; }
+.cmds-row code {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg3);
+  border-radius: 4px;
+  padding: 4px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.cmds-copy {
+  flex: none;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.cmds-copy:hover { color: var(--fg); background: var(--bg2); }
+.cmds-note { color: var(--muted); font-size: 12.5px; margin: 2px 0 8px; max-width: 860px; }
+.cmds-table-wrap { overflow-x: auto; margin: 8px 0; }
+.cmds-table { border-collapse: collapse; font-size: 12.5px; }
+.cmds-table th,
+.cmds-table td {
+  text-align: left;
+  padding: 4px 16px 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cmds-table th { color: var(--muted); font-weight: 500; }
+@media (max-width: 700px) {
+  .cmds-row { flex-direction: column; align-items: stretch; }
+  .cmds-copy { align-self: flex-start; }
 }

@@ -787,6 +787,17 @@ decision in §4 — or the PR is; never "fix later".
   (dies with the tab; never `localStorage`). No server auth path changes — `require_admin`
   already accepts bearer, and oidc keeps its session cookie and sign-in popup. Only `/setup`
   self-selects; no other page changes lanes.
+- **D61** **The everyday CLI set ships in the bundled UI as `/commands` (2026-10-21,
+  cc-ai-commands-page).** The agent-facing cheat sheet — first contact, reading the board,
+  claiming a card and writing entries, repository reads, `collab watch` / MCP, CI, diagnostics —
+  is a static SPA page at `/commands`, linked from the top nav as「命令」/「指令」, next to
+  `/repos` and `/api`. It is data-free: a projection of the CLI surface (`walgit --help`), not
+  of any bucket state, and every command block copies on click. Like `/repos` and `/api` the
+  single-segment route shadows the owner page for an owner literally named `commands` (git
+  operations are unaffected). The page carries no second contract: the normative text stays in
+  `web/SKILL.md` §0a–§0e and `skills/walgit/SKILL.md` §5, and the page is updated with the CLI
+  in the same change. `page_routes_serve_index_without_cache` covers `/commands`.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

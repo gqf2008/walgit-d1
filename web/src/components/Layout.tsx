@@ -32,6 +32,12 @@ export function Layout() {
           >
             {t("nav.repos")}
           </NavLink>
+          <NavLink
+            to="/commands"
+            className={({ isActive }) => (isActive ? "topnav-link active" : "topnav-link")}
+          >
+            {t("nav.commands")}
+          </NavLink>
           <NavLink to={apiHref} className={({ isActive }) => (isActive ? "topnav-link active" : "topnav-link")}>
             API
           </NavLink>

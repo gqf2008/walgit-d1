@@ -27,5 +27,7 @@ describe("Layout", () => {
       </MemoryRouter>,
     );
     expect(screen.getByText("nav.store").closest("a")?.getAttribute("href")).toBe("/setup");
+    // The CLI cheat sheet is a top-level entry (D61), always reachable.
+    expect(screen.getByText("nav.commands").closest("a")?.getAttribute("href")).toBe("/commands");
   });
 });

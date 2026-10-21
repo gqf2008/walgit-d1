@@ -48,6 +48,19 @@ credential with no UI to fix it.
   wizard, the editor, or the token prompt. No other page changes lanes, and no
   server auth path changed.
 
+## CLI cheat sheet page (`/commands`, D61)
+
+`pages/CommandsPage.tsx` renders the everyday CLI set (first contact, board reads,
+claim/entries, repository reads, `collab watch` / MCP, CI, diagnostics) in workflow
+order. It is **static and data-free** — a projection of `walgit --help`, not of any
+repository — so it needs no SDK lane and no API. Each row is a `<code>` block plus a
+copy button (clipboard first, text selection as the fallback). The route is a
+single-segment page route (`main.tsx` → `commands`, server `ui.rs` → `index_route`);
+like `/repos` and `/api` it shadows the owner page for an owner named `commands`.
+Prose lives in `i18n.tsx` (all three dictionaries, `cmds.*`); update the page with
+the CLI in the same change. The normative text is `web/SKILL.md` §0a–§0e and
+`skills/walgit/SKILL.md` §5.
+
 ## Markdown rendering and the XSS boundary (issue #112)
 
 - **Pipeline**: `components/Markdown.tsx` → lazy `MarkdownRenderer` —
