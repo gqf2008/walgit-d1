@@ -2286,16 +2286,18 @@ fn updated_notification(
     self_session: Option<&str>,
 ) -> String {
     let mut meta = json!({"version": version});
-    if !actors.is_empty() {
-        meta["actors"] = json!(actors);
-        if let Some(me) = self_actor {
-            meta["self"] = json!(me);
+    if let Some(object) = meta.as_object_mut() {
+        if !actors.is_empty() {
+            object.insert("actors".to_string(), json!(actors));
+            if let Some(me) = self_actor {
+                object.insert("self".to_string(), json!(me));
+            }
         }
-    }
-    if !sessions.is_empty() {
-        meta["sessions"] = json!(sessions);
-        if let Some(me) = self_session {
-            meta["self_session"] = json!(me);
+        if !sessions.is_empty() {
+            object.insert("sessions".to_string(), json!(sessions));
+            if let Some(me) = self_session {
+                object.insert("self_session".to_string(), json!(me));
+            }
         }
     }
     notification(
