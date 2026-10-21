@@ -64,8 +64,7 @@ pub struct SlotPlan {
 }
 
 pub fn epoch(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 pub fn from_epoch(s: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(s)
@@ -144,7 +143,8 @@ pub fn base_for_slot<'a>(
     slot: u64,
 ) -> Option<&'a BundleEntry> {
     entries_of(list, strategy)
-        .into_iter().rfind(|b| b.creation_token <= slot)
+        .into_iter()
+        .rfind(|b| b.creation_token <= slot)
 }
 
 /// The base bundle of an incremental at `slot`, **up the chain**: the newest
@@ -202,7 +202,8 @@ pub fn base_for_incremental<'a>(
         return base;
     }
     let own = entries_of(list, &strat.name)
-        .into_iter().rfind(|b| b.creation_token < at);
+        .into_iter()
+        .rfind(|b| b.creation_token < at);
     // `>=`: at a tie (Sunday's daily and the weekly fire at the same instant, so their tips are the
     // same objects) the chain continues through its own link. A fresh clone has the weekly's objects
     // and therefore that link's prerequisites; a stale client walks daily → daily straight across
@@ -368,10 +369,7 @@ pub fn plan_with(
             // earliest state (for a large repository, the import) — that is what "weekly =
             // import state" means; later slots are as-of by construction.
             let first_full = strat.kind == BundleKind::Full && built.is_empty();
-            let unavailable = !first_full
-                && ctx
-                    .first_state
-                    .is_some_and(|t| from_epoch(slot) < t);
+            let unavailable = !first_full && ctx.first_state.is_some_and(|t| from_epoch(slot) < t);
             let skipped = list.skipped.iter().find(|k| {
                 k.strategy == strat.name
                     && k.slot == slot
@@ -445,8 +443,7 @@ pub fn chain_window(cfg: &BundlesConfig, strat: &BundleStrategy) -> usize {
     let Some(b2) = crate::schedule::next_fire_after(&bs, b1) else {
         return usize::MAX;
     };
-    slots_between(strat, b1, b2)
-        .map_or(usize::MAX, |v| v.len())
+    slots_between(strat, b1, b2).map_or(usize::MAX, |v| v.len())
 }
 
 /// How many bundles of an incremental strategy stay listed: the newest, and the one
@@ -515,17 +512,14 @@ pub fn retain(cfg: &BundlesConfig, list: &mut BundleList) -> Vec<String> {
             let in_group: Vec<&BundleEntry> =
                 v.iter().copied().filter(|b| group_of(b) == g).collect();
             if strat.chain {
-                let base_newest = strat
-                    .base
-                    .as_deref()
-                    .map_or(0, |n| {
-                        entries_of(list, n)
-                            .into_iter()
-                            .filter(|b| keep.contains(&b.id) && group_of(b) == g)
-                            .map(|b| b.creation_token)
-                            .max()
-                            .unwrap_or(0)
-                    });
+                let base_newest = strat.base.as_deref().map_or(0, |n| {
+                    entries_of(list, n)
+                        .into_iter()
+                        .filter(|b| keep.contains(&b.id) && group_of(b) == g)
+                        .map(|b| b.creation_token)
+                        .max()
+                        .unwrap_or(0)
+                });
                 // Oldest first so a link's base (the previous link) is decided before it. The first
                 // link of a group may point at a pruned link of the previous group (Monday on Sunday's
                 // daily): its prerequisites are the group's full's tips, so it stays while the full does.
@@ -944,12 +938,14 @@ mod tests {
         let pruned = retain(&c, &mut list);
         let mut kept: Vec<&str> = list.bundles.iter().map(|b| b.id.as_str()).collect();
         kept.sort_unstable();
-        let mut want = [format!("weekly-{w1}"),
+        let mut want = [
+            format!("weekly-{w1}"),
             format!("daily-{}", ds[0]),
             format!("daily-{}", ds[1]),
             format!("daily-{}", ds[2]),
             format!("hourly-{h1}"),
-            format!("hourly-{h2}")];
+            format!("hourly-{h2}"),
+        ];
         want.sort();
         assert_eq!(kept, want.iter().map(String::as_str).collect::<Vec<_>>());
         assert_eq!(

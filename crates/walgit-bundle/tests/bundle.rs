@@ -157,7 +157,8 @@ async fn run_git(cwd: &Path, args: &[&str]) -> String {
         .output()
         .await
         .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(output.status.success(), 
+    assert!(
+        output.status.success(),
         "git {:?} failed: {}",
         args,
         String::from_utf8_lossy(&output.stderr)
@@ -1089,7 +1090,6 @@ async fn too_small_closed_slots_are_recorded_and_skipped_not_remeasured() {
 /// A strategy whose ref patterns match nothing (a repository without `main`
 /// under `bundles.main_only`) is `blocked` in the plan with the reason — never
 /// a silent `NoRefs` at debug level with the slot `missing` forever.
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_daily_slot_tying_with_the_weekly_anchor_is_omitted_and_not_remeasured() {

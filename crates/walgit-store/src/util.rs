@@ -68,9 +68,10 @@ pub fn file_stream(
                         },
                     };
                     if start > 0
-                        && let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
-                            return Some((Err(e), State::Done));
-                        }
+                        && let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await
+                    {
+                        return Some((Err(e), State::Done));
+                    }
                     read_next(f, remaining, chunk).await
                 }
                 State::Reading {

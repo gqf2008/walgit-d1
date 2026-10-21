@@ -168,10 +168,7 @@ async fn skill_md_public(headers: HeaderMap) -> Response {
 
 /// `GET /services/public/skill/manifest.json` — what an agent checks before it
 /// fetches: the skill's sha256/bytes and the serving build's version.
-async fn skill_manifest(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn skill_manifest(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let base = crate::smart::request_base_url(&state, &headers);
     (
         [(header::CACHE_CONTROL, "no-cache")],
@@ -182,10 +179,7 @@ async fn skill_manifest(
 
 /// `GET /services/public/skill/install.sh` — the idempotent one-liner that drops
 /// the skill (matching this host's build) into the agent's skills directory.
-async fn skill_install_sh(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn skill_install_sh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let base = crate::smart::request_base_url(&state, &headers);
     (
         [
@@ -420,7 +414,10 @@ fn embedded_response(
         let h = resp.headers_mut();
         // `etag` is quoted lowercase hex (sha256 of the asset): always a valid
         // header value, so the parse cannot fail.
-        #[allow(clippy::unwrap_used, reason = "quoted hex (sha256) is always a valid header value")]
+        #[allow(
+            clippy::unwrap_used,
+            reason = "quoted hex (sha256) is always a valid header value"
+        )]
         h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
         h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
@@ -472,9 +469,10 @@ fn negotiate_encoding(
     };
     for (name, ext) in [("br", ".br"), ("gzip", ".gz")] {
         if accepts(name)
-            && let Some(f) = embedded(&format!("{path}{ext}")) {
-                return Some((Some(name), f.data));
-            }
+            && let Some(f) = embedded(&format!("{path}{ext}"))
+        {
+            return Some((Some(name), f.data));
+        }
     }
     None
 }
@@ -1320,9 +1318,10 @@ async fn checkpoint_info(
         .await
     {
         Ok(GetResult::Object { meta, body }) => {
-            let bytes = walgit_store::util::collect(body, usize::try_from(meta.size).unwrap_or(usize::MAX))
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let bytes =
+                walgit_store::util::collect(body, usize::try_from(meta.size).unwrap_or(usize::MAX))
+                    .await
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
             let checkpoint = Checkpoint::decode(bytes.as_ref())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             (

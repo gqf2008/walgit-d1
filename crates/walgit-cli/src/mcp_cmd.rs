@@ -327,6 +327,8 @@ struct CollabSignal {
     /// The notification envelope carries them so a client can suppress an
     /// update authored entirely by itself.
     changed_actors: Vec<String>,
+    /// Sessions that authored the entries whose refs moved.
+    changed_sessions: Vec<String>,
 }
 
 struct CollabPuller {
@@ -1912,6 +1914,67 @@ fn changed_actors(
     actors.into_iter().collect()
 }
 
+/// The refs that were added or moved between two snapshots.
+fn changed_ref_pairs(
+    previous: &HashMap<String, String>,
+    current: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    current
+        .iter()
+        .filter(|(name, oid)| previous.get(*name) != Some(*oid))
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect()
+}
+
+fn actors_from_ref_pairs(changed: &[(String, String)]) -> Vec<String> {
+    let mut actors = std::collections::BTreeSet::new();
+    for (name, _) in changed {
+        if let Some(actor) = actor_from_collab_ref(name) {
+            actors.insert(actor.to_string());
+        }
+    }
+    actors.into_iter().collect()
+}
+
+/// Sessions carried in the bodies of the changed inbox entries. Reads at most
+/// 64 entries; an over-cap batch simply omits sessions (clients wake), never
+/// guesses. Older entries have no session, so they contribute nothing.
+async fn sessions_from_changed_refs(
+    opts: &Options,
+    changed: &[(String, String)],
+    cancel: Option<watch::Receiver<bool>>,
+) -> Vec<String> {
+    let mut sessions = std::collections::BTreeSet::new();
+    for (name, oid) in changed.iter().take(64) {
+        if !name.starts_with("refs/collab/inbox/") {
+            continue;
+        }
+        let args = vec![
+            "-C".to_string(),
+            opts.repo.display().to_string(),
+            "cat-file".to_string(),
+            "-p".to_string(),
+            oid.clone(),
+        ];
+        let Ok(text) = run_git(&args, cancel.clone()).await else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(session) = value
+            .get("body")
+            .and_then(|body| body.get("session"))
+            .and_then(|session| session.as_str())
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+        {
+            sessions.insert(session.to_string());
+        }
+    }
+    sessions.into_iter().collect()
+}
+
 /// The principal this worktree works as, from `<git-dir>/walgit/identity`.
 /// Absent means the MCP server cannot attribute notifications (no suppression).
 fn own_principal(repo: &std::path::Path) -> Option<String> {
@@ -2236,13 +2299,21 @@ fn updated_notification(
     uri: &str,
     version: &str,
     actors: &[String],
+    sessions: &[String],
     self_actor: Option<&str>,
+    self_session: Option<&str>,
 ) -> String {
     let mut meta = json!({"version": version});
     if !actors.is_empty() {
         meta["actors"] = json!(actors);
         if let Some(me) = self_actor {
             meta["self"] = json!(me);
+        }
+    }
+    if !sessions.is_empty() {
+        meta["sessions"] = json!(sessions);
+        if let Some(me) = self_session {
+            meta["self_session"] = json!(me);
         }
     }
     notification(
@@ -2277,6 +2348,7 @@ fn spawn_subscription(
         let mut last_collab_generation = None;
         let mut last_refs: HashMap<String, String> = HashMap::new();
         let self_principal = own_principal(&opts.repo);
+        let self_session = std::env::var("KI_AGENT_ID").ok();
         loop {
             let delay =
                 Duration::from_millis(subscription_delay_ms(opts.subscribe_interval_ms, failures));
@@ -2288,6 +2360,7 @@ fn spawn_subscription(
                 break;
             }
             let mut actors: Vec<String> = Vec::new();
+            let mut sessions: Vec<String> = Vec::new();
             let result = if let Some(collab_rx) = &collab_rx {
                 let signal = collab_rx.borrow().clone();
                 if signal.generation == 0 && signal.digest.is_empty() && signal.error.is_none() {
@@ -2306,6 +2379,7 @@ fn spawn_subscription(
                     Err(ResourceError::Execution(error))
                 } else {
                     actors = signal.changed_actors.clone();
+                    sessions = signal.changed_sessions.clone();
                     match &parsed {
                         ResourceUri::Thread { thread, .. } => {
                             signal.thread_heads.get(thread).cloned().ok_or_else(|| {
@@ -2325,7 +2399,10 @@ fn spawn_subscription(
                 match probe_refs_version_and_lines(&opts, owner, repo, Some(cancel.clone())).await {
                     Ok((version, lines)) => {
                         let current = refs_map(&lines);
-                        actors = changed_actors(&last_refs, &current);
+                        let changed = changed_ref_pairs(&last_refs, &current);
+                        actors = actors_from_ref_pairs(&changed);
+                        sessions =
+                            sessions_from_changed_refs(&opts, &changed, Some(cancel.clone())).await;
                         last_refs = current;
                         Ok(version)
                     }
@@ -2347,7 +2424,9 @@ fn spawn_subscription(
                                 &uri,
                                 &version,
                                 &actors,
+                                &sessions,
                                 self_principal.as_deref(),
+                                self_session.as_deref(),
                             ),
                         );
                     }
@@ -2389,7 +2468,10 @@ fn spawn_collab_puller(
                 Ok((digest, refs)) => {
                     failures = 0;
                     if last_digest.as_deref() != Some(digest.as_str()) {
-                        let actors = changed_actors(&last_refs, &refs);
+                        let changed = changed_ref_pairs(&last_refs, &refs);
+                        let actors = actors_from_ref_pairs(&changed);
+                        let sessions =
+                            sessions_from_changed_refs(&opts, &changed, Some(cancel.clone())).await;
                         last_refs = refs;
                         match refresh_collab_refs(&opts, Some(cancel.clone())).await {
                             Ok(()) => {
@@ -2403,6 +2485,7 @@ fn spawn_collab_puller(
                                             error: None,
                                             thread_heads,
                                             changed_actors: actors,
+                                            changed_sessions: sessions,
                                         });
                                     }
                                     Err(error) => {
@@ -2414,6 +2497,7 @@ fn spawn_collab_puller(
                                             error: Some(error.message()),
                                             thread_heads: Arc::new(HashMap::new()),
                                             changed_actors: Vec::new(),
+                                            changed_sessions: Vec::new(),
                                         });
                                     }
                                 }
@@ -2427,6 +2511,7 @@ fn spawn_collab_puller(
                                     error: Some(error.message()),
                                     thread_heads: Arc::new(HashMap::new()),
                                     changed_actors: Vec::new(),
+                                    changed_sessions: Vec::new(),
                                 });
                             }
                         }
@@ -2441,6 +2526,7 @@ fn spawn_collab_puller(
                         error: Some(error.message()),
                         thread_heads: Arc::new(HashMap::new()),
                         changed_actors: Vec::new(),
+                        changed_sessions: Vec::new(),
                     });
                 }
             }
@@ -3278,16 +3364,28 @@ mod tests {
 
     #[test]
     fn the_update_notification_carries_actors_and_self_only_when_attributable() {
-        let with = updated_notification("walgit://refs/o/r", "v1", &["a".to_string()], Some("a"));
+        let with = updated_notification(
+            "walgit://refs/o/r",
+            "v1",
+            &["a".to_string()],
+            &["s1".to_string()],
+            Some("a"),
+            Some("s1"),
+        );
         let value: Value = serde_json::from_str(&with).expect("json");
         assert_eq!(value["params"]["_meta"]["version"], "v1");
         assert_eq!(value["params"]["_meta"]["actors"], json!(["a"]));
         assert_eq!(value["params"]["_meta"]["self"], "a");
+        assert_eq!(value["params"]["_meta"]["sessions"], json!(["s1"]));
+        assert_eq!(value["params"]["_meta"]["self_session"], "s1");
 
-        let without = updated_notification("walgit://refs/o/r", "v2", &[], Some("a"));
+        let without =
+            updated_notification("walgit://refs/o/r", "v2", &[], &[], Some("a"), Some("s1"));
         let value: Value = serde_json::from_str(&without).expect("json");
         assert_eq!(value["params"]["_meta"]["version"], "v2");
         assert!(value["params"]["_meta"].get("actors").is_none());
         assert!(value["params"]["_meta"].get("self").is_none());
+        assert!(value["params"]["_meta"].get("sessions").is_none());
+        assert!(value["params"]["_meta"].get("self_session").is_none());
     }
 }

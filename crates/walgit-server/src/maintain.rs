@@ -510,14 +510,12 @@ async fn next_unit_at(
                     let bases = walgit_wal::base_packs(&m);
                     let due = match walgit_wal::base_pack(&m).cloned() {
                         None => !m.packs.is_empty(),
-                        Some(base) => {
-                            base_rebuild_due(
-                                bases.len() > 1,
-                                base.has_bitmap,
-                                base_predates_window(&handle, strat, r.slot, base.seq).await,
-                                !base_lacks_witness(&handle, base.seq).await,
-                            )
-                        }
+                        Some(base) => base_rebuild_due(
+                            bases.len() > 1,
+                            base.has_bitmap,
+                            base_predates_window(&handle, strat, r.slot, base.seq).await,
+                            !base_lacks_witness(&handle, base.seq).await,
+                        ),
                     };
                     if !skip("base-rebuild") && holds && due {
                         return Ok(Unit::BaseRebuild(strat.name.clone(), r.slot));
@@ -1031,7 +1029,9 @@ pub async fn heartbeats(
     use futures::StreamExt;
     use walgit_store::ObjectStoreExt;
     let mut out = Vec::new();
-    let mut keys = state.store.list_keys(walgit_proto::keys::MAINTAIN_DIR, None);
+    let mut keys = state
+        .store
+        .list_keys(walgit_proto::keys::MAINTAIN_DIR, None);
     while let Some(key) = keys.next().await {
         let key = key?;
         if let Some((meta, bytes)) = state.store.get_bytes(&key).await?

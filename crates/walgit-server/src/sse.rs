@@ -125,7 +125,10 @@ impl Rendered {
             if hit {
                 let mut r = StatusCode::NOT_MODIFIED.into_response();
                 // Etags come from etag_for() (quoted hex) — always a valid header value.
-                #[allow(clippy::unwrap_used, reason = "etag_for() emits quoted hex; the parse cannot fail")]
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "etag_for() emits quoted hex; the parse cannot fail"
+                )]
                 r.headers_mut().insert(header::ETAG, etag.parse().unwrap());
                 r.headers_mut().insert(
                     header::CACHE_CONTROL,
@@ -150,13 +153,20 @@ impl Rendered {
         for (name, value) in self.extra {
             r.headers_mut().insert(name, value);
         }
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static(self.content_type));
-        r.headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static(self.cache_control));
+        r.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(self.content_type),
+        );
+        r.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(self.cache_control),
+        );
         if let Some(e) = &self.etag {
             // Etags come from etag_for() (quoted hex) — always a valid header value.
-            #[allow(clippy::unwrap_used, reason = "etag_for() emits quoted hex; the parse cannot fail")]
+            #[allow(
+                clippy::unwrap_used,
+                reason = "etag_for() emits quoted hex; the parse cannot fail"
+            )]
             r.headers_mut().insert(header::ETAG, e.parse().unwrap());
         }
         r

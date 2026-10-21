@@ -33,24 +33,27 @@ pub async fn canonical_browser_host(
         || path.starts_with("/services/public");
     let browser = is_browser(req.headers());
     let get = req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD;
-    if get && browser && !skip
+    if get
+        && browser
+        && !skip
         && let Some(dest) = walgit_localhost_host(
             req.headers()
                 .get(header::HOST)
                 .and_then(|v| v.to_str().ok()),
-        ) {
-            let scheme = if st.cfg.tls_enabled() {
-                "https"
-            } else {
-                "http"
-            };
-            let pq = req
-                .uri()
-                .path_and_query()
-                .map_or("/", http::uri::PathAndQuery::as_str);
-            let loc = format!("{scheme}://{dest}{pq}");
-            return (StatusCode::FOUND, [(header::LOCATION, loc)]).into_response();
-        }
+        )
+    {
+        let scheme = if st.cfg.tls_enabled() {
+            "https"
+        } else {
+            "http"
+        };
+        let pq = req
+            .uri()
+            .path_and_query()
+            .map_or("/", http::uri::PathAndQuery::as_str);
+        let loc = format!("{scheme}://{dest}{pq}");
+        return (StatusCode::FOUND, [(header::LOCATION, loc)]).into_response();
+    }
     next.run(req).await
 }
 
@@ -110,7 +113,8 @@ pub async fn require_auth(
             if is_get && accepts_html && !has_bearer && st.auth.browser_login_enabled() {
                 let next_url = req
                     .uri()
-                    .path_and_query().map_or_else(|| "/".to_string(), |pq| pq.as_str().to_string());
+                    .path_and_query()
+                    .map_or_else(|| "/".to_string(), |pq| pq.as_str().to_string());
                 let q = url_encode(&next_url);
                 return Redirect::temporary(&format!("/_auth/login?next={q}")).into_response();
             }

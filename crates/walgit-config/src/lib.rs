@@ -1452,9 +1452,10 @@ impl Config {
             // Standalone / `dev server`: public_url is the origin the browser hits. Keep its
             // port in lockstep with PORT. A real public_url is left alone.
             if let Some(u) = self.server.public_url.as_mut()
-                && origin_is_loopback(u) {
-                    *u = rewrite_origin_port(u, port);
-                }
+                && origin_is_loopback(u)
+            {
+                *u = rewrite_origin_port(u, port);
+            }
         }
         Ok(ignored)
     }
@@ -1729,7 +1730,8 @@ impl Config {
                 .unwrap_or("")
                 .trim_start_matches('[');
             let host = host
-                .rsplit_once(']').map_or_else(|| host.split(':').next().unwrap_or(host), |(h, _)| h);
+                .rsplit_once(']')
+                .map_or_else(|| host.split(':').next().unwrap_or(host), |(h, _)| h);
             if !host.is_empty() && !v.iter().any(|h| h == host) {
                 v.push(host.to_string());
             }
@@ -1767,7 +1769,8 @@ fn rewrite_origin_port(origin: &str, port: u16) -> String {
         return origin.to_string();
     };
     let host = if rest.starts_with('[') {
-        rest.split_once(']').map_or_else(|| rest.to_string(), |(h, _)| format!("{h}]"))
+        rest.split_once(']')
+            .map_or_else(|| rest.to_string(), |(h, _)| format!("{h}]"))
     } else {
         rest.split([':', '/']).next().unwrap_or(rest).to_string()
     };
@@ -2096,10 +2099,7 @@ audiences = ["walgit-cli", "https://git.example.com"]
         assert!(err.to_string().contains("session_secret"), "{err}");
         let ok = Config::parse("[store]\nbucket = \"b\"\n[server.auth]\nmode = \"oidc\"\nissuer = \"https://login.example.com\"\nanonymous_read = false\nallowed_domains = [\"example.com\"]\noauth_client_id = \"x\"\noauth_client_secret = \"y\"\nsession_secret = \"0123456789abcdef0123456789abcdef\"\n").unwrap();
         assert_eq!(ok.server.auth.issuer, "https://login.example.com");
-        assert_eq!(
-            ok.server.auth.access_token_ttl,
-            Duration::from_hours(2160)
-        );
+        assert_eq!(ok.server.auth.access_token_ttl, Duration::from_hours(2160));
         let err = Config::parse(
             "[store]\nbucket = \"b\"\n[server]\nlisten = \"0.0.0.0:8080\"\n[server.auth]\nmode = \"none\"\n",
         )

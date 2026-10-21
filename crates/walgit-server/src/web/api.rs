@@ -1413,7 +1413,11 @@ async fn object_size(r: &Repo, oid: &str) -> Result<Option<u64>, ApiError> {
             .map_err(|_| internal(format!("invalid object id {oid:?}")))?;
         return Ok(remote.kind_and_size(&oid).await?.map(|(_, size)| size));
     }
-    let out = r.local.git(&["cat-file", "-s", oid]).await.map_err(internal)?;
+    let out = r
+        .local
+        .git(&["cat-file", "-s", oid])
+        .await
+        .map_err(internal)?;
     if !out.status.success() {
         return Ok(None);
     }
@@ -1622,9 +1626,9 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     // D45 size precheck: refuse an oversized snapshot before materializing its
     // body, on both remote and local/mounted object paths.
     if let Some(oid) = snapshot_oid.as_ref()
-        && object_size(r, oid).await?.is_some_and(|size| {
-            size > u64::try_from(COLLAB_SNAPSHOT_MAX_BYTES).unwrap_or(u64::MAX)
-        })
+        && object_size(r, oid)
+            .await?
+            .is_some_and(|size| size > u64::try_from(COLLAB_SNAPSHOT_MAX_BYTES).unwrap_or(u64::MAX))
     {
         return Err(ApiError::ServiceUnavailable(format!(
             "collab snapshot exceeds {} MiB; aggregate offline with the `walgit collab` CLI",
@@ -1887,13 +1891,12 @@ async fn collab_ci_artifact(
                         .map_err(|e| ApiError::Internal(e.to_string()))?;
                 }
                 let oid_owned = oid.to_string();
-                let blobs =
-                    Box::pin(git_cat_file_batch(
-                        &r.local,
-                        std::slice::from_ref(&oid_owned),
-                        None,
-                    ))
-                    .await?;
+                let blobs = Box::pin(git_cat_file_batch(
+                    &r.local,
+                    std::slice::from_ref(&oid_owned),
+                    None,
+                ))
+                .await?;
                 let Some(bytes) = blobs.get(oid) else {
                     continue;
                 };
@@ -1937,11 +1940,7 @@ fn validate_ci_artifact_sha(sha256: &str) -> Result<(), ApiError> {
 /// The refs an artifact address may resolve to. The browser/SDK lookup has no
 /// actor and scans the content-addressed namespace for the first valid bytes
 /// (B3); the CLI preflight names the exact inbox owner it is about to fetch.
-fn ci_artifact_refs<'a>(
-    r: &'a Repo,
-    sha256: &str,
-    actor: Option<&str>,
-) -> Vec<(&'a str, &'a str)> {
+fn ci_artifact_refs<'a>(r: &'a Repo, sha256: &str, actor: Option<&str>) -> Vec<(&'a str, &'a str)> {
     let prefix = walgit_wal::ci::CI_ARTIFACT_REF_PREFIX;
     if let Some(actor) = actor {
         let exact = format!("{prefix}{actor}/{sha256}");
@@ -2673,11 +2672,7 @@ async fn blob(
                 if size > cap {
                     (size, None)
                 } else {
-                    let bytes = git(
-                        &r.local,
-                        vec!["cat-file".into(), "blob".into(), spec],
-                    )
-                    .await?;
+                    let bytes = git(&r.local, vec!["cat-file".into(), "blob".into(), spec]).await?;
                     (i64::try_from(bytes.len()).unwrap_or(i64::MAX), Some(bytes))
                 }
             };
@@ -2691,7 +2686,13 @@ async fn blob(
                     return Err(ApiError::PayloadTooLarge);
                 }
                 let bytes = bytes.ok_or_else(|| not_found("blob"))?;
-                return Ok(raw_blob(bytes::Bytes::from(bytes), &res.path, &res.sha, immutable, &req_headers));
+                return Ok(raw_blob(
+                    bytes::Bytes::from(bytes),
+                    &res.path,
+                    &res.sha,
+                    immutable,
+                    &req_headers,
+                ));
             }
             let is_text = size <= MAX_BLOB
                 && !bytes.as_ref().is_some_and(|b| b.contains(&0))
@@ -2759,9 +2760,9 @@ fn raw_blob(
         .and_then(|spec| parse_range(spec, total));
     let body = match range {
         // Bounds come from parse_range(), which clamps to `total - 1`.
-        Some((start, end)) => bytes.slice(
-            usize::try_from(start).unwrap_or(0)..=usize::try_from(end).unwrap_or(0),
-        ),
+        Some((start, end)) => {
+            bytes.slice(usize::try_from(start).unwrap_or(0)..=usize::try_from(end).unwrap_or(0))
+        }
         None => bytes,
     };
     let mut extra = vec![

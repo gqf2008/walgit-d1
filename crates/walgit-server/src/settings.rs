@@ -535,7 +535,10 @@ pub async fn http_policy_dry_run(
         .read_log(m.min_seq.max(1), None)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let pushes: Vec<(&walgit_proto::v1::LogEntry, &walgit_proto::v1::RefTransaction)> = entries
+    let pushes: Vec<(
+        &walgit_proto::v1::LogEntry,
+        &walgit_proto::v1::RefTransaction,
+    )> = entries
         .iter()
         .rev()
         .filter(|e| e.kind() == walgit_proto::v1::EntryKind::Push)

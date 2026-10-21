@@ -2235,7 +2235,12 @@ async fn repo_settings_api_roundtrip() -> TestResult {
     assert_eq!(resp["revision"], 1);
     assert_eq!(resp["message"], "tiny repo");
     assert!(resp["toml"].as_str().unwrap().contains("min_commits = 2"));
-    let eff = client.get(url(&first, "/effective")).send().await?.text().await?;
+    let eff = client
+        .get(url(&first, "/effective"))
+        .send()
+        .await?
+        .text()
+        .await?;
     assert!(eff.contains("min_commits = 2"), "{eff}");
     assert!(!eff.contains("session_secret"), "{eff}");
     assert!(!eff.contains("[server]"), "{eff}");
@@ -2245,7 +2250,8 @@ async fn repo_settings_api_roundtrip() -> TestResult {
     assert_eq!(resp["revision"], 1);
     let id = walgit_git::RepoId::new("t", "cfg")?;
     assert_eq!(
-        second.state
+        second
+            .state
             .registry
             .open(&id)
             .await?
@@ -2256,7 +2262,12 @@ async fn repo_settings_api_roundtrip() -> TestResult {
     );
 
     // History + clear.
-    let hist: serde_json::Value = client.get(url(&first, "/history")).send().await?.json().await?;
+    let hist: serde_json::Value = client
+        .get(url(&first, "/history"))
+        .send()
+        .await?
+        .json()
+        .await?;
     assert_eq!(hist["entries"].as_array().unwrap().len(), 1);
     assert_eq!(client.delete(url(&first, "")).send().await?.status(), 200);
     let resp: serde_json::Value = client.get(url(&second, "")).send().await?.json().await?;
@@ -2294,7 +2305,10 @@ async fn settings_describe_validate_and_policy_dry_run() -> TestResult {
         .build()?;
     server.put_repo("t", "tab").await?;
     let src = TestRepo::synthetic(3, 2)?;
-    git_in(&src, &["remote", "add", "origin", &server.repo_url("t", "tab")])?;
+    git_in(
+        &src,
+        &["remote", "add", "origin", &server.repo_url("t", "tab")],
+    )?;
     git_in(&src, &["push", "-q", "origin", "main"])?;
     git_in(&src, &["push", "-q", "origin", "main:refs/heads/feature"])?;
     let base = format!("{}/t/tab/api", server.base_url);
@@ -2307,7 +2321,10 @@ async fn settings_describe_validate_and_policy_dry_run() -> TestResult {
         .await?;
     let strategies = describe["strategies"].as_array().unwrap();
     assert_ne!(strategies.len(), 0);
-    let weekly = strategies.iter().find(|item| item["name"] == "weekly").unwrap();
+    let weekly = strategies
+        .iter()
+        .find(|item| item["name"] == "weekly")
+        .unwrap();
     assert_eq!(weekly["kind"], "full");
     assert!(
         weekly["schedule_human"]
@@ -2805,7 +2822,10 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
     // The manifest must pin the exact bytes served, so an agent can verify a
     // download against it (issue cc-ai-ship-skill).
     let skill = c
-        .get(format!("{}/services/public/skill/SKILL.md", server.base_url))
+        .get(format!(
+            "{}/services/public/skill/SKILL.md",
+            server.base_url
+        ))
         .send()
         .await?;
     assert_eq!(skill.status(), 200);
@@ -2833,7 +2853,11 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
         "{manifest}"
     );
     let expected_sha = walgit_server::skill::sha256_hex(skill_body.as_bytes());
-    assert_eq!(manifest["sha256"].as_str(), Some(expected_sha.as_str()), "{manifest}");
+    assert_eq!(
+        manifest["sha256"].as_str(),
+        Some(expected_sha.as_str()),
+        "{manifest}"
+    );
     assert!(
         manifest["version"].as_str().is_some_and(|v| !v.is_empty()),
         "{manifest}"
@@ -2853,11 +2877,17 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
         install_body.contains(manifest["sha256"].as_str().unwrap()),
         "{install_body}"
     );
-    assert!(install_body.contains(".agents/skills/walgit"), "{install_body}");
+    assert!(
+        install_body.contains(".agents/skills/walgit"),
+        "{install_body}"
+    );
 
     // A strong ETag makes a re-read a 304.
     let revalidated = c
-        .get(format!("{}/services/public/skill/SKILL.md", server.base_url))
+        .get(format!(
+            "{}/services/public/skill/SKILL.md",
+            server.base_url
+        ))
         .header("if-none-match", etag)
         .send()
         .await?;
@@ -3172,7 +3202,10 @@ async fn bare_push_gets_a_basic_challenge_and_then_sends_url_userinfo() -> TestR
     let src = TestRepo::synthetic(2, 1)?;
     let authed = server.repo_url_with_userinfo("t", "chal", "dev", "dev");
     git_in(&src, &["remote", "add", "origin", &authed])?;
-    git_in(&src, &["-c", "credential.helper=", "push", "-q", "origin", "main"])?;
+    git_in(
+        &src,
+        &["-c", "credential.helper=", "push", "-q", "origin", "main"],
+    )?;
     // The read side goes through the same challenge flow — userinfo only, no
     // extraHeader (the challenge, not a proactive bearer, moves git here too).
     let remote_tip = git_in(&src, &["ls-remote", "-q", "origin", "refs/heads/main"])?;
@@ -3579,5 +3612,3 @@ async fn empty_pack_push_is_refused_with(check_connectivity: bool) -> TestResult
     );
     Ok(())
 }
-
-

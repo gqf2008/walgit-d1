@@ -218,7 +218,9 @@ async fn ui_assets_etag_304_and_precompressed() -> Result<()> {
         .split('"')
         .find(|p| {
             p.starts_with("/_ui/assets/")
-                && p.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("js"))
+                && p.rsplit('.')
+                    .next()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("js"))
         })
         .expect("asset reference")
         .to_string();

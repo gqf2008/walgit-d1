@@ -230,8 +230,9 @@ impl LeaseGuard {
             .delete(&self.key, Some(self.version.clone()))
             .await
         {
-            Ok(()) |
-Err(StoreError::PreconditionFailed { .. } | StoreError::NotFound { .. }) => Ok(()),
+            Ok(()) | Err(StoreError::PreconditionFailed { .. } | StoreError::NotFound { .. }) => {
+                Ok(())
+            }
             Err(e) => Err(CoordError::Store(e)),
         }
     }
@@ -273,7 +274,6 @@ Err(StoreError::PreconditionFailed { .. } | StoreError::NotFound { .. }) => Ok((
     pub fn holder(&self) -> &str {
         &self.holder
     }
-
 
     /// Like [`spawn_heartbeat`], but the caller can stop it *gracefully* (a
     /// `watch` instead of an `abort`: an abort could cancel a heartbeat whose

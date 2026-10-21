@@ -622,13 +622,11 @@ async fn check_truth(c: &Cluster, pushers: &[Pusher]) -> Result<()> {
             // f must be last.new or a commit pushed after it (the ack'd or an
             // errored-but-committed push along the same chain).
             let later = log.iter().filter(|e| e.seq > last.seq).any(|e| {
-                e.txn
-                    .as_ref()
-                    .is_some_and(|t| {
-                        t.updates
-                            .iter()
-                            .any(|u| u.name == p.refname && u.new_oid == f)
-                    })
+                e.txn.as_ref().is_some_and(|t| {
+                    t.updates
+                        .iter()
+                        .any(|u| u.name == p.refname && u.new_oid == f)
+                })
             }) || last.seq <= cp_seq;
             ensure!(
                 f == last.new || later,
@@ -793,8 +791,10 @@ async fn check_core_liveness(
         .await
         .map_err(|_| anyhow!("liveness: compaction hung > {bound:?}"))?;
         match out {
-            Ok(walgit_server::ops::CompactOutcome::Published { .. } |
-walgit_server::ops::CompactOutcome::NotTriggered { .. }) => break,
+            Ok(
+                walgit_server::ops::CompactOutcome::Published { .. }
+                | walgit_server::ops::CompactOutcome::NotTriggered { .. },
+            ) => break,
             Ok(walgit_server::ops::CompactOutcome::LeaseHeld) => {
                 ensure!(
                     t.elapsed() < bound,
@@ -956,9 +956,10 @@ async fn run_safety_then_liveness(seed: u64) -> Result<()> {
         },
     ];
     for (k, &i) in idx[2..].iter().enumerate() {
-        c.instances[i]
-            .link
-            .set(frozen[(k + usize::try_from(rng.below(4)).expect("below(n) < n")) % frozen.len()].clone());
+        c.instances[i].link.set(
+            frozen[(k + usize::try_from(rng.below(4)).expect("below(n) < n")) % frozen.len()]
+                .clone(),
+        );
     }
     // Non-core pushers keep hammering the frozen links in the background (they
     // may never interfere with the core).
@@ -1204,10 +1205,7 @@ async fn liveness_stale_instance_cannot_starve_the_core() -> Result<()> {
     } else {
         Duration::from_secs(5)
     };
-    ensure!(
-        p99 < p99_budget,
-        "core push p99 {p99:?} — starved"
-    );
+    ensure!(p99 < p99_budget, "core push p99 {p99:?} — starved");
     check_truth(&c, &[core_p]).await?;
     Ok(())
 }
@@ -1357,7 +1355,8 @@ async fn liveness_cold_start_through_truncated_pack_reads() -> Result<()> {
     let mut pusher = Pusher::new(0);
     for _ in 0..4 {
         ensure!(
-            pusher.push_once(&cluster.instances[0], &cluster.id, Duration::from_secs(10))
+            pusher
+                .push_once(&cluster.instances[0], &cluster.id, Duration::from_secs(10))
                 .await?
         );
     }
@@ -1401,7 +1400,11 @@ async fn liveness_cold_start_through_truncated_pack_reads() -> Result<()> {
     // Objects really are there.
     for ack in &pusher.acked {
         let id = gix_hash::ObjectId::from_hex(ack.new.as_bytes())?;
-        ensure!(handle.local().has_object(&id), "cold instance lacks {}", ack.new);
+        ensure!(
+            handle.local().has_object(&id),
+            "cold instance lacks {}",
+            ack.new
+        );
     }
     // Compaction on the healed instance works on what it downloaded.
     let out = walgit_server::ops::compact_repo(
@@ -2049,7 +2052,12 @@ async fn seed_base_and_history(
 ) -> Result<(gix_hash::ObjectId, gix_hash::ObjectId)> {
     for _ in 0..3 {
         ensure!(
-            pusher.push_once(&cluster.instances[idx], &cluster.id, Duration::from_secs(10))
+            pusher
+                .push_once(
+                    &cluster.instances[idx],
+                    &cluster.id,
+                    Duration::from_secs(10)
+                )
                 .await?
         );
     }
@@ -2091,7 +2099,12 @@ async fn seed_base_and_history(
     let hist = gix_hash::ObjectId::from_hex(hist.checksum.as_bytes())?;
     for _ in 0..fresh {
         ensure!(
-            pusher.push_once(&cluster.instances[idx], &cluster.id, Duration::from_secs(10))
+            pusher
+                .push_once(
+                    &cluster.instances[idx],
+                    &cluster.id,
+                    Duration::from_secs(10)
+                )
                 .await?
         );
     }
@@ -2330,7 +2343,12 @@ async fn base_rebuild_resumes_after_a_kill_between_any_two_phases() -> Result<()
     let mut pusher = Pusher::new(0);
     for _ in 0..4 {
         ensure!(
-            pusher.push_once(&cluster.instances[idx], &cluster.id, Duration::from_secs(10))
+            pusher
+                .push_once(
+                    &cluster.instances[idx],
+                    &cluster.id,
+                    Duration::from_secs(10)
+                )
                 .await?
         );
     }
@@ -2351,7 +2369,10 @@ async fn base_rebuild_resumes_after_a_kill_between_any_two_phases() -> Result<()
     ] {
         *TEST_ABORT_AFTER.lock() = Some((repo_key.clone(), phase));
         let (out, log) = rebuild_attempt(&cluster, idx).await;
-        repacks += log.iter().filter(|ln| ln.starts_with("repack done")).count();
+        repacks += log
+            .iter()
+            .filter(|ln| ln.starts_with("repack done"))
+            .count();
         ensure!(
             out.is_err(),
             "attempt killed after {phase:?} should fail: {out:?}\n{}",
@@ -2375,7 +2396,10 @@ async fn base_rebuild_resumes_after_a_kill_between_any_two_phases() -> Result<()
     }
     *TEST_ABORT_AFTER.lock() = None;
     let (out, log) = rebuild_attempt(&cluster, idx).await;
-    repacks += log.iter().filter(|ln| ln.starts_with("repack done")).count();
+    repacks += log
+        .iter()
+        .filter(|ln| ln.starts_with("repack done"))
+        .count();
     let out = out.with_context(|| log.join("\n"))?;
     ensure!(
         matches!(
@@ -2428,9 +2452,19 @@ async fn base_rebuild_resumes_after_a_kill_between_any_two_phases() -> Result<()
     *TEST_ABORT_AFTER.lock() = Some((repo_key.clone(), Phase::Repacked));
     let (out, log1) = rebuild_attempt(&cluster, idx).await;
     ensure!(out.is_err());
-    ensure!(log1.iter().filter(|ln| ln.starts_with("repack done")).count() == 1);
     ensure!(
-        pusher.push_once(&cluster.instances[idx], &cluster.id, Duration::from_secs(10))
+        log1.iter()
+            .filter(|ln| ln.starts_with("repack done"))
+            .count()
+            == 1
+    );
+    ensure!(
+        pusher
+            .push_once(
+                &cluster.instances[idx],
+                &cluster.id,
+                Duration::from_secs(10)
+            )
             .await?
     );
     *TEST_ABORT_AFTER.lock() = None;
@@ -2450,7 +2484,10 @@ async fn base_rebuild_resumes_after_a_kill_between_any_two_phases() -> Result<()
         log2.join("\n")
     );
     ensure!(
-        log2.iter().filter(|ln| ln.starts_with("repack done")).count() == 1,
+        log2.iter()
+            .filter(|ln| ln.starts_with("repack done"))
+            .count()
+            == 1,
         "a fresh repack after the head moved"
     );
     let handle = cluster.instances[idx].open(&cluster.id).await?;
@@ -2508,9 +2545,10 @@ async fn run_task_ownership(seed: u64) -> Result<()> {
     for _ in 0..4 {
         let new = push_blobby(&mut pusher, 64, &mut rng);
         let handle = cluster.instances[0].open(&cluster.id).await?;
-        let pack = pusher
-            .work
-            .pack(&new, (!pusher.tip.is_empty()).then_some(pusher.tip.as_str()));
+        let pack = pusher.work.pack(
+            &new,
+            (!pusher.tip.is_empty()).then_some(pusher.tip.as_str()),
+        );
         let ingested = handle
             .local()
             .ingest_pack(
@@ -2532,7 +2570,9 @@ async fn run_task_ownership(seed: u64) -> Result<()> {
             }],
             ..Default::default()
         };
-        handle.publish_push(Some(ingested), txn, HashMap::new()).await?;
+        handle
+            .publish_push(Some(ingested), txn, HashMap::new())
+            .await?;
         pusher.tip = new;
     }
     let live_packs = cluster.truth_manifest().await?.packs.len();
@@ -2546,7 +2586,8 @@ async fn run_task_ownership(seed: u64) -> Result<()> {
                 Duration::from_millis(1),
                 Duration::from_millis(2 + rng.below(15)),
             )),
-            p_err_before: 0.05 + f64::from(u32::try_from(rng.below(10)).expect("below(n) < n")) / 100.0,
+            p_err_before: 0.05
+                + f64::from(u32::try_from(rng.below(10)).expect("below(n) < n")) / 100.0,
             p_truncate: 0.05,
             ..Default::default()
         }
@@ -2618,7 +2659,10 @@ async fn run_task_ownership(seed: u64) -> Result<()> {
         tasks.running(&repo)
     );
     let recent = tasks.recent(&repo);
-    let materializes: Vec<_> = recent.iter().filter(|task| task.kind == "materialize").collect();
+    let materializes: Vec<_> = recent
+        .iter()
+        .filter(|task| task.kind == "materialize")
+        .collect();
     ensure!(!materializes.is_empty());
     // Every start beyond the first is accounted for by a failure or the abort — never a duplicate.
     ensure!(

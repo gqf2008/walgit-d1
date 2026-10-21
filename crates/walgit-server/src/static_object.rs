@@ -194,9 +194,10 @@ fn base_headers(resp: &mut Response, meta: &ObjectMeta, opts: &ServeOptions<'_>)
         && let Ok(v) = HeaderValue::from_str(&format!(
             "attachment; filename=\"{}\"",
             name.replace('"', "")
-        )) {
-            h.insert(header::CONTENT_DISPOSITION, v);
-        }
+        ))
+    {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
 }
 
 fn cache_control(opts: &ServeOptions<'_>) -> HeaderValue {
@@ -221,7 +222,10 @@ fn range_not_satisfiable(meta: &ObjectMeta, opts: &ServeOptions<'_>) -> Response
         header::CONTENT_RANGE,
         // "bytes */<n>": a fixed prefix plus decimal digits — always a valid
         // header value (u64 renders as visible ASCII only).
-        #[allow(clippy::unwrap_used, reason = "fixed prefix + decimal u64 always parses as a header value")]
+        #[allow(
+            clippy::unwrap_used,
+            reason = "fixed prefix + decimal u64 always parses as a header value"
+        )]
         HeaderValue::from_str(&format!("bytes */{}", meta.size)).unwrap(),
     );
     resp.headers_mut()
@@ -250,43 +254,43 @@ pub async fn serve(
         && !head
         && accel_requested(headers)
         && opts.peer.is_some_and(|p| p.ip().is_loopback())
-        && let Some(target) = store.accel_target(key).await {
-            let meta = match store.head(key).await {
-                Ok(Some(m)) => m,
-                Ok(None) => return Err(ApiError::NotFound(format!("{key} not found"))),
-                Err(e) => return Err(e.into()),
-            };
-            if if_none_match_hit(headers, &meta.version) {
-                return Ok(not_modified(&meta.version, &opts));
-            }
-            let mut resp = StatusCode::OK.into_response();
-            base_headers(&mut resp, &meta, &opts);
-            let h = resp.headers_mut();
-            let hv = |s: &str| {
-                HeaderValue::from_str(s)
-                    .map_err(|e| ApiError::Internal(format!("accel header: {e}")))
-            };
-            h.insert("x-accel-redirect", HeaderValue::from_static(ACCEL_LOCATION));
-            // Where and how the edge fetches. nginx keeps the upstream headers of this answer
-            // across the internal redirect and never forwards them to the client.
-            h.insert("x-walgit-store-url", hv(&target.url)?);
-            if let Some(auth) = &target.authorization {
-                h.insert("x-walgit-store-authorization", hv(auth)?);
-            }
-            // The edge's cache key: the object, not the (possibly presigned, changing) URL.
-            h.insert(
-                "x-walgit-store-key",
-                hv(&walgit_store::util::encode_path(key))?,
-            );
-            h.insert("x-walgit-accel", HeaderValue::from_static(store.backend()));
-            // nginx keeps only Content-Type/Disposition, Accept-Ranges, Cache-Control and Expires
-            // of this answer across the internal redirect and would otherwise hand the client
-            // the bucket's ETag (md5/crc form) — different from the version ETag our HEAD/304 use,
-            // so `If-Range` would fail and a resumed download get the whole object. The edge
-            // re-emits this header as the response ETag and hides the bucket's.
-            h.insert("x-walgit-etag", etag_of(&meta.version));
-            return Ok(resp);
+        && let Some(target) = store.accel_target(key).await
+    {
+        let meta = match store.head(key).await {
+            Ok(Some(m)) => m,
+            Ok(None) => return Err(ApiError::NotFound(format!("{key} not found"))),
+            Err(e) => return Err(e.into()),
+        };
+        if if_none_match_hit(headers, &meta.version) {
+            return Ok(not_modified(&meta.version, &opts));
         }
+        let mut resp = StatusCode::OK.into_response();
+        base_headers(&mut resp, &meta, &opts);
+        let h = resp.headers_mut();
+        let hv = |s: &str| {
+            HeaderValue::from_str(s).map_err(|e| ApiError::Internal(format!("accel header: {e}")))
+        };
+        h.insert("x-accel-redirect", HeaderValue::from_static(ACCEL_LOCATION));
+        // Where and how the edge fetches. nginx keeps the upstream headers of this answer
+        // across the internal redirect and never forwards them to the client.
+        h.insert("x-walgit-store-url", hv(&target.url)?);
+        if let Some(auth) = &target.authorization {
+            h.insert("x-walgit-store-authorization", hv(auth)?);
+        }
+        // The edge's cache key: the object, not the (possibly presigned, changing) URL.
+        h.insert(
+            "x-walgit-store-key",
+            hv(&walgit_store::util::encode_path(key))?,
+        );
+        h.insert("x-walgit-accel", HeaderValue::from_static(store.backend()));
+        // nginx keeps only Content-Type/Disposition, Accept-Ranges, Cache-Control and Expires
+        // of this answer across the internal redirect and would otherwise hand the client
+        // the bucket's ETag (md5/crc form) — different from the version ETag our HEAD/304 use,
+        // so `If-Range` would fail and a resumed download get the whole object. The edge
+        // re-emits this header as the response ETag and hides the bucket's.
+        h.insert("x-walgit-etag", etag_of(&meta.version));
+        return Ok(resp);
+    }
 
     // HEAD and Range both need the size before deciding what to fetch. For
     // a plain GET we want exactly one store round trip, so we pass the
@@ -331,7 +335,10 @@ pub async fn serve(
                     base_headers(&mut resp, &meta, &opts);
                     let h = resp.headers_mut();
                     // Fixed prefix + decimal digits — always a valid header value.
-                    #[allow(clippy::unwrap_used, reason = "decimal u64 fields with '-' and '/' separators always parse as a header value")]
+                    #[allow(
+                        clippy::unwrap_used,
+                        reason = "decimal u64 fields with '-' and '/' separators always parse as a header value"
+                    )]
                     let content_range = HeaderValue::from_str(&format!(
                         "bytes {}-{}/{}",
                         r.start,

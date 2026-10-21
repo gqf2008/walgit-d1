@@ -482,8 +482,7 @@ pub async fn rebuild_base(
             // was folded), do not keep retrying that dead seq: fall through and
             // publish the same immutable pack under a fresh COMPACT seq, where
             // an exact witness can be written again.
-            match walgit_wal::write_witness_checkpoint(handle, p.seq, manifest.packs.clone())
-                .await
+            match walgit_wal::write_witness_checkpoint(handle, p.seq, manifest.packs.clone()).await
             {
                 Ok(_) => {
                     log(format!(

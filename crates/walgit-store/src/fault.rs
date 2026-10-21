@@ -339,10 +339,7 @@ impl FaultStore {
             // below(1 << 20) < 2^20, which fits any usize; the unwrap_or is
             // unreachable and only keeps the conversion honest.
             let cut = usize::try_from(r.below(1 << 20)).unwrap_or(usize::MAX);
-            (
-                [r.f64(), r.f64(), r.f64(), r.f64(), r.f64(), r.f64()],
-                cut,
-            )
+            ([r.f64(), r.f64(), r.f64(), r.f64(), r.f64(), r.f64()], cut)
         };
         let d = if roll[0] < plan.p_hang {
             self.stats.hang.fetch_add(1, Ordering::Relaxed);

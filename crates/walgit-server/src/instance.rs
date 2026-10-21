@@ -64,14 +64,19 @@ fn cgroup_cpus() -> Option<usize> {
         let mut it = s.split_whitespace();
         if let (Some(q), Some(p)) = (it.next(), it.next())
             && q != "max"
-                && let (Ok(q), Ok(p)) = (q.parse::<f64>(), p.parse::<f64>())
-                    && p > 0.0 {
-                        // q/p is a kernel-bounded µs-quota/µs-period ratio (cgroup v2
-                        // cpu.max), rounded up to ≥ 1 CPU: never negative, never above
-                        // 2^53, so the cast cannot truncate or lose sign.
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "cpu.max quota/period ratio is kernel-bounded; round().max(1.0) is ≥ 1 and < 2^53")]
-                        return Some((q / p).round().max(1.0) as usize);
-                    }
+            && let (Ok(q), Ok(p)) = (q.parse::<f64>(), p.parse::<f64>())
+            && p > 0.0
+        {
+            // q/p is a kernel-bounded µs-quota/µs-period ratio (cgroup v2
+            // cpu.max), rounded up to ≥ 1 CPU: never negative, never above
+            // 2^53, so the cast cannot truncate or lose sign.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "cpu.max quota/period ratio is kernel-bounded; round().max(1.0) is ≥ 1 and < 2^53"
+            )]
+            return Some((q / p).round().max(1.0) as usize);
+        }
     }
     None
 }
@@ -143,7 +148,10 @@ fn gce_machine_type() -> Option<String> {
 fn gib(b: u64) -> String {
     // Display-only: the label rounds to tenths of a GiB; exactness for byte
     // counts ≥ 2^53 is not the point of a human-readable size string.
-    #[allow(clippy::cast_precision_loss, reason = "display-only size label in tenths of a GiB")]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "display-only size label in tenths of a GiB"
+    )]
     let g = b as f64 / (1u64 << 30) as f64;
     if g >= 10.0 {
         format!("{g:.0} GiB")
@@ -187,7 +195,9 @@ pub fn info(cfg: &walgit_config::Config) -> InstanceInfo {
         .or_else(|| env("HOSTNAME"))
         .unwrap_or_else(|| "walgit".into());
     let revision = env("WALGIT_REVISION").unwrap_or_default();
-    let instance = env("WALGIT_INSTANCE_ID").map_or_else(|| std::process::id().to_string(), |i| {
+    let instance = env("WALGIT_INSTANCE_ID").map_or_else(
+        || std::process::id().to_string(),
+        |i| {
             i.chars()
                 .rev()
                 .take(6)
@@ -195,7 +205,8 @@ pub fn info(cfg: &walgit_config::Config) -> InstanceInfo {
                 .chars()
                 .rev()
                 .collect()
-        });
+        },
+    );
     let version = build_version();
     let roles = if cfg.server.roles.is_empty() {
         vec!["all".to_string()]
@@ -206,13 +217,14 @@ pub fn info(cfg: &walgit_config::Config) -> InstanceInfo {
             .map(|r| format!("{r:?}").to_lowercase())
             .collect()
     };
-    let cpus = cgroup_cpus().unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map_or(1, std::num::NonZero::get)
-    });
+    let cpus = cgroup_cpus()
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     let memory_bytes = cgroup_memory_max().or_else(meminfo_total).unwrap_or(0);
     let shape = match kind {
-        "ssd" => gce_machine_type().map_or_else(|| format!("{cpus} vCPU · {}", gib(memory_bytes)), |m| format!("{m} · {cpus} vCPU · {}", gib(memory_bytes))),
+        "ssd" => gce_machine_type().map_or_else(
+            || format!("{cpus} vCPU · {}", gib(memory_bytes)),
+            |m| format!("{m} · {cpus} vCPU · {}", gib(memory_bytes)),
+        ),
         "serverless" => format!("a serverless host · {cpus} vCPU · {}", gib(memory_bytes)),
         _ => format!("{cpus} cpus · {}", gib(memory_bytes)),
     };

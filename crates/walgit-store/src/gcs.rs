@@ -113,9 +113,12 @@ where
                 );
                 attempt += 1;
                 let jitter = 100
-                    + u64::from(std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.subsec_nanos()) % 400);
+                    + u64::from(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.subsec_nanos())
+                            % 400,
+                    );
                 tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
             }
         }
@@ -555,7 +558,7 @@ impl BulkHttp {
             Ok(Err(e)) => {
                 return Err(StoreError::retryable(anyhow::anyhow!(
                     "gcs bulk read {key}: {e}"
-                )))
+                )));
             }
             Err(_) => return Err(deadline_error("read", key, self.idle)),
         };
@@ -1010,9 +1013,10 @@ impl ObjectStore for GcsStore {
 
                 for obj in &resp.objects {
                     if let Some(ref sa) = skip_key
-                        && obj.name == *sa {
-                            continue;
-                        }
+                        && obj.name == *sa
+                    {
+                        continue;
+                    }
                     if tx.send(Ok(Self::meta_from_object(obj))).await.is_err() {
                         return; // consumer dropped
                     }
@@ -1215,9 +1219,10 @@ where
 
 fn is_not_found(e: &google_cloud_storage::Error) -> bool {
     if let Some(status) = e.status()
-        && status.code == Code::NotFound {
-            return true;
-        }
+        && status.code == Code::NotFound
+    {
+        return true;
+    }
     if let Some(code) = e.http_status_code() {
         return code == 404;
     }
@@ -1228,9 +1233,10 @@ fn is_not_found(e: &google_cloud_storage::Error) -> bool {
 /// (generation IS the same → object unchanged).
 fn is_not_modified(e: &google_cloud_storage::Error) -> bool {
     if let Some(code) = e.http_status_code()
-        && code == 304 {
-            return true;
-        }
+        && code == 304
+    {
+        return true;
+    }
     if let Some(status) = e.status() {
         // GCS returns 304 as FailedPrecondition for if_generation_not_match.
         return status.code == Code::FailedPrecondition;
@@ -1240,9 +1246,10 @@ fn is_not_modified(e: &google_cloud_storage::Error) -> bool {
 
 fn is_precondition_failed(e: &google_cloud_storage::Error) -> bool {
     if let Some(status) = e.status()
-        && status.code == Code::FailedPrecondition {
-            return true;
-        }
+        && status.code == Code::FailedPrecondition
+    {
+        return true;
+    }
     if let Some(code) = e.http_status_code() {
         // GCS JSON API sometimes returns 412 with Code::Unknown.
         return code == 412;
@@ -1689,8 +1696,11 @@ mod resume_tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let bulk =
-            BulkHttp::for_tests(format!("http://{addr}"), "b".into(), std::time::Duration::from_secs(10));
+        let bulk = BulkHttp::for_tests(
+            format!("http://{addr}"),
+            "b".into(),
+            std::time::Duration::from_secs(10),
+        );
         let (size, generation, mut body) = bulk.read("k", None, None).await.unwrap();
         assert_eq!((size, generation), (3000, Some(7)));
         let mut got = Vec::new();
@@ -1730,7 +1740,11 @@ mod resume_tests {
             panic!("dead peer must not answer");
         };
         assert!(err.is_retryable(), "dead peer must be retryable: {err:?}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
         accept.abort();
     }
 
@@ -1754,6 +1768,9 @@ mod resume_tests {
         let Err(err) = bulk.open("wal/pack.pack", None, None).await else {
             panic!("a refused port must not answer");
         };
-        assert!(err.is_retryable(), "refused connect must be retryable: {err:?}");
+        assert!(
+            err.is_retryable(),
+            "refused connect must be retryable: {err:?}"
+        );
     }
 }

@@ -174,15 +174,27 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     assert_eq!(r.text().await?, "# Titl");
 
     // Repository HTML must never run on the app's origin.
-    let r = c.get(url("/o/r/api/blob/main/page.html?raw")).send().await?;
+    let r = c
+        .get(url("/o/r/api/blob/main/page.html?raw"))
+        .send()
+        .await?;
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
     let csp = r.headers()["content-security-policy"].to_str()?;
-    assert!(csp.contains("sandbox"), "active content needs a sandbox CSP: {csp}");
+    assert!(
+        csp.contains("sandbox"),
+        "active content needs a sandbox CSP: {csp}"
+    );
     // The word alone proves nothing: a policy that re-enabled scripts would
     // still contain it. Pin the two clauses that make it inert.
-    assert!(!csp.contains("allow-scripts"), "scripts must stay disabled: {csp}");
-    assert!(csp.contains("default-src 'none'"), "nothing may be loaded: {csp}");
+    assert!(
+        !csp.contains("allow-scripts"),
+        "scripts must stay disabled: {csp}"
+    );
+    assert!(
+        csp.contains("default-src 'none'"),
+        "nothing may be loaded: {csp}"
+    );
 
     // The JSON lane is unchanged: the viewer still learns it is binary.
     let v: Value = c
@@ -212,14 +224,19 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
         .await?;
     assert_eq!(r.status(), 200);
     assert_eq!(
-        r.headers().get("content-encoding").and_then(|v| v.to_str().ok()),
+        r.headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
         Some("identity"),
         "raw bytes must not be re-encoded"
     );
     assert_eq!(r.bytes().await?.len(), 2 * 1024 * 1024 + 1);
 
     // A strong validator, and revalidation is a 304.
-    let r = c.get(url("/o/r/api/blob/main/README.md?raw")).send().await?;
+    let r = c
+        .get(url("/o/r/api/blob/main/README.md?raw"))
+        .send()
+        .await?;
     let etag = r.headers()["etag"].to_str()?.to_string();
     assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
     let r = c
@@ -1388,7 +1405,10 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
     assert_eq!(report["total_entries"], 3);
     assert_eq!(report["threads"].as_array().unwrap().len(), 1);
     assert_eq!(report["threads"][0]["id"], "t1");
-    assert_eq!(report["threads"][0]["title"], "hi", "root title projected (issue #131)");
+    assert_eq!(
+        report["threads"][0]["title"], "hi",
+        "root title projected (issue #131)"
+    );
     assert_eq!(report["threads"][0]["entries"], 3);
     assert_eq!(report["prs"].as_array().unwrap().len(), 1);
     assert_eq!(report["prs"][0]["title"], "hi");
@@ -1547,7 +1567,8 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn collab_sdk_golden_entry_verifies_end_to_end() -> TestResult {
     const GOLDEN_CANONICAL: &str = r#"{"actor":"alice","body":{"title":"golden vector"},"id":"golden","kind":"issue","parent":"","sig":"","ts":1786500000,"version":1}"#;
-    const GOLDEN_SIG_B64: &str = "VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==";
+    const GOLDEN_SIG_B64: &str =
+        "VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==";
     const GOLDEN_PUB_B64: &str = "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
 
     let server = Server::start_with_tweak(|c| {
@@ -1757,7 +1778,10 @@ async fn collab_board_projects_threads_under_the_default_definition() -> TestRes
     let board: serde_json::Value = serde_json::from_str(&text)?;
     let columns = board["columns"].as_array().unwrap();
     assert_eq!(
-        columns.iter().map(|c| c["name"].as_str().unwrap()).collect::<Vec<_>>(),
+        columns
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
         vec!["open", "merged", "closed", "other"],
         "the built-in default board"
     );
@@ -1765,7 +1789,10 @@ async fn collab_board_projects_threads_under_the_default_definition() -> TestRes
     assert_eq!(open.as_array().unwrap().len(), 0);
     let other = &columns[3]["cards"];
     assert_eq!(other[0]["id"], "t1");
-    assert_eq!(other[0]["status"], "needs-review", "the status entry moved the card");
+    assert_eq!(
+        other[0]["status"], "needs-review",
+        "the status entry moved the card"
+    );
     assert_eq!(other[0]["title"], "hi");
     Ok(())
 }
@@ -1853,10 +1880,7 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
     assert_eq!(st, 400, "a malformed address is a bad request");
     let (st, _, _) = get_h(
         &server,
-        &format!(
-            "/o/r/api/collab/ci-artifacts/{}",
-            sha256.to_uppercase()
-        ),
+        &format!("/o/r/api/collab/ci-artifacts/{}", sha256.to_uppercase()),
         &[],
     )
     .await?;
@@ -1874,10 +1898,7 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
     let oversize_oid = git_in(&dir, &["hash-object", "-w", "oversize.bin"])?;
     let oversize_sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&oversize));
     let oversize_ref = format!("refs/collab/ci-artifacts/ci-a/{oversize_sha}");
-    git_in(
-        &dir,
-        &["update-ref", &oversize_ref, oversize_oid.trim()],
-    )?;
+    git_in(&dir, &["update-ref", &oversize_ref, oversize_oid.trim()])?;
     git_in(
         &dir,
         &["push", "-q", &server.repo_url("o", "r"), &oversize_ref],
@@ -1888,7 +1909,10 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
         &[],
     )
     .await?;
-    assert_eq!(st, 413, "oversize objects are refused before body materialization");
+    assert_eq!(
+        st, 413,
+        "oversize objects are refused before body materialization"
+    );
 
     let (st, _) = head_h(
         &server,
@@ -1907,7 +1931,10 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
         &format!("/o/r/api/collab/ci-artifacts/{oversize_sha}?actor=ci-a"),
     )
     .await?;
-    assert_eq!(st, 413, "the CLI preflight refuses before fetching the body");
+    assert_eq!(
+        st, 413,
+        "the CLI preflight refuses before fetching the body"
+    );
     let (st, _) = head_h(
         &server,
         &format!("/o/r/api/collab/ci-artifacts/{sha256}?actor=bad%2Factor"),
@@ -1939,6 +1966,9 @@ async fn collab_snapshot_over_cap_is_rejected_before_body_read() -> TestResult {
     )?;
 
     let (st, _, _) = get_h(&server, "/o/big/api/collab/report", &[]).await?;
-    assert_eq!(st, 503, "oversize snapshot is rejected before body materialization");
+    assert_eq!(
+        st, 503,
+        "oversize snapshot is rejected before body materialization"
+    );
     Ok(())
 }

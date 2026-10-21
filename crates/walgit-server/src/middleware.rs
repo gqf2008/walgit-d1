@@ -32,13 +32,19 @@ impl Inflight {
     fn enter(&self) {
         let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
         // f64 is the metrics-gauge contract; in-flight counts are request concurrency, ≪ 2^53.
-        #[allow(clippy::cast_precision_loss, reason = "f64 is the metrics-gauge contract; in-flight request counts ≪ 2^53")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "f64 is the metrics-gauge contract; in-flight request counts ≪ 2^53"
+        )]
         ::metrics::gauge!("walgit_http_inflight").set(n as f64);
     }
     fn leave(&self) {
         let n = self.0.fetch_sub(1, Ordering::Relaxed) - 1;
         // f64 is the metrics-gauge contract; in-flight counts are request concurrency, ≪ 2^53.
-        #[allow(clippy::cast_precision_loss, reason = "f64 is the metrics-gauge contract; in-flight request counts ≪ 2^53")]
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "f64 is the metrics-gauge contract; in-flight request counts ≪ 2^53"
+        )]
         ::metrics::gauge!("walgit_http_inflight").set(n as f64);
     }
 }
@@ -89,7 +95,11 @@ pub async fn request_id(
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty()).map_or_else(|| Uuid::new_v4().to_string(), std::string::ToString::to_string);
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || Uuid::new_v4().to_string(),
+            std::string::ToString::to_string,
+        );
     if let Ok(hv) = HeaderValue::from_str(&id) {
         req.headers_mut().insert(REQUEST_ID_HEADER, hv);
     }
@@ -170,7 +180,10 @@ impl RepoSemaphores {
         // Nothing in the codebase ever calls close() on these semaphores (the
         // Arc is owned by the map entry and the entry is never removed), so
         // acquire_owned cannot fail here.
-        #[allow(clippy::expect_used, reason = "the semaphore is never closed: the map entry owns the only Arc and nothing calls close()")]
+        #[allow(
+            clippy::expect_used,
+            reason = "the semaphore is never closed: the map entry owns the only Arc and nothing calls close()"
+        )]
         sem.acquire_owned().await.expect("semaphore never closed")
     }
 }

@@ -251,7 +251,11 @@ impl S3Store {
         }
     }
 
-    fn get_result_from_response(key: &str, resp: reqwest::Response, idle: Duration) -> Result<GetResult> {
+    fn get_result_from_response(
+        key: &str,
+        resp: reqwest::Response,
+        idle: Duration,
+    ) -> Result<GetResult> {
         let status = resp.status();
         let etag = resp
             .headers()
@@ -301,9 +305,7 @@ impl S3Store {
                 let body = tokio_stream::StreamExt::timeout(resp.bytes_stream(), idle)
                     .map(move |r| match r {
                         Ok(Ok(b)) => Ok(b),
-                        Ok(Err(e)) => {
-                            Err(StoreError::retryable(anyhow::anyhow!("s3 body: {e}")))
-                        }
+                        Ok(Err(e)) => Err(StoreError::retryable(anyhow::anyhow!("s3 body: {e}"))),
                         Err(_) => Err(StoreError::retryable(anyhow::anyhow!(
                             "s3 body {key_owned}: no bytes for {idle:?} (idle timeout)"
                         ))),
@@ -505,9 +507,8 @@ impl ObjectStore for S3Store {
                 {
                     return Ok(None);
                 }
-                Err(transport_retryable("head", &err).unwrap_or_else(|| {
-                    StoreError::Other(anyhow::anyhow!("s3 head error: {err}"))
-                }))
+                Err(transport_retryable("head", &err)
+                    .unwrap_or_else(|| StoreError::Other(anyhow::anyhow!("s3 head error: {err}"))))
             }
         }
     }
@@ -569,9 +570,10 @@ impl ObjectStore for S3Store {
                 let mut err = classify_put_error(key, &e);
                 // Fill `current` via HEAD if we got a PreconditionFailed.
                 if let StoreError::PreconditionFailed { current: c, .. } = &mut err
-                    && c.is_none() {
-                        *c = self.head(key).await.ok().flatten().map(|m| m.version);
-                    }
+                    && c.is_none()
+                {
+                    *c = self.head(key).await.ok().flatten().map(|m| m.version);
+                }
                 Err(err)
             }
         }
@@ -715,7 +717,10 @@ impl ObjectStore for S3Store {
                         state.continuation_token = resp
                             .is_truncated()
                             .unwrap_or(false)
-                            .then(|| resp.next_continuation_token().map(std::borrow::ToOwned::to_owned))
+                            .then(|| {
+                                resp.next_continuation_token()
+                                    .map(std::borrow::ToOwned::to_owned)
+                            })
                             .flatten();
                         state.buffer = items.into_iter();
 
@@ -751,7 +756,10 @@ impl ObjectStore for S3Store {
             continuation_token = resp
                 .is_truncated()
                 .unwrap_or(false)
-                .then(|| resp.next_continuation_token().map(std::borrow::ToOwned::to_owned))
+                .then(|| {
+                    resp.next_continuation_token()
+                        .map(std::borrow::ToOwned::to_owned)
+                })
                 .flatten();
             if continuation_token.is_none() {
                 break;
@@ -1514,7 +1522,11 @@ mod tests {
         assert!(err.is_retryable(), "head: {err:?}");
         // SDK internal retries (3 attempts) plus jittered backoff: bound it
         // generously — minutes-waiting is the bug, seconds is the fix.
-        assert!(started.elapsed() < Duration::from_secs(60), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            started.elapsed()
+        );
 
         // The presigned-GET lane (ranged reads, the 24-minute clone traffic).
         let started = Instant::now();
@@ -1531,7 +1543,11 @@ mod tests {
             panic!("dead peer must not answer");
         };
         assert!(err.is_retryable(), "get: {err:?}");
-        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A `PutMode::Create` above the threshold must use the multipart path
@@ -1664,7 +1680,8 @@ mod tests {
             "the condition is evaluated at CompleteMultipartUpload: {tail:?}"
         );
         assert!(
-            tail.last().is_some_and(|r| r.starts_with("DELETE ") && r.contains("uploadId=")),
+            tail.last()
+                .is_some_and(|r| r.starts_with("DELETE ") && r.contains("uploadId=")),
             "a refused completion must abort the staged upload: {tail:?}"
         );
         assert!(
@@ -2458,7 +2475,10 @@ mod tests {
             .await
             .expect("full body survives");
         assert_eq!(bytes.len(), 8192, "all 8 chunks");
-        assert!(started.elapsed() > Duration::from_secs(2), "test itself must stream longer than the idle bound — otherwise it proves nothing");
+        assert!(
+            started.elapsed() > Duration::from_secs(2),
+            "test itself must stream longer than the idle bound — otherwise it proves nothing"
+        );
     }
 
     #[test]
@@ -2611,7 +2631,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, StoreError::PreconditionFailed { current: Some(_), .. }),
+            matches!(
+                err,
+                StoreError::PreconditionFailed {
+                    current: Some(_),
+                    ..
+                }
+            ),
             "{err:?}"
         );
         let state = state.lock().unwrap();

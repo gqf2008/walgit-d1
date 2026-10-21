@@ -2,10 +2,10 @@
 //! catch-up/materialize of local repos, ref snapshots. See AGENTS.md §2 and AGENTS.md §2.
 
 mod checkpoint;
-mod error;
-mod handle;
 pub mod ci;
 pub mod collab;
+mod error;
+mod handle;
 pub mod lockwait;
 mod log_reader;
 pub mod platform;

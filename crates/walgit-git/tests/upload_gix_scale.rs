@@ -48,9 +48,7 @@ fn max_rss_kb() -> u64 {
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: `ru` is a live rusage slot; getrusage fills it (its result is unused —
     // a failed read yields the zeroed peak, which the caller's saturating_sub floors at 0).
-    unsafe {
-        libc::getrusage(libc::RUSAGE_SELF, &raw mut ru)
-    };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut ru) };
     // getrusage reports ru_maxrss in KB on Linux but in BYTES on macOS/BSD.
     // Without this, the memory-bound assertion reads 1024x high on macOS and
     // fails a passing result (a 16 MB delta shown as "16832 MB").

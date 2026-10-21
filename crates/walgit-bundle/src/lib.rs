@@ -854,13 +854,10 @@ pub async fn bundle_engine(handle: &walgit_wal::RepoHandle) -> BundleEngine {
             }
         }
     }
-    let linked = handle
-        .local()
-        .packs()
-        .is_ok_and(|ps| {
-            ps.iter()
-                .any(|p| handle.local().pack_path(&p.checksum).is_symlink())
-        });
+    let linked = handle.local().packs().is_ok_and(|ps| {
+        ps.iter()
+            .any(|p| handle.local().pack_path(&p.checksum).is_symlink())
+    });
     if linked {
         return BundleEngine::Gix { faulter: None };
     }
@@ -869,7 +866,7 @@ pub async fn bundle_engine(handle: &walgit_wal::RepoHandle) -> BundleEngine {
 
 #[cfg(feature = "wal")]
 mod wal_impl {
-    use super::{BundleError, BundleSource, RepoId, BundleRepoHandle, BundleEngine, bundle_engine};
+    use super::{BundleEngine, BundleError, BundleRepoHandle, BundleSource, RepoId, bundle_engine};
     use walgit_wal::{Registry, WalError};
 
     fn wal_err(e: WalError) -> BundleError {

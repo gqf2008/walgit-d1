@@ -97,7 +97,10 @@ async fn base_layer_roundtrip_and_incremental_update() {
     std::fs::copy(writer.pack_path(&base), &pack_tmp).unwrap();
     std::fs::copy(writer.pack_path(&base).with_extension("idx"), &idx_tmp).unwrap();
     std::fs::copy(&side, &graph_tmp).unwrap();
-    reader.install_pack(&pack_tmp, &idx_tmp, &[graph_tmp]).await.unwrap();
+    reader
+        .install_pack(&pack_tmp, &idx_tmp, &[graph_tmp])
+        .await
+        .unwrap();
     assert!(reader.install_commit_graph_base(&base).unwrap());
     assert!(
         reader.install_commit_graph_base(&base).unwrap(),
