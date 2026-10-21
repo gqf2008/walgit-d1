@@ -323,6 +323,10 @@ struct CollabSignal {
     digest: String,
     error: Option<String>,
     thread_heads: Arc<HashMap<String, String>>,
+    /// Principals that pushed the inbox refs which moved in this generation.
+    /// The notification envelope carries them so a client can suppress an
+    /// update authored entirely by itself.
+    changed_actors: Vec<String>,
 }
 
 struct CollabPuller {
@@ -1855,7 +1859,7 @@ async fn refresh_collab_refs(
 async fn collab_remote_digest(
     opts: &Options,
     cancel: Option<watch::Receiver<bool>>,
-) -> Result<String, ResourceError> {
+) -> Result<(String, HashMap<String, String>), ResourceError> {
     let args = vec![
         "-C".to_string(),
         opts.repo.display().to_string(),
@@ -1867,8 +1871,76 @@ async fn collab_remote_digest(
     ];
     run_git_refs_streaming(&args, cancel)
         .await
-        .map(|probe| probe.version)
+        .map(|probe| (probe.version, refs_map(&probe.lines)))
         .map_err(|e| classify_resource_error("refs/collab/*", e))
+}
+
+/// Parse `git ls-remote --refs` output (`<oid>\t<ref>` lines) into a map.
+fn refs_map(lines: &[String]) -> HashMap<String, String> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let (oid, name) = line.split_once('\t')?;
+            Some((name.to_string(), oid.to_string()))
+        })
+        .collect()
+}
+
+/// The inbox owner encoded in `refs/collab/inbox/<actor>/<hash>`.
+fn actor_from_collab_ref(name: &str) -> Option<&str> {
+    name.strip_prefix("refs/collab/inbox/")?
+        .split('/')
+        .next()
+        .filter(|actor| !actor.is_empty())
+}
+
+/// Principals whose inbox refs were added or moved between two snapshots.
+/// Deleted refs carry no attribution, so they leave this empty and the client
+/// wakes normally.
+fn changed_actors(
+    previous: &HashMap<String, String>,
+    current: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut actors = std::collections::BTreeSet::new();
+    for (name, oid) in current {
+        if previous.get(name) != Some(oid) {
+            if let Some(actor) = actor_from_collab_ref(name) {
+                actors.insert(actor.to_string());
+            }
+        }
+    }
+    actors.into_iter().collect()
+}
+
+/// The principal this worktree works as, from `<git-dir>/walgit/identity`.
+/// Absent means the MCP server cannot attribute notifications (no suppression).
+fn own_principal(repo: &std::path::Path) -> Option<String> {
+    let dir = crate::collab_cmd::project_identity_dir(repo).ok()?;
+    let raw = std::fs::read_to_string(dir.join("identity")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("principal")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+async fn probe_refs_version_and_lines(
+    opts: &Options,
+    owner: &str,
+    repo: &str,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<(String, Vec<String>), ResourceError> {
+    let args = vec![
+        "-C".to_string(),
+        opts.repo.display().to_string(),
+        "ls-remote".to_string(),
+        "--refs".to_string(),
+        opts.remote.clone(),
+    ];
+    run_git_refs_streaming(&args, cancel)
+        .await
+        .map(|probe| (probe.version, probe.lines))
+        .map_err(|e| classify_resource_error(&format!("walgit://refs/{owner}/{repo}"), e))
 }
 
 async fn collab_thread_heads(
@@ -2160,8 +2232,23 @@ fn notification(method: &str, params: Option<Value>) -> String {
     body.to_string()
 }
 
-fn updated_notification(uri: &str) -> String {
-    notification("notifications/resources/updated", Some(json!({"uri": uri})))
+fn updated_notification(
+    uri: &str,
+    version: &str,
+    actors: &[String],
+    self_actor: Option<&str>,
+) -> String {
+    let mut meta = json!({"version": version});
+    if !actors.is_empty() {
+        meta["actors"] = json!(actors);
+        if let Some(me) = self_actor {
+            meta["self"] = json!(me);
+        }
+    }
+    notification(
+        "notifications/resources/updated",
+        Some(json!({"uri": uri, "_meta": meta})),
+    )
 }
 
 fn subscription_failure_notification(uri: &str, error: &str) -> String {
@@ -2188,6 +2275,8 @@ fn spawn_subscription(
         let mut tracker = VersionTracker::new(initial_version);
         let mut failures = 0_u32;
         let mut last_collab_generation = None;
+        let mut last_refs: HashMap<String, String> = HashMap::new();
+        let self_principal = own_principal(&opts.repo);
         loop {
             let delay =
                 Duration::from_millis(subscription_delay_ms(opts.subscribe_interval_ms, failures));
@@ -2198,6 +2287,7 @@ fn spawn_subscription(
             if *cancel.borrow() {
                 break;
             }
+            let mut actors: Vec<String> = Vec::new();
             let result = if let Some(collab_rx) = &collab_rx {
                 let signal = collab_rx.borrow().clone();
                 if signal.generation == 0 && signal.digest.is_empty() && signal.error.is_none() {
@@ -2207,8 +2297,7 @@ fn spawn_subscription(
                 // TTL expiring changes the projection without moving a ref):
                 // an unchanged generation still reprobes once the last
                 // computed version is stale.
-                let board_stale =
-                    matches!(&parsed, ResourceUri::Board { .. }) && tracker.stale();
+                let board_stale = matches!(&parsed, ResourceUri::Board { .. }) && tracker.stale();
                 if last_collab_generation == Some(signal.generation) && !board_stale {
                     continue;
                 }
@@ -2216,6 +2305,7 @@ fn spawn_subscription(
                 if let Some(error) = signal.error {
                     Err(ResourceError::Execution(error))
                 } else {
+                    actors = signal.changed_actors.clone();
                     match &parsed {
                         ResourceUri::Thread { thread, .. } => {
                             signal.thread_heads.get(thread).cloned().ok_or_else(|| {
@@ -2230,6 +2320,17 @@ fn spawn_subscription(
                         )),
                     }
                 }
+            } else if matches!(parsed, ResourceUri::Refs { .. }) {
+                let (owner, repo) = parsed.owner_repo();
+                match probe_refs_version_and_lines(&opts, owner, repo, Some(cancel.clone())).await {
+                    Ok((version, lines)) => {
+                        let current = refs_map(&lines);
+                        actors = changed_actors(&last_refs, &current);
+                        last_refs = current;
+                        Ok(version)
+                    }
+                    Err(error) => Err(error),
+                }
             } else {
                 probe_resource_version(&opts, &uri, Some(cancel.clone())).await
             };
@@ -2240,7 +2341,15 @@ fn spawn_subscription(
                 Ok(version) => {
                     failures = 0;
                     if tracker.changed(&version) {
-                        send_notification(&notify_tx, updated_notification(&uri));
+                        send_notification(
+                            &notify_tx,
+                            updated_notification(
+                                &uri,
+                                &version,
+                                &actors,
+                                self_principal.as_deref(),
+                            ),
+                        );
                     }
                 }
                 Err(ResourceError::NotFound(_)) => {
@@ -2273,12 +2382,15 @@ fn spawn_collab_puller(
     tokio::spawn(async move {
         let mut generation = 0_u64;
         let mut last_digest: Option<String> = None;
+        let mut last_refs: HashMap<String, String> = HashMap::new();
         let mut failures = 0_u32;
         loop {
             match collab_remote_digest(&opts, Some(cancel.clone())).await {
-                Ok(digest) => {
+                Ok((digest, refs)) => {
                     failures = 0;
                     if last_digest.as_deref() != Some(digest.as_str()) {
+                        let actors = changed_actors(&last_refs, &refs);
+                        last_refs = refs;
                         match refresh_collab_refs(&opts, Some(cancel.clone())).await {
                             Ok(()) => {
                                 match collab_thread_heads(&opts, Some(cancel.clone())).await {
@@ -2290,6 +2402,7 @@ fn spawn_collab_puller(
                                             digest,
                                             error: None,
                                             thread_heads,
+                                            changed_actors: actors,
                                         });
                                     }
                                     Err(error) => {
@@ -2300,6 +2413,7 @@ fn spawn_collab_puller(
                                             digest: last_digest.clone().unwrap_or_default(),
                                             error: Some(error.message()),
                                             thread_heads: Arc::new(HashMap::new()),
+                                            changed_actors: Vec::new(),
                                         });
                                     }
                                 }
@@ -2312,6 +2426,7 @@ fn spawn_collab_puller(
                                     digest: last_digest.clone().unwrap_or_default(),
                                     error: Some(error.message()),
                                     thread_heads: Arc::new(HashMap::new()),
+                                    changed_actors: Vec::new(),
                                 });
                             }
                         }
@@ -2325,6 +2440,7 @@ fn spawn_collab_puller(
                         digest: last_digest.clone().unwrap_or_default(),
                         error: Some(error.message()),
                         thread_heads: Arc::new(HashMap::new()),
+                        changed_actors: Vec::new(),
                     });
                 }
             }
@@ -2383,9 +2499,9 @@ async fn shutdown_signal() {
 mod tests {
     use super::{
         DEFAULT_MAX_SUBSCRIPTIONS, DEFAULT_SUBSCRIBE_INTERVAL_MS, Options, PROTOCOL_VERSION,
-        ResourceError, ResourceUri, Session, Subscription, ToolError, VersionTracker, argv_for,
-        handle_line, run_git_refs_streaming, subscription_delay_ms, tool_defs,
-        validate_subscription_options,
+        ResourceError, ResourceUri, Session, Subscription, ToolError, VersionTracker,
+        actor_from_collab_ref, argv_for, changed_actors, handle_line, run_git_refs_streaming,
+        subscription_delay_ms, tool_defs, updated_notification, validate_subscription_options,
     };
     use serde_json::{Value, json};
     use std::fmt::Write as _;
@@ -3043,8 +3159,7 @@ mod tests {
         );
         assert_eq!(probe.version.len(), 64);
         assert!(
-            probe.truncated
-                || u64::try_from(probe.lines.len()).unwrap_or(u64::MAX) < probe.count
+            probe.truncated || u64::try_from(probe.lines.len()).unwrap_or(u64::MAX) < probe.count
         );
     }
 
@@ -3141,5 +3256,38 @@ mod tests {
             "{reply}"
         );
         session.shutdown().await;
+    }
+
+    #[test]
+    fn collab_refs_name_their_actor_and_only_changes_count() {
+        let previous = std::collections::HashMap::from([
+            ("refs/collab/inbox/a/1".to_string(), "o1".to_string()),
+            ("refs/collab/inbox/b/2".to_string(), "o2".to_string()),
+            ("refs/collab/meta/snapshot".to_string(), "m1".to_string()),
+        ]);
+        let current = std::collections::HashMap::from([
+            ("refs/collab/inbox/a/1".to_string(), "o1".to_string()),
+            ("refs/collab/inbox/b/2".to_string(), "o2-new".to_string()),
+            ("refs/collab/inbox/a/3".to_string(), "o3".to_string()),
+            ("refs/collab/meta/snapshot".to_string(), "m2".to_string()),
+        ]);
+        assert_eq!(changed_actors(&previous, &current), vec!["a", "b"]);
+        assert_eq!(actor_from_collab_ref("refs/collab/inbox/a/1"), Some("a"));
+        assert_eq!(actor_from_collab_ref("refs/collab/meta/x"), None);
+    }
+
+    #[test]
+    fn the_update_notification_carries_actors_and_self_only_when_attributable() {
+        let with = updated_notification("walgit://refs/o/r", "v1", &["a".to_string()], Some("a"));
+        let value: Value = serde_json::from_str(&with).expect("json");
+        assert_eq!(value["params"]["_meta"]["version"], "v1");
+        assert_eq!(value["params"]["_meta"]["actors"], json!(["a"]));
+        assert_eq!(value["params"]["_meta"]["self"], "a");
+
+        let without = updated_notification("walgit://refs/o/r", "v2", &[], Some("a"));
+        let value: Value = serde_json::from_str(&without).expect("json");
+        assert_eq!(value["params"]["_meta"]["version"], "v2");
+        assert!(value["params"]["_meta"].get("actors").is_none());
+        assert!(value["params"]["_meta"].get("self").is_none());
     }
 }
