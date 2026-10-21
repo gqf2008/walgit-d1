@@ -1896,24 +1896,6 @@ fn actor_from_collab_ref(name: &str) -> Option<&str> {
         .filter(|actor| !actor.is_empty())
 }
 
-/// Principals whose inbox refs were added or moved between two snapshots.
-/// Deleted refs carry no attribution, so they leave this empty and the client
-/// wakes normally.
-fn changed_actors(
-    previous: &HashMap<String, String>,
-    current: &HashMap<String, String>,
-) -> Vec<String> {
-    let mut actors = std::collections::BTreeSet::new();
-    for (name, oid) in current {
-        if previous.get(name) != Some(oid) {
-            if let Some(actor) = actor_from_collab_ref(name) {
-                actors.insert(actor.to_string());
-            }
-        }
-    }
-    actors.into_iter().collect()
-}
-
 /// The refs that were added or moved between two snapshots.
 fn changed_ref_pairs(
     previous: &HashMap<String, String>,
@@ -2594,8 +2576,9 @@ mod tests {
     use super::{
         DEFAULT_MAX_SUBSCRIPTIONS, DEFAULT_SUBSCRIBE_INTERVAL_MS, Options, PROTOCOL_VERSION,
         ResourceError, ResourceUri, Session, Subscription, ToolError, VersionTracker,
-        actor_from_collab_ref, argv_for, changed_actors, handle_line, run_git_refs_streaming,
-        subscription_delay_ms, tool_defs, updated_notification, validate_subscription_options,
+        actor_from_collab_ref, actors_from_ref_pairs, argv_for, changed_ref_pairs, handle_line,
+        run_git_refs_streaming, subscription_delay_ms, tool_defs, updated_notification,
+        validate_subscription_options,
     };
     use serde_json::{Value, json};
     use std::fmt::Write as _;
@@ -3365,7 +3348,8 @@ mod tests {
             ("refs/collab/inbox/a/3".to_string(), "o3".to_string()),
             ("refs/collab/meta/snapshot".to_string(), "m2".to_string()),
         ]);
-        assert_eq!(changed_actors(&previous, &current), vec!["a", "b"]);
+        let changed = changed_ref_pairs(&previous, &current);
+        assert_eq!(actors_from_ref_pairs(&changed), vec!["a", "b"]);
         assert_eq!(actor_from_collab_ref("refs/collab/inbox/a/1"), Some("a"));
         assert_eq!(actor_from_collab_ref("refs/collab/meta/x"), None);
     }
