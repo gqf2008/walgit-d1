@@ -1959,9 +1959,25 @@ async fn sessions_from_changed_refs(
 
 /// The principal this worktree works as, from `<git-dir>/walgit/identity`.
 /// Absent means the MCP server cannot attribute notifications (no suppression).
-fn own_principal(repo: &std::path::Path) -> Option<String> {
-    let dir = crate::collab_cmd::project_identity_dir(repo).ok()?;
-    let raw = std::fs::read_to_string(dir.join("identity")).ok()?;
+///
+/// The git-dir lookup goes through the cancellable child runner, never a
+/// blocking `Command`: this runs inside a subscription task, and an
+/// uncancellable child there wedges `session.shutdown()` (and the runtime)
+/// behind a slow or hung `git`. `walgit collab` may block at startup; a poller
+/// may not.
+async fn own_principal(
+    repo: &std::path::Path,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Option<String> {
+    let args = vec![
+        "-C".to_string(),
+        repo.display().to_string(),
+        "rev-parse".to_string(),
+        "--absolute-git-dir".to_string(),
+    ];
+    let dir = run_git(&args, cancel).await.ok()?;
+    let identity = std::path::Path::new(dir.trim()).join("walgit/identity");
+    let raw = std::fs::read_to_string(identity).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     value
         .get("principal")
@@ -2331,7 +2347,7 @@ fn spawn_subscription(
         let mut failures = 0_u32;
         let mut last_collab_generation = None;
         let mut last_refs: HashMap<String, String> = HashMap::new();
-        let self_principal = own_principal(&opts.repo);
+        let self_principal = own_principal(&opts.repo, Some(cancel.clone())).await;
         let self_session = std::env::var("KI_AGENT_ID").ok();
         loop {
             let delay =
