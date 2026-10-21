@@ -58,6 +58,10 @@ fn allowed_route(path: &str) -> bool {
         // reserves "api" (D42). git operations for such an owner are
         // unaffected — only the single-segment owner page is shadowed.
         "/repos",
+        // In-app CLI cheat sheet (D61): a static page route like /repos; it
+        // reserves the owner name "commands" the same way (git operations for
+        // such an owner are unaffected).
+        "/commands",
         // AI-agent collaboration guide (D42): data-free doc served verbatim,
         // open like /repos.js; reserves the owner name "SKILL.md" (dot is a
         // legal owner character) the same way.
