@@ -19,6 +19,9 @@
 #   WALGIT_HDIUTIL_BIN    可选：覆盖 hdiutil 路径（测试注入）
 #   WALGIT_HDIUTIL_RETRY_DELAY
 #                         可选：create 失败后的重试间隔秒数，默认 5
+#   WALGIT_STAPLER_BIN    可选：覆盖 `xcrun stapler`（测试注入）
+#   WALGIT_STAPLER_RETRY_DELAY
+#                         可选：stapler 失败后的重试间隔秒数，默认 5
 #
 # 产物：dist/walgit-<版本>-<架构>.dmg
 set -euo pipefail
@@ -114,6 +117,42 @@ notary_submit() {
         sleep 5
     done
     return 1
+}
+
+# `xcrun stapler` overridable so the retry loop is testable without Xcode
+# (mirrors WALGIT_HDIUTIL_BIN).
+stapler_run() {
+    if [ -n "${WALGIT_STAPLER_BIN:-}" ]; then
+        "$WALGIT_STAPLER_BIN" "$@"
+    else
+        xcrun stapler "$@"
+    fi
+}
+
+# `stapler staple` downloads the ticket and `stapler validate` queries Apple's
+# ticket-delivery records — both are network calls that intermittently lose
+# the connection to CloudKit *after* a successful notarization
+# (NSURLError -1005 → error 68, thread release-macos-stapler-cloudkit-flake).
+# Both operations are retry-safe (staple re-downloads and re-attaches the
+# ticket), so a bounded retry absorbs the wobble instead of red-marking the
+# whole release (macOS job red → the Publish step is skipped for every
+# platform). Same shape as notary_submit / create_dmg_with_retry.
+stapler_with_retry() {
+    local sub="$1"
+    local target="$2"
+    local delay="${WALGIT_STAPLER_RETRY_DELAY:-5}"
+    local attempt
+    for attempt in 1 2 3; do
+        if stapler_run "$sub" "$target"; then
+            return 0
+        fi
+        if [ "$attempt" -eq 3 ]; then
+            echo "stapler $sub failed after 3 attempts: $target" >&2
+            return 1
+        fi
+        echo "stapler $sub failed (attempt $attempt/3); retrying in ${delay}s" >&2
+        sleep "$delay"
+    done
 }
 
 stale_dmg_mountpoint() {
@@ -213,6 +252,9 @@ case "${1:-}" in
     --check-hdiutil-retry)
         create_dmg_with_retry "${2:?stage}" "${3:?output}"
         exit $? ;;
+    --check-stapler-retry)
+        stapler_with_retry "${2:?sub}" "${3:?target}"
+        exit $? ;;
     -h|--help)
         usage
         exit 0 ;;
@@ -307,8 +349,8 @@ APP_ZIP="$WORK/walgit-tray.zip"
 ditto -c -k --keepParent --norsrc --noextattr "$APP" "$APP_ZIP"
 check_zip "$APP_ZIP"
 notary_submit "$APP_ZIP"
-xcrun stapler staple "$APP"
-xcrun stapler validate "$APP"
+stapler_with_retry staple "$APP"
+stapler_with_retry validate "$APP"
 spctl --assess --type execute --verbose=2 "$APP" 2>&1 | tail -1
 # The notarization archive is no longer needed; freeing it before hdiutil
 # avoids keeping a second copy of the app around during DMG creation.
@@ -339,8 +381,8 @@ fi
 
 echo "== [7/8] notarize + staple DMG =="
 notary_submit "$TMP_DMG"
-xcrun stapler staple "$TMP_DMG"
-xcrun stapler validate "$TMP_DMG"
+stapler_with_retry staple "$TMP_DMG"
+stapler_with_retry validate "$TMP_DMG"
 spctl --assess --type open --context context:primary-signature -v "$TMP_DMG" 2>&1 | tail -1
 
 echo "== [8/8] publish local artifact =="

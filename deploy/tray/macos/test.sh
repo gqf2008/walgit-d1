@@ -955,6 +955,61 @@ STUB
     return 0
 }
 
+# stapler validate queries Apple's ticket-delivery records; a lost connection
+# (NSURLError -1005 → error 68) after a successful notarization used to red the
+# whole release (thread release-macos-stapler-cloudkit-flake). The retry must
+# absorb a transient failure and stay bounded on a persistent one.
+stapler_retry_fixture() {
+    local base="$TMP/stapler-retry"
+    local stub="$base/stapler"
+    local state="$base/attempts"
+    mkdir -p "$base"
+
+    cat >"$stub" <<'STUB'
+#!/bin/bash
+set -eu
+state="${WALGIT_STAPLER_STUB_STATE:?}"
+always_fail="${WALGIT_STAPLER_STUB_ALWAYS_FAIL:-0}"
+attempt=0
+[ ! -f "$state" ] || attempt="$(cat "$state")"
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$state"
+echo "stapler: $1 $2" >&2
+if [ "$attempt" -lt 3 ] || [ "$always_fail" = 1 ]; then
+    echo "stapler: The network connection was lost. (NSURLErrorDomain -1005)" >&2
+    exit 68
+fi
+exit 0
+STUB
+    chmod +x "$stub"
+
+    WALGIT_STAPLER_STUB_STATE="$state" WALGIT_STAPLER_BIN="$stub" \
+        WALGIT_STAPLER_RETRY_DELAY=0 \
+        ./build-dmg.sh --check-stapler-retry validate "$base/x.app" \
+        >"$base/stdout" 2>"$base/stderr" \
+        || { echo "FAIL(stapler-retry): validate still failed" >&2; cat "$base/stderr" >&2; return 1; }
+    [ "$(cat "$state")" = 3 ] \
+        || { echo "FAIL(stapler-retry): expected 3 attempts, got $(cat "$state")" >&2; return 1; }
+    grep -Fq 'stapler: The network connection was lost.' "$base/stderr" \
+        || { echo "FAIL(stapler-retry): the underlying failure must stay visible" >&2; return 1; }
+
+    # Bounded even when every attempt fails: 3 tries, a clear message, rc != 0.
+    rm -f "$state"
+    if WALGIT_STAPLER_STUB_STATE="$state" WALGIT_STAPLER_STUB_ALWAYS_FAIL=1 \
+        WALGIT_STAPLER_BIN="$stub" WALGIT_STAPLER_RETRY_DELAY=0 \
+        ./build-dmg.sh --check-stapler-retry staple "$base/x.app" \
+        >"$base/persistent.stdout" 2>"$base/persistent.stderr"; then
+        echo "FAIL(stapler-retry): persistent failure unexpectedly succeeded" >&2
+        return 1
+    fi
+    [ "$(cat "$state")" = 3 ] \
+        || { echo "FAIL(stapler-retry): expected bounded 3 attempts, got $(cat "$state")" >&2; return 1; }
+    grep -Fq 'stapler staple failed after 3 attempts' "$base/persistent.stderr" \
+        || { echo "FAIL(stapler-retry): missing final failure message" >&2; cat "$base/persistent.stderr" >&2; return 1; }
+    return 0
+}
+
+stapler_retry_fixture
 hdiutil_retry_fixture
 bash_compat_smoke
 layout_fixture
