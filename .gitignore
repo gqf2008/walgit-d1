@@ -44,3 +44,6 @@ __pycache__/
 
 # ki runtime state (sessions/goals) never belongs in the server repo
 .ki/
+
+# legacy ki runtime state in this repo
+.rpi/
