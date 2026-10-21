@@ -5,16 +5,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JAR="$ROOT/target/tla2tools.jar"
 VERSION="v1.8.0"
-# v1.8.0 is a rolling upstream asset, not an immutable release. The upstream
-# port pinned 867aefb69ffc2452031292587b389d1fc3eb43ff (2026-09-12); by
-# 2026-10-19 that asset was gone, the release had rolled to
-# 932d35ec2b9fdb3d3e4d0a3321689c634a1f6b43 (built 2026-10-15) and the old
-# checksum could no longer be obtained. The pin was re-derived from the release
-# asset GitHub serves for v1.8.0 (asset digest 15d103b7...) and every matrix arm
-# was rerun. A mismatch still fails closed: inspect MANIFEST.MF, upstream commit
-# history and the release asset digest before changing it. Never accept an
-# unverified replacement automatically.
-SHA256="15d103b7e5617780bcc904c0af12f1ad242e2b345c0301136c5be4588f17edac"
+# v1.8.0 is a rolling upstream *prerelease*: its assets are rebuilt and
+# re-uploaded, so the URL is stable but the bytes are not. The pin has moved
+# repeatedly: the upstream port pinned 867aefb69ffc2452031292587b389d1fc3eb43ff
+# (2026-09-12); by 2026-10-19 that asset was gone, rolled to 932d35ec2b9fdb3d
+# (built 2026-10-15), and the pin was re-derived to 15d103b7...; on 2026-10-21
+# the asset had rolled again to the 2026-10-20 build (MANIFEST.MF X-Git-Revision
+# d2e1472, GitHub release asset digest 5bd7b64d..., confirmed via
+# `gh api repos/tlaplus/tlaplus/releases`). A mismatch still fails closed:
+# inspect MANIFEST.MF, upstream commit history and the release asset digest
+# before changing it. Never accept an unverified replacement automatically.
+SHA256="5bd7b64db99ae4c6c35f290de5e809c0ee41af43f8699cf696099ffb6452b1e2"
 URL="https://github.com/tlaplus/tlaplus/releases/download/$VERSION/tla2tools.jar"
 
 # `command -v java` alone accepts macOS's /usr/bin/java stub, which exists but
