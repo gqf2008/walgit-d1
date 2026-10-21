@@ -162,7 +162,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             web::require_auth,
         ));
-
+    
     let app = Router::new()
         .merge(
             web::api::router(state.clone())
@@ -245,31 +245,24 @@ pub fn router(state: Arc<AppState>) -> Router {
     } else {
         app
     }
-    .with_state(state)
+        .with_state(state)
 }
 
 async fn host_from_authority(mut req: Request<Body>) -> Request<Body> {
     if !req.headers().contains_key(axum::http::header::HOST)
         && let Some(auth) = req.uri().authority().map(std::string::ToString::to_string)
-        && let Ok(v) = axum::http::HeaderValue::from_str(&auth)
-    {
-        req.headers_mut().insert(axum::http::header::HOST, v);
-    }
+            && let Ok(v) = axum::http::HeaderValue::from_str(&auth) {
+                req.headers_mut().insert(axum::http::header::HOST, v);
+            }
     req
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "CatchPanicLayer::custom requires the boxed-panic handler signature"
-)]
+#[allow(clippy::needless_pass_by_value, reason = "CatchPanicLayer::custom requires the boxed-panic handler signature")]
 fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
     let msg = err
         .downcast_ref::<String>()
         .cloned()
-        .or_else(|| {
-            err.downcast_ref::<&str>()
-                .map(std::string::ToString::to_string)
-        })
+        .or_else(|| err.downcast_ref::<&str>().map(std::string::ToString::to_string))
         .unwrap_or_else(|| "unknown panic".to_string());
     tracing::error!(panic = %msg, "request handler panicked");
     (
@@ -301,10 +294,7 @@ fn spawn_runtime_watchdog(
             let inflight = inflight.get();
             let tasks_running = tasks.running_count();
             // f64 is the metrics-gauge contract; task counts cannot approach 2^53.
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "f64 is the metrics-gauge contract; task counts ≪ 2^53"
-            )]
+            #[allow(clippy::cast_precision_loss, reason = "f64 is the metrics-gauge contract; task counts ≪ 2^53")]
             ::metrics::gauge!("walgit_tasks_running").set(tasks_running as f64);
             if gap > std::time::Duration::from_millis(2500) {
                 ::metrics::counter!("walgit_runtime_stall_total").increment(1);
@@ -413,7 +403,9 @@ pub(crate) async fn dispatch_route(
             (&Method::DELETE, "") => admin::delete(st, route, &headers).await,
             // Admin routes reach here only through `/{o}/{r}/api[-browser]/…` (web::v1).
             (&Method::GET, "policy") => policy::http_get(st, route, &headers).await,
-            (&Method::PUT, "policy") => policy::http_put(st, route, &headers, body).await,
+            (&Method::PUT, "policy") => {
+                policy::http_put(st, route, &headers, body).await
+            }
             (&Method::DELETE, "policy") => policy::http_delete(st, route, &headers).await,
             (&Method::GET, "settings") => settings::http_get(st, route, &headers).await,
             (&Method::GET, "settings/effective") => {
@@ -745,10 +737,13 @@ impl walgit_bundle::BundleSource for RegistryBundleSource {
                 }
             }
         }
-        let linked = h.local().packs().is_ok_and(|ps| {
-            ps.iter()
-                .any(|p| h.local().pack_path(&p.checksum).is_symlink())
-        });
+        let linked = h
+            .local()
+            .packs()
+            .is_ok_and(|ps| {
+                ps.iter()
+                    .any(|p| h.local().pack_path(&p.checksum).is_symlink())
+            });
         if linked {
             return walgit_bundle::BundleEngine::Gix { faulter: None };
         }

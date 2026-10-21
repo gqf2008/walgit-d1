@@ -386,8 +386,7 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     let client = reqwest::Client::new();
     // create via the prefix form
     assert_eq!(
-        client
-            .put(format!("{}/t/pfx/api", server.base_url))
+        client.put(format!("{}/t/pfx/api", server.base_url))
             .send()
             .await?
             .status(),
@@ -449,8 +448,7 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     assert_eq!(validation["ok"], true);
     // refs etc. (already D15)
     assert_eq!(
-        client
-            .get(format!("{}/t/pfx/api/refs", server.base_url))
+        client.get(format!("{}/t/pfx/api/refs", server.base_url))
             .send()
             .await?
             .status(),
@@ -458,16 +456,14 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     );
     // delete via the prefix form
     assert_eq!(
-        client
-            .delete(format!("{}/t/pfx/api", server.base_url))
+        client.delete(format!("{}/t/pfx/api", server.base_url))
             .send()
             .await?
             .status(),
         204
     );
     assert_eq!(
-        client
-            .get(format!("{}/t/pfx/api", server.base_url))
+        client.get(format!("{}/t/pfx/api", server.base_url))
             .send()
             .await?
             .status(),
@@ -646,25 +642,11 @@ async fn host_principal_registry_self_only_and_verifiable() -> TestResult {
 
     // Bob may not revoke alice; alice may.
     assert_eq!(
-        call(
-            &server,
-            reqwest::Method::DELETE,
-            "/api/v1/principals/alice",
-            bob,
-            None
-        )
-        .await?,
+        call(&server, reqwest::Method::DELETE, "/api/v1/principals/alice", bob, None).await?,
         reqwest::StatusCode::FORBIDDEN
     );
     assert_eq!(
-        call(
-            &server,
-            reqwest::Method::DELETE,
-            "/api/v1/principals/alice",
-            alice,
-            None
-        )
-        .await?,
+        call(&server, reqwest::Method::DELETE, "/api/v1/principals/alice", alice, None).await?,
         reqwest::StatusCode::NO_CONTENT
     );
 

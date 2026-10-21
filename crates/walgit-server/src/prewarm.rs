@@ -142,22 +142,21 @@ async fn warm(st: &Arc<AppState>, repo: &str) -> Result<String, String> {
             .find(|r| r.name == head.head_target)
             .map(|r| r.oid.clone());
         if let (Some(sha), walgit_wal::ObjectAccess::Remote(packs)) = (head_sha.as_deref(), &access)
-            && let Ok(oid) = gix_hash::ObjectId::from_hex(sha.as_bytes())
-        {
-            reporter.notice(format!(
-                // sha passed from_hex above (40/64 hex chars), so byte 12
-                // is on a char boundary and split_at cannot panic.
-                "Reading the root tree of {} from the pack set",
-                sha.split_at(12).0
-            ));
-            let remote = crate::web::objects::Remote::new(
-                packs.clone(),
-                handle.local().clone(),
-                reporter.clone(),
-            );
-            let (_c, tree, _m) = remote.fault_path(&oid, "").await.map_err(|e| e.message())?;
-            let _ = remote.tree_entries(&tree).await;
-        }
+            && let Ok(oid) = gix_hash::ObjectId::from_hex(sha.as_bytes()) {
+                reporter.notice(format!(
+                    // sha passed from_hex above (40/64 hex chars), so byte 12
+                    // is on a char boundary and split_at cannot panic.
+                    "Reading the root tree of {} from the pack set",
+                    sha.split_at(12).0
+                ));
+                let remote = crate::web::objects::Remote::new(
+                    packs.clone(),
+                    handle.local().clone(),
+                    reporter.clone(),
+                );
+                let (_c, tree, _m) = remote.fault_path(&oid, "").await.map_err(|e| e.message())?;
+                let _ = remote.tree_entries(&tree).await;
+            }
         Ok(format!("warm: {mode}"))
     }
     .instrument(span)

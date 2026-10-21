@@ -473,9 +473,7 @@ impl Remote {
                 } else {
                     let mut treesame_parent = None;
                     for par in &meta.parents {
-                        let pm = if let Some(m) = metas.get(par) {
-                            m.clone()
-                        } else {
+                        let pm = if let Some(m) = metas.get(par) { m.clone() } else {
                             let m = self.commit(par).await?;
                             metas.insert(*par, m.clone());
                             m
@@ -501,9 +499,7 @@ impl Remote {
             for par in follow {
                 if seen.insert(par) {
                     seq += 1;
-                    let pm = if let Some(m) = metas.get(&par) {
-                        m.clone()
-                    } else {
+                    let pm = if let Some(m) = metas.get(&par) { m.clone() } else {
                         let m = self.commit(&par).await?;
                         metas.insert(par, m.clone());
                         m

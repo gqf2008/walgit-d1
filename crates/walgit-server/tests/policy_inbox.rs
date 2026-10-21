@@ -93,13 +93,7 @@ fn scrub_credentials(s: &str, token: &str) -> String {
 /// Push `HEAD` as `refs/collab/inbox/<actor>/<name>` from `src` with the
 /// transport identity of `token`. Returns success (the server accepted) and
 /// **credential-scrubbed** stderr ([`scrub_credentials`]).
-fn push_inbox(
-    src: &TestRepo,
-    server: &Server,
-    actor: &str,
-    name: &str,
-    token: &str,
-) -> (bool, String) {
+fn push_inbox(src: &TestRepo, server: &Server, actor: &str, name: &str, token: &str) -> (bool, String) {
     let ref_name = format!("refs/collab/inbox/{actor}/{name}");
     // An orphan commit per push: the inbox is append-only refs, unrelated
     // history between them is the normal shape.
@@ -188,7 +182,10 @@ async fn collab_inbox_pushes_are_gated_per_actor_in_token_mode() -> TestResult {
     assert!(status.is_success(), "repo create with bearer: {status}");
 
     let put = reqwest::Client::new()
-        .put(format!("{}/t/secured/policy", server.base_url))
+        .put(format!(
+            "{}/t/secured/policy",
+            server.base_url
+        ))
         .bearer_auth("alice-s3cret")
         .header("content-type", "application/json")
         .body(inbox_policy())
@@ -221,7 +218,10 @@ async fn collab_inbox_pushes_are_gated_per_actor_in_token_mode() -> TestResult {
     // Clearing the policy rolls the behavior back: bob can now push alice's
     // inbox (the read-side signature check remains the second layer).
     let cleared = reqwest::Client::new()
-        .delete(format!("{}/t/secured/policy", server.base_url))
+        .delete(format!(
+            "{}/t/secured/policy",
+            server.base_url
+        ))
         .bearer_auth("bob-s3cret")
         .send()
         .await?;

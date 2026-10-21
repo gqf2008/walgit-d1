@@ -166,7 +166,8 @@ mod tests {
     /// The encoder the CLI uses (`base64::engine::general_purpose::STANDARD` over
     /// UTF-16LE). Hand-rolled so the launcher needs no dependency at all.
     fn encode(text: &str) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const ALPHABET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut utf16 = Vec::with_capacity(text.len() * 2);
         for unit in text.encode_utf16() {
             utf16.extend_from_slice(&unit.to_le_bytes());
@@ -241,9 +242,6 @@ mod tests {
         cmd.raw_arg(command);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args.len(), 4);
-        assert_eq!(
-            args[3], command,
-            "the redirect and the nested quotes reach cmd untouched"
-        );
+        assert_eq!(args[3], command, "the redirect and the nested quotes reach cmd untouched");
     }
 }

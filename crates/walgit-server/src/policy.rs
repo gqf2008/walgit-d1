@@ -907,10 +907,7 @@ mod tests {
     #[test]
     fn principal_placeholder_captures_one_segment() {
         assert_eq!(
-            ref_pattern_capture(
-                "refs/collab/inbox/{principal}/**",
-                "refs/collab/inbox/alice/123"
-            ),
+            ref_pattern_capture("refs/collab/inbox/{principal}/**", "refs/collab/inbox/alice/123"),
             Some(Some("alice".to_string()))
         );
         assert_eq!(
@@ -927,10 +924,7 @@ mod tests {
             None
         );
         assert_eq!(
-            ref_pattern_capture(
-                "refs/collab/inbox/x{principal}/**",
-                "refs/collab/inbox/xalice/1"
-            ),
+            ref_pattern_capture("refs/collab/inbox/x{principal}/**", "refs/collab/inbox/xalice/1"),
             None,
             "the placeholder must be a whole segment"
         );
@@ -960,9 +954,7 @@ mod tests {
         );
         let foreign = txn(vec![upd("refs/collab/inbox/alice/y", "", "bbb")], false);
         assert!(
-            evaluate(&p, "bob", &foreign, |_| false).per_ref[0]
-                .1
-                .is_err(),
+            evaluate(&p, "bob", &foreign, |_| false).per_ref[0].1.is_err(),
             "a principal other than the captured owner is denied"
         );
         let other = txn(vec![upd("refs/heads/topic", "", "ccc")], false);

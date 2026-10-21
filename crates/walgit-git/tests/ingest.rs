@@ -560,7 +560,9 @@ fn open_history_pack_repo(root: &tempfile::TempDir, id: &RepoId) -> LocalRepo {
     LocalRepo::open(root.path(), id).unwrap().unwrap()
 }
 
-async fn full_midx_repo(format: ObjectFormat) -> (tempfile::TempDir, RepoId, gix_hash::ObjectId) {
+async fn full_midx_repo(
+    format: ObjectFormat,
+) -> (tempfile::TempDir, RepoId, gix_hash::ObjectId) {
     let root = tempfile::TempDir::new().unwrap();
     let id = RepoId::new("acme", "full-midx").unwrap();
     let repo = LocalRepo::init(root.path(), &id, format).unwrap();
@@ -622,9 +624,7 @@ async fn removing_midx_covered_base_rewrites_stale_midx() {
     assert!(repo.remove_pack(&base).unwrap());
     assert_eq!(repo.refs_diag("HEAD").generation, before);
     assert!(
-        !id.local_dir(root.path())
-            .join("objects/pack/multi-pack-index")
-            .exists(),
+        !id.local_dir(root.path()).join("objects/pack/multi-pack-index").exists(),
         "remove_packs must defer MIDX construction to the caller outside rw.write"
     );
     repo.rebuild_history_midx().await.unwrap();
@@ -653,9 +653,7 @@ async fn removing_unrelated_pack_preserves_legal_full_midx() {
         .unwrap()
         .unwrap()
         .checksum;
-    let midx = id
-        .local_dir(root.path())
-        .join("objects/pack/multi-pack-index");
+    let midx = id.local_dir(root.path()).join("objects/pack/multi-pack-index");
     let before = std::fs::read(&midx).unwrap();
     assert!(midx_names_pack(&repo, &base));
     assert!(!midx_names_pack(&repo, &unrelated));
@@ -677,9 +675,7 @@ async fn removing_unrelated_pack_preserves_legal_full_midx() {
 async fn real_git_full_midx_survives_refresh_for_sha1_and_sha256() {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let (root, id, base) = full_midx_repo(format).await;
-        let midx = id
-            .local_dir(root.path())
-            .join("objects/pack/multi-pack-index");
+        let midx = id.local_dir(root.path()).join("objects/pack/multi-pack-index");
         let before = std::fs::read(&midx).unwrap();
         let verify = Command::new("git")
             .arg("--git-dir")
@@ -759,7 +755,8 @@ async fn refresh_rebuilds_empty_truncated_and_missing_chunk_midx() {
             "bad-terminator" => {
                 let mut bytes = std::fs::read(&midx).unwrap();
                 let nchunks = usize::from(bytes[6]);
-                bytes[12 + nchunks * 12..16 + nchunks * 12].copy_from_slice(b"BAD!");
+                bytes[12 + nchunks * 12..16 + nchunks * 12]
+                    .copy_from_slice(b"BAD!");
                 std::fs::write(&midx, bytes).unwrap();
             }
             _ => unreachable!(),
@@ -776,9 +773,7 @@ async fn refresh_rebuilds_empty_truncated_and_missing_chunk_midx() {
 async fn sha256_history_midx_is_rebuilt_after_corruption() {
     let (root, id, base) = history_pack_repo(ObjectFormat::Sha256).await;
     assert_eq!(base.to_string().len(), 64);
-    let midx = id
-        .local_dir(root.path())
-        .join("objects/pack/multi-pack-index");
+    let midx = id.local_dir(root.path()).join("objects/pack/multi-pack-index");
     std::fs::write(&midx, []).unwrap();
     let repo = open_history_pack_repo(&root, &id);
     repo.refresh().unwrap();

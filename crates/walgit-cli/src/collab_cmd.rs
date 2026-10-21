@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
+use walgit_git::ObjectFormat;
 use std::fmt::Write as _;
 use std::io::Write as _;
-use walgit_git::ObjectFormat;
 use walgit_wal::collab::{
     BOARD_PATH, Board, BoardDef, CARD_CLAIM_KIND, CARD_CLAIM_TTL_DEFAULT_SECS,
     CARD_CLAIM_TTL_MAX_SECS, CARD_CLAIM_TTL_MIN_SECS, COLLAB_ENTRY_MAX_BYTES,
@@ -949,10 +949,7 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
         obj.insert(
             "related".into(),
             serde_json::Value::Array(
-                args.related
-                    .iter()
-                    .map(|o| serde_json::Value::String(o.clone()))
-                    .collect(),
+                args.related.iter().map(|o| serde_json::Value::String(o.clone())).collect(),
             ),
         );
     }
@@ -960,10 +957,7 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
         obj.insert(
             "depends_on".into(),
             serde_json::Value::Array(
-                args.depends_on
-                    .iter()
-                    .map(|o| serde_json::Value::String(o.clone()))
-                    .collect(),
+                args.depends_on.iter().map(|o| serde_json::Value::String(o.clone())).collect(),
             ),
         );
     }
@@ -1014,7 +1008,9 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
     // load 只在 done 分支执行——收件箱里他人坏条目/缺对象不该阻断
     // issue/comment 等普通写(#114 审查回归修正),也避免每写一次 O(N)
     // git cat-file。
-    if entry.kind == "status" && entry.body.get("status").and_then(|v| v.as_str()) == Some("done") {
+    if entry.kind == "status"
+        && entry.body.get("status").and_then(|v| v.as_str()) == Some("done")
+    {
         let (thread_entries, principals) = CollabReader::new(&args.repo).load()?;
         check_status_transition(&entry, &thread_entries, &principals)?;
     }
@@ -1064,7 +1060,14 @@ fn run_auto_fold(repo: &Path, actor: &str, key: &Path, remote: Option<&str>, thr
     if n < threshold {
         return;
     }
-    match run_gc(repo, actor, key, remote, false, COLLAB_SNAPSHOT_MAX_BYTES) {
+    match run_gc(
+        repo,
+        actor,
+        key,
+        remote,
+        false,
+        COLLAB_SNAPSHOT_MAX_BYTES,
+    ) {
         Ok(()) => println!("collab auto-fold: folded {n} inbox ref(s) (threshold {threshold})"),
         Err(e) => eprintln!("collab auto-fold skipped (entry is published): {e}"),
     }
@@ -1478,11 +1481,7 @@ fn run_gc(
         changed |= keep_fold_record(
             &mut records,
             &mut seen,
-            SnapshotRecord {
-                oid,
-                principal,
-                json,
-            },
+            SnapshotRecord { oid, principal, json },
             &entry.actor,
             format,
         );
@@ -1509,8 +1508,7 @@ fn run_gc(
     // is over cap and truncation was explicitly requested.
     let snap_oid = if changed || over_cap {
         let ts = chrono::Utc::now().timestamp();
-        let (snap, content) =
-            build_capped_snapshot_at(actor, ts, records, &key, truncate, max_bytes)?;
+        let (snap, content) = build_capped_snapshot_at(actor, ts, records, &key, truncate, max_bytes)?;
         if !snap.complete {
             eprintln!(
                 "collab gc: WARNING snapshot truncated: dropped {} oldest record(s); the ledger is now marked complete=false",
@@ -1538,9 +1536,13 @@ fn run_gc(
             // target is proven to hold the history before any inbox deletion;
             // when it already does this is a harmless no-op.
             let snapshot_to_push = snap_oid.as_deref().or(baseline.as_deref());
-            let snapshot_to_push = snapshot_to_push
-                .context("cannot prune a remote without a snapshot: fetch the remote and retry")?;
-            let lease = format!("{SNAPSHOT_REF}:{}", baseline.as_deref().unwrap_or_default());
+            let snapshot_to_push = snapshot_to_push.context(
+                "cannot prune a remote without a snapshot: fetch the remote and retry",
+            )?;
+            let lease = format!(
+                "{SNAPSHOT_REF}:{}",
+                baseline.as_deref().unwrap_or_default()
+            );
             git_push_refspecs(
                 repo,
                 remote,
@@ -1594,7 +1596,11 @@ fn run_gc(
 /// thread id when it has none (issue #131 — the board cards and the report
 /// lists label the same way).
 fn unit_label<'a>(title: &'a str, id: &'a str) -> &'a str {
-    if title.is_empty() { id } else { title }
+    if title.is_empty() {
+        id
+    } else {
+        title
+    }
 }
 
 fn render_report_text(r: &Report, unpushed: Option<&Unpushed>) -> String {
@@ -1630,10 +1636,7 @@ fn render_report_text(r: &Report, unpushed: Option<&Unpushed>) -> String {
             out,
             "  {} [{}] approvals={} merge_allowed={} ({})",
             unit_label(&p.title, &p.id),
-            p.status,
-            p.approvals,
-            p.merge_allowed,
-            p.merge_reason
+            p.status, p.approvals, p.merge_allowed, p.merge_reason
         );
     }
     let _ = writeln!(out, "\nactivity");
@@ -1680,9 +1683,7 @@ fn render_report_markdown(r: &Report, unpushed: Option<&Unpushed>) -> String {
             out,
             "| {} | {} | {} | {} |",
             esc(unit_label(&p.title, &p.id)),
-            p.status,
-            p.approvals,
-            p.merge_allowed
+            p.status, p.approvals, p.merge_allowed
         );
     }
     out
@@ -2060,7 +2061,8 @@ fn read_claim_state(repo: &Path, id: &str, session: &str) -> Option<ClaimState> 
 fn write_claim_state(repo: &Path, id: &str, session: &str, claim_oid: &str) -> Result<()> {
     let path = claim_state_path(repo, id, session)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
     }
     let doc = ClaimState {
         claim: claim_oid.to_string(),
@@ -2075,14 +2077,15 @@ fn write_claim_state(repo: &Path, id: &str, session: &str, claim_oid: &str) -> R
 /// error exit.
 fn save_claim_state(repo: &Path, id: &str, session: &str, claim_oid: &str) {
     if let Err(e) = write_claim_state(repo, id, session, claim_oid) {
-        eprintln!(
-            "warning: could not record the claim state ({e:#}); a restart re-claims after the TTL"
-        );
+        eprintln!("warning: could not record the claim state ({e:#}); a restart re-claims after the TTL");
     }
 }
 
 /// The card's claim view and effective status over freshly read collab refs.
-fn claim_view_now(repo: &Path, id: &str) -> Result<(walgit_wal::collab::CardClaimView, String)> {
+fn claim_view_now(
+    repo: &Path,
+    id: &str,
+) -> Result<(walgit_wal::collab::CardClaimView, String)> {
     let (entries, principals) = CollabReader::new(repo).load()?;
     let thread_entries: Vec<&EntryRef> = entries.iter().filter(|e| e.entry.id == id).collect();
     anyhow::ensure!(
@@ -2097,19 +2100,15 @@ fn claim_view_now(repo: &Path, id: &str) -> Result<(walgit_wal::collab::CardClai
     );
     let ordered = thread(&thread_entries);
     let status = card_status(&ordered);
-    let view = card_claim_view(&thread_entries, &principals, chrono::Utc::now().timestamp());
+    let view = card_claim_view(
+        &thread_entries,
+        &principals,
+        chrono::Utc::now().timestamp(),
+    );
     Ok((view, status))
 }
 
-fn print_claim(
-    format: &str,
-    claimed: bool,
-    id: &str,
-    holder: &str,
-    oid: &str,
-    expires_at: i64,
-    resumed: bool,
-) {
+fn print_claim(format: &str, claimed: bool, id: &str, holder: &str, oid: &str, expires_at: i64, resumed: bool) {
     match format {
         "json" => println!(
             "{}",
@@ -2124,11 +2123,7 @@ fn print_claim(
         ),
         _ if claimed => println!(
             "{} {id} by {holder} until {expires_at} (claim {oid})",
-            if resumed {
-                "already claimed"
-            } else {
-                "claimed"
-            }
+            if resumed { "already claimed" } else { "claimed" }
         ),
         _ => println!(
             "stand-down: card {id} is held by {holder} until {expires_at} (claim {oid}); do not start work"
@@ -2137,15 +2132,7 @@ fn print_claim(
 }
 
 fn stand_down(id: &str, winner: &CardClaim, format: &str) -> Result<()> {
-    print_claim(
-        format,
-        false,
-        id,
-        &winner.actor,
-        &winner.oid,
-        winner.expires_at(),
-        false,
-    );
+    print_claim(format, false, id, &winner.actor, &winner.oid, winner.expires_at(), false);
     let _ = std::io::stdout().flush();
     if format == "json" {
         // JSON mode's stdout is the machine channel; the human-readable
@@ -2232,15 +2219,7 @@ fn run_claim(
         && winner.actor == actor
         && winner.session == session
     {
-        print_claim(
-            format,
-            true,
-            id,
-            &winner.actor,
-            &winner.oid,
-            winner.expires_at(),
-            true,
-        );
+        print_claim(format, true, id, &winner.actor, &winner.oid, winner.expires_at(), true);
         return Ok(());
     }
     if let Some(winner) = &view.winner {
@@ -2319,7 +2298,9 @@ fn run_claim(
         None => {
             if view.claims.iter().any(|c| c.oid == oid) {
                 // Ours parsed and verified but is already past ts + ttl.
-                bail!("claim {oid} expired between publish and re-read; retry with a larger --ttl");
+                bail!(
+                    "claim {oid} expired between publish and re-read; retry with a larger --ttl"
+                );
             }
             // Ours never entered the verified set: the signature does not
             // match the principal's registered key (or the principal is
@@ -2335,10 +2316,7 @@ fn run_claim(
 fn thread_head_map(entries: &[EntryRef]) -> HashMap<String, String> {
     let mut grouped: HashMap<&str, Vec<&EntryRef>> = HashMap::new();
     for entry in entries {
-        grouped
-            .entry(entry.entry.id.as_str())
-            .or_default()
-            .push(entry);
+        grouped.entry(entry.entry.id.as_str()).or_default().push(entry);
     }
     let mut heads = HashMap::new();
     for (id, refs) in grouped {
@@ -2891,8 +2869,7 @@ impl CollabReader {
                     COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
                 );
             }
-            let snap =
-                parse_snapshot(&bytes).map_err(|e| anyhow::anyhow!("{SNAPSHOT_REF}: {e}"))?;
+            let snap = parse_snapshot(&bytes).map_err(|e| anyhow::anyhow!("{SNAPSHOT_REF}: {e}"))?;
             for rec in &snap.entries {
                 if let Some(er) = rec.entry_ref(format) {
                     set.insert(er);
@@ -3010,15 +2987,7 @@ mod tests {
 
     #[test]
     fn fold_records_prefer_the_actor_owned_inbox_copy() {
-        let e = entry(
-            "t",
-            "issue",
-            "alice",
-            "",
-            "unused",
-            1,
-            serde_json::json!({}),
-        );
+        let e = entry("t", "issue", "alice", "", "unused", 1, serde_json::json!({}));
         let json = serde_json::to_string(&e.entry).unwrap();
         let oid = walgit_wal::collab::git_blob_oid(json.as_bytes(), ObjectFormat::Sha1);
         let planted = SnapshotRecord {
@@ -3057,10 +3026,7 @@ mod tests {
             "alice",
             ObjectFormat::Sha1,
         ));
-        assert_eq!(
-            records[0].principal, "alice",
-            "a later planted copy cannot displace it"
-        );
+        assert_eq!(records[0].principal, "alice", "a later planted copy cannot displace it");
     }
 
     #[test]
@@ -3166,7 +3132,8 @@ mod tests {
         // own approve is excluded by the merge rule (distinct non-author
         // approvers), so carol signs with her own key.
         let sk2 = SigningKey::from_bytes(&[8u8; 32]);
-        let pk2 = base64::engine::general_purpose::STANDARD.encode(sk2.verifying_key().to_bytes());
+        let pk2 =
+            base64::engine::general_purpose::STANDARD.encode(sk2.verifying_key().to_bytes());
         principals.insert("carol".to_string(), pk2);
         let mut review = entry(
             "pr1",
@@ -3404,16 +3371,10 @@ mod entry_refs_tests {
         let related = ["aaa".to_string()];
         let depends_on = ["bbb".to_string()];
         body["related"] = serde_json::Value::Array(
-            related
-                .iter()
-                .map(|o| serde_json::Value::String(o.clone()))
-                .collect(),
+            related.iter().map(|o| serde_json::Value::String(o.clone())).collect(),
         );
         body["depends_on"] = serde_json::Value::Array(
-            depends_on
-                .iter()
-                .map(|o| serde_json::Value::String(o.clone()))
-                .collect(),
+            depends_on.iter().map(|o| serde_json::Value::String(o.clone())).collect(),
         );
         assert_eq!(body["related"][0], "aaa");
         assert_eq!(body["depends_on"][0], "bbb");
@@ -3428,9 +3389,7 @@ mod entry_refs_tests {
         let content = b"attachment bytes";
         let digest = format!("{:x}", sha2::Sha256::digest(content));
         let b64 = base64::engine::general_purpose::STANDARD.encode(content);
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&b64)
-            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
         let digest2 = format!("{:x}", sha2::Sha256::digest(&decoded));
         assert_eq!(digest, digest2);
         assert_eq!(decoded, content);
@@ -3458,22 +3417,14 @@ mod entry_refs_tests {
         };
         let thread_entries = vec![
             mk("issue", "e1", 1, serde_json::json!({"title": "x"})),
-            mk(
-                "status",
-                "e2",
-                2,
-                serde_json::json!({"status": "needs-review"}),
-            ),
+            mk("status", "e2", 2, serde_json::json!({"status": "needs-review"})),
         ];
         let principals = HashMap::new();
         let done = mk("status", "e3", 3, serde_json::json!({"status": "done"}));
         let err = check_status_transition(&done.entry, &thread_entries, &principals).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("status transition rejected"), "got: {msg}");
-        assert!(
-            msg.contains("principal-fetch"),
-            "缺 host registry 提示: {msg}"
-        );
+        assert!(msg.contains("principal-fetch"), "缺 host registry 提示: {msg}");
         // 非 done 状态自由流转。
         let open = mk("status", "e4", 4, serde_json::json!({"status": "open"}));
         assert!(check_status_transition(&open.entry, &thread_entries, &principals).is_ok());
@@ -3495,14 +3446,7 @@ mod gc_tests {
         (path, pk, sk)
     }
 
-    fn mk_entry(
-        kind: &str,
-        id: &str,
-        actor: &str,
-        parent: &str,
-        ts: i64,
-        body: serde_json::Value,
-    ) -> Entry {
+    fn mk_entry(kind: &str, id: &str, actor: &str, parent: &str, ts: i64, body: serde_json::Value) -> Entry {
         Entry {
             version: 1,
             kind: kind.into(),
@@ -3538,12 +3482,7 @@ mod gc_tests {
         }))
         .unwrap();
         let oid = git_write_blob(repo, &content).unwrap();
-        git_update_ref(
-            repo,
-            &format!("refs/collab/meta/principals/{principal}"),
-            Some(&oid),
-        )
-        .unwrap();
+        git_update_ref(repo, &format!("refs/collab/meta/principals/{principal}"), Some(&oid)).unwrap();
     }
 
     /// The aggregation fingerprint: the report's bytes plus every entry's
@@ -3551,13 +3490,9 @@ mod gc_tests {
     fn fingerprint(repo: &Path) -> Vec<u8> {
         let (entries, principals) = CollabReader::new(repo).load().unwrap();
         let refs: Vec<&EntryRef> = entries.iter().collect();
-        let mut out = serde_json::to_vec(&build_report(
-            &refs,
-            &principals,
-            &MergeRules::default(),
-            i64::MAX,
-        ))
-        .unwrap();
+        let mut out =
+            serde_json::to_vec(&build_report(&refs, &principals, &MergeRules::default(), i64::MAX))
+                .unwrap();
         let mut rows: Vec<String> = entries
             .iter()
             .map(|e| {
@@ -3652,9 +3587,7 @@ mod gc_tests {
             Some(7),
             "the stream stays aligned after a skipped body"
         );
-        let uncapped = reader
-            .blobs_batch(std::slice::from_ref(&big), None)
-            .unwrap();
+        let uncapped = reader.blobs_batch(std::slice::from_ref(&big), None).unwrap();
         assert_eq!(uncapped.get(&big).map(Vec::len), Some(4096));
     }
 
@@ -3700,8 +3633,8 @@ mod gc_tests {
                 }
             })
             .collect();
-        let full =
-            serde_json::to_string(&build_snapshot("alice", 9, records.clone(), &alice_sk)).unwrap();
+        let full = serde_json::to_string(&build_snapshot("alice", 9, records.clone(), &alice_sk))
+            .unwrap();
         let cap = full.len() - 40;
         let oid = git_write_blob(
             &repo,
@@ -3754,14 +3687,7 @@ mod gc_tests {
 
         let (alice_key, alice_pk, alice_sk) = keypair_file(tmp.path(), 7);
         register(&repo, "alice", &alice_pk);
-        let mut issue = mk_entry(
-            "issue",
-            "t1",
-            "alice",
-            "",
-            1,
-            serde_json::json!({"title": "x"}),
-        );
+        let mut issue = mk_entry("issue", "t1", "alice", "", 1, serde_json::json!({"title": "x"}));
         issue.sig = sign_entry(&mut issue, &alice_sk);
         let oid = push_entry(&repo, &issue);
         let inbox = String::from_utf8_lossy(
@@ -3783,23 +3709,11 @@ mod gc_tests {
         std::process::Command::new("git")
             .args(["-C"])
             .arg(&repo)
-            .args([
-                "fetch",
-                "-q",
-                "origin",
-                "+refs/collab/inbox/*:refs/collab/inbox/*",
-            ])
+            .args(["fetch", "-q", "origin", "+refs/collab/inbox/*:refs/collab/inbox/*"])
             .status()
             .unwrap();
 
-        let pushed = run_gc(
-            &repo,
-            "alice",
-            &alice_key,
-            Some("origin"),
-            false,
-            usize::MAX,
-        );
+        let pushed = run_gc(&repo, "alice", &alice_key, Some("origin"), false, usize::MAX);
         let remote_snapshot = String::from_utf8_lossy(
             &std::process::Command::new("git")
                 .args(["-C"])
@@ -3813,10 +3727,7 @@ mod gc_tests {
         .to_string();
 
         if pushed.is_ok() {
-            assert!(
-                !remote_snapshot.is_empty(),
-                "a successful prune must publish a snapshot first"
-            );
+            assert!(!remote_snapshot.is_empty(), "a successful prune must publish a snapshot first");
             let snap_oid = remote_snapshot.split_whitespace().next().unwrap();
             let snap = std::process::Command::new("git")
                 .args(["-C"])
@@ -3827,11 +3738,7 @@ mod gc_tests {
             let snap = parse_snapshot(&snap.stdout).unwrap();
             assert!(snap.entries.iter().any(|record| record.oid == oid));
         } else {
-            assert_eq!(
-                inbox_ref_count(&repo),
-                1,
-                "a failed prune leaves the remote inbox intact"
-            );
+            assert_eq!(inbox_ref_count(&repo), 1, "a failed prune leaves the remote inbox intact");
         }
     }
 
@@ -3899,14 +3806,7 @@ mod gc_tests {
             .status()
             .unwrap();
 
-        let entry = mk_entry(
-            "issue",
-            "t1",
-            "alice",
-            "",
-            1,
-            serde_json::json!({"title": "ok"}),
-        );
+        let entry = mk_entry("issue", "t1", "alice", "", 1, serde_json::json!({"title": "ok"}));
         push_entry(&repo, &entry);
         let garbage = git_write_blob(&repo, "not an entry").unwrap();
         git_update_ref(&repo, "refs/collab/inbox/alice/garbage0", Some(&garbage)).unwrap();
@@ -3933,38 +3833,14 @@ mod gc_tests {
         register(&repo, "alice", &alice_pk);
         register(&repo, "bob", &bob_pk);
 
-        let mut issue = mk_entry(
-            "issue",
-            "t1",
-            "alice",
-            "",
-            1,
-            serde_json::json!({"title": "fold me"}),
-        );
+        let mut issue = mk_entry("issue", "t1", "alice", "", 1, serde_json::json!({"title": "fold me"}));
         issue.sig = sign_entry(&mut issue, &alice_sk);
         let o1 = push_entry(&repo, &issue);
-        let mut comment = mk_entry(
-            "comment",
-            "t1",
-            "bob",
-            &o1,
-            2,
-            serde_json::json!({"text": " chained"}),
-        );
+        let mut comment = mk_entry("comment", "t1", "bob", &o1, 2, serde_json::json!({"text": " chained"}));
         comment.sig = sign_entry(&mut comment, &bob_sk);
         let o2 = push_entry(&repo, &comment);
         // carol is unregistered: her entry is and stays unverified.
-        let o3 = push_entry(
-            &repo,
-            &mk_entry(
-                "comment",
-                "t1",
-                "carol",
-                &o2,
-                3,
-                serde_json::json!({"text": "drive-by"}),
-            ),
-        );
+        let o3 = push_entry(&repo, &mk_entry("comment", "t1", "carol", &o2, 3, serde_json::json!({"text": "drive-by"})));
         // An unparseable inbox blob: gc must leave its ref alone.
         let garbage = git_write_blob(&repo, "not an entry").unwrap();
         git_update_ref(&repo, "refs/collab/inbox/carol/garbage0", Some(&garbage)).unwrap();
@@ -3972,19 +3848,11 @@ mod gc_tests {
         // The garbage blob fails the CLI's strict inbox parse (pre-existing
         // behavior); gc must still fold around it, so fold first.
         run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
-        assert_eq!(
-            inbox_ref_count(&repo),
-            1,
-            "only the unparseable blob's ref survives"
-        );
+        assert_eq!(inbox_ref_count(&repo), 1, "only the unparseable blob's ref survives");
         let out = std::process::Command::new("git")
             .args(["-C"])
             .arg(&repo)
-            .args([
-                "for-each-ref",
-                "--format=%(refname) %(objectname)",
-                "refs/collab/inbox",
-            ])
+            .args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/collab/inbox"])
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("garbage0"));
@@ -4009,13 +3877,7 @@ mod gc_tests {
         assert_eq!(entries.len(), 3);
         let carol = entries.iter().find(|e| e.entry.actor == "carol").unwrap();
         assert!(!carol.is_verified(&principals));
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|e| e.is_verified(&principals))
-                .count(),
-            2
-        );
+        assert_eq!(entries.iter().filter(|e| e.is_verified(&principals)).count(), 2);
 
         // A second gc with an empty tail is a no-op...
         run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
@@ -4023,31 +3885,16 @@ mod gc_tests {
 
         // ...and the tail stays live: a new entry chains onto a folded tip
         // (its parent oid lives only inside the snapshot now).
-        let mut follow = mk_entry(
-            "status",
-            "t1",
-            "alice",
-            &o3,
-            4,
-            serde_json::json!({"status": "in-progress"}),
-        );
+        let mut follow = mk_entry("status", "t1", "alice", &o3, 4, serde_json::json!({"status": "in-progress"}));
         follow.sig = sign_entry(&mut follow, &alice_sk);
         push_entry(&repo, &follow);
         let (entries, principals) = CollabReader::new(&repo).load().unwrap();
         assert_eq!(entries.len(), 4);
         let refs: Vec<&EntryRef> = entries.iter().filter(|e| e.entry.id == "t1").collect();
         let ordered = thread(&refs);
-        assert_eq!(
-            ordered.len(),
-            4,
-            "the chain resolves across the fold boundary"
-        );
+        assert_eq!(ordered.len(), 4, "the chain resolves across the fold boundary");
         assert_eq!(ordered[3].entry.kind, "status");
-        assert!(
-            ordered
-                .iter()
-                .all(|e| e.entry.actor != "carol" || !e.is_verified(&principals))
-        );
+        assert!(ordered.iter().all(|e| e.entry.actor != "carol" || !e.is_verified(&principals)));
 
         // A second real fold composes with the existing snapshot.
         run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
@@ -4069,14 +3916,7 @@ mod gc_tests {
             .unwrap();
         let (alice_key, alice_pk, _) = keypair_file(tmp.path(), 7);
         register(&repo, "alice", &alice_pk);
-        let mut e = mk_entry(
-            "issue",
-            "t1",
-            "alice",
-            "",
-            1,
-            serde_json::json!({"title": "x"}),
-        );
+        let mut e = mk_entry("issue", "t1", "alice", "", 1, serde_json::json!({"title": "x"}));
         e.sig = sign_entry(&mut e, &SigningKey::from_bytes(&[7u8; 32]));
         push_entry(&repo, &e);
         run_gc(&repo, "alice", &alice_key, None, false, usize::MAX).unwrap();
@@ -4090,10 +3930,7 @@ mod gc_tests {
         let ev = describe_ref(&repo, SNAPSHOT_REF, &snap_oid).unwrap();
         assert_eq!(ev.kind, "snapshot");
         assert_eq!(ev.actor, "alice");
-        assert!(
-            ev.verified,
-            "snapshot verifies against the folder's registered key"
-        );
+        assert!(ev.verified, "snapshot verifies against the folder's registered key");
         assert_eq!(ev.thread.len(), 0);
     }
 }
@@ -4222,11 +4059,15 @@ mod capped_snapshot_tests {
         assert!(text.len() <= cap, "rendered {} <= cap {cap}", text.len());
         // The newest record (ts 30) always survives; the oldest (ts 10) goes first.
         assert!(
-            snap.entries.iter().any(|r| r.oid == format!("{:040x}", 3)),
+            snap.entries
+                .iter()
+                .any(|r| r.oid == format!("{:040x}", 3)),
             "newest survives"
         );
         assert!(
-            snap.entries.iter().all(|r| r.oid != format!("{:040x}", 1)),
+            snap.entries
+                .iter()
+                .all(|r| r.oid != format!("{:040x}", 1)),
             "oldest dropped"
         );
     }

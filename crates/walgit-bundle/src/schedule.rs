@@ -62,7 +62,8 @@ pub fn is_due(schedule: &Schedule, last_built: Option<SystemTime>, now: SystemTi
 
 /// Current Unix timestamp in seconds (for `creation_token` computation).
 pub fn unix_now(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    now.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Coalescing bound for [`due_slot`]: at most this many fires are walked per

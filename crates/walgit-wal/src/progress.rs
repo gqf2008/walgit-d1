@@ -47,10 +47,7 @@ impl Progress {
         // A one-decimal percent for narration: u64 byte counters lose nothing
         // meaningful past f64's 2^53 integer precision, and the field is an
         // approximation by design (not a byte-exact count).
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "narration percent of byte counters; f64 is the wire shape and exactness past 2^53 is meaningless"
-        )]
+        #[allow(clippy::cast_precision_loss, reason = "narration percent of byte counters; f64 is the wire shape and exactness past 2^53 is meaningless")]
         let percent = total
             .filter(|t| *t > 0)
             .map(|t| ((done as f64 / t as f64) * 1000.0).round() / 10.0);

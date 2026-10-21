@@ -141,14 +141,8 @@ mod tests {
         assert_eq!(m.name, "walgit");
         assert_eq!(m.sha256, sha256_hex(SKILL_MD.as_bytes()));
         assert_eq!(m.bytes, SKILL_MD.len());
-        assert_eq!(
-            m.skill_url,
-            "https://git.example.com/services/public/skill/SKILL.md"
-        );
-        assert_eq!(
-            m.install_url,
-            "https://git.example.com/services/public/skill/install.sh"
-        );
+        assert_eq!(m.skill_url, "https://git.example.com/services/public/skill/SKILL.md");
+        assert_eq!(m.install_url, "https://git.example.com/services/public/skill/install.sh");
         // One source of truth: the manifest reports the same build as `/healthz`/the footer.
         assert_eq!(m.version, crate::instance::build_version());
     }
@@ -157,18 +151,9 @@ mod tests {
     fn install_script_pins_the_sha_and_writes_the_skill_dir() {
         let script = super::install_script(&Config::default(), "https://git.example.com");
         assert!(script.starts_with("#!/bin/sh"), "{script}");
-        assert!(
-            script.contains(&sha256_hex(SKILL_MD.as_bytes())),
-            "{script}"
-        );
-        assert!(
-            script.contains("WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit"),
-            "{script}"
-        );
-        assert!(
-            script.contains("/services/public/skill/SKILL.md"),
-            "{script}"
-        );
+        assert!(script.contains(&sha256_hex(SKILL_MD.as_bytes())), "{script}");
+        assert!(script.contains("WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit"), "{script}");
+        assert!(script.contains("/services/public/skill/SKILL.md"), "{script}");
         // A public-CA host must not downgrade verification.
         assert!(!script.contains("curl -fsSLk"), "{script}");
     }
@@ -188,8 +173,10 @@ mod tests {
         std::fs::write(&served, SKILL_MD).unwrap();
         let dest = root.join("installed");
 
-        let script =
-            super::install_script(&Config::default(), &format!("file://{}", root.display()));
+        let script = super::install_script(
+            &Config::default(),
+            &format!("file://{}", root.display()),
+        );
         let run = || {
             Command::new("sh")
                 .args(["-c", &script])
@@ -238,8 +225,10 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("SKILL.md"), b"previous good skill\n").unwrap();
 
-        let script =
-            super::install_script(&Config::default(), &format!("file://{}", root.display()));
+        let script = super::install_script(
+            &Config::default(),
+            &format!("file://{}", root.display()),
+        );
         let out = Command::new("sh")
             .args(["-c", &script])
             .env("WALGIT_SKILL_DIR", &dest)
@@ -273,10 +262,7 @@ mod tests {
             .strip_prefix("---\n")
             .and_then(|rest| rest.split_once("\n---\n"))
             .expect("frontmatter delimited");
-        assert!(
-            body.trim_start().starts_with('#'),
-            "body follows the frontmatter"
-        );
+        assert!(body.trim_start().starts_with('#'), "body follows the frontmatter");
         let mut seen_name = false;
         for line in front.lines() {
             if let Some(value) = line.strip_prefix("description:") {
@@ -299,9 +285,6 @@ mod tests {
         cfg.server.tls.mode = walgit_config::TlsMode::SelfSigned;
         let script = super::install_script(&cfg, "https://git.example.com");
         assert!(script.contains("curl -fsSLk"), "{script}");
-        assert!(
-            script.contains(&sha256_hex(SKILL_MD.as_bytes())),
-            "{script}"
-        );
+        assert!(script.contains(&sha256_hex(SKILL_MD.as_bytes())), "{script}");
     }
 }

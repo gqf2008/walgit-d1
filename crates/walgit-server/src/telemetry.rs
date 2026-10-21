@@ -58,10 +58,9 @@ fn resolve_project_id(cfg: &Config) -> Option<String> {
         return Some(p.clone());
     }
     if let Ok(p) = std::env::var("GOOGLE_CLOUD_PROJECT")
-        && !p.is_empty()
-    {
-        return Some(p);
-    }
+        && !p.is_empty() {
+            return Some(p);
+        }
     // Probe metadata only when the documented GCE override is present. Off-GCP,
     // resolving metadata.google.internal can otherwise stall startup.
     #[cfg(not(test))]
@@ -300,11 +299,7 @@ where
         let message = visitor
             .values
             .get("message")
-            .and_then(|v| v.as_str())
-            .map_or_else(
-                || metadata.name().to_string(),
-                std::string::ToString::to_string,
-            );
+            .and_then(|v| v.as_str()).map_or_else(|| metadata.name().to_string(), std::string::ToString::to_string);
 
         let mut record = Self::base_record(severity, &message);
         record.insert("target".into(), json!(metadata.target()));
@@ -329,8 +324,7 @@ where
         }
         if let Some(t) = visitor.values.get("trace_id").and_then(|v| v.as_str()) {
             let sid = trace
-                .as_ref()
-                .map_or_else(generate_span_id, |t| t.1.clone());
+                .as_ref().map_or_else(generate_span_id, |t| t.1.clone());
             trace = Some((t.to_string(), sid));
         }
         if let Some((tid, sid)) = trace {
@@ -352,8 +346,7 @@ where
                 return;
             }
             let end = data.last_exit.unwrap_or_else(Instant::now);
-            let elapsed_ms =
-                u64::try_from(end.duration_since(data.start).as_millis()).unwrap_or(u64::MAX);
+            let elapsed_ms = u64::try_from(end.duration_since(data.start).as_millis()).unwrap_or(u64::MAX);
             record = Self::base_record(level_to_severity(data.level), data.name);
             record.insert("elapsed_ms".into(), json!(elapsed_ms));
             // Close deferred well past the last poll (a lingering child): say so
@@ -483,15 +476,13 @@ pub fn extract_trace_id(headers: &axum::http::HeaderMap) -> Option<String> {
     if let Some(v) = headers
         .get("x-cloud-trace-context")
         .and_then(|v| v.to_str().ok())
-        && let Some(tid) = parse_x_cloud_trace_context(v)
-    {
-        return Some(tid);
-    }
+        && let Some(tid) = parse_x_cloud_trace_context(v) {
+            return Some(tid);
+        }
     if let Some(v) = headers.get("traceparent").and_then(|v| v.to_str().ok())
-        && let Some(tid) = parse_traceparent(v)
-    {
-        return Some(tid);
-    }
+        && let Some(tid) = parse_traceparent(v) {
+            return Some(tid);
+        }
     None
 }
 

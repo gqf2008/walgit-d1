@@ -179,7 +179,8 @@ fn credential_env_warnings(
             continue; // the file carries it; nothing a restart can lose.
         }
         let env_override = !running_literal.is_empty();
-        let env_named = !env_name.is_empty() && lookup(env_name).is_some_and(|v| !v.is_empty());
+        let env_named =
+            !env_name.is_empty() && lookup(env_name).is_some_and(|v| !v.is_empty());
         if env_override || env_named {
             warnings.push(format!(
                 "the saved config has no literal {slot}: this instance gets it from the environment ({}), which the file does not capture — a restart outside that environment will fail to open the store (put the credential in the form, or move it into the file)",
@@ -486,10 +487,7 @@ force_path_style = true
 
         // Nothing anywhere: no warning (the wizard's own GCS/ADC shape).
         let none_lookup = |_: &str| None;
-        assert_eq!(
-            credential_env_warnings(&file, &running, none_lookup).len(),
-            0
-        );
+        assert_eq!(credential_env_warnings(&file, &running, none_lookup).len(), 0);
 
         // A WALGIT__-style override reached the running config only.
         running.store.s3.access_key = Some("from-override".into());

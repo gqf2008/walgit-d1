@@ -63,7 +63,8 @@ async fn skill_md_is_open_markdown_with_etag() -> Result<()> {
         .await?;
     assert_eq!(response.status(), 200);
     assert!(
-        response.headers()["content-type"]
+        response
+            .headers()["content-type"]
             .to_str()?
             .starts_with("text/markdown")
     );
@@ -96,10 +97,7 @@ async fn assets_have_content_type_and_immutable_cache() -> Result<()> {
         .split('"')
         .find(|part| {
             part.starts_with(marker)
-                && part
-                    .rsplit('.')
-                    .next()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("js"))
+                && part.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("js"))
         })
         .expect("built index references a JavaScript asset");
     let response = client

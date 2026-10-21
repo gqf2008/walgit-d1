@@ -3921,9 +3921,13 @@ async fn refs_at_seq_rejects_a_witness_older_than_a_folded_cut() {
         .await
         .unwrap();
     assert_eq!(handle.manifest().head_seq, 1);
-    let witness = walgit_wal::write_witness_checkpoint(&handle, 1, handle.manifest().packs.clone())
-        .await
-        .unwrap();
+    let witness = walgit_wal::write_witness_checkpoint(
+        &handle,
+        1,
+        handle.manifest().packs.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(witness.seq, 1);
 
     // seq 2 and seq 3, then fold the live checkpoint to 3. The tail (1, 2]
@@ -4036,6 +4040,7 @@ async fn publish_compact_tier2_writes_an_exact_witness() {
         .expect("main ref");
     assert_eq!(main.oid, c1);
 }
+
 
 /// C5/C7/C8: a submission that changes nothing must settle with `seq = 0`,
 /// publish no log entry, and never consume a sibling's seq. A pack with no ref

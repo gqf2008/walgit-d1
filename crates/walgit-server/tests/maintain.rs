@@ -3764,10 +3764,7 @@ async fn planner_rebuilds_a_base_that_lost_its_witness() -> anyhow::Result<()> {
     // the old checksum, so the old live-seq witness path would fail forever.
     // BaseRebuild must republish that immutable pack at a fresh COMPACT seq
     // and write its witness there.
-    let report = step!(
-        "repair pass",
-        walgit_server::maintain::run_pass(&server.state)
-    )?;
+    let report = step!("repair pass", walgit_server::maintain::run_pass(&server.state))?;
     assert!(report.compactions >= 1, "repair pass: {report:?}");
     step!("sync after repair", h.sync())?;
     let repaired = walgit_wal::base_pack(&h.manifest())
@@ -4941,7 +4938,10 @@ async fn gc_reads_retention_settings_past_the_freshness_ttl() -> anyhow::Result<
         h.store()
             .put_bytes(&keys::log_segment_key(15), vec![0u8; 16], PutMode::Create)
     )?;
-    for key in [keys::checkpoint_key(5), keys::checkpoint_refs_key(5)] {
+    for key in [
+        keys::checkpoint_key(5),
+        keys::checkpoint_refs_key(5),
+    ] {
         step!(
             "old checkpoint",
             h.store().put_bytes(&key, vec![0u8; 16], PutMode::Create)
@@ -4959,7 +4959,8 @@ async fn gc_reads_retention_settings_past_the_freshness_ttl() -> anyhow::Result<
     let mut cfg2 = (*server.state.cfg).clone();
     let cache2 = tempfile::tempdir()?;
     cfg2.cache.dir = cache2.path().to_path_buf();
-    let registry2 = walgit_wal::Registry::new(server.state.store.clone(), Arc::new(cfg2));
+    let registry2 =
+        walgit_wal::Registry::new(server.state.store.clone(), Arc::new(cfg2));
     let h2 = step!("open second instance", registry2.open(&id))?;
     step!(
         "retention settings",

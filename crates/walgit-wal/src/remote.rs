@@ -182,20 +182,19 @@ impl RemotePacks {
                 let name = e.file_name().to_string_lossy().to_string();
                 if let Some(stem) = name.strip_suffix(".idx")
                     && !live.contains(stem)
-                    && let Err(err) = tokio::fs::remove_file(e.path()).await
-                {
-                    // On Windows a delete of a still-mapped index fails
-                    // (ACCESS_DENIED / USER_MAPPED_FILE) while the previous
-                    // RemotePacks or an in-flight request holds it; it is
-                    // pruned on the next refresh once every holder is gone.
-                    // Not an error: the manifest no longer names this pack,
-                    // so it can never serve bytes again.
-                    tracing::debug!(
-                        path = %e.path().display(),
-                        %err,
-                        "stale pack index kept: delete deferred to the next refresh"
-                    );
-                }
+                        && let Err(err) = tokio::fs::remove_file(e.path()).await {
+                            // On Windows a delete of a still-mapped index fails
+                            // (ACCESS_DENIED / USER_MAPPED_FILE) while the previous
+                            // RemotePacks or an in-flight request holds it; it is
+                            // pruned on the next refresh once every holder is gone.
+                            // Not an error: the manifest no longer names this pack,
+                            // so it can never serve bytes again.
+                            tracing::debug!(
+                                path = %e.path().display(),
+                                %err,
+                                "stale pack index kept: delete deferred to the next refresh"
+                            );
+                        }
             }
         }
         // An index the Serve level already installed (linked/local base) is
@@ -344,10 +343,7 @@ impl RemotePacks {
         self.packs.iter().map(|p| p.checksum.as_str()).collect()
     }
     pub fn total_objects(&self) -> u64 {
-        self.packs
-            .iter()
-            .map(|p| u64::from(p.idx.num_objects()))
-            .sum()
+        self.packs.iter().map(|p| u64::from(p.idx.num_objects())).sum()
     }
 
     /// Locate an object: (pack index, pack offset).
@@ -409,9 +405,10 @@ impl RemotePacks {
                 Header::Blob | Header::Tree | Header::Commit | Header::Tag => {
                     // as_kind() is None only for the two delta variants, which
                     // this arm excludes.
-                    let kind = entry.header.as_kind().ok_or_else(|| {
-                        WalError::Corrupt("delta header in a base-kind arm".into())
-                    })?;
+                    let kind = entry
+                        .header
+                        .as_kind()
+                        .ok_or_else(|| WalError::Corrupt("delta header in a base-kind arm".into()))?;
                     return Ok(Some((kind, size.unwrap_or(entry.decompressed_size))));
                 }
                 Header::OfsDelta { base_distance } => {
@@ -458,10 +455,7 @@ impl RemotePacks {
             span.record("chain", *chain);
             // Chain depth is capped at 4096 by decode_inner's guard, far below
             // f64's exact-integer range; a histogram needs f64.
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "delta-chain depth bounded by the 4096 guard in decode_inner"
-            )]
+            #[allow(clippy::cast_precision_loss, reason = "delta-chain depth bounded by the 4096 guard in decode_inner")]
             metrics::histogram!("walgit_remote_delta_chain").record(*chain as f64);
         }
         r.map(|(o, _)| o)
@@ -483,9 +477,10 @@ impl RemotePacks {
                 Header::Blob | Header::Tree | Header::Commit | Header::Tag => {
                     // as_kind() is None only for the two delta variants, which
                     // this arm excludes.
-                    let kind = entry.header.as_kind().ok_or_else(|| {
-                        WalError::Corrupt("delta header in a base-kind arm".into())
-                    })?;
+                    let kind = entry
+                        .header
+                        .as_kind()
+                        .ok_or_else(|| WalError::Corrupt("delta header in a base-kind arm".into()))?;
                     let o = Arc::new(Obj {
                         kind,
                         data: Bytes::from(data),
@@ -758,8 +753,7 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, &'static str> {
             let start = usize::try_from(ofs).map_err(|_| "delta copy offset exceeds usize")?;
             let end = usize::try_from(end).map_err(|_| "delta copy end exceeds usize")?;
             out.extend_from_slice(
-                base.get(start..end)
-                    .ok_or("delta copy out of base bounds")?,
+                base.get(start..end).ok_or("delta copy out of base bounds")?,
             );
         } else if cmd != 0 {
             let n = cmd as usize;
@@ -780,10 +774,7 @@ pub fn human_bytes(n: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     // Human display only: byte counts past f64's 2^53 (8 PiB) lose sub-unit
     // precision, which is beyond what one-decimal display promises.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "display formatter; f64 granularity past 2^53 bytes is beyond one-decimal precision"
-    )]
+    #[allow(clippy::cast_precision_loss, reason = "display formatter; f64 granularity past 2^53 bytes is beyond one-decimal precision")]
     let mut v = n as f64;
     let mut i = 0;
     while v >= 1024.0 && i + 1 < U.len() {

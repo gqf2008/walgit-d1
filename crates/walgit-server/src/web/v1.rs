@@ -99,9 +99,7 @@ fn host_principal_key(principal: &str) -> String {
 /// immediately on the writer instance and within the TTL everywhere else.
 /// Best effort: a failing store read surfaces as an internal error, never as a
 /// silent "unverified" fallback.
-pub(crate) async fn host_principals_map(
-    st: &AppState,
-) -> Result<HashMap<String, String>, ApiError> {
+pub(crate) async fn host_principals_map(st: &AppState) -> Result<HashMap<String, String>, ApiError> {
     if let Some(hit) = st.caches.host_principals.get(&()) {
         return Ok(hit);
     }
@@ -148,10 +146,7 @@ async fn host_principals(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    st.auth
-        .require_read(&headers)
-        .await
-        .map_err(ApiError::from)?;
+    st.auth.require_read(&headers).await.map_err(ApiError::from)?;
     let map = host_principals_map(&st).await?;
     Ok(json_swr(&map, None).into_response(&headers))
 }
@@ -165,11 +160,7 @@ async fn host_principal_put(
     Path(principal): Path<String>,
     Json(body): Json<HostPrincipalPut>,
 ) -> Result<Response, ApiError> {
-    let auth = st
-        .auth
-        .require_write(&headers)
-        .await
-        .map_err(ApiError::from)?;
+    let auth = st.auth.require_write(&headers).await.map_err(ApiError::from)?;
     if !auth.anonymous && auth.name != principal {
         return Err(ApiError::Forbidden);
     }
@@ -205,11 +196,7 @@ async fn host_principal_delete(
     headers: HeaderMap,
     Path(principal): Path<String>,
 ) -> Result<Response, ApiError> {
-    let auth = st
-        .auth
-        .require_write(&headers)
-        .await
-        .map_err(ApiError::from)?;
+    let auth = st.auth.require_write(&headers).await.map_err(ApiError::from)?;
     if !auth.anonymous && auth.name != principal {
         return Err(ApiError::Forbidden);
     }

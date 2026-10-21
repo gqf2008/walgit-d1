@@ -44,8 +44,7 @@ pub fn git_pipe(cwd: &std::path::Path, first: &[&str], second: &[&str]) -> std::
         .stderr(Stdio::piped())
         .output()
         .expect("run upstream git");
-    assert!(
-        up.status.success(),
+    assert!(up.status.success(), 
         "git {first:?} failed: {} — stderr: {}",
         up.status,
         String::from_utf8_lossy(&up.stderr)
@@ -65,8 +64,7 @@ pub fn git_pipe(cwd: &std::path::Path, first: &[&str], second: &[&str]) -> std::
         let _ = stdin.write_all(&up.stdout);
     }
     let out = down.wait_with_output().expect("wait downstream git");
-    assert!(
-        out.status.success(),
+    assert!(out.status.success(), 
         "git {second:?} failed: {} — stderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
@@ -228,8 +226,7 @@ pub fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(
-        out.status.success(),
+    assert!(out.status.success(), 
         "git {:?} failed: {}",
         args,
         String::from_utf8_lossy(&out.stderr)

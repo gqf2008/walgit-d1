@@ -15,10 +15,7 @@ pub fn encode_line(buf: &mut Vec<u8>, data: &[u8]) {
     let len = data.len() + 4;
     // Every index is a nibble masked with `& 0xf`, so it is 0..=15 by
     // construction and the 16-entry table can never be indexed out of range.
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "indexes are nibbles masked to 0..=15 against a 16-byte table"
-    )]
+    #[allow(clippy::indexing_slicing, reason = "indexes are nibbles masked to 0..=15 against a 16-byte table")]
     buf.extend_from_slice(&[
         HEX[(len >> 12) & 0xf],
         HEX[(len >> 8) & 0xf],

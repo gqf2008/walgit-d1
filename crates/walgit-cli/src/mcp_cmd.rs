@@ -2401,8 +2401,12 @@ fn spawn_subscription(
                         let current = refs_map(&lines);
                         let changed = changed_ref_pairs(&last_refs, &current);
                         actors = actors_from_ref_pairs(&changed);
-                        sessions =
-                            sessions_from_changed_refs(&opts, &changed, Some(cancel.clone())).await;
+                        sessions = sessions_from_changed_refs(
+                            &opts,
+                            &changed,
+                            Some(cancel.clone()),
+                        )
+                        .await;
                         last_refs = current;
                         Ok(version)
                     }
@@ -2470,8 +2474,12 @@ fn spawn_collab_puller(
                     if last_digest.as_deref() != Some(digest.as_str()) {
                         let changed = changed_ref_pairs(&last_refs, &refs);
                         let actors = actors_from_ref_pairs(&changed);
-                        let sessions =
-                            sessions_from_changed_refs(&opts, &changed, Some(cancel.clone())).await;
+                        let sessions = sessions_from_changed_refs(
+                            &opts,
+                            &changed,
+                            Some(cancel.clone()),
+                        )
+                        .await;
                         last_refs = refs;
                         match refresh_collab_refs(&opts, Some(cancel.clone())).await {
                             Ok(()) => {
@@ -3379,8 +3387,14 @@ mod tests {
         assert_eq!(value["params"]["_meta"]["sessions"], json!(["s1"]));
         assert_eq!(value["params"]["_meta"]["self_session"], "s1");
 
-        let without =
-            updated_notification("walgit://refs/o/r", "v2", &[], &[], Some("a"), Some("s1"));
+        let without = updated_notification(
+            "walgit://refs/o/r",
+            "v2",
+            &[],
+            &[],
+            Some("a"),
+            Some("s1"),
+        );
         let value: Value = serde_json::from_str(&without).expect("json");
         assert_eq!(value["params"]["_meta"]["version"], "v2");
         assert!(value["params"]["_meta"].get("actors").is_none());

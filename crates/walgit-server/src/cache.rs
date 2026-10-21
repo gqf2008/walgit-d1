@@ -396,10 +396,7 @@ mod tests {
 
     fn make_args(prefixes: &[&str]) -> walgit_git::LsRefsArgs {
         walgit_git::LsRefsArgs {
-            ref_prefixes: prefixes
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            ref_prefixes: prefixes.iter().map(std::string::ToString::to_string).collect(),
             symrefs: false,
             peel: true,
             unborn: false,
@@ -656,10 +653,7 @@ mod tests {
         let cache_ms = start.elapsed().as_millis();
 
         // Test-only benchmark ratio; measured in milliseconds, far below f64's exact range.
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "test-only ms timing ratio ≪ 2^53"
-        )]
+        #[allow(clippy::cast_precision_loss, reason = "test-only ms timing ratio ≪ 2^53")]
         let speedup = if cache_ms > 0 {
             render_ms as f64 / cache_ms as f64
         } else {

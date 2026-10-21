@@ -371,12 +371,7 @@ async fn gc_wal_objects(
         if keep_all_folded_logs || keep_logs.contains(&first_seq) {
             continue; // a live base's replay witness (or nothing provable)
         }
-        let Some((meta, bytes)) = handle
-            .store()
-            .get_bytes(&key)
-            .await
-            .map_err(|e| e.to_string())?
-        else {
+        let Some((meta, bytes)) = handle.store().get_bytes(&key).await.map_err(|e| e.to_string())? else {
             continue; // a vanished object has nothing left to reclaim
         };
         let (entries, _) = walgit_proto::frame::decode_entries(&bytes)
@@ -416,12 +411,7 @@ async fn gc_wal_objects(
         }
         let cp_key = keys::checkpoint_key(seq);
         let refs_key = keys::checkpoint_refs_key(seq);
-        let timestamp = if let Some((_, bytes)) = handle
-            .store()
-            .get_bytes(&cp_key)
-            .await
-            .map_err(|e| e.to_string())?
-        {
+        let timestamp = if let Some((_, bytes)) = handle.store().get_bytes(&cp_key).await.map_err(|e| e.to_string())? {
             match walgit_proto::v1::Checkpoint::decode(bytes.as_ref()) {
                 Ok(cp) => cp.created_at.as_ref().and_then(valid_time),
                 Err(e) => {
@@ -436,12 +426,7 @@ async fn gc_wal_objects(
         // snapshot carries a timestamp too; use it so the remnant can drain.
         let timestamp = if timestamp.is_some() {
             timestamp
-        } else if let Some((_, bytes)) = handle
-            .store()
-            .get_bytes(&refs_key)
-            .await
-            .map_err(|e| e.to_string())?
-        {
+        } else if let Some((_, bytes)) = handle.store().get_bytes(&refs_key).await.map_err(|e| e.to_string())? {
             match walgit_proto::v1::RefSnapshot::decode(bytes.as_ref()) {
                 Ok(rs) => rs.created_at.as_ref().and_then(valid_time),
                 Err(e) => {
@@ -539,13 +524,17 @@ fn reclaim_deadline(
         (ts.seconds >= 0 && (0..1_000_000_000).contains(&ts.nanos))
             .then(|| walgit_proto::time::to_system(ts))
     };
-    claim.fence_until.as_ref().and_then(valid_time).or_else(|| {
-        claim
-            .since
-            .as_ref()
-            .and_then(valid_time)
-            .and_then(|t| t.checked_add(grace))
-    })
+    claim
+        .fence_until
+        .as_ref()
+        .and_then(valid_time)
+        .or_else(|| {
+            claim
+                .since
+                .as_ref()
+                .and_then(valid_time)
+                .and_then(|t| t.checked_add(grace))
+        })
 }
 
 async fn gc_superseded_packs(
@@ -908,8 +897,9 @@ async fn gc_superseded_packs_with_grace(
         .iter()
         .find(|r| r.owner == owner && r.token == token)
         .and_then(|r| reclaim_deadline(r, grace));
-    let within_fence =
-        || fence_deadline.is_some_and(|deadline| std::time::SystemTime::now() < deadline);
+    let within_fence = || {
+        fence_deadline.is_some_and(|deadline| std::time::SystemTime::now() < deadline)
+    };
 
     let mut deleted = 0u64;
     let mut freed = 0u64;
@@ -1410,7 +1400,10 @@ async fn run(
             // are per-repo settings (D24), and a direct `POST /ops/gc` bypasses
             // the maintainer's own sync — a cached handle must not hand out a
             // lease (or a window) sized by a superseded settings revision.
-            let manifest = handle.sync_refs_fresh().await.map_err(|e| e.to_string())?;
+            let manifest = handle
+                .sync_refs_fresh()
+                .await
+                .map_err(|e| e.to_string())?;
             let effective = handle.effective_config_for(manifest.as_ref());
             // Per-repo lease: two GC passes must not interleave. Claims carry
             // an owner+token fence, so a later pass cannot touch ours while we
@@ -1990,11 +1983,7 @@ mod gc_tests {
         let seq = 7;
         let cp = walgit_proto::keys::checkpoint_key(seq);
         let refs = walgit_proto::keys::checkpoint_refs_key(seq);
-        let side = format!(
-            "{}{}.bundle",
-            walgit_proto::keys::CHECKPOINTS_DIR,
-            "0000000000000007/"
-        );
+        let side = format!("{}{}.bundle", walgit_proto::keys::CHECKPOINTS_DIR, "0000000000000007/");
         let mut objects = vec![cp.clone(), refs.clone(), side.clone()];
         order_checkpoint_deletes(seq, &mut objects);
         let names: Vec<&str> = objects.iter().map(String::as_str).collect();
@@ -2149,7 +2138,10 @@ mod gc_fence_tests {
                 PutMode::Create,
             )
             .await?;
-        let full_marker_key = format!("{prefix}{}", walgit_proto::keys::superseded_key(&checksum));
+        let full_marker_key = format!(
+            "{prefix}{}",
+            walgit_proto::keys::superseded_key(&checksum)
+        );
         Ok((fault, truth, handle, checksum, full_marker_key, cache))
     }
 

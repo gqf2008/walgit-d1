@@ -43,7 +43,8 @@ const LOG_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub async fn run(action: &ServiceAction, config: &Path) -> Result<()> {
     let config = config.to_path_buf();
-    let cfg = Config::load(&config).with_context(|| format!("loading {}", config.display()))?;
+    let cfg = Config::load(&config)
+        .with_context(|| format!("loading {}", config.display()))?;
     let home = walgit_config::deploy_home();
     std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     let log = home.join("server.log");
@@ -92,10 +93,7 @@ async fn stop(listen: &str, home: &Path) -> Result<()> {
     let pidfile = &pidfile(home);
     let Some(pid) = read_pid(pidfile) else {
         if healthy(listen).await {
-            bail!(
-                "walgit: serving but no pidfile at {} — stop it by hand",
-                pidfile.display()
-            );
+            bail!("walgit: serving but no pidfile at {} — stop it by hand", pidfile.display());
         }
         println!("walgit: not running — http://{listen}");
         return Ok(());
@@ -241,7 +239,11 @@ fn tail(path: &Path, lines: usize) -> Option<String> {
 
 #[cfg(not(windows))]
 fn read_pid(pidfile: &Path) -> Option<u32> {
-    std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()
+    std::fs::read_to_string(pidfile)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// One GET /healthz over a bare TCP socket: the CLI owes nothing to an HTTP
@@ -620,7 +622,8 @@ fn listeners_on(netstat: &str, listen: &str, port: u16) -> Result<Vec<u32>, Stri
             continue;
         }
         // `[::1]:8081` → `::1`, `127.0.0.1:8081` → `127.0.0.1`.
-        let host = cols[1][..cols[1].len() - suffix.len()].trim_matches(['[', ']']);
+        let host = cols[1][..cols[1].len() - suffix.len()]
+            .trim_matches(['[', ']']);
         if !same_bind(host, &ours) {
             continue;
         }
@@ -1012,7 +1015,9 @@ mod task {
     use anyhow::{Context, Result, bail};
     use base64::Engine as _;
 
-    use super::{SERVICE_HOST_IMAGE, TASK_NAME, lists_task, task_is_ours};
+    use super::{
+        SERVICE_HOST_IMAGE, TASK_NAME, lists_task, task_is_ours,
+    };
 
     fn schtasks(args: &[&str]) -> Result<String> {
         let out = Command::new("schtasks")
@@ -1352,10 +1357,7 @@ mod task {
                 xml.contains(&format!("<Command>{escaped_host}</Command>")),
                 "the action must be the windowless host: {xml}"
             );
-            for console_image in [
-                "<Command>cmd.exe</Command>",
-                "<Command>powershell.exe</Command>",
-            ] {
+            for console_image in ["<Command>cmd.exe</Command>", "<Command>powershell.exe</Command>"] {
                 assert!(
                     !xml.contains(console_image),
                     "a console-subsystem action can still flash a window: {xml}"
@@ -1396,10 +1398,7 @@ mod task {
             }
             for path in [&exe, &cfg, &log] {
                 let path = path.display().to_string();
-                assert!(
-                    command_line.contains(&path),
-                    "missing {path:?} in {command_line}"
-                );
+                assert!(command_line.contains(&path), "missing {path:?} in {command_line}");
             }
         }
 
@@ -1411,14 +1410,8 @@ mod task {
             let script = "# walgit-service-task-v1: cmd /c wrapper with append logging\n\
                           $psi.Arguments = '/d /s /c \"\"C:\\walgit\\walgit.exe\" serve --config \
                           \"C:\\u\\walgit.toml\" >> \"C:\\u\\server.log\" 2>&1\"'";
-            let args = format!(
-                "-NoLogo -WindowStyle Hidden -EncodedCommand {}",
-                encode_command_line(script)
-            );
-            assert!(super::super::action_is_ours(
-                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-                &args
-            ));
+            let args = format!("-NoLogo -WindowStyle Hidden -EncodedCommand {}", encode_command_line(script));
+            assert!(super::super::action_is_ours("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", &args));
         }
 
         /// Both hidden wrappers stay narrow: a lookalike image (or a payload that
@@ -1494,7 +1487,9 @@ mod listener_parse_tests {
             vec![4242, 4243]
         );
         assert_eq!(
-            listeners_on(netstat, "127.0.0.1:1234", 1234).unwrap().len(),
+            listeners_on(netstat, "127.0.0.1:1234", 1234)
+                .unwrap()
+                .len(),
             0
         );
         // Read as a `::1`-only configuration, the v4 row stays out too.

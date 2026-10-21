@@ -777,13 +777,9 @@ impl RepoHandle {
                 }
                 let arc2 = arc.clone();
                 let r = crate::sync::on_bulk_runtime(async move {
-                    let needs_refresh = crate::sync::reconcile_packs_inner(
-                        &arc2,
-                        &manifest,
-                        SyncLevel::Serve,
-                        true,
-                    )
-                    .await?;
+                    let needs_refresh =
+                        crate::sync::reconcile_packs_inner(&arc2, &manifest, SyncLevel::Serve, true)
+                            .await?;
                     if needs_refresh {
                         arc2.local.refresh_async().await?;
                     }
@@ -1909,8 +1905,7 @@ mod tests {
                         {
                             bad.store(true, Ordering::Relaxed);
                         }
-                        if writers_done.load(Ordering::Acquire) == usize::try_from(writers).unwrap()
-                        {
+                        if writers_done.load(Ordering::Acquire) == usize::try_from(writers).unwrap() {
                             let (m, v) = h.manifest_snapshot();
                             if let Some(v) = v
                                 && v.as_str() != format!("v{}", m.revision)

@@ -1352,4 +1352,5 @@ mod download_tests {
             .unwrap();
         assert_eq!(std::fs::read(&small).unwrap(), b"tiny");
     }
+
 }

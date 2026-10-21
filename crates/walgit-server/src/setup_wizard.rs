@@ -149,10 +149,7 @@ pub(crate) fn storable_config_path(path: Option<&std::path::PathBuf>) -> bool {
 /// A unique sibling temp name (same directory, so the rename is atomic on
 /// the filesystem that holds the config).
 fn temp_sibling(path: &std::path::Path) -> std::path::PathBuf {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("walgit.toml");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("walgit.toml");
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -182,11 +179,7 @@ pub(crate) fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Resul
 /// our own file" contract is testable (issue #135: `temp_sibling` embeds a
 /// nanosecond, so its collision path is otherwise unreachable in a unit
 /// test).
-fn write_atomic_via(
-    path: &std::path::Path,
-    tmp: &std::path::Path,
-    text: &str,
-) -> std::io::Result<()> {
+fn write_atomic_via(path: &std::path::Path, tmp: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     // Only a temp this call created is this call's to remove. If
     // `create_new` failed the name belonged to someone else — a concurrent
@@ -261,10 +254,7 @@ fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::OpenOptions::new()
-        .read(true)
-        .open(parent)?
-        .sync_all()
+    std::fs::OpenOptions::new().read(true).open(parent)?.sync_all()
 }
 
 /// What a **blank** credential field means, which differs by surface:
@@ -810,11 +800,7 @@ backend = \"memory\"
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(
-            entries,
-            vec![std::ffi::OsString::from("walgit.toml")],
-            "{entries:?}"
-        );
+        assert_eq!(entries, vec![std::ffi::OsString::from("walgit.toml")], "{entries:?}");
         #[cfg(unix)]
         {
             // The file that carries literal credentials is 0600 (D43).
@@ -931,11 +917,7 @@ backend = \"memory\"
         unsafe { libc::umask(previous) };
         wrote.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(
-            mode & 0o777,
-            0o600,
-            "{mode:o} — the chmod must beat the umask"
-        );
+        assert_eq!(mode & 0o777, 0o600, "{mode:o} — the chmod must beat the umask");
         // And the next save still works — the file is writable by its owner.
         write_atomic(&path, "# second\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# second\n");

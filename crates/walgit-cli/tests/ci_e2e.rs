@@ -703,7 +703,8 @@ schedule = "* * * * * *"
     // Removing the map must trigger one schedule-discovery pass instead of
     // permanently stranding an unchanged ref.
     let state_path = r1.path().join(".git").join("ci-run.json");
-    let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&state_path)?)?;
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path)?)?;
     legacy
         .as_object_mut()
         .expect("state object")

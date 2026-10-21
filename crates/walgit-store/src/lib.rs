@@ -117,7 +117,8 @@ impl GetResult {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PutMode {
     /// Unconditional overwrite.
     #[default]

@@ -57,9 +57,9 @@ pub async fn receive_pack(
     else {
         return ForwardOutcome::Fallback;
     };
-    let stream = body
-        .into_data_stream()
-        .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string())));
+    let stream = body.into_data_stream().map(|chunk| {
+        chunk.map_err(|e| std::io::Error::other(e.to_string()))
+    });
     let mut request = client
         .post(&endpoint)
         .body(reqwest::Body::wrap_stream(stream));
@@ -86,9 +86,7 @@ pub async fn receive_pack(
             .ok()
             .filter(|v| !v.is_empty())
             .or_else(|| broker_token.map(str::to_string).filter(|v| !v.is_empty()));
-        if let Some(token) = token {
-            request = request.bearer_auth(token)
-        } else {
+        if let Some(token) = token { request = request.bearer_auth(token) } else {
             tracing::warn!(
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "push broker token unset (wal.push_broker_token / WALGIT_BROKER_TOKEN); falling back"
@@ -129,9 +127,9 @@ pub async fn receive_pack(
 
     let status = response.status();
     let response_headers = response.headers().clone();
-    let stream = response
-        .bytes_stream()
-        .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string())));
+    let stream = response.bytes_stream().map(|chunk| {
+        chunk.map_err(|e| std::io::Error::other(e.to_string()))
+    });
     let mut builder = Response::builder().status(status);
     for name in [
         header::CONTENT_TYPE,

@@ -194,9 +194,7 @@ pub async fn compose_full_from_base(
     // rig's weekly compose failed every pass for as long as the churn kept refs moving, 2026-08-22);
     // only a log folded away below the base's seq with no checkpoint before it is unrecoverable.
     let refs_key = walgit_proto::keys::checkpoint_refs_key(seq);
-    let snap = if let Some((_, bytes)) = store.get_bytes(&refs_key).await? {
-        walgit_proto::v1::RefSnapshot::decode(bytes.as_ref())?
-    } else {
+    let snap = if let Some((_, bytes)) = store.get_bytes(&refs_key).await? { walgit_proto::v1::RefSnapshot::decode(bytes.as_ref())? } else {
         info!(
             base_seq = seq,
             head = manifest.head_seq,

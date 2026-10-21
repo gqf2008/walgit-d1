@@ -159,7 +159,11 @@ impl Upstream {
             out.insert(
                 o.oid.clone(),
                 UpstreamObject {
-                    size: if o.size > 0 { o.size } else { asked_size },
+                    size: if o.size > 0 {
+                        o.size
+                    } else {
+                        asked_size
+                    },
                     oid: o.oid,
                     href: dl.href,
                     header: dl.header,

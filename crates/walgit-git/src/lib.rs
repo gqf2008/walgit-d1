@@ -418,10 +418,9 @@ impl LsRefsLine {
     pub fn render(&self, args: &LsRefsArgs) -> String {
         let mut s = format!("{} {}", self.oid, self.name);
         if (args.symrefs || self.oid == "unborn")
-            && let Some(t) = &self.symref_target
-        {
-            let _ = write!(s, " symref-target:{t}");
-        }
+            && let Some(t) = &self.symref_target {
+                let _ = write!(s, " symref-target:{t}");
+            }
         if args.peel && !self.peeled.is_empty() {
             let _ = write!(s, " peeled:{}", self.peeled);
         }
@@ -887,17 +886,16 @@ impl LocalRepo {
             empty_check = false;
             total += n as u64;
             if let Some(max) = opts.max_bytes
-                && total > max
-            {
-                drop(
-                    tokio::fs::remove_file(&tmp_path)
-                        .instrument(span.clone())
-                        .await,
-                );
-                return Err(GitError::InvalidInput(format!(
-                    "pack exceeds max_bytes {max}"
-                )));
-            }
+                && total > max {
+                    drop(
+                        tokio::fs::remove_file(&tmp_path)
+                            .instrument(span.clone())
+                            .await,
+                    );
+                    return Err(GitError::InvalidInput(format!(
+                        "pack exceeds max_bytes {max}"
+                    )));
+                }
             let (filled, _) = buf.split_at(n);
             tmp.write_all(filled)
                 .instrument(span.clone())
@@ -1002,25 +1000,19 @@ impl LocalRepo {
         std::fs::create_dir_all(&pack_dir).map_err(GitError::Io)?;
         // `file_name()` is None only for a path ending in `..`; rename would
         // fail anyway, so degrade to Err rather than panic.
-        let pack_name = pack.file_name().ok_or_else(|| {
-            GitError::Io(std::io::Error::other(
-                "install_pack: pack path has no file name",
-            ))
-        })?;
-        let idx_name = idx.file_name().ok_or_else(|| {
-            GitError::Io(std::io::Error::other(
-                "install_pack: idx path has no file name",
-            ))
-        })?;
+        let pack_name = pack
+            .file_name()
+            .ok_or_else(|| GitError::Io(std::io::Error::other("install_pack: pack path has no file name")))?;
+        let idx_name = idx
+            .file_name()
+            .ok_or_else(|| GitError::Io(std::io::Error::other("install_pack: idx path has no file name")))?;
         let dst_pack = pack_dir.join(pack_name);
         let dst_idx = pack_dir.join(idx_name);
         rename_atomic(pack, &dst_pack)?;
         rename_atomic(idx, &dst_idx)?;
         for e in extra {
             let dst = pack_dir.join(e.file_name().ok_or_else(|| {
-                GitError::Io(std::io::Error::other(
-                    "install_pack: extra path has no file name",
-                ))
+                GitError::Io(std::io::Error::other("install_pack: extra path has no file name"))
             })?);
             rename_atomic(e, &dst)?;
         }
@@ -1320,8 +1312,7 @@ impl LocalRepo {
             .refs_gen
             .load(std::sync::atomic::Ordering::Acquire);
         let key = refs_key(path, generation);
-        let read =
-            |p: std::path::PathBuf| -> String { std::fs::read_to_string(p).unwrap_or_default() };
+        let read = |p: std::path::PathBuf| -> String { std::fs::read_to_string(p).unwrap_or_default() };
         let loose_oid = read(path.join(name))
             .trim()
             .trim_start_matches("ref: ")
@@ -1335,27 +1326,25 @@ impl LocalRepo {
             })
             .unwrap_or_default();
         let head = read(path.join("HEAD")).trim().to_string();
-        let cache = self
-            .inner
-            .refs_cache
-            .lock()
-            .as_ref()
-            .map(|c| RefsCacheDiag {
-                key_generation: c.key.generation,
-                current: c.key == key,
-                data_oid: c
-                    .data
-                    .refs
-                    .binary_search_by(|r| r.name.as_str().cmp(name))
-                    .ok()
-                    .and_then(|i| c.data.refs.get(i))
-                    .map(|r| r.oid.clone())
-                    .unwrap_or_default(),
-                pending_oids: c
-                    .pending
-                    .iter()
-                    .flat_map(|t| {
-                        t.updates.iter().filter(|u| u.name == name).map(|u| {
+        let cache = self.inner.refs_cache.lock().as_ref().map(|c| RefsCacheDiag {
+            key_generation: c.key.generation,
+            current: c.key == key,
+            data_oid: c
+                .data
+                .refs
+                .binary_search_by(|r| r.name.as_str().cmp(name))
+                .ok()
+                .and_then(|i| c.data.refs.get(i))
+                .map(|r| r.oid.clone())
+                .unwrap_or_default(),
+            pending_oids: c
+                .pending
+                .iter()
+                .flat_map(|t| {
+                    t.updates
+                        .iter()
+                        .filter(|u| u.name == name)
+                        .map(|u| {
                             if !u.new_symbolic_target.is_empty() {
                                 format!("sym:{}", u.new_symbolic_target)
                             } else if u.new_oid.is_empty() || u.new_oid.chars().all(|c| c == '0') {
@@ -1364,9 +1353,9 @@ impl LocalRepo {
                                 u.new_oid.clone()
                             }
                         })
-                    })
-                    .collect(),
-            });
+                })
+                .collect(),
+        });
         RefsDiag {
             generation,
             cache,
@@ -1533,10 +1522,9 @@ impl LocalRepo {
                     {
                         // stdin(Stdio::piped()) above guarantees the handle; an
                         // Err here is an io failure like any other.
-                        let stdin = c
-                            .stdin
-                            .as_mut()
-                            .ok_or_else(|| std::io::Error::other("update-ref stdin unavailable"))?;
+                        let stdin = c.stdin.as_mut().ok_or_else(|| {
+                            std::io::Error::other("update-ref stdin unavailable")
+                        })?;
                         stdin.write_all(input.as_bytes())?;
                     }
                     c.wait_with_output()
@@ -1794,7 +1782,12 @@ impl LocalRepo {
         // Hex is ASCII, so the byte split is char-safe; split_at avoids the
         // (linted) str slice.
         let (lo, hi) = hex.split_at(2);
-        let path = self.inner.path.join("objects").join(lo).join(hi);
+        let path = self
+            .inner
+            .path
+            .join("objects")
+            .join(lo)
+            .join(hi);
         if path.exists() {
             return Ok(());
         }
@@ -2178,17 +2171,16 @@ impl LocalRepo {
             }
             // Include HEAD if it has a resolvable target and isn't already the
             // first advertised ref (upload-pack advertises HEAD).
-            if !head_target.is_empty()
-                && service == Service::UploadPack
+            if !head_target.is_empty() && service == Service::UploadPack
                 && let Some(oid) = snap
                     .refs
                     .iter()
                     .find(|r| r.name == head_target)
                     .map(|r| r.oid.clone())
-            {
-                let head_line = format!("{oid} HEAD\n");
-                pkt::encode_data(out, head_line.as_bytes());
-            }
+                {
+                    let head_line = format!("{oid} HEAD\n");
+                    pkt::encode_data(out, head_line.as_bytes());
+                }
         }
         pkt::encode_flush(out);
         Ok(())
@@ -2497,7 +2489,9 @@ impl LocalRepo {
             .iter()
             .any(|name| !named_pack_pair_exists(&pack_dir, name));
         let expected = expected_history_midx_names(&pack_dir)?;
-        let missing_expected = expected.iter().any(|name| !names.contains(name.as_str()));
+        let missing_expected = expected
+            .iter()
+            .any(|name| !names.contains(name.as_str()));
         Ok(stale_name || missing_expected)
     }
 
@@ -2947,10 +2941,9 @@ impl LocalRepo {
             {
                 // stdin(Stdio::piped()) above guarantees the handle; an Err
                 // here is an io failure like any other.
-                let stdin = child
-                    .stdin
-                    .as_mut()
-                    .ok_or_else(|| GitError::Io(std::io::Error::other("git stdin unavailable")))?;
+                let stdin = child.stdin.as_mut().ok_or_else(|| {
+                    GitError::Io(std::io::Error::other("git stdin unavailable"))
+                })?;
                 stdin.write_all(&stdin_bytes).map_err(GitError::Io)?;
             }
             child.wait_with_output().map_err(GitError::Io)
@@ -3222,11 +3215,9 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
             )));
         }
     };
-    let num_packs = u32::from_be_bytes(
-        header[8..12]
-            .try_into()
-            .map_err(|_| GitError::InvalidInput("multi-pack-index: missing pack count".into()))?,
-    ) as usize;
+    let num_packs = u32::from_be_bytes(header[8..12].try_into().map_err(|_| {
+        GitError::InvalidInput("multi-pack-index: missing pack count".into())
+    })?) as usize;
     let nchunks = usize::from(header[6]);
     // Git writes C chunk entries followed by a zero-id terminator entry whose
     // offset is the start of the trailing checksum. That terminator is part of
@@ -3239,9 +3230,11 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
         .ok_or_else(|| {
             GitError::InvalidInput("multi-pack-index: chunk table size overflow".into())
         })?;
-    let table_end = MIDX_HEADER_LEN.checked_add(table_len).ok_or_else(|| {
-        GitError::InvalidInput("multi-pack-index: chunk table size overflow".into())
-    })?;
+    let table_end = MIDX_HEADER_LEN
+        .checked_add(table_len)
+        .ok_or_else(|| {
+            GitError::InvalidInput("multi-pack-index: chunk table size overflow".into())
+        })?;
     let table_end = u64::try_from(table_end)
         .map_err(|_| GitError::InvalidInput("multi-pack-index: chunk table overflow".into()))?;
     let data_end = file_len.checked_sub(hash_len).ok_or_else(|| {
@@ -3425,7 +3418,11 @@ fn read_midx_pack_names(path: &Path) -> Result<Vec<String>, GitError> {
     Ok(names)
 }
 
-fn read_midx_chunk(file: &mut std::fs::File, offset: u64, end: u64) -> Result<Vec<u8>, GitError> {
+fn read_midx_chunk(
+    file: &mut std::fs::File,
+    offset: u64,
+    end: u64,
+) -> Result<Vec<u8>, GitError> {
     let len = end
         .checked_sub(offset)
         .ok_or_else(|| GitError::InvalidInput("multi-pack-index: invalid chunk length".into()))?;
@@ -3780,10 +3777,9 @@ fn find_conflict(stderr: &str) -> Option<String> {
     // Best-effort: extract a ref name appearing in a quoted context.
     for line in stderr.lines() {
         if let Some((_, rest)) = line.split_once("cannot lock ref '")
-            && let Some((name, _)) = rest.split_once('\'')
-        {
-            return Some(name.to_string());
-        }
+            && let Some((name, _)) = rest.split_once('\'') {
+                return Some(name.to_string());
+            }
         if let Some((_, rest)) = line.split_once("ref ") {
             // "ref refs/heads/main: expected ..."
             let name = rest.split([':', ' ', ',']).next().unwrap_or("").trim();
@@ -3822,10 +3818,9 @@ pub(crate) fn read_refs(repo_path: &Path) -> RefSnapshotData {
             }
             if let Some(rest) = line.strip_prefix('^') {
                 if let Some(name) = &last
-                    && let Some((_, peeled)) = map.get_mut(name)
-                {
-                    *peeled = rest.trim().to_string();
-                }
+                    && let Some((_, peeled)) = map.get_mut(name) {
+                        *peeled = rest.trim().to_string();
+                    }
                 continue;
             }
             let mut parts = line.splitn(2, ' ');
@@ -3885,26 +3880,25 @@ fn walk_loose_refs(dir: &Path, prefix: &str, map: &mut BTreeMap<String, (String,
         if path.is_dir() {
             walk_loose_refs(&path, &name, map);
         } else if path.is_file()
-            && let Ok(content) = std::fs::read_to_string(&path)
-        {
-            let s = content.trim();
-            if let Some(t) = s.strip_prefix("ref: ") {
-                // Symbolic loose ref: resolve target oid later if present.
-                // We record the target name in the oid slot is wrong;
-                // instead skip (packed-refs usually has the real value, or
-                // the symref target is resolved at read time elsewhere).
-                // For HEAD-only symref we handle separately; loose symrefs
-                // under refs/ are rare. Record empty oid if unresolved.
-                let target = t.trim();
-                if let Some((o, _)) = map.get(target).cloned() {
-                    map.insert(name, (o, String::new()));
+            && let Ok(content) = std::fs::read_to_string(&path) {
+                let s = content.trim();
+                if let Some(t) = s.strip_prefix("ref: ") {
+                    // Symbolic loose ref: resolve target oid later if present.
+                    // We record the target name in the oid slot is wrong;
+                    // instead skip (packed-refs usually has the real value, or
+                    // the symref target is resolved at read time elsewhere).
+                    // For HEAD-only symref we handle separately; loose symrefs
+                    // under refs/ are rare. Record empty oid if unresolved.
+                    let target = t.trim();
+                    if let Some((o, _)) = map.get(target).cloned() {
+                        map.insert(name, (o, String::new()));
+                    }
+                    continue;
                 }
-                continue;
+                if !s.is_empty() {
+                    map.insert(name, (s.to_string(), String::new()));
+                }
             }
-            if !s.is_empty() {
-                map.insert(name, (s.to_string(), String::new()));
-            }
-        }
     }
 }
 
@@ -3924,10 +3918,9 @@ impl LocalRepo {
             }
             if let Ok(oid) = gix_hash::ObjectId::from_hex(u.new_oid.as_bytes())
                 && let Some(p) = peel_tag(&repo, oid)
-                && p != oid
-            {
-                u.new_peeled = p.to_hex().to_string();
-            }
+                    && p != oid {
+                        u.new_peeled = p.to_hex().to_string();
+                    }
         }
     }
 }
@@ -4115,10 +4108,11 @@ impl TreeVisit for ConnectivityVisitor<'_> {
         if entry.mode.is_commit() {
             return std::ops::ControlFlow::Continue(true);
         }
-        if self.seen.insert(entry.oid.to_owned()) && !self.repo.has_object(entry.oid) {
-            self.missing = Some(entry.oid.to_owned());
-            return std::ops::ControlFlow::Break(());
-        }
+        if self.seen.insert(entry.oid.to_owned())
+            && !self.repo.has_object(entry.oid) {
+                self.missing = Some(entry.oid.to_owned());
+                return std::ops::ControlFlow::Break(());
+            }
         std::ops::ControlFlow::Continue(true)
     }
 }
@@ -4137,15 +4131,13 @@ pub(crate) fn parse_filter(spec: &str) -> PackFilter {
         return PackFilter::BlobNone;
     }
     if let Some(rest) = spec.strip_prefix("blob:limit=")
-        && let Ok(n) = rest.parse::<u64>()
-    {
-        return PackFilter::BlobLimit(n);
-    }
+        && let Ok(n) = rest.parse::<u64>() {
+            return PackFilter::BlobLimit(n);
+        }
     if let Some(rest) = spec.strip_prefix("tree:")
-        && let Ok(n) = rest.parse::<usize>()
-    {
-        return PackFilter::Tree(n);
-    }
+        && let Ok(n) = rest.parse::<usize>() {
+            return PackFilter::Tree(n);
+        }
     PackFilter::None
 }
 
@@ -4184,17 +4176,17 @@ pub(crate) fn compute_object_set(
                         if obj.kind != ObjKind::Tag {
                             break;
                         }
-                        let tag = gix_object::TagRef::from_bytes(&obj.data, kind).map_err(ge)?;
+                        let tag =
+                            gix_object::TagRef::from_bytes(&obj.data, kind).map_err(ge)?;
                         let target = tag.target();
                         set.insert(target);
                         cur = target;
                     }
                     // If the final target is a commit, rev-walk from it.
                     if let Ok(Some(h)) = repo.objects.try_header(&cur)
-                        && h.kind == ObjKind::Commit
-                    {
-                        commit_wants.push(cur);
-                    }
+                        && h.kind == ObjKind::Commit {
+                            commit_wants.push(cur);
+                        }
                 }
                 ObjKind::Tree => {
                     set.insert(*w);
@@ -4240,7 +4232,10 @@ pub(crate) fn compute_object_set(
                 // commit and walking its tree here as well.
                 continue;
             }
-            let mut commit = repo.objects.find_commit_iter(&cid, &mut buf).map_err(ge)?;
+            let mut commit = repo
+                .objects
+                .find_commit_iter(&cid, &mut buf)
+                .map_err(ge)?;
             let tree_id = commit.tree_id().map_err(ge)?;
 
             // `tree:0` sends no trees at all, the root included.
@@ -4263,13 +4258,12 @@ pub(crate) fn compute_object_set(
                 }
                 if let Ok(obj) = repo.find_object(tag_oid)
                     && obj.kind == ObjKind::Tag
-                    && let Ok(tag) = gix_object::TagRef::from_bytes(&obj.data, kind)
-                {
-                    let target = tag.target();
-                    if set.contains(&target) {
-                        set.insert(tag_oid);
-                    }
-                }
+                        && let Ok(tag) = gix_object::TagRef::from_bytes(&obj.data, kind) {
+                            let target = tag.target();
+                            if set.contains(&target) {
+                                set.insert(tag_oid);
+                            }
+                        }
             }
         }
     }
@@ -4289,7 +4283,10 @@ pub(crate) fn walk_tree_with_filter(
     buf: &mut Vec<u8>,
 ) -> Result<(), GitError> {
     // Collect entries first to end the mutable borrow of buf before recursing.
-    let tree_iter = repo.objects.find_tree_iter(&tree_id, buf).map_err(ge)?;
+    let tree_iter = repo
+        .objects
+        .find_tree_iter(&tree_id, buf)
+        .map_err(ge)?;
     let entries: Vec<(gix_object::tree::EntryMode, gix_hash::ObjectId)> = tree_iter
         .map(|res| {
             let e = res.map_err(ge)?;
@@ -4299,11 +4296,10 @@ pub(crate) fn walk_tree_with_filter(
     for (mode, oid) in entries {
         if mode.is_tree() {
             if let PackFilter::Tree(max_depth) = filter
-                && depth + 1 > *max_depth
-            {
-                set.insert(oid);
-                continue;
-            }
+                && depth + 1 > *max_depth {
+                    set.insert(oid);
+                    continue;
+                }
             if set.insert(oid) {
                 walk_tree_with_filter(repo, oid, set, filter, depth + 1, buf)?;
             }
@@ -4317,10 +4313,9 @@ pub(crate) fn walk_tree_with_filter(
             }
             if let PackFilter::BlobLimit(limit) = filter
                 && let Ok(Some(hdr)) = repo.objects.try_header(&oid)
-                && hdr.size > *limit
-            {
-                continue;
-            }
+                    && hdr.size > *limit {
+                        continue;
+                    }
             set.insert(oid);
         }
     }
@@ -4356,8 +4351,12 @@ pub(crate) fn compute_shallow(
             if !seen.insert(*cid) {
                 continue;
             }
-            let commit = repo.objects.find_commit_iter(cid, &mut buf).map_err(ge)?;
-            let parents: Vec<gix_hash::ObjectId> = commit.parent_ids().collect();
+            let commit = repo
+                .objects
+                .find_commit_iter(cid, &mut buf)
+                .map_err(ge)?;
+            let parents: Vec<gix_hash::ObjectId> =
+                commit.parent_ids().collect();
             if d == depth.max(1) {
                 if !parents.is_empty() {
                     shallow.push(*cid);

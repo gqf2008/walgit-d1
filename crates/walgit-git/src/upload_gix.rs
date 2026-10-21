@@ -290,7 +290,10 @@ impl LocalRepo {
         }
 
         // ---- enumerate (sync, retried after faulting missing objects) ----
-        let filter = req.filter.as_deref().map_or(PackFilter::None, parse_filter);
+        let filter = req
+            .filter
+            .as_deref()
+            .map_or(PackFilter::None, parse_filter);
         let has_filter = req.filter.is_some();
         let mut rounds = 0usize;
         let (set, commits, diffed) = loop {
@@ -567,9 +570,7 @@ fn generate_pack_streaming(
     let thread_limit = if small {
         Some(1)
     } else {
-        std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .ok()
+        std::thread::available_parallelism().map(std::num::NonZero::get).ok()
     };
     let chunk_size = if small { 64 } else { 256 };
     let interrupt = std::sync::atomic::AtomicBool::new(false);
@@ -596,9 +597,8 @@ fn generate_pack_streaming(
     // The pack header's object count is u32; a pack cannot hold more (git's
     // own limit), so len() always fits — but degrade to Err rather than
     // truncate if that invariant is ever broken.
-    let num_entries = u32::try_from(counts.len()).map_err(|_| {
-        GitError::Protocol("object count exceeds the pack format's u32 field".into())
-    })?;
+    let num_entries = u32::try_from(counts.len())
+        .map_err(|_| GitError::Protocol("object count exceeds the pack format's u32 field".into()))?;
     let progress: Box<dyn gix_features::progress::DynNestedProgress + 'static> =
         Box::new(gix_features::progress::Discard);
     let entries = entry::iter_from_counts(
@@ -849,11 +849,10 @@ fn enumerate(
             }
             if let Ok(Some(obj)) = repo.objects.try_find(&tag_oid, &mut buf)
                 && obj.kind == ObjKind::Tag
-                && let Ok(tag) = gix_object::TagRef::from_bytes(obj.data, kind)
-                && set.contains(&tag.target())
-            {
-                set.insert(tag_oid);
-            }
+                    && let Ok(tag) = gix_object::TagRef::from_bytes(obj.data, kind)
+                        && set.contains(&tag.target()) {
+                            set.insert(tag_oid);
+                        }
         }
     }
     Ok(Enumerated::Done {
@@ -923,14 +922,12 @@ fn diff_tree_new_objects(
     for o in olds {
         match o {
             Old::Absent => old_maps.push(HashMap::new()),
-            Old::Tree(oid) => {
-                if let Some(entries) = tree_entries(repo, oid, buf)? {
-                    old_maps.push(entries.into_iter().map(|(m, n, o)| (n, (m, o))).collect());
-                } else {
-                    missing.push(*oid);
-                    deferred = true;
-                }
-            }
+            Old::Tree(oid) => if let Some(entries) = tree_entries(repo, oid, buf)? {
+                old_maps.push(entries.into_iter().map(|(m, n, o)| (n, (m, o))).collect());
+            } else {
+                missing.push(*oid);
+                deferred = true;
+            },
         }
     }
     if deferred {
@@ -953,11 +950,10 @@ fn diff_tree_new_objects(
         }
         if mode.is_tree() {
             if let PackFilter::Tree(max) = filter
-                && depth + 1 > *max
-            {
-                set.insert(oid);
-                continue;
-            }
+                && depth + 1 > *max {
+                    set.insert(oid);
+                    continue;
+                }
             if set.insert(oid) {
                 let sub_olds: Vec<Old> = old_maps
                     .iter()
@@ -973,10 +969,9 @@ fn diff_tree_new_objects(
                 PackFilter::BlobNone => continue,
                 PackFilter::BlobLimit(limit) => {
                     if let Ok(Some(h)) = repo.objects.try_header(&oid)
-                        && h.size > *limit
-                    {
-                        continue;
-                    }
+                        && h.size > *limit {
+                            continue;
+                        }
                 }
                 _ => {}
             }

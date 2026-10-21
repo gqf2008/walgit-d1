@@ -53,8 +53,7 @@ pub(crate) fn git_pipe(
         .stderr(Stdio::piped())
         .output()
         .expect("run upstream git");
-    assert!(
-        up.status.success(),
+    assert!(up.status.success(), 
         "git {first:?} failed: {} — stderr: {}",
         up.status,
         String::from_utf8_lossy(&up.stderr)
@@ -74,8 +73,7 @@ pub(crate) fn git_pipe(
         let _ = stdin.write_all(&up.stdout);
     }
     let out = down.wait_with_output().expect("wait downstream git");
-    assert!(
-        out.status.success(),
+    assert!(out.status.success(), 
         "git {second:?} failed: {} — stderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
