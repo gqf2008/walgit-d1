@@ -41,3 +41,6 @@ cli-integration.log
 # Python bytecode caches (agent scripts/tests)
 __pycache__/
 *.pyc
+
+# ki runtime state (sessions/goals) never belongs in the server repo
+.ki/
