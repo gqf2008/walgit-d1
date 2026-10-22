@@ -1591,3 +1591,47 @@ table.kv.compact td { padding: 2px 0; }
   .cmds-row { flex-direction: column; align-items: stretch; }
   .cmds-copy { align-self: flex-start; }
 }
+
+/* ---- Home redesign (2026-10-23): one-liner + SKILL lead + role prompts ---- */
+.home-wrap {
+  max-width: 900px;
+  margin-inline: auto;
+}
+.home-roles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+.home-role {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.home-role h3 {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+.home-role .code-sample {
+  margin: 0;
+  border: 0;
+  flex: 1;
+}
+.home-role .code-block {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 700px) {
+  .home-roles { grid-template-columns: 1fr; }
+}
