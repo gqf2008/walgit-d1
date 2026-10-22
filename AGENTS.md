@@ -770,7 +770,8 @@ decision in §4 — or the PR is; never "fix later".
   fixer sub-agent; genuine ambiguity/authorization/external input goes to `needs-human`; Minor does
   not block. Sub-agents are short-lived background processes started with the host agent's own
   capability (walgit does not prescribe the runtime), supervised by the
-  orchestrator (launch / timeout / budget / restart / log / worktree cleanup); one card, one
+  orchestrator (launch / timeout / budget / restart / log; the worktree-tenure cleanup of the
+  original text is superseded by D62 — worktrees are never removed); one card, one
   owner, one worktree, never a shared checkout or key. Durable truth stays in `refs/collab/*`;
   process state is local and disposable. Normative statement in `web/SKILL.md` §0d (and §0/§0b)
   and `skills/walgit/SKILL.md` §5b.
@@ -797,6 +798,24 @@ decision in §4 — or the PR is; never "fix later".
   operations are unaffected). The page carries no second contract: the normative text stays in
   `web/SKILL.md` §0a–§0e and `skills/walgit/SKILL.md` §5, and the page is updated with the CLI
   in the same change. `page_routes_serve_index_without_cache` covers `/commands`.
+
+- **D62** **The worktree is the collaboration identity's home; the coordinator holds `main`
+  and never removes a worker worktree (2026-10-23, cc-ai-worktree-tenure).** D58/D59 put each
+  collaborator's key in its own worktree's git dir; this decision draws the consequence: the set
+  of surviving worktrees **is** the team's physical roster, so worktree deletion is not cleanup —
+  it is amputating an identity. The shape:
+  (1) the **coordinator/leader** works in the main checkout, on `main` — it decomposes the goal
+  into cards, reviews (itself, or through the acceptance sub-agent — either way a principal other
+  than the patch author), merges worker branches, and records `merge_result`;
+  (2) each **worker** owns one worktree and creates its **dev branch inside it** per card
+  (`git worktree add .worktrees/<unit> -b feat/<thread> <base>`), claims before work, and never
+  works in a shared checkout;
+  (3) the coordinator **never deletes a worker worktree** — not after a merge, not after a
+  crash, not to "tidy up". A merged **branch** may be pruned once the card is closed; the
+  worktree outlives the card. Retiring a principal is `walgit collab principal-revoke` (a
+  signed registry act), never `git worktree remove`. The pre-D62 texts that told the
+  orchestrator to "remove the worktree/branch after the card is closed" (web/SKILL.md §0d/§0e,
+  skills/walgit/SKILL.md §5b) are corrected in place; D59's "worktree cleanup" is superseded.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

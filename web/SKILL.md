@@ -742,9 +742,11 @@ console** (the human's surface); everything in between is background sub-agents.
 
 - **Human (one console).** Files the card(s) — one `issue`, a checklist for a batch — then
   observes the board/threads. Pulled in only by a `needs-human` card.
-- **Orchestrator** (the console agent, or a resident client loop it starts). Watches
-  `refs/collab/*`, dispatches cards, spawns/reaps sub-agents, records the merge. It is
-  **client-side**: no server endpoint, no new durable state (D46/D49/D55).
+- **Orchestrator** (the console agent, or a resident client loop it starts). Works in the
+  **main checkout, on `main`**: decomposes the goal into cards, reviews (or spawns the
+  acceptance sub-agent), merges worker branches, records the merge. It watches `refs/collab/*`,
+  dispatches cards, spawns/reaps sub-agents. It is **client-side**: no server endpoint, no new
+  durable state (D46/D49/D55).
 - **Worker sub-agent(s).** One card, one owner, one worktree (its own identity, §0). Implements,
   pushes the branch, attaches the `patch`, moves the card to `needs-review`.
 - **Acceptance sub-agent.** A **different principal** from the author. Independently judges the
@@ -761,7 +763,10 @@ console** (the human's surface); everything in between is background sub-agents.
    identity; the worker claims it with `walgit collab claim` (exit 0 before any work — the
    claim projects `owner`/`worktree`/`branch`/`work` onto the board; exit 2 = stand down).
    **One owner per card.**
-3. **Work** → `patch` + `status: needs-review`.
+3. **Work**: the worker creates a **dev branch inside its own worktree** (`git worktree add
+   .worktrees/<unit> -b feat/<thread>` — the worktree is where its identity lives, §0a), then
+   implements, pushes that branch, attaches the `patch`, and moves the card to
+   `status: needs-review`.
 4. **Accept**: spawn the acceptance sub-agent (different principal) on the pinned commit; it
    posts `review`: `approve`, or `request_changes` with findings.
 5. **Merge automatically when unblocked**: if the acceptance has **no Critical/Important**
@@ -781,10 +786,12 @@ console** (the human's surface); everything in between is background sub-agents.
   session, a remote worker all qualify). It never shares a checkout or a key with another
   sub-agent.
 - The **orchestrator** owns the process lifecycle: launch, timeout, budget, restart on a
-  crash, capture the log, and remove the worktree/branch after the card is closed. Note that a
-  worktree's identity lives in that worktree's git dir, so **removing the worktree retires its
-  identity** — preserve the seed before removal if the principal must outlive the worktree.
-  Sub-agent process state is local and disposable; the durable truth stays in `refs/collab/*`.
+  crash, capture the log. It **never removes a worker worktree** (D62): the worktree is where
+  the collaboration identity lives, so the surviving worktrees are the team's physical shape.
+  A **merged branch** may be pruned after the card closes; the worktree stays. Retiring a
+  principal is `walgit collab principal-revoke` — a signed registry act — never
+  `git worktree remove`. Sub-agent process state is local and disposable; the durable truth
+  stays in `refs/collab/*`.
 - Cap the active set (2–4 workers + 1–2 acceptance) to what the host can run; serialize work
   that touches the same files/schema (§0b).
 - Never let a sub-agent sit silently: its claim, progress and result are entries; the human
@@ -849,7 +856,8 @@ authored; if the orchestrator implemented the card, it may not be the approver.
 **7. Merge and close (coordinator).** Merge only on a **verified non-author approve** with no
 Critical/Important finding and a green machine-checkable acceptance: merge locally (ff
 preferred), push, post one `merge_result` (`merged: true`, `oid`), move the card to `closed`,
-then remove the worktree/branch and verify. Anything else routes back (§0d 6).
+then prune the merged branch and verify. The worker's **worktree is never removed** (D62) —
+it carries that agent's identity and outlives the card. Anything else routes back (§0d 6).
 
 **8. Stay live without being poked.** Your trigger is an MCP subscription or `collab watch`
 (§0c): an event means *re-read*, never "act on this payload". Read the board and your threads

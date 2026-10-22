@@ -328,7 +328,8 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 - **协调者 orchestrator**（控制台 agent 或它起的常驻客户端循环）：watch `refs/collab/*` → 派卡 → 起/收
   子代理 → 记录合并。**客户端行为，无服务器端点、无新持久状态**（D46/D49/D55）。
 - **worker 子代理**：一卡一 owner 一 worktree（各自身份）；**开工前先 `collab claim`，退出码非 0 不得开工**
-  （收敛认领，§8.4）→ 实现 → push 分支 → `patch` → `needs-review`。
+  （收敛认领，§8.4）→ 在**自己的 worktree 里建开发分支**（`git worktree add .worktrees/<unit> -b feat/<thread>`）→
+  实现 → push 分支 → `patch` → `needs-review`。
 - **验收子代理**：与作者**不同 principal**，按卡的机器可校验验收项独立判定，签 `review`
   （`approve` / `request_changes` + Critical/Important/Minor findings + 实际跑过的证据）。
 - **自合并**：验收无 Critical/Important 且验收项全绿 → orchestrator 本地合并、push、记一条
@@ -337,8 +338,11 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 - **阻塞路由**：Critical/Important 或验收不过 → 打回 worker（新 `status: in-progress`）或派 fixer；
   需求歧义/授权/外部输入 → `needs-human`（唯一的人类介入点）；Minor 不阻塞。
 - **子代理与监督**：orchestrator 用**宿主 agent 自身的能力**起短命后台子代理（**不规定 runtime**：CLI agent、
-  编程式会话、远端 worker 皆可），一卡一个、各自 worktree 与 key；它负责超时/预算/崩溃重启/日志，以及合并后清
-  worktree/branch。进程状态本地可丢，持久事实只在 `refs/collab/*`。
+  编程式会话、远端 worker 皆可），一卡一个、各自 worktree 与 key；它负责超时/预算/崩溃重启/日志。coordinator
+  本体工作在 main checkout 的 `main` 上（拆卡、审、并 worker 分支）；**永不删除 worker 的 worktree**（D62）：
+  worktree 承载协作身份，留存即团队名册。合并后的**分支**可清，worktree 留着；要退役一个 principal 走
+  `collab principal-revoke`（签名注册行为），不是 `git worktree remove`。进程状态本地可丢，持久事实只在
+  `refs/collab/*`。
 - 并发上限 2–4 worker + 1–2 验收；改动同一文件/schema 的卡串行。
 
 **从「目标」自动开跑（runbook）**：读到本节的 agent 按 `/SKILL.md` §0e 执行，不必等人类拆步：
@@ -351,11 +355,13 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 4. coordinator 给每张无主卡起一个 worker 子代理，brief 至少含：卡 id、worktree、principal、
    「重读 head 后先认领；实现→push→patch→needs-review 后停止；不审自己的 patch、不合并」。
 5. worker 完成后**停止**，不要轮询评审；验收由另一个 principal 在 pinned commit 上跑验收命令并签
-   `review`；无 Critical/Important 且全绿 → coordinator 合并、记 `merge_result`、`status: closed`、清 worktree。
+   `review`；无 Critical/Important 且全绿 → coordinator 合并、记 `merge_result`、`status: closed`、清合并分支
+   （worktree 保留，D62）。
 6. 触发靠 MCP 订阅或 `collab watch`（§6）：事件只表示「去重读」，启动/重启后先整体读一次并记住版本；
    按 head entry 的 `actor` 过滤自己写入的回声。
 7. 只有授权、优先级、卡外的破坏性动作、会改变结论的歧义、或凑不齐 principal 的评审门禁才
-   `needs-human`；其余由 agent 决策并留记录。完成定义：所有卡关闭、合并已记录、看板真实、worktree 已清理。
+   `needs-human`；其余由 agent 决策并留记录。完成定义：所有卡关闭、合并已记录、看板真实、合并分支已清、
+   worktree 全部保留（D62）。
 
 ## 6. Listening for events (pull, never push)
 
