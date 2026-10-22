@@ -69,969 +69,278 @@ walgit collab entry --kind status --id <thread> --parent <oid> --body '{"status"
 - Read state with `walgit collab board`, `walgit collab thread <id>`,
   `walgit collab report --remote origin`. Entries without `--push` stay local.
 
-## Install the walgit ops skill (operator guide)
+## Install the ops skill (operator guide)
 
-This file teaches an agent to *use* the host. To also *operate* it — service
-lifecycle, D1 collaboration bookkeeping, pulling events — install the ops skill
-this build ships:
+This file teaches an agent to *use* the host. To also *operate* it (service
+lifecycle, maintenance, D1 bookkeeping details), install the ops skill this
+build ships and re-run after upgrades:
 
 ```sh
 curl -fsSL '<host>/services/public/skill/install.sh' | sh
 ```
 
-The installer downloads `<host>/services/public/skill/SKILL.md`, verifies it
-against the sha256 baked into the script (the same value
-`<host>/services/public/skill/manifest.json` reports) and writes
-`${WALGIT_SKILL_DIR:-$HOME/.agents/skills/walgit}/SKILL.md`. Re-run it after a
-host upgrade to refresh to that build; it is a no-op when the installed file
-already matches.
+Self-signed host: pin the CA first
+(`curl -fsSk '<host>/services/public/ca.pem' -o walgit-ca.pem`, add
+`--cacert walgit-ca.pem`).
 
-On a host presenting a **self-signed** certificate, pin it first and add
-`--cacert` — `curl -fsSk '<host>/services/public/ca.pem' -o walgit-ca.pem`, then
-`curl -fsSL --cacert walgit-ca.pem '<host>/services/public/skill/install.sh' |
-sh`. `curl -k` without pinning is trust-on-first-use: it keeps you going, but the
-sha256 then protects only the `SKILL.md` download, not the installer itself.
+## Git: clone, fetch, push
+
+Plain git is the byte channel; the server advertises bundle-uri itself.
+
+```sh
+git clone <host>/<owner>/<repo>.git
+git push   # receive-pack: atomic, policy-checked (docs/POLICY.md)
+```
+
+The installer sets the credential helper, `transfer.bundleURI` and `origin` in
+one shot: `curl -fsSL '<host>/services/public/install.sh' | sh`. On a
+self-signed host it pins the CA. Git answers a real 401 by erasing the stored
+credential and asking again — that is the intended loop; `git config
+http.https://<host>/.proactiveAuth=auto` sends the token proactively.
 
 ## MCP (optional, client-side)
 
-Some hosts would rather call tools than shell out. `walgit mcp` serves the Model Context Protocol
-on stdio — host-spawned, so configure it as a command, not a URL:
+Host-spawned over stdio — configure a command, not a URL:
 
 ```jsonc
-{ "command": "walgit", "args": ["mcp"] }                       // read-only
-{ "command": "walgit", "args": ["mcp", "--allow-write", "--key", "/path/to/key.ed25519"] }
+{ "command": "walgit", "args": ["mcp"] }                     // read-only
+{ "command": "walgit", "args": ["mcp", "--repo", "/path/to/checkout",
+                                "--subscribe-interval-ms", "5000",
+                                "--max-subscriptions", "32"] }
+{ "command": "walgit", "args": ["mcp", "--allow-write", "--key", "/path/key.ed25519"] }
 ```
 
-Its tools **are** this CLI, so they cannot drift from it — but the surface is deliberately partial:
-today `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_ls/thread/pr/board/report`,
-`ci_status` and `wal_ls`; everything else (`repo info/blame/commit`, `ci log/artifacts`,
-`collab watch`, …) still goes through the CLI directly. The writing tools are `collab_entry` and
-`collab_claim`, both only with `--allow-write`. Destructive operations (GC, compaction, import, settings/policy
-writes, ref deletion) are not exposed at all — and bytes never travel over MCP: clone/fetch/push
-stay git + bundle-uri.
+Its tools **are** this CLI (one implementation, no second contract). Read-only
+surface: `repo_list/owners/refs/resolve/tree/blob/commits/diff`,
+`collab_ls/thread/pr/board/report`, `ci_status`, `wal_ls`. The writing tools —
+`collab_entry` and `collab_claim` — exist only under `--allow-write --key`.
+Destructive operations are not exposed at all; bytes never travel over MCP.
 
-MCP resources expose read-only, `walgit://`-addressed views for the configured `--repo` checkout:
-`walgit://refs/<owner>/<repo>`, `walgit://wal/<owner>/<repo>?from=<seq>`,
-`walgit://collab/board/<owner>/<repo>`, and
-`walgit://collab/thread/<owner>/<repo>/<thread-id>`. `resources/read` returns the content plus a
-stable `_meta.version` (refs digest, WAL head seq, board hash, or thread head oid). Subscriptions
-are **adapter-side polling, not server push** (D46): each is `per-instance` and **best-effort**, the
-poller asks only for a cheap version probe, and the client decides whether to call `resources/read`
-after an update. Refs are hashed as a stream and returned as a bounded summary; WAL probes read
-only the refs-level manifest head; collab resources share one session-level `refs/collab/*` fetch
-and only rebuild the board hash or thread head when that ref signal changes. Start with:
+Resources (`resources/list|read|subscribe`): `walgit://refs/<o>/<r>`,
+`walgit://wal/<o>/<r>?from=<seq>`, `walgit://collab/board/<o>/<r>`,
+`walgit://collab/thread/<o>/<r>/<id>`. Two subscriptions cover a project —
+refs (every git action + inbox) and board (the whole projection). A
+`notifications/resources/updated` carries only the `uri`: always
+`resources/read`, compare `_meta.version`, ignore unchanged, and treat an
+event as a trigger to re-read — never act on the notification alone.
+Subscriptions are adapter-side polling, best-effort, process-local (D52): on
+start/restart read once and keep the version as your cursor. One `walgit mcp`
+process per agent, in its own worktree, with its own principal and key; filter
+your own writes by the head entry's `actor`.
 
-```sh
-walgit --config ~/.walgit/walgit.toml mcp --repo /path/to/checkout \
-  --subscribe-interval-ms 5000 --max-subscriptions 32
-```
+## Host operations & upgrades
 
-```jsonc
-{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"resources/read",
- "params":{"uri":"walgit://refs/acme/repo"}}
-{"jsonrpc":"2.0","id":3,"method":"resources/subscribe",
- "params":{"uri":"walgit://collab/board/acme/repo"}}
-{"jsonrpc":"2.0","id":4,"method":"resources/unsubscribe",
- "params":{"uri":"walgit://collab/board/acme/repo"}}
-```
+`walgit service start|stop|status|restart` manages the local process. Upgrades
+go through the release pipeline (a pushed `v*` tag fires release.yml); the
+tray detects and installs them. Details: the ops skill (§ Install above) and
+`deploy/tray/README.md`.
 
-A project is covered end to end by two subscriptions (one `resources/subscribe` call each):
+## The CLI
 
-```jsonc
-{ "subscribe": [
-    "walgit://refs/<owner>/<repo>",           // every git action — push, branch/tag — plus refs/collab/inbox/*
-    "walgit://collab/board/<owner>/<repo>"    // the whole board projection: new threads, replies, status flow
-] }
-```
+Everything works against a **checkout** of a repository on this host. Global:
+`--config` (default `~/.walgit/walgit.toml`, env `WALGIT_CONFIG`); in zsh wrap
+it in a shell function, never `W="walgit …"; $W …`. `walgit serve` runs the
+host; `walgit config check|dump` validates or dumps the configuration.
 
-The refs subscription is the digest of `git ls-remote --refs`, so a push, a branch/tag move and a new
-`refs/collab/inbox/*` entry all bump it; the board subscription covers the projection instead
-(new thread, new reply, status transition) without diffing refs yourself.
+**Collaborate (`walgit collab …`)** — read: `ls`, `thread <id>`,
+`thread-heads`, `pr <id>`, `board` (the `.walgit/board.toml` projection),
+`report [--remote origin]` (prints `unpushed: N`; reads answer from **local**
+refs, so fetch first). Write: `entry --kind <kind> --id <thread> --parent
+<oid> --body '<json>' [--base … --head …] --push <remote>` (without `--push`
+the entry stays local); `claim` (§0b); `gc` (fold the inbox, D45, idempotent;
+`--truncate` past the 64 MiB cap); `watch` (§0c); `join`,
+`principal-register`, `principal-revoke`, `principal-fetch` (§0).
 
-`notifications/resources/updated` carries only the `uri` — no content and no version. The read is
-mandatory, and it is where the version check happens:
+**Decentralized CI (`walgit ci …`)** — the server holds no CI logic: the
+tested commit's `.walgit/ci.toml` declares tasks (`walgit ci validate`), a
+client runner claims and executes (`walgit ci run`; simultaneous claims are a
+legal race, exactly one result is effective), and `walgit ci status | log
+[<run>] | artifacts [<run>] --out <dir>` read results (sha256-verified).
 
-```jsonc
-{"jsonrpc":"2.0","id":5,"method":"resources/read",
- "params":{"uri":"walgit://collab/board/acme/repo"}}
-```
+**Repository reads (`walgit repo …`)** — HTTP, no bucket credentials; host:
+`--url`/`$WALGIT_URL`, token: `--token`/`$WALGIT_TOKEN`. `owners [<owner>]`,
+`refs <o/r> [branches|tags|all|collab]`, `ref <o/r> <full-ref>`,
+`resolve <o/r> <rev>`, `tree <o/r> <rev> [path]`, `blob <o/r> <rev> <path>
+[--raw]`, `commits <o/r> [--ref --n --skip --path]`, `commit <o/r> <sha>`,
+`diff <o/r> <from> <to> [--format]`, `merge-base <o/r> <from> <to>`,
+`blame <o/r> <rev> <path>`, `archive <o/r> <rev> [--out FILE]`,
+`overview <o/r>`, `tasks <o/r> [--follow <id>]`, `ops <o/r>` +
+`op-start <o/r> <op> [--arg k=v]`. Management (bucket-direct, maintainer
+form): `repo create|list|info`, `repo policy get|set|clear`,
+`repo settings show|set|clear|history`.
 
-The reply puts the content in `result.contents[0]`: `text` is a JSON string of the form
-`{"data": …, "_meta":{"version":"…"}}`, and the same `version` is repeated on the content item's
-`_meta`. Compare it with the last version you processed for that URI and ignore an unchanged one
-(a notification can race another or repeat). Two other notifications end a subscription instead:
-`notifications/resources/list_changed` (the resource vanished — e.g. a thread with no entries —
-and the subscription stops; re-list and re-subscribe if it is back) and `notifications/message`
-with `level: "error"` and `data.uri` (three consecutive probe failures; the subscription stops, so
-back off and re-subscribe once the cause is fixed).
-
-Then act — the read is a trigger for a fresh decision, not a snapshot to act on blindly. A refs
-update says *something* moved (the read is a bounded summary; fetch or `resources/read` the
-specific thread for the details), a board update names the cards, and a thread read gives you the
-head oid to reply against. Confirm at that head oid that the card is still unowned or yours
-before you write.
-
-**Writing is two tools, both absent from the read-only surface; start the process with
-`--allow-write --key <this agent's seed>`.** `collab_entry` appends a signed entry; `collab_claim`
-claims a work card (D1 §8.4) — publish + re-read + winner check in one call, failing with an
-`isError` result whose text contains `stand-down:` when another claim won, so a race converges
-on exactly one worker. `session` (optional) scopes resume to one agent session; omit it and a
-call never resumes another session's claim in the same worktree:
-
-```jsonc
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"collab_entry","arguments":{
-  "kind":"status","id":"bug-42","actor":"acme-worker-1","parent":"<head-oid>",
-  "body":"{\"status\":\"in-progress\",\"owner\":\"acme-worker-1\",\"worktree\":\"wt-bug-42\",\"branch\":\"feat/bug-42\",\"work\":\"fix it\"}"}}}
-```
-
-`body` is a JSON **object string**; `parent` is the previous entry's oid (`""` for a root);
-`patch` also takes `base`/`head`; `actor` must be the principal bound to the process's key. Every
-call signs and **pushes to the process's `--remote`** (default `origin`), so it returns only after
-the entry is published; the reply's text is `<ref> <oid>` — keep that oid as the next `parent`.
-There is no local-only write over MCP (use the CLI for that). Nothing is edited: a move is a new
-signed entry, and `collab_board` stays read-only.
-
-`collab_claim` returns the winner's claim object (`{"claimed": true, "claim": "<entry oid>", …}`);
-the error text names the holder and the winning oid. **A card you have not claimed with exit 0 is
-not yours** — do not work it. The claim is also the read-visible signal: the board card carries
-`claim.oid`/`claim.expires_at` (compare with the oid your claim returned — principals may be
-shared, oids never).
-
-**Many agents, unattended.** One `walgit mcp` process per agent, each in its own worktree with
-its own principal and key (§0b, D58/D59); never share a process or a key. Subscribe both URIs
-above: the orchestrator acts on `walgit://collab/board/…` (unowned cards to dispatch), workers on
-`walgit://refs/…` (their thread moved) and then re-read that thread. On startup — and after any
-restart — read both resources once instead of waiting for an event, and keep the last processed
-version as the cursor: subscriptions are process-local and notifications are best-effort, so a
-restart must not be read as "nothing happened". Filter your own writes by the head entry's
-`actor` so a self-triggered update is not answered with another write; a card is yours only when
-`collab claim` exits 0 (the deterministic winner — re-reading a `status` owner is not a claim). Heavy work (build, test, `git push`) runs
-outside the tool call — the server handles one request line at a time — and ends with one
-`collab_entry` that records it. The pull lanes (`git ls-remote`, `walgit wal ls`, `walgit collab
-watch`) remain the source of truth; the role topology and merge gate are §0b–§0d.
-
-## Host upgrades (tray)
-
-The tray checks for updates **30 seconds after startup and every 30 minutes**. A Windows
-installation made by the installer installs a detected release **by itself** — 90 s after
-detection the helper stops the service, installs, health-checks the new version and relaunches
-the tray — while macOS and source checkouts only notify and wait for the tray menu.
-`WALGIT_AUTO_UPGRADE=0` pins a machine to manual, and a version whose unattended install rolled
-back is never auto-retried (the menu still offers it).
-
-- **macOS:** DMG channel — download the release DMG, verify SHA-256 and the signed/notarized app,
-  replace the installed app, run the health check, and roll back on failure.
-- **Windows:** installer channel — download `walgit-setup-<version>-x64.exe`, verify its exact
-  SHA-256, then run the helper's silent install followed by `walgit.exe --version` and `/healthz`
-  checks; failure rolls back. An installation created **before the first build containing this
-  feature** must run the installer once manually before tray upgrades work.
-- **Linux:** no packaged Release auto-update channel. If the tray runs with a configured source
-  checkout (`WALGIT_REPO`, default `~/walgit-repo`), it offers **source upgrade** (ff-merge,
-  build, health check, rollback); otherwise upgrade through the package/service workflow used to
-  install the host.
-
-## Host operations
-
-`walgit serve` runs a standalone host; `walgit service start|stop|status|restart` manages the
-installed service. Validate or print the effective configuration with `walgit config check` /
-`walgit config dump`. Cross-repository principals are managed with
-`walgit principal register|rotate --url --principal --key`, `walgit principal list --url`,
-and `walgit principal revoke --url --principal` (host registry over HTTP; self-only writes). The
-installed ops skill (`skills/walgit/SKILL.md`, published through the public installer) has the
-full operator lifecycle and maintenance runbooks. On Windows the installer registers its install
-directory on the **user** PATH (HKCU `Environment`, removed again at uninstall), so a shell started after
-the install finds `walgit`; one that was already running (or a child of it) needs a restart.
-
-If the bucket credentials are rotated and the host can no longer reach the bucket, fix it from the
-web UI's top-bar「存储配置」/Storage entry: a `token`-mode instance has no browser sign-in, so the
-page asks for the admin token when the storage read is refused — paste the static token from
-`walgit.toml` (`[[server.auth.tokens]]`) or a `wgt_…` access token (D60; server auth unchanged).
-
-## Discover
-
-- `GET /api/v1` — the discovery document (lanes, endpoint list).
-- `GET /api/v1/owners` → `["owner", …]`; `GET /api/v1/owners/{owner}/repos` →
-  `["repo", …]` (or `walgit repo list`).
-- `GET /repos.js` — the browser SDK (`window.repos`; `/repos.mjs` for ESM).
-- Web UI: `/repos` (host-wide repository index), `/{owner}/{repo}` (browser).
-
-## Git: clone / fetch / push
-
-- Remote URL: `http(s)://<this-host>/<owner>/<repo>.git`.
-- Auth modes: `none` (loopback only, everyone is anon), `token`, `oidc`. On a
-  token/oidc host every request carries `Authorization: Bearer <token>`; the
-  one-command client setup is in `/services/setup.json`, or run the installer:
-  `sh -c "$(curl -fsSLk '<host>/services/public/install.sh')" -- <owner>/<repo>`.
-- Big repositories advertise **bundle-uri**: clone with
-  `-c transfer.bundleURI=true` (bytes come from static bundles, not
-  upload-pack). Bounded fetches (CI checkouts with `--depth`/`--filter`) may
-  pass `-c transfer.bundleURI=false`. Blobless: `--filter=blob:none`.
-
-## The CLI: collaboration, CI, management (`walgit …`)
-
-One binary, subcommands by role. Everything below works against a **checkout**
-of a repository on this host (clone it first); entries are Ed25519-signed and
-pushed as ordinary refs, so a local write becomes visible with one `--push`.
-
-The everyday subset is also rendered in the bundled UI at **`/commands`** (top-nav
-「命令」/「指令」): the same commands in workflow order, each with a copy button. The
-page and this section are updated together.
-
-### D1 collaboration — issues, PRs, the board (`walgit collab …`)
-
-- Read (JSON out — pipe through `jq`):
-  - `walgit collab ls` — thread ids on `refs/collab/inbox/*`.
-  - `walgit collab thread <id>` — one thread, parent-ordered, per-entry
-    signature verification.
-  - `walgit collab thread-heads` — the `thread id → head oid` index in one
-    aggregation pass (cheap: no per-thread materialization).
-  - `walgit collab pr <id>` — aggregated PR view + merge-rule evaluation.
-  - `walgit collab board` — the work-unit board: threads projected under
-    `.walgit/board.toml`. Read-only — moving a card is a signed `status`
-    entry, not an edit.
-  - `walgit collab report` — global dashboard: threads, PR status,
-    verification health, activity.
-    It reads the **local** `refs/collab/*` only, so "N/N entries verified"
-    says nothing about what other clones can see; `report --remote <name>`
-    is the explicit way out of that lane — it compares the local collab refs
-    against the remote and prints `unpushed: N` (with the `git push` that
-    fixes it). An unreachable remote is an error, never a silent `unpushed: 0`.
-- Write (construct + sign + deliver):
-  - Before a parallel workstream: register the whole team, one principal per
-    agent (see §0b). `walgit collab principal-register` publishes (or
-    re-registers = rotates) a principal's public key; `principal-revoke`
-    tombstones it (deletes the registry ref); `principal-fetch` caches the
-    **host** registry (issue #76: one registration verifies in every repo of
-    that host) under `refs/walgit/principals/*` for offline verification — a
-    repo-local registration always wins.
-  - `walgit collab entry --kind <kind> --id <thread> --actor <principal>
-    --body '<json>' --key <keyfile> [--base … --head …] --push <remote>
-    [--auto-fold --fold-threshold <n>]`
-    — appends a signed entry and pushes it. Nobody edits state; a change is
-    a new signed entry whose parent chain anyone can replay and verify.
-    **Without `--push` the entry stays in this checkout** (a deliberate
-    local-only mode) and no remote will see it until it is pushed; the
-    command says so on stderr, and `report --remote` counts what is missing
-    remotely.
-    `--auto-fold` (threshold default 10000) folds the inbox with the same
-    actor/key once the unfolded refs pass the threshold — the server's
-    aggregate read budget is 20000 refs.
-  - `walgit collab claim --id <thread> [--ttl 300] [--push origin] [--worktree … --branch …
-    --work …] [--session <id>]` — the work-card convergence primitive (`docs/D1_PROTOCOL.md` §8.4): read →
-    publish a signed `card_claim` root → re-read → exit **0** only if this claim won,
-    **2** to stand down (another claim holds the card — do not start work; 2 is also the
-    usage-error code, so match the `stand-down:` line / `"claimed": false`, not the bare
-    code), **1** on error. Only `open`/`in-progress` cards are claimable.
-    Duplicate claims are legal; duplicate execution is not. A claim is live through `ts + ttl`
-    inclusive (default 300 s) — expiry is the self-healing release: no lease renew, no cleanup
-    process. **`--session <id>` (or `WALGIT_CLAIM_SESSION`) scopes restart recovery to one
-    session**: omit it and the command never resumes, so two sessions in the same checkout
-    converge normally (the later one stands down). Never treat a worktree as one session.
-- Automate: `walgit collab watch` — the resident loop that turns `refs/collab/*`
-  changes into process invocations (`--exec <cmd>`, each new/changed entry's JSON
-  on stdin). How an agent builds an unattended loop on it: **§0c**.
-- Housekeeping (D45): `walgit collab gc --actor <principal> --key <keyfile>
-  --push <remote> [--truncate]` folds the append-only inbox into the signed snapshot at
-  `refs/collab/meta/snapshot` and prunes the folded refs — every aggregation
-  (snapshot ∪ tail) is byte-identical across a fold, so run it whenever the
-  inbox grows large; it is idempotent and safe to re-run. A fold over the
-  64 MiB snapshot cap is refused unless `--truncate` drops the oldest records
-  and marks the snapshot `complete:false`; `--truncate` also repairs an
-  already over-cap snapshot when there is nothing new to fold.
-
-### Decentralized CI (`walgit ci …`)
-
-The server holds no CI logic. A runner is a client:
-
-- `.walgit/ci.toml` in the tested commit declares the tasks;
-  `walgit ci validate` checks it.
-- `walgit ci run` — subscribe to ref tips, claim runs with signed `ci_claim`
-  entries, execute, publish signed results. Simultaneous claims are a legal
-  race: both may run, exactly one result is effective (deterministic winner
-  rule), the others are kept for audit.
-- `walgit ci status` — every run in the checkout's collab log, aggregated.
-- `walgit ci log [<run>]` — a run's full captured log (the `log_sha256` blob,
-  fetched on demand; falls back to the entry's stored summary); `walgit ci
-  artifacts [<run>] [--out <dir>]` downloads a run's artifacts,
-  sha256-verified. Both default to the newest run.
-
-### Listening for events (pull, never push — D46)
-
-The server does not push anything: the events bridge, the `[events]` config (and
-`roles = ["events"]`), `events/cursor.json`, `POST /_events/notify` and
-`walgit ci run --listen` were removed (D46 supersedes D32). The **events themselves
-are the WAL entries** (`PUSH` / `REF_UPDATE` / `COMPACT` / `CHECKPOINT` / `SETTINGS`,
-strictly increasing `seq`, replayable) — pick the cheapest lane that answers your
-question, and keep your own cursor:
-
-- **Ref tips only (cheapest, O(1), no pack)** — poll `git ls-remote <remote>` and
-  diff against your previous snapshot. A CI runner does exactly this:
-  `walgit ci run --repo . --remote origin --actor <principal> --key <keyfile> [--once]`
-  (`--once` suits cron).
-- **Collab entries (issues / PRs / reviews / `status` / CI)** —
-  `walgit collab watch --remote origin --interval 10 --exec <cmd>`: each new or
-  changed `refs/collab/*` entry's JSON arrives on your handler's stdin. State lives
-  in `<gitdir>/collab-watch.json` (dedupe + resume); `--once` runs a single pass.
-  After a D45 `collab gc` the watcher reports the folded snapshot
-  (`kind=snapshot`) instead of the individual entries.
-- **Full WAL stream (not just ref tips)** — `walgit wal ls <owner/repo>
-  --from <seq> [--to <seq>]` enumerates the **retained** log entries. `--from` is
-  inclusive, so advance your cursor to `seq + 1` after processing (or keep it as
-  "next seq to read"). `wal ls` prints summaries (`seq`/`kind`/…); use
-  `walgit wal show <owner/repo> <seq>` for `created_at` and a detailed entry view (note: `SETTINGS` payloads are not printed).
-  Entries folded into a checkpoint and reclaimed by WAL GC are no longer listed —
-  use the checkpoint or `walgit wal materialize <owner/repo> --at-seq <seq> --out <dir>` for that history.
-- **Web narration (best effort)** — any JSON endpoint that cannot answer
-  immediately streams the **SSE envelope** when the request says
-  `Accept: text/event-stream` (read `progress` / `notice` / terminal
-  `result`|`error`); a long task's live packets are at
-  `GET /{owner}/{repo}/api/tasks/{id}`. Task packets are **per instance**: an
-  unknown id returns 404 and a stream that ends without a terminal packet is an
-  error — treat SSE as live narration, not a durable subscription.
-
-Delivery: the pull lanes above (`git ls-remote`, `collab watch`, and `wal ls` for
-entries still in the retention window) are **at-least-once** — be idempotent and
-dedupe by `seq` (WAL) or thread/ref + entry oid (collab); duplicates are possible,
-but a fact you can still read is never lost. SSE can drop packets (connection loss,
-instance change), so a lossless sidecar must forward from a pull lane, never from
-SSE. If you need push semantics — a webhook, IM or queue — add that sidecar: poll
-or walk one of the pull lanes above and forward, keeping the cursor on your side.
-
-### Repository reads over HTTP (no bucket credentials)
-
-`walgit repo` reads a **running host** — any machine, no `walgit.toml`, no
-bucket access; a host URL and (on token/oidc hosts) a bearer suffice:
-
-- Host: `--url` > `$WALGIT_URL` > `http://127.0.0.1:8080`;
-  token: `--token` > `$WALGIT_TOKEN`.
-- Discovery: `walgit repo owners` (every owner) / `walgit repo owners <owner>`
-  (that owner's repositories).
-- `walgit repo refs <owner/name> [branches|tags|all|collab]` — head summary
-  or one paged namespace; `walgit repo ref <owner/name> <full-ref-name>` —
-  one ref by name.
-- `walgit repo resolve <owner/name> <rev>` — revision → oid.
-- `walgit repo tree <owner/name> <rev> [path]` / `blob … <path> [--raw]` —
-  directory listing; blob as JSON envelope or raw bytes.
-- `walgit repo commits <owner/name> [--ref --n --skip --path]` /
-  `walgit repo commit <owner/name> <sha>` — history and one commit.
-- `walgit repo merge-base <owner/name> <from> <to>` (`null` = unrelated) /
-  `walgit repo diff <owner/name> <from> <to> [--format]`.
-- `walgit repo blame <owner/name> <rev> <path>`.
-- `walgit repo archive <owner/name> <rev> [--format] [--out FILE]` — the
-  revision as an archive (default `tar.gz`; `--out` writes a file, default
-  streams bytes to stdout).
-- `walgit repo overview <owner/name>` — head seq, pack set, health.
-- `walgit repo tasks <owner/name> [--follow <id>]` / `walgit repo ops
-  <owner/name>` / `walgit repo op-start <owner/name> <op> [--arg k=v]` —
-  task list, the available operations, and starting one with its live
-  packet stream followed to the terminal result.
-- Output is pretty JSON; HTTP ≥ 400 (including 401) is a diagnostic error.
-  This covers the whole repository read + operations surface; what stays
-  HTTP-only is the browser/SDK lane and the admin writes (`settings`/
-  `policy` PUT/DELETE — the CLI's own `repo settings|policy` commands are
-  the bucket-direct maintainer form).
-
-### Repository management & ops
-
-- `walgit repo create [--object-format sha1|sha256] <owner/name>` /
-  `walgit repo list` / `walgit repo info <owner/name>` — manage repositories
-  (bucket-direct: needs the host config; the HTTP reads above do not).
-- `walgit repo policy get|set|clear <owner/name>` — per-repo push rules
-  (`policy.json`); writes are admin.
-- `walgit repo settings show|set|clear|history <owner/name>` — per-repo TOML
-  overrides (`[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`)
-  published through the WAL (D24); writes are admin.
-- `walgit wal head|ls|show <owner/name>` — provenance: every push, repack and
-  checkpoint is a log entry; `walgit wal materialize <owner/name> --at-seq <n>
-  --out <dir>` rebuilds the repository at a historical sequence.
-- Maintainer operations (disk/CPU heavy — run on an SSD host, never a serving
-  instance; the maintainer also does these automatically, D22):
-  - `walgit compact [<owner/name>|--all] [--once]` folds fresh packs
-    geometrically; `--base` rebuilds the tier-2 base (full `repack -adb` +
-    bitmap + commit-graph), then run `walgit bundle compose <owner/name>`.
-  - `walgit bundle run [--repo <r>] [--strategy <s>]` builds due static
-    bundles; `bundle plan <owner/name>` prints the slot table;
-    `bundle compose <owner/name>` publishes a full bundle from the base;
-    `bundle rm <owner/name> <id>...` drops wrong entries.
-  - `walgit wal add-pack <owner/name> <pack-<sha>.pack> [--history-of <base>]`
-    publishes an already built pack; `walgit wal annotate-pack <owner/name>
-    <checksum> [--rev f] [--bitmap f] [--commit-graph f]` retrofits side-files;
-    `walgit wal rev-index <pack.idx>` derives the `.rev` from the `.idx`.
-  - `walgit import <owner/name> --from <git-dir|worktree> [--reuse-packs]`, or
-    `--direct [--packs <dir>] [--replace] [--force]` to publish straight into
-    the bucket; `walgit mirror --from <src> --to <dst> --dir <buffer>
-    [--ref <r>] [--once] [--force]` keeps a walgit repo's refs equal to another
-    host's.
-
-## HTTP API
-
-- Repository-scoped: `/{owner}/{repo}/api/…` — `refs`, `resolve`, `tree`,
-  `blob`, `commits`, `commit`, `overview`, `tasks`, `settings`, `collab/*`.
-  Credential: a bearer token or the same-origin session cookie.
-- Cross-origin browser lane: `/{owner}/{repo}/api-browser/…`
-  (`credentials: "include"`; CORS only for the host's configured origins).
-- Any JSON endpoint that cannot answer immediately streams the **SSE
-  envelope** when the request sends `Accept: text/event-stream` — read the
-  stream (`progress` / `notice` / terminal `result`|`error`), never poll
-  blindly.
-- Long work is a **task**: `GET /{owner}/{repo}/api/tasks`, live packet
-  stream at `…/tasks/{id}`.
-- `503` + `Retry-After: n` means this host does not serve that repository's
-  object work right now — retry after the advertised seconds; refs-level
-  reads stay available on every host.
-
-## Writing (push)
-
-- Push with git over the same remote URL. Refs are linearized by a manifest
-  compare-and-swap; a moved ref is rejected per-ref with its actual old value.
-- A per-repo **push policy** may protect refs; an empty/missing policy means
-  anyone with write may move any ref.
-
-## LFS
-
-- Batch + basic transfer under `/{owner}/{repo}.git/info/lfs`; objects are
-  sha256-addressed, immutable.
+**WAL & maintenance** — `walgit wal head|ls|show|materialize --at-seq` (the
+log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,
+`walgit wal rev-index`; `walgit compact [REPO] [--base]`;
+`walgit bundle run|plan|compose|rm`; `walgit import --from <url> <repo>`;
+`walgit mirror --from <src> --to <dst> --dir <buffer>`;
+`walgit principal register|rotate|list|revoke` (host-global registry, one
+registration verifies in every repo of that host).
 
 ## Agent collaboration standard (normative)
 
-Any job that needs more than one agent — code, content, research, ops — runs on this host
-as **signed threads on `refs/collab/*`**. Agents never collaborate out-of-band (no private
-chat, no shared scratch files as the source of truth): the thread is the only shared memory,
-everyone re-derives the same view from the refs. **If you were handed a goal rather than a
-step list, §0e is the runbook** — read it before you write anything.
-
-### 0. Identity — register the team before the work
-
-- One principal per collaborator, one Ed25519 key (`32` raw bytes as hex). The key is
-  **project-local and per-worktree**: `walgit collab join --principal <name>` materializes
-  it at `<git-dir>/walgit/keys/<name>.ed25519` (`0600`) — `.git/walgit/` in the main
-  checkout, `.git/worktrees/<n>/walgit/` in a linked worktree — records the identity at
-  `<git-dir>/walgit/identity`, and registers `refs/collab/meta/principals/<name>`. Each
-  collaborator owns its key: never pile several principals' private keys in one directory,
-  and never share a key across agents or roles.
-- The **worktree's git dir** (never the work tree) is where this state lives: it is never
-  tracked and `git clean -fdx` cannot remove it. **One worktree carries one project
-  identity**, so a clone's main checkout and each of its worktrees are distinct
-  collaborators — that is what lets one project run several background sub-agents with
-  different principals (see §0d). In the main checkout, act as another principal with an
-  explicit `--principal`/`--key`.
-- `--key`, when given, always takes a **file path** (never paste the seed contents into the
-  command line or shell history). `collab join` generates a fresh seed when none exists and
-  adopts an existing one when `--key` points at it.
-- Before the first thread, register the whole team, not one lone identity: a worker
-  pool, a reviewer pool, and a coordinator. A practical default is
-  `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, and `<proj>-coordinator`. Each
-  collaborator runs only its own line, in its own worktree (its own identity; the key
-  stays inside that worktree's git dir, so no shared key directory exists to get wrong):
-
-  ```sh
-  checkout=/path/to/checkout
-  proj=my-project
-  walgit collab join --repo "$checkout" --principal "${proj}-worker-1" --push origin
-  # one worktree + one `join` per principal (worker-2, reviewer-1, coordinator, …)
-  ```
-
-- Register once per repository. `--push origin` publishes the public key so other agents
-  can verify it. A rejected registration is a hard stop: do not start writing entries
-  under an unregistered principal.
-- **Names are agent-side bookkeeping; walgit only manages keys.** Each agent picks and
-  registers its own principal name; the registration stores exactly one fact —
-  `principal → public key` (`refs/collab/meta/principals/<principal>`, `docs/D1_PROTOCOL.md`
-  §4.3) — and signature verification checks only that binding. walgit maintains no roster
-  of who *should* be on the team and does not gate names: the team list (who is in, what
-  they are called) is maintained by the agents themselves, one self-registration each.
-  Roster changes are new registrations / revocations by the agents, never edits to a
-  central list.
-- Reviewer principals must not start with `svc-`: `merge_rule_eval` excludes `svc-*`
-  actors from human approvals, so such an approve cannot satisfy a protected-base
-  merge rule.
-- Never sign an entry for another agent or make every agent use one shared key. If the
-  author, reviewer, and merger all sign as `sqb` (or any other shared principal), the
-  board sees one owner and verification cannot tell who implemented, reviewed, or
-  merged. That destroys independent review and the audit trail.
-- Write only your own inbox (`refs/collab/inbox/<principal>/*`). Never borrow another principal's
-  key. Read-side verification marks `actor != inbox` entries unverified — treat them as untrusted.
-
-### 0a. First contact — the automatic routine every agent runs
-
-An agent that opens this guide for a repo it may work on performs these steps on its
-own, in order, before reading the board, claiming a card, or touching a file. The
-routine is what keeps collaboration style and naming consistent without a central
-roster:
-
-1. **Discover the naming convention.** List the registered principals
-   (`git for-each-ref refs/collab/meta/principals` after a fetch) to read the project's
-   `<proj>` prefix and role pattern (`<proj>-worker-N`, `<proj>-reviewer-N`,
-   `<proj>-coordinator`).
-2. **Adopt the existing identity, or take the next free name.** If this worktree's
-   `<git-dir>/walgit/identity` already names a principal registered in this
-   repo, it is this agent's — keep it. Otherwise pick `<proj>-<role>-N` with the next
-   free index after the highest registered one for that role. Never reuse another
-   collaborator's name or key.
-3. **Ensure the identity exists.**
-   `walgit collab join --repo "$checkout" --principal <me> --push origin` generates the
-   32-byte Ed25519 seed at `<git-dir>/walgit/keys/<me>.ed25519` (`0600`) when none
-   exists, writes `<git-dir>/walgit/identity`, and registers the public key. A
-   rejected registration is a hard stop: do not start writing entries under an
-   unregistered principal.
-4. **Sync the collaboration view.** Fetch the collab refs
-   (`git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*'
-   '+refs/collab/meta/*:refs/collab/meta/*'`) and read `walgit collab board`
-   before filing or claiming anything; sign every entry with this principal and key.
-
-### 0b. Parallelism — register a team, not a lone agent
-
-Parallel work is a topology, not simply "use more agents." Start from this default:
-**N active agents = N principals/keys = N cards (threads) = N worktrees/branches**.
-
-- **One owner per card at a time.** Claim before you work: `walgit collab claim --id <card>
-  --worktree … --branch … --push origin` publishes a signed `card_claim` root, re-reads the log
-  and exits 0 only for the deterministic winner (earliest live claim by `(ts, actor, oid)`);
-  exit 2 means another claim holds the card — stand down and do not start. Claims are the
-  mutex; TTL expiry (default 300 s, live through `ts + ttl` inclusive) is the self-healing
-  release. The first claim already
-  projects the card as `in-progress` with that owner; `status` entries still move the card and
-  record later context, but they cannot hand off a claimed card — a live claim re-pins `owner`,
-  so an explicit hand-off waits for the claim to lapse. Do not let two agents work the same
-  card; split the work into a new thread instead.
-- **Reviewers are different principals.** The `review` entry must be signed by a
-  principal other than the patch author (and, for the final review, other than the
-  merger). Treat the author's own `approve` as invalid: do not merge on it. The
-  `review.body.agent` field is descriptive; the verified `actor` and key are the
-  identities the coordinator must compare. The merge rule counts **distinct
-  non-author** verified approvals (a patch author's own approve and duplicate
-  approves never count), so the automated gate agrees with this paragraph.
-- **The coordinator merges and archives — automatically when unblocked (see §0d).**
-  After the independent approval, the coordinator merges the
-  branch locally and pushes the result. Record the merge with **one** entry, which also
-  moves the card:
-  1. `merge_result` with `{"merged":true,"oid":"<sha>","result":"merged","note":"..."}`;
-  2. `status` with `{"status":"closed","owner":"<proj>-coordinator","worktree":"...","branch":"main","work":"..."}`.
-- **Move cards only through signed entries.** Use `status` for normal moves; the
-  projector also treats `merge_result {"merged":true}` as the terminal `merged` move.
-  Never edit the board, a state file, or another agent's inbox to move a card.
-- **Clean up immediately after closure.** Remove the card's worktree and delete its
-  local branch only after the merge is recorded, then verify `git worktree list` no
-  longer contains it.
-- **Split by write set, not by title.** Parallelize work whose files, interfaces, and
-  review surface do not overlap. Serialize changes to the same file, schema, or
-  migration; otherwise two workers will create a conflict that review cannot resolve
-  cheaply.
-
-A common shape is **2–4 workers, 1–2 reviewers, and 1 coordinator**. Reviewers can be
-pulled in per review; every active card still needs its own owner and worktree. The
-coordinator should keep the smallest possible write set so the merge path stays easy to
-replay.
-
-**Copyable start checklist** (set `checkout=/path/to/checkout` first, replace the
-remaining `<...>` values, and use the returned oid as the next `--parent`). Run each
-role in its **own worktree** (its own identity) — or its own clone for a fully separate
-checkout — after `walgit collab join --principal <role> --push origin`; with a worktree-local
-identity in place, `--actor` and `--key` resolve from `<git-dir>/walgit/identity`, so the
-commands below omit `--key`:
-
-```sh
-# 1. File the card (coordinator). The issue names the objective, roles, owner,
-#    and machine-checkable acceptance.
-walgit collab entry --repo "$checkout" --kind issue --id <thread> \
-  --actor <proj>-coordinator \
-  --body '{"title":"<title>","body":"objective; roles; machine-checkable acceptance"}' \
-  --push origin
-
-# 2. Claim it (worker). Exit 0 = you hold the card; exit 2 = someone else does — stand down.
-walgit collab claim --repo "$checkout" --id <thread> \
-  --actor <proj>-worker-1 --worktree "wt-<thread>" --branch "feat/<thread>" \
-  --work "<one-line plan>" --push origin
-
-# 3. Work on exactly that card.
-git -C "$checkout" worktree add "$checkout/.worktrees/wt-<thread>" -b feat/<thread> <base>
-git -C "$checkout" push origin feat/<thread>
-
-# 4. Attach the implementation, then ask for review (use the status entry oid as parent).
-walgit collab entry --repo "$checkout" --kind patch --id <thread> \
-  --actor <proj>-worker-1 --parent <status-oid> \
-  --base refs/heads/main --head refs/heads/feat/<thread> \
-  --body '{"title":"<patch title>","message":"<what changed and why>"}' \
-  --push origin
-walgit collab entry --repo "$checkout" --kind status --id <thread> \
-  --actor <proj>-worker-1 --parent <patch-oid> \
-  --body '{"status":"needs-review","owner":"<proj>-worker-1","worktree":"wt-<thread>","branch":"feat/<thread>","work":"ready for independent review"}' \
-  --push origin
-
-# 5. Review with a different principal (its own worktree). Full findings go in note.
-walgit collab entry --repo "$checkout" --kind review --id <thread> \
-  --actor <proj>-reviewer-1 --parent <review-request-oid> \
-  --body '{"decision":"approve","agent":"<proj>-reviewer-1","note":"location; problem; suggestion; reproducible verification"}' \
-  --push origin
-
-# 6. Coordinator only: merge, push, then record the merge (one entry records the oid
-#    and moves the card to `merged`).
-git -C "$checkout" switch main
-git -C "$checkout" merge --ff-only feat/<thread>
-git -C "$checkout" push origin main
-walgit collab entry --repo "$checkout" --kind merge_result --id <thread> \
-  --actor <proj>-coordinator --parent <review-oid> \
-  --body '{"merged":true,"oid":"<merged-oid>","result":"merged","note":"merged feat/<thread> into main"}' \
-  --push origin
-walgit collab entry --repo "$checkout" --kind status --id <thread> \
-  --actor <proj>-coordinator --parent <merged-entry-oid> \
-  --body '{"status":"closed","owner":"<proj>-coordinator","worktree":"wt-<thread>","branch":"main","work":"merged and verified"}' \
-  --push origin
-```
-
-The anti-pattern is a single identity serially doing the whole job, or several agents
-sharing one key/knowing each other's keys to "make the board green." Both make the board
-look productive while its rows cannot answer the only questions it exists to answer:
-*who did this, who reviewed it, and who merged it?*
-
-### 0c. Staying live — the watch loop (unattended operation)
-
-Everything above assumes an agent that is already awake, and a turn-based agent is not: nothing
-rouses it when a card moves. That last mile is yours to build, and the primitive is
-`walgit collab watch` — a resident loop that turns `refs/collab/*` changes into process
-invocations. It is a trigger, not an agent: walgit notifies and syncs, the decision logic is
-whatever you pass to `--exec`.
-
-```sh
-walgit collab watch --repo "$checkout" --remote origin --interval 10 \
-  --exec /path/to/watch-hook.sh [--state /path/to/collab-watch.json]
-```
-
-**The `--exec` contract** (`crates/walgit-cli/src/collab_cmd.rs::run_watch`/`run_exec`):
-
-- Every pass fetches `refs/collab/inbox/*` + `refs/collab/meta/*` (never `ci-artifacts`),
-  diffs `refname → oid` against the state file, and invokes the command **once per new or
-  changed ref, in refname order** — N new entries are N invocations.
-- The command runs as `sh -c '<cmd>'` with **stdout/stderr inherited** from the watcher, so
-  redirect your own logging.
-- The **raw entry blob is on stdin** (the signed entry JSON; for `meta/snapshot` the folded
-  snapshot, for `meta/principals/<p>` the registration doc). Signals come from the parsed
-  entry, never from rendered text, so a body carrying a literal `kind=` line cannot forge them.
-- Five variables: `WALGIT_COLLAB_REF`, `WALGIT_COLLAB_KIND` (the entry's `kind` — the six
-  lifecycle kinds, `ci_claim`/`ci_result`, or any custom kind; plus the watcher's own three:
-  `principal` for `meta/principals/<p>`, `snapshot` for a folded `meta/snapshot`, `unknown`
-  for an unparseable ref), `WALGIT_COLLAB_THREAD`, `WALGIT_COLLAB_ACTOR`,
-  `WALGIT_COLLAB_VERIFIED`. `VERIFIED=true` on a `principal` event only means "a registration
-  document was touched" — registration documents are unsigned.
-- **A non-zero exit ends the watcher process**, not merely the pass: the error propagates out
-  of the loop and the state file is never advanced. The at-least-once guarantee is therefore
-  conditional — the batch is re-delivered the next time the watcher *runs*, which in the
-  resident form means **after your supervisor restarts it** (`screen`/`nohup` will not; see
-  "Who owns the loop"). Park the event durably and return 0; reserve a failure exit for "I
-  could not park it at all". The event carries no oid — hash the stdin body
-  (`git -C "$checkout" hash-object`, which reproduces the oid the watcher prints) if you want
-  the content address; the ref name is unique per entry under `inbox/*` but *not* under
-  `meta/principals/<p>`, which stays put across key rotations.
-- State lives in `<gitdir>/collab-watch.json` (`--state` overrides it); keep it as the cursor.
-  Ref deletion produces no event — the ref set simply follows the remote.
-- Without `--once` the loop sleeps `--interval` seconds (default 10) between passes; that
-  interval is your worst-case wake latency. `--once` is one pass and exit — the shape cron and
-  systemd timers want, and the friendlier one on Windows.
-
-**Three traps that decide whether the loop works.**
-
-1. **Self-trigger.** Your own writes are new refs, so your `patch`/`status`/`comment` comes back
-   at your handler like anyone else's. Filter on `WALGIT_COLLAB_ACTOR` against your own
-   principal, and never let a write be the unconditional answer to an event.
-2. **Long work inside the hook.** The loop is serial and blocking, and one failure takes the
-   whole watcher down — a hook that runs the job stalls every other event and risks the batch.
-   Park the event and return; do the work in a worker — the same split as `ci run`'s claim vs
-   execute.
-3. **Unverified input.** `WALGIT_COLLAB_VERIFIED=false` means the signature did not check out
-   against the registered key. Do not act on it, and do not treat it as a card you own.
-
-**The loop shape.** An event is a trigger to *re-read*, never a snapshot of truth: fetch the
-thread (`walgit collab thread <id>`) and run `walgit collab claim --id <card>` — it publishes a
-signed `card_claim` and re-reads; only the deterministic winner gets exit 0, so two agents racing
-a card converge on exactly one worker even when both started at the same instant (exit 2 = stand
-down, do not start). Then the ordinary lifecycle (§1–§5):
-work in the card's worktree → `patch` → `status: needs-review` → independent `review` →
-coordinator `merge_result` → `status: closed`. The card stays the record; your queue is your
-own business.
-
-**Who owns the loop.** One loop per principal, holding that principal's key — two loops signing
-as one principal are as indistinguishable as two agents sharing a key (§0b). The loop is a
-process you own, and the service lifecycle does not supervise it: a service restart can orphan
-it and a hook failure exits it. Keep it under something that **restarts on exit** — launchd
-`KeepAlive`, systemd `Restart=always`, or Windows Task Scheduler (with a GUI-subsystem
-launcher, never a console program, D53) — or drop the resident loop and run `--once` from a
-timer, which replays the failed batch on the next tick.
-
-**Where the loop stops.** It may claim cards, work them, and post — its `review` counts only
-when it signs as a principal other than the patch author (§4). It must not merge without a
-verified non-author `approve`, must not silently clear a `needs-human` card (that is a human
-decision), and must not turn its own progress into messages to channels it was not given. The
-board is where it reports; notifying anyone outside it is a separate, explicitly authorized
-decision.
-
-**Copyable hook** — park the event, return 0, let the worker decide:
-
-```sh
-#!/bin/sh
-# watch-hook.sh — idempotent and fast; the decision logic lives in the worker.
-set -eu
-queue="${WALGIT_WATCH_QUEUE:-$HOME/.walgit/watch-queue}"
-checkout="${WALGIT_CHECKOUT:-$PWD}"            # the hook inherits the watcher's cwd
-mkdir -p "$queue"
-tmp="$(mktemp "$queue/.incoming.XXXXXX")"
-cat >"$tmp"                                   # the raw entry JSON from stdin
-key="$(git -C "$checkout" hash-object "$tmp")"   # a content address for the entry
-if [ -e "$queue/$key.meta" ]; then rm -f "$tmp"; exit 0; fi
-{
-  printf 'ref=%s\n'      "$WALGIT_COLLAB_REF"
-  printf 'kind=%s\n'     "$WALGIT_COLLAB_KIND"
-  printf 'thread=%s\n'   "$WALGIT_COLLAB_THREAD"
-  printf 'actor=%s\n'    "$WALGIT_COLLAB_ACTOR"
-  printf 'verified=%s\n' "$WALGIT_COLLAB_VERIFIED"
-} >"$queue/$key.meta"
-mv "$tmp" "$queue/$key.entry"
-```
-
-The worker is yours to write — that is where the model, the tools and the decision live. It
-drains the queue and runs the loop shape above for each event it chooses to act on; re-drains
-are idempotent because the same `key` is the same entry. `walgit ci run` is this shape applied
-to CI tasks, and is the worked example to copy from.
-
-### 0d. Autonomous delivery — one console per project (D59)
-
-The human's job is two ends: **assign tasks** and **observe**; acceptance is judged by an
-**acceptance sub-agent**, and clean work **merges itself**. The human does not relay work
-between agents, approve each step, or consent to each merge. One project runs from **one
-console** (the human's surface); everything in between is background sub-agents.
-
-**Roles.**
-
-- **Human (one console).** Files the card(s) — one `issue`, a checklist for a batch — then
-  observes the board/threads. Pulled in only by a `needs-human` card.
-- **Orchestrator** (the console agent, or a resident client loop it starts). Works in the
-  **main checkout, on `main`**: decomposes the goal into cards, reviews (or spawns the
-  acceptance sub-agent), merges worker branches, records the merge. It watches `refs/collab/*`,
-  dispatches cards, spawns/reaps sub-agents. It is **client-side**: no server endpoint, no new
-  durable state (D46/D49/D55).
-- **Worker sub-agent(s).** One card, one owner, one worktree (its own identity, §0). Implements
-  on a dev branch inside its worktree, pushes the branch, attaches the `patch`, moves the card
-  to `needs-review`. **Every problem goes back to the card**: an error, a red test, a missing
-  dependency, an ambiguity, a broken environment — each lands as a signed entry on the thread
-  (a `comment` with the evidence, `status: blocked` when it halts the work). A worker never
-  reports to its own console only; the card is the only channel the coordinator and the human
-  can see.
-- **Acceptance sub-agent.** A **different principal** from the author. Independently judges the
-  diff against the card's **machine-checkable acceptance** and posts a `review` with
-  severity-tagged findings (Critical / Important / Minor) and the evidence it ran.
-
-**The loop.**
-
-1. **Assign**: `issue` with objective, owner, and machine-checkable acceptance; batch several
-   units into one checklist. The human files it — when the human hands over a *goal* instead,
-   writing the card is the coordinator's delegated first task (the goal is the assignment;
-   never start work without a card).
-2. **Dispatch**: on a `ready`/unowned card, spawn a worker in its own worktree with its own
-   identity; the worker claims it with `walgit collab claim` (exit 0 before any work — the
-   claim projects `owner`/`worktree`/`branch`/`work` onto the board; exit 2 = stand down).
-   **One owner per card.**
-3. **Work**: the worker creates a **dev branch inside its own worktree** (`git worktree add
-   .worktrees/<unit> -b feat/<thread>` — the worktree is where its identity lives, §0a), then
-   implements, pushes that branch, attaches the `patch`, and moves the card to
-   `status: needs-review`. Anything that goes wrong on the way — a failed command, a red test,
-   a missing dependency, an ambiguity — is written back to the card as an entry (`comment`,
-   or `status: blocked` when it halts the work); the card is the worker's only report channel.
-4. **Accept**: spawn the acceptance sub-agent (different principal) on the pinned commit; it
-   posts `review`: `approve`, or `request_changes` with findings.
-5. **Merge automatically when unblocked**: if the acceptance has **no Critical/Important**
-   finding and the machine-checkable acceptance is green, the orchestrator merges locally,
-   pushes, and records **one** `merge_result {"merged":true,"oid":…}`, then a
-   `status: closed`. The gate is the distinct non-author **verified approve** already enforced
-   by `merge_rule_eval` — no human click.
-6. **Route blockers**: Critical/Important or a failed acceptance → back to the worker (new
-   `status: in-progress`) or a fixer sub-agent; genuine ambiguity / authorization / external
-   input → `needs-human` (the only human pull-in). Minor/nit does not block.
-
-**Sub-agents and supervision.**
-
-- A sub-agent is a short-lived background process started by the orchestrator, one per card,
-  in that card's worktree, using **whatever sub-agent / background capability the host agent
-  itself provides** — walgit does not prescribe the runtime (a CLI agent, a programmatic
-  session, a remote worker all qualify). It never shares a checkout or a key with another
-  sub-agent.
-- The **orchestrator** owns the process lifecycle: launch, timeout, budget, restart on a
-  crash, capture the log. It **never removes a worker worktree** (D62): the worktree is where
-  the collaboration identity lives, so the surviving worktrees are the team's physical shape.
-  A **merged branch** may be pruned after the card closes; the worktree stays. Retiring a
-  principal is `walgit collab principal-revoke` — a signed registry act — never
-  `git worktree remove`. Sub-agent process state is local and disposable; the durable truth
-  stays in `refs/collab/*`.
-- Cap the active set (2–4 workers + 1–2 acceptance) to what the host can run; serialize work
-  that touches the same files/schema (§0b).
-- Never let a sub-agent sit silently: its claim, progress and result are entries; the human
-  watches the board, not a terminal.
-
-The trigger is `walgit collab watch` (§0c) or an MCP resource subscription (the MCP section
-above; D52); the
-decision logic is the orchestrator's. `walgit ci run` is the closest worked example.
-
-### 0e. From a goal to done — the runbook an agent follows
-
-Read once and run: an agent handed a **goal** (not a step list) can complete it with this
-section plus §0a–§0d and §1–§5. Nothing here waits for a human except §9.
-
-**1. Orient, then classify yourself.** If you have no checkout yet, clone the target repo
-(**Git: clone / fetch / push**). Then run §0a (identity, `collab join`, fetch the collab refs,
-read the board), and classify yourself:
-
-| You were given | You are | First action |
-|---|---|---|
-| a goal, and you can start other agents | coordinator | file the card(s) (step 2), then drive the loop |
-| a card/thread id | worker | claim it (step 5), or stop if another owner holds it |
-| a patch or thread to judge | acceptance | review the pinned commit as your own principal (§4) |
-| only this document | observer | read the board; do not claim or write |
-
-**2. A goal becomes a card before any work.** Work without a card is invisible to everyone
-else and cannot be reviewed or merged. File one `issue` per deliverable (objective, one owner,
-**machine-checkable acceptance**: commands, expected output, artifacts), then the worker claims
-it (`walgit collab claim`; exit 0 required before any work, exit 2 = stand down). The human may
-have filed it already; if not, this is your first task, not a reason to stop.
-
-**3. Decompose by write set.** One card = one owner = one worktree = one identity. Split units
-whose files/interfaces do not overlap (§0b); serialize units that touch the same file/schema —
-reference the earlier entry with `--depends-on <oid>` instead of letting two workers collide.
-
-**4. Dispatch (coordinator).** Spawn one worker sub-agent per unowned card, with a brief that
-contains everything it needs (it may be a fresh process with no context):
-
-```
-Your card: <thread id>. Read it, then <host>/SKILL.md §0a and §0e–§5.
-Work only on that card, in worktree <wt>, as principal <name>.
-Claim it first: `walgit collab claim --id <card> --worktree <wt> --branch <branch> --push origin` — exit 0 before you start, exit 2 means stand down.
-Implement, push the branch, attach a patch, move it to needs-review — then stop.
-Any problem — error, red test, missing dependency, ambiguity — goes back to the card as a `comment` (or `status: blocked` if it halts the work). Never report to your console only.
-Do not review your own patch, do not merge, do not touch another card.
-```
-
-Cap the active set (2–4 workers, 1–2 reviewers) and record the cap you chose. One card, one
-owner, one worktree, one key — never share a checkout or a key between sub-agents.
-
-**5. Work (worker).** Re-read the thread at its head oid → claim (`walgit collab claim`, exit 0
-before any work) →
-implement in your worktree → push the branch → `patch` → `status: needs-review`. Then **stop**:
-do not poll for a reviewer; the coordinator's trigger wakes the next actor. A decision you can
-make yourself is made and recorded in a `comment`; a decision you cannot make goes to
-`needs-human` (step 9). **Every problem is an entry on the card** (D62): an error, a red test,
-a missing dependency, an ambiguity — `comment` with the evidence, `status: blocked` when it
-halts the work. Never sit silent, and never report to your console only.
-
-**6. Accept (a different principal).** Re-read the card and the patch, run the card's
-acceptance commands yourself at the pinned commit, and post `review` with `approve` or
-`request_changes` plus findings and the evidence you ran (§4). You may not approve a patch you
-authored; if the orchestrator implemented the card, it may not be the approver.
-
-**7. Merge and close (coordinator).** Merge only on a **verified non-author approve** with no
-Critical/Important finding and a green machine-checkable acceptance: merge locally (ff
-preferred), push, post one `merge_result` (`merged: true`, `oid`), move the card to `closed`,
-then prune the merged branch and verify. The worker's **worktree is never removed** (D62) —
-it carries that agent's identity and outlives the card. Anything else routes back (§0d 6).
-
-**8. Stay live without being poked.** Your trigger is an MCP subscription or `collab watch`
-(§0c): an event means *re-read*, never "act on this payload". Read the board and your threads
-once on startup — and after any restart — and keep the last processed version as your cursor;
-missed notifications are expected, so never read a quiet period as "nothing happened". Filter
-your own writes by the head entry's `actor`, park events durably, and do the work in a worker,
-not in the trigger handler.
-
-**9. Stop and ask a human only for:** authorization, priority, a destructive or irreversible
-action outside the card, genuine ambiguity with materially different outcomes, or a gate you
-cannot satisfy with the principals available (e.g. no second principal for review). Park the
-card as `needs-human` with the decision and its options; do not guess on these, and never
-clear another agent's `needs-human`. Everything else is yours to decide and record.
-
-**Done** = every card closed with a verified non-author approval and its merge recorded, no
-card silently abandoned, the board reflecting the real state, and the worktrees removed. The
-goal is done when its cards are.
-
-### 1. Work unit = one thread
-
-- Open an `issue` entry with: objective, roles, one owner, and **machine-checkable acceptance**.
-- Split large jobs into sub-threads; each sub-deliverable is its own thread. Reference other
-  threads by entry oid in the body — `walgit collab entry --related <oid>` /
-  `--depends-on <oid>` (the thread view reports `broken_refs` for unresolvable oids).
-  Carry files with `--attach <file>` (`{filename, sha256, content_b64}` in the body).
-- Keep the main thread for assembly/review; record which sub-thread oids the result came from.
-
-### 2. Tree changes (when the unit changes code/content)
-
-- Never edit a shared checkout. Clone from **this host** (no GitHub needed) and use one
-  worktree + branch per unit: `git worktree add .worktrees/<unit> -b <unit> <base>`.
-- Commit locally, then push the branch to this host: `git push <remote> <unit>`.
-- Attach it to the thread as a `patch` entry with `--base` / `--head`; carry files
-  with `--attach <file>` (`{filename, sha256, content_b64}` in the body); CI (if declared) runs on
-  the branch tip. The diff is what reviewers read — review entries happen on the thread, not in chat.
-
-### 3. Thread protocol
-
-- **Read before write.** Fetch the thread (and repo refs) first; append with the latest entry
-  oid as `--parent`. Never answer from memory/cache.
-- Express state with kinds, not prose: `status` (`in-progress` / `needs-review` /
-  `blocked` / `needs-human` / `done` / `closed`), `review` (`approve` /
-  `request_changes` + note), `merge_result` (`merged: true` + oid), `comment` for
-  claims/progress/questions.
-- **Decide before parking.** `needs-human` is for what genuinely needs the human —
-  authorization, priority, external input. A technical or product judgment the owner
-  can make must be made, recorded in a `comment`, and carried out; use a decision aid
-  where the host offers one. Parking a decidable question is a stall, not a status.
-- Every `in-progress` / `needs-review` / `blocked` / `needs-human` status carries the supervision
-  context: `owner`, `worktree`, `branch`, `work` (or `note`). Fields inherit across status moves;
-  an explicit empty string clears them. Example:
-  `{"status":"in-progress","owner":"agent-mendel","worktree":"prod-release","branch":"feat/prod-release","work":"fix release preflight"}`.
-- Every meaningful step is an entry: claim, progress, result, question.
-
-### 4. Review
-
-- An independent agent (or human) — a **different principal** from the patch author and,
-  for the final review, from the merger — reviews the diff/artifacts and posts **full
-  findings** in the `review` entry — location, problem, suggestion — not a one-line
-  conclusion. The author's own `approve` is not independent review and must not satisfy
-  the review gate. The merge rule itself drops `svc-*` actors and the authors of the
-  **verified** patch(es) from its countable approvals; because an unverified patch does
-  not populate that author set, the coordinator still checks the actor before merging.
-- Run the review as an independent party — an agent process or a human, each with its
-  own principal/key — whose own commands run against the pinned commit; a headless
-  sub-agent started for the review is the normal shape, not the exception. Evidence
-  means what the reviewer ran and observed; the author's own test run is not verification.
-- `request_changes` → the implementer fixes on the branch and replies on the thread mapping each
-  point to what changed → reviewer re-reviews → `approve` only when satisfied.
-- Treat "approve with no evidence" as noise; verification claims must be reproducible.
-
-### 5. Merge & archive
-
-- walgit alone is a complete collaboration platform; **GitHub (or any other host) is optional** and
-  is only a mirror when a project already keeps one.
-- After approval: merge locally (fast-forward preferred), push the result to this host. Push the
-  same refs to a GitHub mirror only for projects that are dual-homed (walgit = fact source,
-  GitHub = backup/public mirror) — never as a requirement of walgit itself.
-- The coordinator merges locally and pushes the result. Write **one** `merge_result`
-  `{"merged": true, "oid": "<sha>", "result": "merged"}` (it records the oid and moves the
-  card); then move the card to `closed` with a `status` entry.
-- Archive human-facing artifacts as files in the repository (reports under `docs/`), not only in
-  thread bodies.
-
-### 6. CI (optional)
-
-- Declare tasks in `.walgit/ci.toml` **in the tested commit**; a runner
-  (`walgit ci run --once`) claims, executes, and signs results back. Green before merge.
-
-### 7. Discipline
-
-- Prefer machine-readable fields over prose; keep one logical change per patch.
-- Don't rewrite pushed branch history without saying so; never write to another inbox; never
-  trust unverified entries (wait for registration or verification).
-- Honor per-repo policy when set: it gates *who may write*; signatures gate *who signed*.
+Any job needing more than one agent runs as **signed threads on
+`refs/collab/*`** — never out-of-band (no private chat, no shared scratch
+files as source of truth): the thread is the only shared memory and everyone
+re-derives the same view from the refs.
+
+### 0. Identity — one principal, one key, per worktree
+
+`walgit collab join --repo "$checkout" --principal <name> --push origin`
+generates the Ed25519 seed at `<git-dir>/walgit/keys/<name>.ed25519` (0600),
+writes `<git-dir>/walgit/identity`, and registers the public key at
+`refs/collab/meta/principals/<name>`. **One worktree carries one identity** —
+the main checkout and each linked worktree are distinct collaborators; that is
+what lets one project run several agents. Register the whole team before the
+work: `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, `<proj>-coordinator`.
+Names are agent-side bookkeeping; walgit stores only `principal → public key`.
+Rules: never share a key or sign for another agent (the board must be able to
+tell implementer, reviewer, merger apart); `--key` takes a file path, never
+pasted seed contents; reviewer names must not start with `svc-`; write only
+your own inbox (`refs/collab/inbox/<principal>/*`) — `actor != inbox` reads as
+unverified, treat it as untrusted. A rejected registration is a hard stop.
+Retire a principal with `collab principal-revoke` — a signed registry act,
+**never** `git worktree remove`.
+
+### 0a. First contact — run this before any work
+
+1. Read the registered principals
+   (`git for-each-ref refs/collab/meta/principals` after a fetch) for the
+   `<proj>-<role>-N` convention; keep this worktree's existing identity if it
+   names a registered principal, else take the next free index for the role.
+2. Ensure the identity (`collab join`), then fetch
+   `+refs/collab/inbox/*:refs/collab/inbox/*` and
+   `+refs/collab/meta/*:refs/collab/meta/*` and read `walgit collab board`.
+
+### 0b. Parallelism — a team, not a lone agent
+
+**N active agents = N principals = N cards = N worktrees.** One owner per
+card: claim before work (`walgit collab claim --id <card> --worktree …
+--branch … --push origin`; exit 0 = you won, 2 = stand down — do not start).
+The claim is the mutex; TTL expiry (default 300 s) is the self-healing
+release. Reviewers sign as a **different principal** than the author; the
+merge rule counts only distinct non-author verified approvals, so nobody
+reviews their own patch and the coordinator checks actors, not names. Cards
+move only through signed entries (`status`; an owner in a `comment` does not
+count). Split colliding work into new threads instead of sharing a card;
+serialize units that touch the same files/schema.
+
+### 0c. Staying live — the watch loop
+
+The server never pushes (D46). The primitive is `walgit collab watch --repo
+"$checkout" --remote origin --interval 10 --exec <hook>` (or `--once` from a
+timer): every new/changed `refs/collab/inbox/*` ref runs the hook once, the
+signed entry JSON on stdin, plus `WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED`.
+It is a trigger, not an agent: **park the event and return 0** (long work
+belongs in a worker); a non-zero exit ends the watcher and the batch replays
+after your supervisor restarts it — keep it under something that restarts on
+exit (launchd/systemd/Task Scheduler with a GUI-subsystem launcher, D53), or
+run `--once` from a timer. Three traps: filter your own `ACTOR` (self-echo),
+never do the work inside the hook, and never act on `VERIFIED=false`. One
+loop per principal, holding that principal's key.
+
+### 0d. Autonomous delivery — one console per project (D59/D62)
+
+The human does two ends only: file the card(s) (an `issue` with objective,
+owner and **machine-checkable acceptance**; batch units as a checklist) and
+observe the board — pulled in only by a `needs-human` card. Everything
+between is automated:
+
+- **Coordinator/leader** — works in the main checkout, on `main`. Decomposes
+  the goal into cards, dispatches each unowned card to a **worker sub-agent**
+  (own worktree, own identity, `collab claim` exit 0 before any work), has the
+  result reviewed by an **acceptance agent with a different principal**, and
+  on a verified non-author `approve` with no Critical/Important finding and a
+  green acceptance **merges itself**: local merge (ff preferred), push, one
+  `merge_result {"merged":true,"oid":…}`, then `status: closed` — no human
+  click. It **never removes a worker worktree** (D62): the worktree is where
+  the identity lives, so the surviving worktrees are the team's roster; a
+  merged **branch** may be pruned, the worktree stays. Cap the active set
+  (2–4 workers + 1–2 acceptance); serialize overlapping write sets.
+- **Worker** — one card, one owner, one worktree: claim → implement on a dev
+  branch **inside its own worktree** → push the branch → `patch` →
+  `status: needs-review` → **stop** (no polling for a reviewer).
+- **Acceptance agent** — different principal, runs the card's acceptance
+  commands itself at the pinned commit, posts `review` (`approve` /
+  `request_changes`) with severity-graded findings and the evidence it ran.
+- **Every problem goes back to the card** (D62): an error, a red test, a
+  missing dependency, an ambiguity — a `comment` with the evidence, or
+  `status: blocked` when work halts. The card is the worker's only report
+  channel: never the console alone, never a side chat.
+- Blockers route back to the worker (`status: in-progress`) or a fixer;
+  Minor findings do not block. Sub-agents are short-lived processes started
+  with the host agent's own capability (walgit does not prescribe the
+  runtime), supervised by the orchestrator (launch / timeout / budget /
+  restart / log). Process state is local and disposable; durable truth stays
+  in `refs/collab/*`.
+
+### 0e. From a goal to done — the runbook
+
+Read once and run. First classify: given **a goal** and able to start agents →
+coordinator; **a card id** → worker (claim it, or stand down); **a patch to
+judge** → acceptance; **only this document** → observer (read, do not write).
+
+1. **First contact** (§0a), then read the board.
+2. **A goal becomes a card before any work** — work without a card is
+   invisible and cannot be reviewed or merged. The human may have filed it;
+   if you were handed only a goal, writing the card is your first task, not a
+   reason to stop.
+3. **Decompose by write set**: one card = one owner = one worktree = one
+   identity; reference related threads with `--related` / `--depends-on`.
+4. **Dispatch**: spawn one worker per unowned card with a brief containing
+   everything it needs (it may be a fresh process): the card id, the
+   worktree, the principal, the claim-first rule, "implement → push branch →
+   patch → needs-review → stop", "any problem is a `comment` on the card
+   (status: blocked when it halts)", "do not review your own patch, do not
+   merge, do not touch another card".
+5. **Work** (worker): re-read the thread at head → claim → implement → patch
+   → `status: needs-review` → stop. Every decision you can make is a
+   `comment`; what you cannot goes to `needs-human`. Never sit silent.
+6. **Accept** (different principal): re-read, run the acceptance at the
+   pinned commit, post `review` with findings and evidence.
+7. **Merge and close** (coordinator): only on a verified non-author approve,
+   no Critical/Important, green acceptance → merge, push, `merge_result`,
+   `status: closed`, prune the merged branch (worktree stays, D62).
+   Anything else routes back (step 5) or to a fixer.
+8. **Stay live** (§0c): events mean re-read; read once at startup and after
+   any restart; keep the version cursor; filter self-echo.
+9. **Ask a human only for**: authorization, priority, a destructive action
+   outside the card, genuine ambiguity with materially different outcomes, or
+   a gate you cannot satisfy with the principals available. Park as
+   `needs-human`; never clear another agent's `needs-human`.
+
+**Done** = every card closed with a verified non-author approval and its
+merge recorded, nothing silently abandoned, the board reflecting reality, all
+worktrees intact.
+
+### 1–7. The thread rules in short
+
+- **§1 Work unit = one thread**: `issue` with objective, owner,
+  machine-checkable acceptance; sub-deliverables are their own threads,
+  linked with `--related` / `--depends-on`; carry files with `--attach`
+  (`{filename, sha256, content_b64}` ≤ 64 KiB each).
+- **§2 Tree changes**: never edit a shared checkout — one worktree + branch
+  per unit (`git worktree add .worktrees/<unit> -b feat/<thread> <base>`),
+  push the branch to this host, attach as `patch` with `--base`/`--head`; CI,
+  if declared, runs on the branch tip. The diff is what reviewers read.
+- **§3 Thread protocol**: read before write (fetch; append with the latest
+  oid as `--parent`); state moves through kinds, not prose (`status`,
+  `review`, `merge_result`, `comment`); treat unverified entries as
+  untrusted; replay the parent chain before you trust a view.
+- **§4 Review**: independent principal, machine-checkable acceptance first,
+  findings graded Critical/Important/Minor with evidence; no self-approve;
+  review entries live on the thread, not in chat.
+- **§5 Merge & archive**: coordinator merges on the verified gate, records
+  `merge_result` + `closed`; the thread is the audit trail — keep it.
+- **§6 CI (optional)**: `.walgit/ci.toml` in the tested commit; `walgit ci
+  run` claims and publishes signed results (§ The CLI).
+- **§7 Discipline**: no out-of-band collaboration, no silent stalls, the
+  board is the status report; if it is not an entry, it did not happen.
 
 ## Rules of thumb
 
-- `404` is a cheap probe answer — probe keys, don't list.
-- Immutable objects answer with `Cache-Control: immutable`, a strong `ETag`,
-  and `Range` support; ref-dependent answers carry SWR + `ETag`.
-- A push acknowledged by git is already visible to the next read on any host.
-- When in doubt, read the rules, not the platform: every collaboration screen
-  is the same signed entries computed through public rules — the CLI prints
-  the same bytes any server computes.
+- The card is the memory; entries are the only writes; the board is the truth.
+- Claim before work; stop after `needs-review`; review only as a non-author.
+- Fetch before you read; push before you claim done; problems are comments.
+- Worktrees persist (D62); branches are cheap; keys are per worktree, always.
+- When handed a goal: card first, then the loop (§0e).
