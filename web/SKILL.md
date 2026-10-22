@@ -7,6 +7,68 @@ hosts are disposable caches, the bucket is the repository. Collaboration
 teaches an AI agent to discover, read, and write repositories on **this host**
 with plain git, the CLI, and HTTP. No interactive steps anywhere.
 
+## Quick start — identity → roles → worktree → collaboration
+
+Everything in this section runs as-is; it is the short path. The normative
+detail lives in §0–§5, and §0e is the runbook when you were handed a **goal**
+instead of a step list.
+
+### 1. Identity — one principal + one key per worktree
+
+```sh
+walgit collab join --repo "$checkout" --principal <proj>-worker-1 --push origin
+```
+
+- Generates the Ed25519 key inside that worktree's git dir
+  (`<git-dir>/walgit/keys/<principal>.ed25519`, 0600), writes the identity
+  pointer, and publishes the public key. A rejected registration is a hard stop.
+- One worktree = one identity = one agent. Never share a key; never put key
+  contents on a command line (`--key` takes a file path).
+- Names are agent-side bookkeeping: walgit stores only `principal → public key`.
+
+### 2. Roles — name the team by convention
+
+- `<proj>-worker-1..N` implement; `<proj>-reviewer-1..N` review;
+  `<proj>-coordinator` files cards and merges. Register each before the work
+  (repeat `collab join`, one principal per worktree).
+- The reviewer must be a **different principal** than the patch author (and
+  never a `svc-*` name): only a verified non-author `approve` satisfies the
+  merge rule. Nobody reviews their own patch.
+
+### 3. Worktree — the leader stays on `main`, workers get their own
+
+```sh
+# coordinator/leader: works in the main checkout, on main (files, reviews, merges)
+# worker: one worktree + one dev branch per card
+git -C "$checkout" worktree add .worktrees/wt-<thread> -b feat/<thread> main
+walgit collab join --repo "$checkout/.worktrees/wt-<thread>" --principal <proj>-worker-2 --push origin
+```
+
+- The worktree **is** where the identity lives, so it is never deleted (D62):
+  merged **branches** may be pruned; worktrees stay. Retiring a principal is
+  `walgit collab principal-revoke`, never `git worktree remove`.
+
+### 4. Collaborate — card → claim → patch → review → merge
+
+```sh
+# coordinator files the card (objective + machine-checkable acceptance)
+walgit collab entry --kind issue --id <thread> --body '{"title":"…","body":"acceptance: <commands>"}' --push origin
+# worker claims it (exit 0 = go; exit 2 = stand down, do not start)
+walgit collab claim --id <thread> --worktree wt-<thread> --branch feat/<thread> --push origin
+# … implement on the branch, push it, then attach and ask for review …
+walgit collab entry --kind patch --id <thread> --parent <oid> --base refs/heads/main --head refs/heads/feat/<thread> --body '{"note":"…"}' --push origin
+walgit collab entry --kind status --id <thread> --parent <oid> --body '{"status":"needs-review"}' --push origin
+# reviewer (different principal) runs the acceptance on the pinned commit and posts review approve / request_changes
+# coordinator merges only on a verified non-author approve, then records:
+walgit collab entry --kind merge_result --id <thread> --parent <oid> --body '{"merged":true,"oid":"<sha>"}' --push origin
+walgit collab entry --kind status --id <thread> --parent <oid> --body '{"status":"closed"}' --push origin
+```
+
+- **Every problem goes back to the card**: a `comment` with the evidence, or
+  `status: blocked` when work halts. The card is the only report channel.
+- Read state with `walgit collab board`, `walgit collab thread <id>`,
+  `walgit collab report --remote origin`. Entries without `--push` stay local.
+
 ## Install the walgit ops skill (operator guide)
 
 This file teaches an agent to *use* the host. To also *operate* it — service

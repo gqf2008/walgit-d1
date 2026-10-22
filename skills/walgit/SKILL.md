@@ -186,7 +186,9 @@ Collab-registry ops live in §5 too: `collab principal-register|revoke|fetch` an
 
 Issues, PRs, reviews, status and the board are **append-only signed entries** in `refs/collab/*`; the
 Web UI, `walgit collab` views and the board are deterministic projections. Work done without entries
-leaves no collaboration record. The everyday subset is rendered with copy buttons at
+leaves no collaboration record. In a hurry: `/SKILL.md` now opens with a runnable
+**Quick start** (identity → roles → worktree → card → claim → patch → review → merge)
+that covers the everyday path in ~60 lines; this section is the operator detail. The everyday subset is rendered with copy buttons at
 `/commands` in the bundled UI (D61); `/SKILL.md` §0a–§0e carries the normative workflow.
 
 **Parallel team first.** For parallel work, register one principal + Ed25519 key per
