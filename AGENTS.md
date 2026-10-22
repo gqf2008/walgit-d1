@@ -816,6 +816,10 @@ decision in §4 — or the PR is; never "fix later".
   signed registry act), never `git worktree remove`. The pre-D62 texts that told the
   orchestrator to "remove the worktree/branch after the card is closed" (web/SKILL.md §0d/§0e,
   skills/walgit/SKILL.md §5b) are corrected in place; D59's "worktree cleanup" is superseded.
+  *(Amended 2026-10-23, same decision: **a worker reports every problem to its card** — an
+  error, a red test, a missing dependency, an ambiguity — as a signed `comment` with the
+  evidence, or `status: blocked` when it halts the work. The card is the worker's only report
+  channel: never the console alone, never a side chat.)*
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

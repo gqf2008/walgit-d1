@@ -747,8 +747,13 @@ console** (the human's surface); everything in between is background sub-agents.
   acceptance sub-agent), merges worker branches, records the merge. It watches `refs/collab/*`,
   dispatches cards, spawns/reaps sub-agents. It is **client-side**: no server endpoint, no new
   durable state (D46/D49/D55).
-- **Worker sub-agent(s).** One card, one owner, one worktree (its own identity, §0). Implements,
-  pushes the branch, attaches the `patch`, moves the card to `needs-review`.
+- **Worker sub-agent(s).** One card, one owner, one worktree (its own identity, §0). Implements
+  on a dev branch inside its worktree, pushes the branch, attaches the `patch`, moves the card
+  to `needs-review`. **Every problem goes back to the card**: an error, a red test, a missing
+  dependency, an ambiguity, a broken environment — each lands as a signed entry on the thread
+  (a `comment` with the evidence, `status: blocked` when it halts the work). A worker never
+  reports to its own console only; the card is the only channel the coordinator and the human
+  can see.
 - **Acceptance sub-agent.** A **different principal** from the author. Independently judges the
   diff against the card's **machine-checkable acceptance** and posts a `review` with
   severity-tagged findings (Critical / Important / Minor) and the evidence it ran.
@@ -766,7 +771,9 @@ console** (the human's surface); everything in between is background sub-agents.
 3. **Work**: the worker creates a **dev branch inside its own worktree** (`git worktree add
    .worktrees/<unit> -b feat/<thread>` — the worktree is where its identity lives, §0a), then
    implements, pushes that branch, attaches the `patch`, and moves the card to
-   `status: needs-review`.
+   `status: needs-review`. Anything that goes wrong on the way — a failed command, a red test,
+   a missing dependency, an ambiguity — is written back to the card as an entry (`comment`,
+   or `status: blocked` when it halts the work); the card is the worker's only report channel.
 4. **Accept**: spawn the acceptance sub-agent (different principal) on the pinned commit; it
    posts `review`: `approve`, or `request_changes` with findings.
 5. **Merge automatically when unblocked**: if the acceptance has **no Critical/Important**
@@ -835,6 +842,7 @@ Your card: <thread id>. Read it, then <host>/SKILL.md §0a and §0e–§5.
 Work only on that card, in worktree <wt>, as principal <name>.
 Claim it first: `walgit collab claim --id <card> --worktree <wt> --branch <branch> --push origin` — exit 0 before you start, exit 2 means stand down.
 Implement, push the branch, attach a patch, move it to needs-review — then stop.
+Any problem — error, red test, missing dependency, ambiguity — goes back to the card as a `comment` (or `status: blocked` if it halts the work). Never report to your console only.
 Do not review your own patch, do not merge, do not touch another card.
 ```
 
@@ -846,7 +854,9 @@ before any work) →
 implement in your worktree → push the branch → `patch` → `status: needs-review`. Then **stop**:
 do not poll for a reviewer; the coordinator's trigger wakes the next actor. A decision you can
 make yourself is made and recorded in a `comment`; a decision you cannot make goes to
-`needs-human` (step 9). Never sit silent.
+`needs-human` (step 9). **Every problem is an entry on the card** (D62): an error, a red test,
+a missing dependency, an ambiguity — `comment` with the evidence, `status: blocked` when it
+halts the work. Never sit silent, and never report to your console only.
 
 **6. Accept (a different principal).** Re-read the card and the patch, run the card's
 acceptance commands yourself at the pinned commit, and post `review` with `approve` or

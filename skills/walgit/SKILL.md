@@ -329,7 +329,9 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
   子代理 → 记录合并。**客户端行为，无服务器端点、无新持久状态**（D46/D49/D55）。
 - **worker 子代理**：一卡一 owner 一 worktree（各自身份）；**开工前先 `collab claim`，退出码非 0 不得开工**
   （收敛认领，§8.4）→ 在**自己的 worktree 里建开发分支**（`git worktree add .worktrees/<unit> -b feat/<thread>`）→
-  实现 → push 分支 → `patch` → `needs-review`。
+  实现 → push 分支 → `patch` → `needs-review`。**任何问题都写回卡片**（D62）：报错、测试红、缺依赖、有歧义——
+  一律 `comment`（带证据）落卡，卡住就走 `status: blocked`；卡片是 worker 唯一的汇报通道，不许只写在自己的
+  控制台里。
 - **验收子代理**：与作者**不同 principal**，按卡的机器可校验验收项独立判定，签 `review`
   （`approve` / `request_changes` + Critical/Important/Minor findings + 实际跑过的证据）。
 - **自合并**：验收无 Critical/Important 且验收项全绿 → orchestrator 本地合并、push、记一条
@@ -353,7 +355,8 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 3. 目标先落成卡：一个交付一条 `issue`（目标、唯一 owner、**机器可校验的验收项**）+ 一条
    `status`（owner/worktree/branch/work）。人类交办的是目标时，写卡是 coordinator 的第一个动作，不是停下的理由。
 4. coordinator 给每张无主卡起一个 worker 子代理，brief 至少含：卡 id、worktree、principal、
-   「重读 head 后先认领；实现→push→patch→needs-review 后停止；不审自己的 patch、不合并」。
+   「重读 head 后先认领；实现→push→patch→needs-review 后停止；任何问题 `comment` 写回卡片、卡住走
+   `status: blocked`；不审自己的 patch、不合并」。
 5. worker 完成后**停止**，不要轮询评审；验收由另一个 principal 在 pinned commit 上跑验收命令并签
    `review`；无 Critical/Important 且全绿 → coordinator 合并、记 `merge_result`、`status: closed`、清合并分支
    （worktree 保留，D62）。
