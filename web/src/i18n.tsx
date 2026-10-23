@@ -28,7 +28,7 @@ const en = {
   // Home model landing (issue #55): the "/" page teaches D1's mental model in
   // plain language with static, clearly-marked illustrations. The same story
   // told on a repository's own live data is the collab guide page (#41).
-  "home.eyebrow": "walgit · D1 — the collaboration layer, in plain language",
+  "home.eyebrow": "walgit-D1 · the collaboration protocol",
   "home.live": "See it live in a repository →",
   "tab.code": "Code",
   "tab.commits": "Commits",
@@ -743,7 +743,7 @@ const en = {
   "cmds.footer": "Commands follow walgit v0.9.8 --help. Normative text: web/SKILL.md §0a–§0e and skills/walgit/SKILL.md §5. Destructive operations (GC, compaction, import, settings and policy writes) are not MCP tools.",
   // Home redesign (2026-10-23): one sentence, a SKILL.md lead, five role prompts.
   "home.oneline":
-    "walgit is a git server that keeps hosting, collaboration (issues, PRs, boards) and CI inside the repository itself — no server-side database; every fact is a signed entry on refs/collab/*.",
+    "walgit-D1 is walgit with a collaboration protocol added: issues, PRs, boards and CI are signed entries inside the repository itself — there is no server-side database.",
   "home.skill.para.pre": "New here? Read ",
   "home.skill.para.post":
     " once — it walks from creating your identity to claiming cards and merging — and pair it with the ",
@@ -782,7 +782,7 @@ const zhCN: Record<I18nKey, string> = {
   "nav.repos": "仓库",
 
   // Home model landing (issue #55)
-  "home.eyebrow": "walgit · D1 去中心化协作层 · 人类版模型",
+  "home.eyebrow": "walgit-D1 · 协作协议",
   "home.live": "在真实仓库里看现场版 →",
   "tab.code": "代码",
   "tab.commits": "提交",
@@ -1490,7 +1490,7 @@ const zhCN: Record<I18nKey, string> = {
 
   // 首页重设计（2026-10-23）：一句话 + SKILL.md 引读 + 五个角色提示词。
   "home.oneline":
-    "walgit 是把 git 托管、协作（issue / PR / 看板）和 CI 全部放进 git 仓库本身的 git 服务器——没有服务器数据库，每个事实都是 refs/collab/* 上的一条签名条目。",
+    "walgit-D1 是加入了协作协议的 walgit：issue、PR、看板与 CI 都是仓库里的一条条签名条目，没有服务器数据库。",
   "home.skill.para.pre": "第一次来？先读一遍 ",
   "home.skill.para.post":
     "：从建身份、认领卡片到合并的完整流程都在里面；再配合顶栏的 ",
@@ -1527,7 +1527,7 @@ const zhTW: Record<I18nKey, string> = {
   "nav.repos": "倉庫",
 
   // Home model landing (issue #55)
-  "home.eyebrow": "walgit · D1 去中心化協作層 · 人類版模型",
+  "home.eyebrow": "walgit-D1 · 協作協議",
   "home.live": "在真實倉庫裡看現場版 →",
   "tab.code": "程式碼",
   "tab.commits": "提交",
@@ -2234,7 +2234,7 @@ const zhTW: Record<I18nKey, string> = {
   "cmds.footer": "指令以 walgit v0.9.8 的 --help 為準。規範文本：web/SKILL.md §0a–§0e、skills/walgit/SKILL.md §5。破壞性操作（GC、壓縮、匯入、settings/policy 寫）不在 MCP 工具表裡。",
   // 首頁重設計（2026-10-23）：一句話 + SKILL.md 導讀 + 五個角色提示詞。
   "home.oneline":
-    "walgit 是把 git 託管、協作（issue / PR / 看板）和 CI 全部放進 git 倉庫本身的 git 伺服器——沒有伺服器資料庫，每個事實都是 refs/collab/* 上的一條簽名條目。",
+    "walgit-D1 是加入了協作協議的 walgit：issue、PR、看板與 CI 都是倉庫裡的一條條簽名條目，沒有伺服器資料庫。",
   "home.skill.para.pre": "第一次來？先讀一遍 ",
   "home.skill.para.post":
     "：從建身分、認領卡片到合併的完整流程都在裡面；再配合頂欄的 ",
