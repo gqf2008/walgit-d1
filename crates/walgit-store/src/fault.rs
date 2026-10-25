@@ -60,6 +60,9 @@ pub struct FaultPlan {
     pub p_cas_fail: f64,
     /// Conditional PUT is applied, then answers `PreconditionFailed` — the
     /// shape a transparent retry returns after its first attempt landed.
+    /// Shares its die roll (`roll[2]`) with `p_cas_fail` and is consulted only
+    /// when that did not fire, so a plan setting both gets the larger of the
+    /// two rates, never their sum.
     pub p_cas_fail_after: f64,
     /// `get` with `if_none_match` answers `NotModified` regardless of the
     /// real version (a replica that never sees anyone else's writes).

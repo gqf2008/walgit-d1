@@ -195,6 +195,13 @@ bytes 判定是否已提交；只有证据表明未提交的普通 412 才允许
 「应用写入后返回 412」，覆盖 push、compact、settings；修复前在 push 即以缺失 log 段失败，修复后三段均保留。
 成功路径 round trips 不变；探测只落在 CAS 错误路径（`docs/ROUNDTRIPS.md` §2）。
 
+第二次 review 补充 landed 采纳的两个约束：`cas_landed` 返回的 `(manifest, version)` 必须来自同一次
+manifest GET（禁止内容一次读、version 另一次 HEAD 的跨读配对）；若 probe 读到的是后续 writer 在我们
+landed 之后发布的 raced manifest，三个发布入口只安装**本次 attempt 自己的 snapshot**并留空 version，
+让下一次 sync 无条件重取、重放 foreign tail 并 reconcile packs——不能把 foreign manifest 记成
+`applied_seq`/`packs_revision` 已应用。tier-2 compact 的 witness 在 raced 采纳时也使用本次 COMPACT
+seq 的 pack set，而不是 foreign manifest 的 pack set。
+
 ## 验证记录
 
 环境说明：本机没有安装 `just`（`just: command not found`），所以没有运行 `just` 本身；按 justfile 的

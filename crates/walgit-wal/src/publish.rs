@@ -320,14 +320,18 @@ const ORPHAN_GRACE_STEP: std::time::Duration = std::time::Duration::from_millis(
 /// something else is wrong).
 const MAX_BURN: u32 = 8;
 
-/// Unconditional fresh read of the manifest (not the handle's cached view).
-pub(crate) async fn read_manifest_fresh(store: &Prefixed) -> Result<Option<Manifest>, WalError> {
+/// Unconditional fresh read of the manifest (not the handle's cached view),
+/// paired with the version token of exactly those bytes: the pair a
+/// landed-CAS adopt installs, so content and version come from one read.
+pub(crate) async fn read_manifest_fresh(
+    store: &Prefixed,
+) -> Result<Option<(Manifest, walgit_store::Version)>, WalError> {
     use walgit_store::ObjectStoreExt;
     match store.get_bytes(keys::MANIFEST).await? {
-        Some((_, b)) => {
-            Ok(Some(Manifest::decode(b.as_ref()).map_err(|e| {
-                WalError::Corrupt(format!("manifest decode: {e}"))
-            })?))
+        Some((meta, b)) => {
+            let manifest = Manifest::decode(b.as_ref())
+                .map_err(|e| WalError::Corrupt(format!("manifest decode: {e}")))?;
+            Ok(Some((manifest, meta.version)))
         }
         None => Ok(None),
     }
@@ -379,7 +383,7 @@ pub(crate) async fn claim_log_slot(
         let mut probes = 0u32;
         let orphan_version = loop {
             let fresh = read_manifest_fresh(store).await?;
-            let fresh_head = fresh.as_ref().map_or(0, |m| m.head_seq);
+            let fresh_head = fresh.as_ref().map_or(0, |(m, _)| m.head_seq);
             if fresh_head >= seq {
                 return Ok(ClaimOutcome::Contended);
             }
@@ -430,17 +434,17 @@ pub(crate) async fn drop_own_slot(store: &Prefixed, slot: &LogSlot) {
     let _ = store.delete(&slot.key, Some(slot.version.clone())).await;
 }
 
-/// After a manifest CAS failed with a non-412 error: did the write land?
-/// `Ok(Some(manifest))` only when the fresh manifest lists exactly our segment
+/// After a manifest CAS failed with any error: did the write land?
+/// `Ok(Some((manifest, version)))` only when the fresh manifest lists exactly our segment
 /// **and** the object at its key is byte-for-byte the attempt we wrote
 /// (committed), `Ok(None)` when evidence is absent (unknown, not rejection;
 /// leave it alone).
 pub(crate) async fn cas_landed(
     store: &Prefixed,
     slot: &LogSlot,
-) -> Result<Option<Manifest>, WalError> {
+) -> Result<Option<(Manifest, walgit_store::Version)>, WalError> {
     use walgit_store::ObjectStoreExt;
-    let Some(manifest) = read_manifest_fresh(store).await? else {
+    let Some((manifest, version)) = read_manifest_fresh(store).await? else {
         return Ok(None);
     };
     // Key and sequence alone are not identity: a delete/recreate cycle can put
@@ -455,7 +459,7 @@ pub(crate) async fn cas_landed(
         .get_bytes(&slot.key)
         .await?
         .is_some_and(|(_, bytes)| bytes == slot.bytes);
-    Ok(exact.then_some(manifest))
+    Ok(exact.then_some((manifest, version)))
 }
 
 /// Verify a ref transaction against a working ref map. Returns per-ref results.
@@ -1044,6 +1048,8 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         updated.updated_at = Some(time::now());
         updated.writer = writer.clone();
         updated.revision += 1;
+        let attempt_revision = updated.revision;
+        let attempt_manifest = updated.clone();
 
         // CAS manifest
         let buf = updated.encode_to_vec();
@@ -1064,17 +1070,17 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         // Every CAS error is ambiguous, including 412: a transparent retry
         // returns 412 when its first attempt landed but lost the response.
         // Resolve against the exact claimed bytes before deleting anything.
-        let committed: Option<(Manifest, Option<walgit_store::Version>)> = match cas {
-            Ok(meta) => Some((updated, Some(meta.version))),
+        let committed: Option<(Manifest, walgit_store::Version)> = match cas {
+            Ok(meta) => Some((updated, meta.version)),
             Err(e) => {
                 let precondition = e.is_precondition_failed();
                 match cas_landed(&handle.store, &slot)
                     .instrument(span.clone())
                     .await
                 {
-                    Ok(Some(fresh)) => {
+                    Ok(Some((fresh, version))) => {
                         tracing::warn!(repo = %handle.id, seq = last_seq, "manifest CAS errored but landed: {e}");
-                        Some((fresh, None))
+                        Some((fresh, version))
                     }
                     Ok(None) if precondition => None,
                     Ok(None) => {
@@ -1093,22 +1099,9 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         };
 
         if let Some((committed, version)) = committed {
-            // Success! Update handle state. A landed-but-errored CAS leaves
-            // us without the new version: drop our cached one so the next
-            // sync refetches unconditionally.
-            let version = match version {
-                Some(v) => v,
-                None => match handle.store.head(keys::MANIFEST).await? {
-                    Some(m) => m.version,
-                    None => {
-                        return finish_with_error(
-                            batch,
-                            &valid_indices,
-                            WalError::Corrupt("manifest vanished after commit".into()),
-                        );
-                    }
-                },
-            };
+            // Success! Update handle state. A landed-but-errored CAS adopts the
+            // probe read's own (manifest, version) pair, so the install never pairs
+            // content from one read with a version token fetched from another.
             // The local commit — ref txns applied, then the new manifest version advertised — happens
             // under `sync_mutex`, the lock the refs phase of every sync holds: a sync that already read
             // the committed manifest would otherwise replay the same entry concurrently (two
@@ -1236,14 +1229,29 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 }
                 if local_ok {
-                    handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+                    // A raced adopt — a concurrent writer published between our
+                    // landed CAS and the probe — describes entries (and packs)
+                    // this local copy has not applied. Installing it while
+                    // recording our `applied_seq` would make every freshness
+                    // check answer 304 while local refs and packs lag an
+                    // acknowledged push. Install this attempt's own snapshot
+                    // with an unknown version instead: it matches the ref txns
+                    // just applied locally, and the next sync refetches the
+                    // raced manifest unconditionally and replays the foreign
+                    // tail through the normal delta path.
+                    let raced = committed.head_seq != last_seq;
+                    if raced {
+                        handle.install_manifest(Arc::new(attempt_manifest), None);
+                    } else {
+                        handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+                    }
                     {
                         let mut state = handle.state.lock();
-                        state.manifest_version = Some(version.as_str().to_string());
+                        state.manifest_version = (!raced).then(|| version.as_str().to_string());
                         state.applied_seq = last_seq;
                         let ready = state.packs_ready();
-                        state.revision = committed.revision;
-                        if ready {
+                        state.revision = if raced { attempt_revision } else { committed.revision };
+                        if ready && !raced {
                             state.packs_revision = committed.revision;
                         }
                     }
@@ -1610,6 +1618,9 @@ pub(crate) async fn publish_compact_impl(
         updated.updated_at = Some(time::now());
         updated.writer = writer.clone();
         updated.revision += 1;
+        let attempt_revision = updated.revision;
+        let attempt_manifest = updated.clone();
+        let attempt_packs = attempt_manifest.packs.clone();
 
         let buf = updated.encode_to_vec();
         let mode = match &known_version {
@@ -1649,30 +1660,38 @@ pub(crate) async fn publish_compact_impl(
             Err(e) => {
                 let precondition = e.is_precondition_failed();
                 match cas_landed(&handle.store, &slot).await {
-                    Ok(Some(fresh)) => {
+                    Ok(Some((fresh, version))) => {
                         tracing::warn!(repo = %handle.id, seq, "compact manifest CAS errored but landed: {e}");
-                        let v = handle
-                            .store
-                            .head(keys::MANIFEST)
-                            .await?
-                            .map(|m| m.version)
-                            .ok_or_else(|| {
-                                WalError::Corrupt("manifest vanished after commit".into())
-                            })?;
-                        Some((fresh, v))
+                        Some((fresh, version))
                     }
                     Ok(None) if precondition => None,
                     // A failed probe is not permission to delete the slot.
-                    Ok(None) | Err(_) => return Err(WalError::Store(e)),
+                    Ok(None) => return Err(WalError::Store(e)),
+                    Err(probe) => {
+                        tracing::warn!(repo = %handle.id, seq, error = %probe, "compact manifest CAS errored and the landed probe failed too");
+                        return Err(WalError::Store(e));
+                    }
                 }
             }
         };
         if let Some((committed, version)) = committed {
-            handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+            // A raced adopt — a concurrent writer published between our landed
+            // CAS and the probe — describes entries and packs this local copy
+            // has not applied. Install this attempt's own snapshot with an
+            // unknown version instead: it matches the COMPACT entry just
+            // committed, and the next sync refetches the raced manifest
+            // unconditionally and replays the foreign tail (including pack
+            // reconciliation) through the normal delta path.
+            let raced = committed.head_seq != seq;
+            if raced {
+                handle.install_manifest(Arc::new(attempt_manifest), None);
+            } else {
+                handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+            }
             note_entry_time(handle, seq, &entry_time);
             {
                 let mut state = handle.state.lock();
-                state.manifest_version = Some(version.as_str().to_string());
+                state.manifest_version = (!raced).then(|| version.as_str().to_string());
                 state.applied_seq = seq;
                 // The publisher's own superseded packs are removed by the next pack sync like
                 // everyone else's (a scratch-copy base rebuild leaves them in the serving copy;
@@ -1683,8 +1702,8 @@ pub(crate) async fn publish_compact_impl(
                     }
                 }
                 let ready = state.packs_ready();
-                state.revision = committed.revision;
-                if ready {
+                state.revision = if raced { attempt_revision } else { committed.revision };
+                if ready && !raced {
                     state.packs_revision = committed.revision;
                 }
             }
@@ -1695,8 +1714,18 @@ pub(crate) async fn publish_compact_impl(
                 // the base's refs replayable after later folds move the live
                 // checkpoint past `seq`. A failure is surfaced so the unit retries
                 // instead of silently leaving a base without its witness.
-                crate::checkpoint::write_witness_checkpoint(handle, seq, committed.packs.clone())
-                    .await?;
+                // A raced adopt's manifest carries a later pack set; the
+                // witness must describe the pack set at this COMPACT's own seq.
+                crate::checkpoint::write_witness_checkpoint(
+                    handle,
+                    seq,
+                    if raced {
+                        attempt_packs.clone()
+                    } else {
+                        committed.packs.clone()
+                    },
+                )
+                .await?;
             }
             sweep_burned(&handle.store, &slot).await;
             return Ok(seq);
@@ -1940,6 +1969,9 @@ pub(crate) async fn publish_settings_impl(
         updated.updated_at = Some(time::now());
         updated.writer = writer.clone();
         updated.revision += 1;
+        let attempt_revision = updated.revision;
+        let attempt_manifest = updated.clone();
+
         let buf = updated.encode_to_vec();
         let mode = match &known_version {
             Some(v) => PutMode::Update(v.clone()),
@@ -1958,31 +1990,38 @@ pub(crate) async fn publish_settings_impl(
             Err(e) => {
                 let precondition = e.is_precondition_failed();
                 match cas_landed(&handle.store, &slot).await {
-                    Ok(Some(fresh)) => {
+                    Ok(Some((fresh, version))) => {
                         tracing::warn!(repo = %handle.id, seq, "settings manifest CAS errored but landed: {e}");
-                        let version = handle
-                            .store
-                            .head(keys::MANIFEST)
-                            .await?
-                            .map(|m| m.version)
-                            .ok_or_else(|| {
-                                WalError::Corrupt("manifest vanished after commit".into())
-                            })?;
                         Some((fresh, version))
                     }
                     Ok(None) if precondition => None,
-                    Ok(None) | Err(_) => return Err(WalError::Store(e)),
+                    Ok(None) => return Err(WalError::Store(e)),
+                    Err(probe) => {
+                        tracing::warn!(repo = %handle.id, seq, error = %probe, "settings manifest CAS errored and the landed probe failed too");
+                        return Err(WalError::Store(e));
+                    }
                 }
             }
         };
         if let Some((committed, version)) = committed {
-            handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+            // A raced adopt — a concurrent writer published between our landed
+            // CAS and the probe — describes entries this local copy has not
+            // applied. Install this attempt's own snapshot with an unknown
+            // version instead: it matches the SETTINGS entry just committed,
+            // and the next sync refetches the raced manifest unconditionally
+            // and replays the foreign tail through the normal delta path.
+            let raced = committed.head_seq != seq;
+            if raced {
+                handle.install_manifest(Arc::new(attempt_manifest), None);
+            } else {
+                handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+            }
             note_entry_time(handle, seq, &entry_time);
             {
                 let mut state = handle.state.lock();
-                state.manifest_version = Some(version.as_str().to_string());
+                state.manifest_version = (!raced).then(|| version.as_str().to_string());
                 state.applied_seq = seq;
-                state.revision = committed.revision;
+                state.revision = if raced { attempt_revision } else { committed.revision };
             }
             crate::state::save_state(handle.local.path(), &handle.state.lock().clone())?;
             *handle.effective.lock() = None;
@@ -2071,14 +2110,21 @@ mod claim_tests {
             }],
             ..Default::default()
         };
-        store
+        let meta = store
             .put_bytes(keys::MANIFEST, manifest.encode_to_vec(), PutMode::Create)
             .await?;
         assert!(
             cas_landed(&store, &first).await?.is_none(),
             "same key and sequence are insufficient"
         );
-        assert!(cas_landed(&store, &second).await?.is_some());
+        let (_, landed_version) = cas_landed(&store, &second)
+            .await?
+            .expect("our exact attempt is committed");
+        // The adopt's version token comes from the same read as the content it
+        // is paired with — never from a second read (the cross-read pairing a
+        // landed adopt used to install: content from one GET, version from a
+        // later HEAD).
+        assert_eq!(landed_version, meta.version);
         Ok(())
     }
 }
