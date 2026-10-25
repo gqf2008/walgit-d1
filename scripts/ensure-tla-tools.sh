@@ -10,12 +10,14 @@ VERSION="v1.8.0"
 # repeatedly: the upstream port pinned 867aefb69ffc2452031292587b389d1fc3eb43ff
 # (2026-09-12); by 2026-10-19 that asset was gone, rolled to 932d35ec2b9fdb3d
 # (built 2026-10-15), and the pin was re-derived to 15d103b7...; on 2026-10-21
-# the asset had rolled again to the 2026-10-20 build (MANIFEST.MF X-Git-Revision
-# d2e1472, GitHub release asset digest 5bd7b64d..., confirmed via
-# `gh api repos/tlaplus/tlaplus/releases`). A mismatch still fails closed:
+# the asset rolled to the 2026-10-20 build (X-Git-Revision d2e1472, digest
+# 5bd7b64d...); on 2026-10-24 it rolled again to revision 2ef2af8c767b76e5db5cba
+# 2878f027ac07aad36c. That current pin was verified on 2026-10-25 from the
+# GitHub release-asset digest, the downloaded bytes and MANIFEST.MF
+# (`gh api repos/tlaplus/tlaplus/releases`). A mismatch still fails closed:
 # inspect MANIFEST.MF, upstream commit history and the release asset digest
 # before changing it. Never accept an unverified replacement automatically.
-SHA256="5bd7b64db99ae4c6c35f290de5e809c0ee41af43f8699cf696099ffb6452b1e2"
+SHA256="d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f"
 URL="https://github.com/tlaplus/tlaplus/releases/download/$VERSION/tla2tools.jar"
 
 # `command -v java` alone accepts macOS's /usr/bin/java stub, which exists but

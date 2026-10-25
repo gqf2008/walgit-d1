@@ -138,11 +138,14 @@ The checksum-pinned jar is upstream TLA+ `v1.8.0`. The upstream port pinned revi
 `db131ddb48e7004d823bef4493df7b35694babe37505b9d9fa5685e7a331f1f1`). By 2026-10-19 that rolling asset
 was no longer served: the release had been rebuilt from revision
 `932d35ec2b9fdb3d3e4d0a3321689c634a1f6b43` (built 2026-10-15) and the old bytes could not be obtained.
-The pin was re-derived from the release asset and its manifest; the current SHA-256 is
-`15d103b7e5617780bcc904c0af12f1ad242e2b345c0301136c5be4588f17edac`, matching the
-[release asset digest](https://github.com/tlaplus/tlaplus/releases/tag/v1.8.0) and the jar manifest
-(`X-Git-Revision: 932d35e`). The first-batch matrix arms were rerun after the re-pin; the remaining arms
-are exercised by `just spec` / `just spec-full` and are not claimed green by this document. This tag is rolling. A changed
-asset must fail checksum verification until provenance is reviewed and checks rerun. Historical state
-counts are not reused as new evidence. The runner does not substitute another checker, especially one
-without equivalent result, liveness and input semantics.
+That pin was re-derived from the release asset and its manifest. The rolling assets have since moved
+again: 2026-10-20 built `d2e1472` (digest `5bd7b64d...`), and 2026-10-24 built
+[`2ef2af8c767b76e5db5cba2878f027ac07aad36c`](https://github.com/tlaplus/tlaplus/commit/2ef2af8c767b76e5db5cba2878f027ac07aad36c).
+The pin current as of 2026-10-25 is
+`d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f`, verified against the
+[release asset digest](https://github.com/tlaplus/tlaplus/releases/tag/v1.8.0), the downloaded bytes and
+the jar manifest (`X-Git-Revision: 2ef2af8`). The first-batch matrix arms must be rerun after this
+re-pin; the remaining arms are exercised by `just spec` / `just spec-full` and are not claimed green by
+this document. This tag is rolling. A changed asset must fail checksum verification until provenance is
+reviewed and checks rerun. Historical state counts are not reused as new evidence. The runner does not
+substitute another checker, especially one without equivalent result, liveness and input semantics.
