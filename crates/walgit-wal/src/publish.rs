@@ -1061,31 +1061,35 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             )
             .instrument(span.clone())
             .await;
-        // A non-412 error is ambiguous: the bucket may have applied the CAS and
-        // lost the response. Look before deciding.
+        // Every CAS error is ambiguous, including 412: a transparent retry
+        // returns 412 when its first attempt landed but lost the response.
+        // Resolve against the exact claimed bytes before deleting anything.
         let committed: Option<(Manifest, Option<walgit_store::Version>)> = match cas {
             Ok(meta) => Some((updated, Some(meta.version))),
-            Err(StoreError::PreconditionFailed { .. }) => None,
-            Err(e) => match cas_landed(&handle.store, &slot)
-                .instrument(span.clone())
-                .await
-            {
-                Ok(Some(fresh)) => {
-                    tracing::warn!(repo = %handle.id, seq = last_seq, "manifest CAS errored but landed: {e}");
-                    Some((fresh, None))
+            Err(e) => {
+                let precondition = e.is_precondition_failed();
+                match cas_landed(&handle.store, &slot)
+                    .instrument(span.clone())
+                    .await
+                {
+                    Ok(Some(fresh)) => {
+                        tracing::warn!(repo = %handle.id, seq = last_seq, "manifest CAS errored but landed: {e}");
+                        Some((fresh, None))
+                    }
+                    Ok(None) if precondition => None,
+                    Ok(None) => {
+                        // Not known to be committed. Leave the segment: a later
+                        // writer burns past it and sweeps it; deleting here could
+                        // race a commit that the probe itself failed to observe.
+                        let msg = e.to_string();
+                        return finish_with_error_msg(batch, &valid_indices, &msg, WalError::Store(e));
+                    }
+                    Err(e2) => {
+                        let msg = format!("{e} (and re-reading the manifest failed: {e2})");
+                        return finish_with_error_msg(batch, &valid_indices, &msg, WalError::Store(e));
+                    }
                 }
-                Ok(None) => {
-                    // Not committed. Leave the segment: a later writer burns past
-                    // it and sweeps it; deleting here could race a lost-response
-                    // commit that `cas_landed` itself failed to observe.
-                    let msg = e.to_string();
-                    return finish_with_error_msg(batch, &valid_indices, &msg, WalError::Store(e));
-                }
-                Err(e2) => {
-                    let msg = format!("{e} (and re-reading the manifest failed: {e2})");
-                    return finish_with_error_msg(batch, &valid_indices, &msg, WalError::Store(e));
-                }
-            },
+            }
         };
 
         if let Some((committed, version)) = committed {
@@ -1642,22 +1646,26 @@ pub(crate) async fn publish_compact_impl(
             .await;
         let committed = match cas {
             Ok(meta) => Some((updated, meta.version)),
-            Err(StoreError::PreconditionFailed { .. }) => None,
-            Err(e) => match cas_landed(&handle.store, &slot).await {
-                Ok(Some(fresh)) => {
-                    tracing::warn!(repo = %handle.id, seq, "compact manifest CAS errored but landed: {e}");
-                    let v = handle
-                        .store
-                        .head(keys::MANIFEST)
-                        .await?
-                        .map(|m| m.version)
-                        .ok_or_else(|| {
-                            WalError::Corrupt("manifest vanished after commit".into())
-                        })?;
-                    Some((fresh, v))
+            Err(e) => {
+                let precondition = e.is_precondition_failed();
+                match cas_landed(&handle.store, &slot).await {
+                    Ok(Some(fresh)) => {
+                        tracing::warn!(repo = %handle.id, seq, "compact manifest CAS errored but landed: {e}");
+                        let v = handle
+                            .store
+                            .head(keys::MANIFEST)
+                            .await?
+                            .map(|m| m.version)
+                            .ok_or_else(|| {
+                                WalError::Corrupt("manifest vanished after commit".into())
+                            })?;
+                        Some((fresh, v))
+                    }
+                    Ok(None) if precondition => None,
+                    // A failed probe is not permission to delete the slot.
+                    Ok(None) | Err(_) => return Err(WalError::Store(e)),
                 }
-                Ok(None) | Err(_) => return Err(WalError::Store(e)),
-            },
+            }
         };
         if let Some((committed, version)) = committed {
             handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
@@ -1937,38 +1945,55 @@ pub(crate) async fn publish_settings_impl(
             Some(v) => PutMode::Update(v.clone()),
             None => PutMode::Create,
         };
-        match handle
+        let cas = handle
             .store
             .put(
                 keys::MANIFEST,
                 PutBody::Bytes(bytes::Bytes::from(buf)),
                 mode.into(),
             )
-            .await
-        {
-            Ok(meta) => {
-                handle.install_manifest(Arc::new(updated.clone()), Some(meta.version.clone()));
-                note_entry_time(handle, seq, &entry_time);
-                {
-                    let mut state = handle.state.lock();
-                    state.manifest_version = Some(meta.version.as_str().to_string());
-                    state.applied_seq = seq;
-                    state.revision = updated.revision;
-                }
-                crate::state::save_state(handle.local.path(), &handle.state.lock().clone())?;
-                *handle.effective.lock() = None;
-                sweep_burned(&handle.store, &slot).await;
-                tracing::info!(repo = %handle.id, seq, revision, author, "settings published");
-                return Ok(revision);
-            }
-            Err(StoreError::PreconditionFailed { .. }) => {
-                drop_own_slot(&handle.store, &slot).await;
-                attempts += 1;
-                if attempts >= max_retries {
-                    return Err(WalError::Retry { attempts });
+            .await;
+        let committed = match cas {
+            Ok(meta) => Some((updated, meta.version)),
+            Err(e) => {
+                let precondition = e.is_precondition_failed();
+                match cas_landed(&handle.store, &slot).await {
+                    Ok(Some(fresh)) => {
+                        tracing::warn!(repo = %handle.id, seq, "settings manifest CAS errored but landed: {e}");
+                        let version = handle
+                            .store
+                            .head(keys::MANIFEST)
+                            .await?
+                            .map(|m| m.version)
+                            .ok_or_else(|| {
+                                WalError::Corrupt("manifest vanished after commit".into())
+                            })?;
+                        Some((fresh, version))
+                    }
+                    Ok(None) if precondition => None,
+                    Ok(None) | Err(_) => return Err(WalError::Store(e)),
                 }
             }
-            Err(e) => return Err(WalError::Store(e)),
+        };
+        if let Some((committed, version)) = committed {
+            handle.install_manifest(Arc::new(committed.clone()), Some(version.clone()));
+            note_entry_time(handle, seq, &entry_time);
+            {
+                let mut state = handle.state.lock();
+                state.manifest_version = Some(version.as_str().to_string());
+                state.applied_seq = seq;
+                state.revision = committed.revision;
+            }
+            crate::state::save_state(handle.local.path(), &handle.state.lock().clone())?;
+            *handle.effective.lock() = None;
+            sweep_burned(&handle.store, &slot).await;
+            tracing::info!(repo = %handle.id, seq, revision, author, "settings published");
+            return Ok(revision);
+        }
+        drop_own_slot(&handle.store, &slot).await;
+        attempts += 1;
+        if attempts >= max_retries {
+            return Err(WalError::Retry { attempts });
         }
     }
 }

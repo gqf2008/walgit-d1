@@ -176,11 +176,24 @@ redirects_are_relayed_not_followed}` 固定同一分类。
 
 ## 范围外但记录在案
 
-- `publish_settings_impl` 的非 412 CAS 错误不调用 `cas_landed`，直接返回 `WalError::Store`。SETTINGS
-  没有 per-ref 回执，调用方是管理 API（返回错误即可），因此不构成本卡的 C5/C7/C8/C9 缺口；但它同样
-  缺少「unknown」语义，作为后续项记录。
+- 当时 `publish_settings_impl` 的非 412 CAS 错误不调用 `cas_landed`，直接返回 `WalError::Store`；
+  2026-10-25 追补已让 SETTINGS 与其它两个发布入口共用同样的 landed 判定，见下节。
 - `txn.atomic` 字段在本仓库的 WAL 发布路径中未被读取；C5 的 all-or-none 由「一条提交要么整条
   valid、要么整条拒绝」在 `process_batch` 内保证，与 `atomic` 的值无关。本卡不改这个语义。
+
+## 2026-10-25 追补：已生效的 CAS 也可能返回 412
+
+线上症状为 manifest 仍引用最新 `log/0000000000003000.pb`，对象存储却返回 NotFound。代码审计确认一个
+可产生完全相同损坏形态的缺口：第一次 manifest CAS 已在服务端生效但响应丢失，SDK/代理透明重试后，
+第二次请求因旧 precondition 返回 412。此前 push / compact / settings 都把 412 直接当成「本次未提交」，
+删除自己的 log slot 后重试；这会把已经提交的 WAL 段删掉。
+
+修复后三个入口都在**任何** manifest CAS 错误后调用 `cas_landed`，以 manifest descriptor + 精确 segment
+bytes 判定是否已提交；只有证据表明未提交的普通 412 才允许 `drop_own_slot`。无法读取提交证据时保留 slot，
+绝不把「未知」当成删除许可。回归测试
+`applied_cas_returning_412_keeps_every_committed_log_segment` 用 `FaultPlan::p_cas_fail_after` 注入
+「应用写入后返回 412」，覆盖 push、compact、settings；修复前在 push 即以缺失 log 段失败，修复后三段均保留。
+成功路径 round trips 不变；探测只落在 CAS 错误路径（`docs/ROUNDTRIPS.md` §2）。
 
 ## 验证记录
 

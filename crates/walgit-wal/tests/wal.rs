@@ -4214,3 +4214,88 @@ async fn lost_cas_reply_is_resolved_or_unknown_without_losing_the_commit() {
         "one entry per charged publish — no double publish"
     );
 }
+
+/// A transport retry can turn an applied CAS into a 412: the first attempt
+/// lands, its response is lost, and the retry observes the stale precondition.
+/// That receipt is ambiguous, not proof of rejection; deleting the claimed log
+/// would leave the committed manifest pointing at a missing object.
+#[tokio::test]
+async fn applied_cas_returning_412_keeps_every_committed_log_segment() {
+    use walgit_store::fault::{FaultPlan, FaultStore};
+    let cache = tempfile::tempdir().unwrap();
+    let truth = MemoryStore::shared();
+    let link = FaultStore::new(truth, "applied-412", 1);
+    let registry = Registry::new(link.clone(), Arc::new(make_config(cache.path(), 0)));
+    let handle = registry
+        .create(&repo_id("o", "applied-412"), ObjectFormat::Sha1)
+        .await
+        .unwrap();
+    let work = WorkRepo::new();
+    let tip = work.commit("first", "content");
+    let pack = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
+    handle
+        .publish_push(
+            Some(pack.clone()),
+            make_txn(vec![("refs/heads/main", "", &tip)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let applied_412 = || FaultPlan {
+        p_cas_fail_after: 1.0,
+        only_keys: Some(vec!["manifest.pb".into()]),
+        ..Default::default()
+    };
+    link.set(applied_412());
+    let receipt = handle
+        .publish_push_synced(
+            None,
+            make_txn(vec![("refs/heads/retry", "", &tip)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    link.heal();
+    assert_eq!(receipt.seq, 2);
+    assert!(receipt.per_ref.iter().all(|(_, status)| status.is_ok()));
+    assert_eq!(
+        handle.local().ref_view().unwrap().get("refs/heads/retry"),
+        Some(tip)
+    );
+    assert_eq!(handle.read_log(1, None).await.unwrap().len(), 2);
+
+    let compact_pack = walgit_git::PackInfo {
+        checksum: pack.checksum,
+        pack_size: pack.pack_size,
+        idx_size: pack.idx_size,
+        object_count: pack.object_count,
+        has_rev: true,
+        has_bitmap: false,
+        has_commit_graph: false,
+        history_of: None,
+    };
+    link.set(applied_412());
+    assert_eq!(
+        handle
+            .publish_compact(compact_pack, Vec::new(), 1)
+            .await
+            .unwrap(),
+        3
+    );
+    link.heal();
+    assert_eq!(handle.read_log(1, None).await.unwrap().len(), 3);
+
+    link.set(applied_412());
+    assert_eq!(
+        handle
+            .publish_settings("[bundles]
+min_commits = 3
+", "test", "applied 412")
+            .await
+            .unwrap(),
+        1
+    );
+    link.heal();
+    assert_eq!(handle.read_log(1, None).await.unwrap().len(), 4);
+}

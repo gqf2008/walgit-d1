@@ -47,7 +47,7 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | Compaction publish | same shape as push | — | `publish.rs::publish_compact_impl` |
 | Large pack upload (S3/R2 `PutBody::File` > `store.multipart_threshold`) | 1 HEAD pre-check (only for `PutMode::Create`) → 1 CreateMultipartUpload → ⌈len/part_size⌉ sequential UploadPart → 1 CompleteMultipartUpload; each part is one SDK request, so a 135 MiB pack at 32 MiB parts costs 3 + 5 = 8 requests instead of one single-shot PUT that cannot finish inside the request timeout (and cannot exceed S3's 5 GiB `PutObject` cap at all) | 3 + parts | `s3.rs::put` / `multipart_put` |
 | Checkpoint | 1 cond GET (freshness) → refs PUT ∥ checkpoint PUT → manifest CAS | 3 rounds, 4 requests (was 6/6 until 2026-08-22: a bundle-list GET before the checkpoint PUT and a log GET for provenance times sat in the chain; times now come from the writer's own applied state, `bundle_key` is no longer looked up) | `checkpoint.rs` |
-| Lost CAS response resolution | fresh manifest GET; only if the exact segment descriptor is listed, GET and compare the claimed log bytes | normally +1 GET on this failure path compared with key/sequence-only resolution; no added successful-push requests. Missing/folded evidence remains unknown. Per-attempt nonce and actual frame sizes are computed locally. | `publish.rs::cas_landed` |
+| Lost/ambiguous CAS response resolution | fresh manifest GET; only if the exact segment descriptor is listed, GET and compare the claimed log bytes; a landed CAS then needs one manifest HEAD for its version | Runs after **every** manifest CAS error, including a 412 produced by a transparent retry after the first attempt landed. Ordinary contention pays the probe before slot cleanup/retry; the successful path is unchanged. Missing/folded evidence remains unknown and the slot is not deleted. | `publish.rs::cas_landed` |
 | Settings publish (D24) | refs sync (conditional GET) → log slot PUT → manifest CAS; readers pay nothing extra (settings ride inline on the manifest) | 3 rounds; read: 0 | `publish.rs::publish_settings_impl` |
 | Lease acquire | 1 GET → 1 CAS put (or 1 Create when absent) | 2 | `coord.rs::try_acquire` |
 | Publish, local commit (2026-08-23) | unchanged in round trips: after the manifest CAS the ref txns are applied to the local copy **before** the new manifest version is advertised, both under `sync_mutex` (the refs phase of every sync); the reverse order let a reader cache the old refs under the new version, and without the lock a concurrent sync replayed the same entry (two `update-ref`, a lock collision). A landed CAS is answered `ok` whatever the local apply does — the next sync replays (one conditional GET that then returns 200, no extra write). | 0 extra | `publish.rs::process_batch` |
@@ -72,11 +72,12 @@ link, so a scenario can assert "a push on a healthy link is ≤ N requests" as a
 ## 3. Rules of thumb
 - **Depth before count.** Two PUTs in parallel cost one round trip; the same two in sequence cost two.
   `tokio::join!` independent writes; never `await` uploads one after the other.
-- **Let the conditional write be the read.** `PutMode::Create` → 412 *is* "it exists"; `Update(v)` → 412 *is*
-  "someone moved it" and GCS tells you the current generation. Don't GET to decide what a conditional write will
-  tell you for free.
+- **Let the conditional write be the read.** `PutMode::Create` → 412 means "it exists"; `Update(v)` → 412
+  means the named version is not current (possibly because a transparent retry's first attempt already moved
+  it). Don't GET to decide whether to attempt a conditional write, but do resolve that ambiguity before any
+  destructive cleanup of the attempt's log slot.
 - **Verification goes on the failure path.** e.g. `put_immutable_create` HEADs only after a 412; `cas_landed`
-  re-reads the manifest only after a non-412 error. The happy path must not pay for rare cases.
+  re-reads the manifest after any manifest CAS error, including 412. The happy path must not pay for rare cases.
 - **Carry state in the object you already fetch.** The manifest is the one GET every request makes: anything a
   reader needs at refs level (pack set + side-file inventory, checkpoint pointer, log segments, revision, writer)
   belongs in it, so no second request is needed to know *what* to fetch.
