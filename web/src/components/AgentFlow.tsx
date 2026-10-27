@@ -17,10 +17,22 @@ const MAX_ANIMATED_EDGES = 30;
 
 /** Group current board cards by their explicit owner; empty owner is unassigned. */
 export function agentFlowGroups(columns: CollabBoardColumn[]): AgentFlowGroup[] {
+  // One card may be listed twice: once in an `unverified` alert lane and once in
+  // its workflow lane (`build_board` alert lanes never consume a card). The
+  // projection always emits an alert lane *before* the workflow lane that
+  // places the card, so the last column listing a card id is the placement
+  // lane — render only that occurrence, keeping card counts, React keys and
+  // flow edges unique.
+  const placement = new Map<string, CollabBoardColumn>();
+  for (const col of columns) {
+    for (const card of col.cards) {
+      if (!ARCHIVED.has(card.status)) placement.set(card.id, col);
+    }
+  }
   const groups = new Map<string, AgentFlowGroup>();
   for (const col of columns) {
     for (const card of col.cards) {
-      if (ARCHIVED.has(card.status)) continue;
+      if (placement.get(card.id) !== col) continue;
       const owner = card.owner.trim() || "unassigned";
       const group = groups.get(owner) ?? { owner, cards: [] };
       group.cards.push({ card, lane: col.name });
