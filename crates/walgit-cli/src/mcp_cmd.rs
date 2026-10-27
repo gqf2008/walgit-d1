@@ -216,7 +216,7 @@ fn tool_defs() -> Vec<Tool> {
                 json!({
                     "kind": {"type": "string", "enum": ["issue", "comment", "patch", "review", "merge_result", "status"]},
                     "id": {"type": "string", "description": "thread id, shared by every entry"},
-                    "actor": {"type": "string"},
+                    "actor": {"type": "string", "description": "the principal the entry is written as; it must be the principal the server's `--key` is registered under — a mismatch is refused (it could only produce a permanently unverified entry)"},
                     "parent": {"type": "string", "description": "previous entry's oid (\"\" for a root)"},
                     "body": {"type": "string", "description": "the entry body as a JSON object string"},
                     "base": {"type": "string", "description": "patch only"},
@@ -238,7 +238,7 @@ fn tool_defs() -> Vec<Tool> {
             schema: schema(
                 json!({
                     "id": {"type": "string", "description": "card thread id"},
-                    "actor": {"type": "string"},
+                    "actor": {"type": "string", "description": "the principal claiming the card; it must be the principal the server's `--key` is registered under — a mismatch is refused"},
                     "ttl": {"type": "integer", "description": "claim lifetime in seconds (1..=86400, default 300)"},
                     "worktree": {"type": "string", "description": "worktree the holder will work in"},
                     "branch": {"type": "string", "description": "branch the holder will work on"},

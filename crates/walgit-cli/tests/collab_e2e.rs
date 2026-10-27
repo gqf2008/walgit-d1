@@ -837,10 +837,40 @@ async fn gc_fold_keeps_aggregation_byte_identical_and_the_tail_stays_live() -> T
         "collab", "entry", "--repo", repo_a, "--kind", "status", "--id", "t2", "--actor", "alice",
         "--parent", &t2, "--body", r#"{"status":"closed"}"#, "--key", alice_k, "--push", "origin",
     ])?);
-    run(&[
-        "collab", "entry", "--repo", repo_a, "--kind", "comment", "--id", "t2", "--actor", "alice",
-        "--parent", &t2s, "--body", r#"{"text":"wrong key"}"#, "--key", bob_k, "--push", "origin",
-    ])?;
+    // The write gate now refuses `--actor alice --key bob_k` (that pairing can
+    // only mint a permanently unverified entry), so plant the same shape by
+    // hand: alice's inbox holding an entry bob signed. Aggregation must still
+    // report it unverified, before and after a fold.
+    let mut wrong = walgit_wal::collab::Entry {
+        version: 1,
+        kind: "comment".into(),
+        id: "t2".into(),
+        actor: "alice".into(),
+        ts: ts as i64,
+        parent: t2s.clone(),
+        refs: None,
+        body: serde_json::json!({"text": "wrong key"}),
+        sig: String::new(),
+    };
+    let bob_signing = ed25519_dalek::SigningKey::from_bytes(&[0x08u8; 32]);
+    wrong.sig = walgit_wal::collab::sign_entry(&mut wrong, &bob_signing);
+    let wrong_oid = git_stdin(
+        a.path(),
+        &["hash-object", "-w", "--stdin"],
+        &serde_json::to_string_pretty(&wrong)?,
+    )?;
+    git_in(
+        a.path(),
+        &[
+            "update-ref",
+            "refs/collab/inbox/alice/wrongkey1",
+            &wrong_oid,
+        ],
+    )?;
+    git_in(
+        a.path(),
+        &["push", "-q", "origin", "refs/collab/inbox/alice/wrongkey1"],
+    )?;
 
     // A CI run thread (docs/D1_CI_PROTOCOL.md): claim -> result, signed by
     // ci-runner-a's key, ttl far from expiry so `now` never flips the state

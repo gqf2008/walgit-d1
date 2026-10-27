@@ -192,6 +192,15 @@ pub async fn run(action: CiAction) -> Result<()> {
                 task_filter: task,
             };
             runner.register()?;
+            // `register` self-registers a new actor; an actor already bound to
+            // another key would make every entry this runner writes
+            // unverifiable, so refuse that pairing up front.
+            crate::collab_cmd::ensure_actor_key_binding(
+                &runner.repo,
+                &runner.actor,
+                &key,
+                &runner.key,
+            )?;
             println!(
                 "ci: watching {} via {} as {} (interval {}s, state {})",
                 runner.repo.display(),

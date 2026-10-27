@@ -113,8 +113,10 @@ Host-spawned over stdio — configure a command, not a URL:
 Its tools **are** this CLI (one implementation, no second contract). Read-only
 surface: `repo_list/owners/refs/resolve/tree/blob/commits/diff`,
 `collab_ls/thread/pr/board/report`, `ci_status`, `wal_ls`. The writing tools —
-`collab_entry` and `collab_claim` — exist only under `--allow-write --key`.
-Destructive operations are not exposed at all; bytes never travel over MCP.
+`collab_entry` and `collab_claim` — exist only under `--allow-write --key`, and an entry's
+`actor` must be the principal that key is registered under (a mismatched pair can only write a
+permanently unverified entry, so the call is refused). Destructive operations are not exposed at
+all; bytes never travel over MCP.
 
 Resources (`resources/list|read|subscribe`): `walgit://refs/<o>/<r>`,
 `walgit://wal/<o>/<r>?from=<seq>`, `walgit://collab/board/<o>/<r>`,

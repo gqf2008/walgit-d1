@@ -221,6 +221,13 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 但 blob oid 是存储字节的内容寻址，因此去重键是 oid/字节而非语义相等：**重试必须复用同一份
 字节**（同一次构造的 blob），重新序列化后的「同一条目」是另一个 oid，会被聚合视为两条（§7.1）。
 
+**写侧身份闸**：`sig` 必须用 `actor` 自己注册的 key 签。`actor` 与 key 解耦写出的条目永久
+unverified（§4.5 的「此刻注册表」语义也无法事后修复，且日志 append-only）。因此
+`walgit collab entry` / `collab claim` 在落盘/推送前校验「签名 key 的 public key == 注册表中
+`actor` 的 key」（仓库本地注册表 ∪ host 缓存），不一致即拒绝，并在错误里指出 key 实际归属的
+principal；MCP 的 `collab_entry` / `collab_claim` 只是这两个子命令的 argv 适配层，走同一条
+闸，没有旁路。`collab gc` 对折叠签名一向如此。
+
 ### 5.2 kind 与 body 约定
 
 基础协议对 body **不做强制校验**（读取端做宽容抽取）；下表是各 kind 的规范约定，
