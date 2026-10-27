@@ -617,9 +617,10 @@ decision in §4 — or the PR is; never "fix later".
   (`docs/D1_PROTOCOL.md` §8.4) in one call. Still append-only and non-destructive; the excluded
   destructive list is unchanged.)*
   *(Amended 2026-10-27: both writing tools refuse an `actor` the process `--key` is not registered
-  under. The adapter passes `actor` and `--key` through independently, and a mismatched pair can
-  only produce a permanently unverified entry — the append-only log makes that unfixable after the
-  fact (observed: worker actors signed with a coordinator key). The guard sits in the CLI write
+  under. The adapter passes `actor` and `--key` through independently, and a mismatched pair
+  produces an entry that does not verify until that actor is rotated to the signing key; the
+  append-only log cannot be edited, so the entry cannot be deleted or repaired in place (observed:
+  worker actors signed with a coordinator key). The guard sits in the CLI write
   path (`ensure_actor_key_binding`), so `collab entry`/`collab claim`/`ci run` and every other
   caller get it too, not just MCP.)*
 

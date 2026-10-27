@@ -837,10 +837,10 @@ async fn gc_fold_keeps_aggregation_byte_identical_and_the_tail_stays_live() -> T
         "collab", "entry", "--repo", repo_a, "--kind", "status", "--id", "t2", "--actor", "alice",
         "--parent", &t2, "--body", r#"{"status":"closed"}"#, "--key", alice_k, "--push", "origin",
     ])?);
-    // The write gate now refuses `--actor alice --key bob_k` (that pairing can
-    // only mint a permanently unverified entry), so plant the same shape by
-    // hand: alice's inbox holding an entry bob signed. Aggregation must still
-    // report it unverified, before and after a fold.
+    // The write gate now refuses `--actor alice --key bob_k` (that pairing
+    // does not verify until alice is rotated to bob's key), so plant the same
+    // shape by hand: alice's inbox holding an entry bob signed. Aggregation
+    // must still report it unverified, before and after a fold.
     let mut wrong = walgit_wal::collab::Entry {
         version: 1,
         kind: "comment".into(),
@@ -1568,6 +1568,102 @@ async fn principal_registry_rotation_and_revocation_push_through_receive_pack() 
             .iter()
             .all(|e| e["verified"] == false),
         "after revocation nothing verifies: {thread}"
+    );
+    Ok(())
+}
+
+/// A signature mismatch is conditional, not permanent (`docs/D1_PROTOCOL.md`
+/// §4.5): verification is a function of the registry *at this moment*. An
+/// entry signed with key B verifies, stops verifying after the actor is
+/// rotated to key A, and verifies again after rotating back to B. This is the
+/// path the write-refusal wording must stay conditional about.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rotating_the_actor_away_and_back_reverifies_the_entry() -> TestResult {
+    let (base, _shutdown) = start_server().await?;
+    let bin = env!("CARGO_BIN_EXE_walgit");
+    let keydir = tempfile::tempdir()?;
+    let key_b = keydir.path().join("key-b");
+    let key_a = keydir.path().join("key-a");
+    std::fs::write(&key_b, "0b".repeat(32))?;
+    std::fs::write(&key_a, "0a".repeat(32))?;
+
+    let run = |args: &[&str]| -> TestResult<String> {
+        let out = std::process::Command::new(bin)
+            .arg("--config")
+            .arg("/dev/null")
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "walgit {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    let a = tempfile::tempdir()?;
+    git_in(a.path(), &["init", "-q", "-b", "main"])?;
+    git_in(a.path(), &["config", "user.email", "t@t"])?;
+    git_in(a.path(), &["config", "user.name", "T"])?;
+    git_in(
+        a.path(),
+        &["remote", "add", "origin", &format!("{base}/o/r.git")],
+    )?;
+    let repo_a = a.path().to_str().unwrap();
+    let kb = key_b.to_str().unwrap();
+    let ka = key_a.to_str().unwrap();
+
+    // Write under key B: the write gate passes because alice is registered to B.
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", kb,
+        "--push", "origin",
+    ])?;
+    run(&[
+        "collab", "entry", "--repo", repo_a, "--kind", "issue", "--id", "t1", "--actor", "alice",
+        "--body", r#"{"title":"rotate me"}"#, "--key", kb, "--push", "origin",
+    ])?;
+
+    // Read the thread from a fresh clone so the answer comes from what the
+    // remote currently advertises, never from repo_a's local registry.
+    let fetch_and_read = || -> TestResult<(tempfile::TempDir, serde_json::Value)> {
+        let dir = tempfile::tempdir()?;
+        git_in(
+            dir.path(),
+            &["clone", "-q", "--no-checkout", &format!("{base}/o/r.git"), "."],
+        )?;
+        git_in(
+            dir.path(),
+            &["fetch", "-q", "origin", "+refs/collab/*:refs/collab/*"],
+        )?;
+        let repo = dir.path().to_str().unwrap();
+        let thread = run(&["collab", "thread", "t1", "--repo", repo])?;
+        let arr: serde_json::Value = serde_json::from_str(&thread)?;
+        Ok((dir, arr))
+    };
+
+    // Rotate away to A: the B-signed entry no longer verifies.
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", ka,
+        "--push", "origin",
+    ])?;
+    let (_away_checkout, away) = fetch_and_read()?;
+    let rows = away.as_array().expect("thread rows");
+    assert!(
+        rows.iter().all(|e| e["verified"] == false),
+        "after rotating away the old signature does not verify: {away}"
+    );
+
+    // Rotate back to B: the same entry verifies again — nothing was "forever".
+    run(&[
+        "collab", "principal-register", "--repo", repo_a, "--principal", "alice", "--key", kb,
+        "--push", "origin",
+    ])?;
+    let (_back_checkout, back) = fetch_and_read()?;
+    let rows = back.as_array().expect("thread rows");
+    assert!(
+        !rows.is_empty() && rows.iter().all(|e| e["verified"] == true),
+        "rotating back to the signing key re-verifies the entry: {back}"
     );
     Ok(())
 }

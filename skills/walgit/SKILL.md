@@ -113,8 +113,9 @@ and succeeds only for the deterministic winner; a losing call returns `isError` 
 over MCP.
 
 `actor` must be the principal the server's `--key` is registered under. The entry is signed with
-that process-wide key, and an entry whose actor and key disagree can never verify (the log is
-append-only), so both writing tools refuse it and the error names the key's real owner. Do not
+that process-wide key; an entry whose actor and key disagree does not verify until that actor is
+rotated to the signing key, and the append-only log cannot be edited, so both writing tools
+refuse it and the error names the key's real owner. Do not
 pass another agent's actor to a shared server — run one process per principal (below).
 
 For unattended multi-agent work, run **one process per agent/worktree/principal**, subscribing
@@ -276,8 +277,9 @@ W collab principal-fetch    [--remote origin] [--token $WALGIT_TOKEN]
 
 `--actor` (on `entry` and `claim`) must be the principal the signing key is registered under —
 with `--key` omitted that is this checkout's identity. Naming another principal without its key
-is refused: the signed entry could never verify (the log is append-only), so the write fails
-instead of landing dead.
+is refused: the signed entry would not verify until that actor is rotated to this key (the log
+is append-only, so the entry cannot be deleted or edited), so the write fails instead of landing
+dead.
 
 Claim a work card before working on it (`docs/D1_PROTOCOL.md` §8.4). The command publishes a
 signed `card_claim`, re-reads the log and exits **0** only for the deterministic winner

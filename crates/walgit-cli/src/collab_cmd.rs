@@ -73,8 +73,9 @@ pub enum CollabAction {
         id: String,
         /// Principal whose inbox receives the entry (default: this worktree's
         /// project identity). Must be the principal the signing key is
-        /// registered under: an entry signed as anyone else is permanently
-        /// unverified, so the write is refused.
+        /// registered under: an entry signed as anyone else does not verify
+        /// until that actor is rotated to the signing key, and the append-only
+        /// log cannot be edited, so the write is refused.
         #[arg(long)]
         actor: Option<String>,
         /// Previous entry's oid in the thread, or empty for the root.
@@ -1367,8 +1368,9 @@ fn signing_key_matches_registered(key: &SigningKey, registered_public_key: &str)
 /// Every consumer of the log (`is_verified`, the board, the merge rule) counts
 /// an entry only when its signature checks against the public key registered
 /// for the entry's **own** actor (`docs/D1_PROTOCOL.md` §4.3/§5). Signing as one
-/// principal with another's key therefore mints an entry that can never verify —
-/// permanently, because the log is append-only. `collab gc` already guards the
+/// principal with another's key therefore mints an entry that does not verify
+/// until that actor is rotated to this key — and the log is append-only, so the
+/// entry itself cannot be deleted or edited. `collab gc` already guards the
 /// fold signer this way; the write paths must apply the same rule, or a caller
 /// that picks `actor` and `--key` independently (the MCP `collab_entry` /
 /// `collab_claim` tools take both as separate arguments) writes dead entries
@@ -1401,8 +1403,9 @@ pub(crate) fn ensure_actor_key_binding(
             bail!(
                 "cannot sign as actor {actor} with the key at {}: {owner}, and {actor} is \
                  registered with a different public key — verification uses only the key \
-                 registered for an entry's own actor, and the log is append-only, so a mismatched \
-                 signature stays unverified forever. Use the key registered for {actor}, sign as \
+                 registered for an entry's own actor, so this signature does not verify until \
+                 {actor} is rotated to this key; the log is append-only, so the entry cannot be \
+                 deleted or edited. Use the key registered for {actor}, sign as \
                  the actor this key belongs to, or rotate {actor} to this key on purpose: `walgit \
                  collab principal-register --principal {actor} --key <keyfile> --push origin`. \
                  Without `--push origin` the registration stays local and the entries you push \
@@ -1528,15 +1531,24 @@ fn run_gc(
     let principals = reader.principals()?;
     let Some(registered_public_key) = principals.get(actor) else {
         bail!(
-            "gc.actor {actor} has no registered collab key in this repository; \
-             `walgit collab principal-register --principal {actor} --key <keyfile>` first"
+            "gc.actor {actor} has no registered collab key in the registry visible to this \
+             checkout (local ∪ host cache); if {actor} is registered on the host, run \
+             `walgit collab principal-fetch` first; otherwise register the seed you already \
+             hold with `walgit collab principal-register --principal {actor} --key <keyfile> \
+             --push origin` — without `--push origin` the registration stays local and the \
+             snapshot stays unverified on the remote"
         );
     };
     let key = read_signing_key(key_path)?;
     if !signing_key_matches_registered(&key, registered_public_key) {
         bail!(
-            "gc.key does not match the public key registered for gc.actor {actor}; \
-             use the key registered for this principal or rotate it explicitly"
+            "gc.key does not match the public key registered for gc.actor {actor} in the \
+             registry visible to this checkout (local ∪ host cache): this signature does not \
+             verify until {actor} is rotated to this key, and the collab log is append-only, so \
+             the entry cannot be deleted or edited. Use the key registered for {actor}, or rotate \
+             {actor} on purpose with `walgit collab principal-register --principal {actor} \
+             --key <keyfile> --push origin`; rotation is destructive, because every past entry \
+             signed by {actor} turns unverified"
         );
     }
     // The baseline the snapshot push leases against: the snapshot ref's value
@@ -4323,8 +4335,9 @@ mod actor_key_binding_tests {
     //! A collab entry verifies only when its signature matches the key
     //! registered for its own actor, so `collab entry`/`collab claim` must
     //! refuse an `actor` that the signing key is not bound to (previously both
-    //! accepted the pair silently and produced permanently-unverified entries;
-    //! the MCP `collab_entry`/`collab_claim` tools take `actor` and `--key` as
+    //! accepted the pair silently and produced entries that only verify after
+    //! the actor is rotated to the signing key; the MCP
+    //! `collab_entry`/`collab_claim` tools take `actor` and `--key` as
     //! independent arguments, which is how that happened).
     use super::*;
 
@@ -4418,8 +4431,54 @@ mod actor_key_binding_tests {
             msg.contains("turns unverified"),
             "rotation semantics: {msg}"
         );
+        // Verification is a function of the registry at this moment
+        // (`docs/D1_PROTOCOL.md` §4.5): rotating alice to bob's key later makes
+        // the entry verify, so the refusal must be conditional — never the old
+        // "unverified forever" claim.
+        assert!(
+            msg.contains("does not verify until"),
+            "the mismatch is conditional on rotation: {msg}"
+        );
+        assert_no_absolute_claim(&msg);
         // The same key with its own actor still passes.
         ensure_actor_key_binding(&repo, "bob", &bob_key, &bob_sk).unwrap();
+    }
+
+    /// The refusal wording must not reintroduce an absolute verification claim:
+    /// the registry is consulted at read time (§4.5), so rotation can change
+    /// the outcome.
+    fn assert_no_absolute_claim(msg: &str) {
+        let lower = msg.to_lowercase();
+        for absolute in ["forever", "permanent", "unfixable"] {
+            assert!(
+                !lower.contains(absolute),
+                "the refusal must not claim `{absolute}`: {msg}"
+            );
+        }
+    }
+
+    /// The host registry cache (`refs/walgit/principals/<p>`, written by
+    /// `collab principal-fetch`) alone is enough to bind a key: the binding
+    /// reads the union of the repo-local registry and the host cache
+    /// (`docs/D1_PROTOCOL.md` §4.5), so a fetched principal passes without a
+    /// repo-local registration.
+    #[test]
+    fn host_registry_cache_alone_binds_the_key() {
+        let (tmp, repo) = init_repo();
+        let (path, pk, sk) = keypair_file(tmp.path(), 4);
+        let oid = git_write_blob(
+            &repo,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "principal": "p",
+                "public_key": pk,
+                "registered_at": 0,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        git_update_ref(&repo, "refs/walgit/principals/p", Some(&oid)).unwrap();
+        ensure_actor_key_binding(&repo, "p", &path, &sk).unwrap();
     }
 
     /// The unregistered-actor refusal must lead with the host-registry remedy,
