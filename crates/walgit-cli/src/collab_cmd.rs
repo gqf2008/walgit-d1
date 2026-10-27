@@ -72,7 +72,10 @@ pub enum CollabAction {
         #[arg(long)]
         id: String,
         /// Principal whose inbox receives the entry (default: this worktree's
-        /// project identity).
+        /// project identity). Must be the principal the signing key is
+        /// registered under: an entry signed as anyone else does not verify
+        /// until that actor is rotated to the signing key, and the append-only
+        /// log cannot be edited, so the write is refused.
         #[arg(long)]
         actor: Option<String>,
         /// Previous entry's oid in the thread, or empty for the root.
@@ -233,7 +236,8 @@ pub enum CollabAction {
         #[arg(long, default_value_t = CARD_CLAIM_TTL_DEFAULT_SECS)]
         ttl: u64,
         /// Principal whose inbox receives the claim (default: this worktree's
-        /// project identity).
+        /// project identity). Must be the principal the signing key is
+        /// registered under, like `entry`.
         #[arg(long)]
         actor: Option<String>,
         /// Ed25519 signing key (default: the project identity key).
@@ -1015,6 +1019,7 @@ fn run_entry(args: &EntryArgs) -> Result<()> {
         check_status_transition(&entry, &thread_entries, &principals)?;
     }
     let key = read_signing_key(&args.key)?;
+    ensure_actor_key_binding(&args.repo, &args.actor, &args.key, &key)?;
     entry.sig = sign_entry(&mut entry, &key);
     let content = serde_json::to_string_pretty(&entry)?;
     let oid = git_write_blob(&args.repo, &content)?;
@@ -1358,6 +1363,112 @@ fn signing_key_matches_registered(key: &SigningKey, registered_public_key: &str)
         .is_ok_and(|bytes| bytes.as_slice() == key.verifying_key().as_bytes())
 }
 
+/// Refuse a write whose signing key is not the key registered for its actor.
+///
+/// Every consumer of the log (`is_verified`, the board, the merge rule) counts
+/// an entry only when its signature checks against the public key registered
+/// for the entry's **own** actor (`docs/D1_PROTOCOL.md` §4.3/§5). Signing as one
+/// principal with another's key therefore mints an entry that does not verify
+/// until that actor is rotated to this key — and the log is append-only, so the
+/// entry itself cannot be deleted or edited. `collab gc` already guards the
+/// fold signer this way; the write paths must apply the same rule, or a caller
+/// that picks `actor` and `--key` independently (the MCP `collab_entry` /
+/// `collab_claim` tools take both as separate arguments) writes dead entries
+/// (observed 2026-10: worker actors signed with a coordinator key — 99315ec2 /
+/// fad5f2a9 / db9fa46a).
+///
+/// The binding is read from the same place verification reads it: the principal
+/// registry (`refs/collab/meta/principals/*` plus the host cache under
+/// `refs/walgit/principals/*`). `walgit collab join` materializes both halves —
+/// the worktree identity (`<git-dir>/walgit/identity` + `keys/`) *and* the
+/// registration ref — so a joined worktree always passes. The identity is
+/// consulted only to name the key's owner in the error.
+///
+/// The host half of the registry holds only what `collab principal-fetch`
+/// cached, so "no key registered here" is a statement about this checkout, not
+/// about the principal: a host-level registration the caller has not fetched is
+/// invisible, and the refusal says so (pointing at `principal-fetch`) instead of
+/// claiming the write could never verify.
+pub(crate) fn ensure_actor_key_binding(
+    repo: &Path,
+    actor: &str,
+    key_path: &Path,
+    key: &SigningKey,
+) -> Result<()> {
+    let principals = CollabReader::new(repo).principals()?;
+    match principals.get(actor) {
+        Some(registered) if signing_key_matches_registered(key, registered) => Ok(()),
+        Some(_) => {
+            let owner = key_owners(repo, &principals, key);
+            bail!(
+                "cannot sign as actor {actor} with the key at {}: {owner}, and {actor} is \
+                 registered with a different public key — verification uses only the key \
+                 registered for an entry's own actor, so this signature does not verify until \
+                 {actor} is rotated to this key; the log is append-only, so the entry cannot be \
+                 deleted or edited. Use the key registered for {actor}, sign as \
+                 the actor this key belongs to, or rotate {actor} to this key on purpose: `walgit \
+                 collab principal-register --principal {actor} --key <keyfile> --push origin`. \
+                 Without `--push origin` the registration stays local and the entries you push \
+                 stay unverified on the remote; rotation is destructive, because every past \
+                 entry signed by {actor} turns unverified. A repo-local registration is \
+                 authoritative over the host registry, so rotating here also shadows a host-level \
+                 registration of {actor}",
+                key_path.display()
+            )
+        }
+        None => {
+            let owner = key_owners(repo, &principals, key);
+            bail!(
+                "cannot sign as actor {actor} with the key at {}: {owner}, and this repository \
+                 has no collab key registered for {actor}, so the signature cannot be checked \
+                 here (this is a local view, not proof that {actor} is unregistered elsewhere). \
+                 If {actor} is registered on the host, run `walgit collab principal-fetch` to \
+                 cache the host registry under refs/walgit/principals/* — writes then verify \
+                 against the host-registered key. Otherwise register the seed you already hold: \
+                 `walgit collab join --principal {actor} --key <registered seed> --push origin` \
+                 — `--key` is required, because join without it generates a fresh random seed, \
+                 and a repo-local registration overrides the host registry, silently shadowing \
+                 {actor}'s host identity (whose past entries then turn unverified). In a fresh \
+                 clone, fetch the collab refs first (`git fetch <remote> \
+                 '+refs/collab/*:refs/collab/*'`) so an existing registration is visible",
+                key_path.display()
+            )
+        }
+    }
+}
+
+/// Which principal(s) a signing key belongs to, for the refusal messages above.
+/// The registry is authoritative; the worktree identity is added because it
+/// names the key the MCP server was started with.
+fn key_owners(repo: &Path, principals: &HashMap<String, String>, key: &SigningKey) -> String {
+    let mut owners: Vec<String> = principals
+        .iter()
+        .filter(|(_, public_key)| signing_key_matches_registered(key, public_key))
+        .map(|(principal, _)| principal.clone())
+        .collect();
+    owners.sort();
+    if let Some(identity) = identity_principal_for_key(repo, key)
+        && !owners.iter().any(|owner| owner == &identity)
+    {
+        owners.push(format!("{identity} (this worktree's identity)"));
+    }
+    if owners.is_empty() {
+        "the signing key is not registered under any principal here".to_string()
+    } else {
+        format!("the signing key belongs to {}", owners.join(", "))
+    }
+}
+
+/// The principal whose key this worktree's identity file points at, when the
+/// seeds match. Messages only: verification goes through the registry.
+fn identity_principal_for_key(repo: &Path, key: &SigningKey) -> Option<String> {
+    let dir = project_identity_dir(repo).ok()?;
+    let identity = read_identity_at(&dir).ok()?;
+    let path = resolve_key_path(&dir, &identity.principal, identity.key.as_deref());
+    let bound = read_signing_key(&path).ok()?;
+    (bound.verifying_key() == key.verifying_key()).then_some(identity.principal)
+}
+
 /// Record one entry in a snapshot fold, preferring the copy whose inbox
 /// principal is the entry's own actor when the same oid appears under multiple
 /// refs. Returns whether `records` changed and therefore needs a new snapshot;
@@ -1420,15 +1531,24 @@ fn run_gc(
     let principals = reader.principals()?;
     let Some(registered_public_key) = principals.get(actor) else {
         bail!(
-            "gc.actor {actor} has no registered collab key in this repository; \
-             `walgit collab principal-register --principal {actor} --key <keyfile>` first"
+            "gc.actor {actor} has no registered collab key in the registry visible to this \
+             checkout (local ∪ host cache); if {actor} is registered on the host, run \
+             `walgit collab principal-fetch` first; otherwise register the seed you already \
+             hold with `walgit collab principal-register --principal {actor} --key <keyfile> \
+             --push origin` — without `--push origin` the registration stays local and the \
+             snapshot stays unverified on the remote"
         );
     };
     let key = read_signing_key(key_path)?;
     if !signing_key_matches_registered(&key, registered_public_key) {
         bail!(
-            "gc.key does not match the public key registered for gc.actor {actor}; \
-             use the key registered for this principal or rotate it explicitly"
+            "gc.key does not match the public key registered for gc.actor {actor} in the \
+             registry visible to this checkout (local ∪ host cache): this signature does not \
+             verify until {actor} is rotated to this key, and the collab log is append-only, so \
+             the entry cannot be deleted or edited. Use the key registered for {actor}, or rotate \
+             {actor} on purpose with `walgit collab principal-register --principal {actor} \
+             --key <keyfile> --push origin`; rotation is destructive, because every past entry \
+             signed by {actor} turns unverified"
         );
     }
     // The baseline the snapshot push leases against: the snapshot ref's value
@@ -2197,6 +2317,10 @@ fn run_claim(
 
     // Step 1: read the log as the remote has it now.
     git_fetch_collab(repo, remote)?;
+    // The fetch above refreshes the principal registry; the same binding gate
+    // as `collab entry` then refuses a claim that could never verify *before*
+    // it enters the append-only log.
+    ensure_actor_key_binding(repo, &actor, &key_path, &signing)?;
     let (view, status) = claim_view_now(repo, id)?;
     // The same gate the board projection applies (§8.4): a claim owns only an
     // open/in-progress card, so claiming any other state would exit 0 while
@@ -4203,5 +4327,271 @@ mod unpushed_tests {
         let html = render_report_html(&report, Some(&zero));
         assert!(html.contains("<p>unpushed: 0 (vs origin)</p>"), "{html}");
         assert!(!html.contains("fix:"), "nothing to fix at zero: {html}");
+    }
+}
+
+#[cfg(test)]
+mod actor_key_binding_tests {
+    //! A collab entry verifies only when its signature matches the key
+    //! registered for its own actor, so `collab entry`/`collab claim` must
+    //! refuse an `actor` that the signing key is not bound to (previously both
+    //! accepted the pair silently and produced entries that only verify after
+    //! the actor is rotated to the signing key; the MCP
+    //! `collab_entry`/`collab_claim` tools take `actor` and `--key` as
+    //! independent arguments, which is how that happened).
+    use super::*;
+
+    fn init_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        (tmp, repo)
+    }
+
+    fn keypair_file(dir: &Path, seed: u8) -> (PathBuf, String, SigningKey) {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let pk = base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
+        let path = dir.join(format!("key{seed}"));
+        std::fs::write(&path, hex::encode([seed; 32])).unwrap();
+        (path, pk, sk)
+    }
+
+    /// The same ref `collab principal-register` writes.
+    fn register(repo: &Path, principal: &str, pk: &str) {
+        let content = serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "principal": principal,
+            "public_key": pk,
+            "registered_at": 0,
+        }))
+        .unwrap();
+        let oid = git_write_blob(repo, &content).unwrap();
+        git_update_ref(
+            repo,
+            &format!("refs/collab/meta/principals/{principal}"),
+            Some(&oid),
+        )
+        .unwrap();
+    }
+
+    fn inbox_refs(repo: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args(["for-each-ref", "--format=%(refname)", "refs/collab/inbox"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn actor_bound_to_its_own_key_is_allowed() {
+        let (tmp, repo) = init_repo();
+        let (path, pk, sk) = keypair_file(tmp.path(), 1);
+        register(&repo, "alice", &pk);
+        ensure_actor_key_binding(&repo, "alice", &path, &sk).unwrap();
+    }
+
+    #[test]
+    fn another_principals_key_is_refused_and_names_both_sides() {
+        let (tmp, repo) = init_repo();
+        let (_alice_key, alice_pk, _alice_sk) = keypair_file(tmp.path(), 1);
+        let (bob_key, bob_pk, bob_sk) = keypair_file(tmp.path(), 2);
+        register(&repo, "alice", &alice_pk);
+        register(&repo, "bob", &bob_pk);
+
+        // The incident shape: an actor signed with another principal's key.
+        let err = ensure_actor_key_binding(&repo, "alice", &bob_key, &bob_sk).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("actor alice"), "{msg}");
+        assert!(
+            msg.contains("belongs to bob"),
+            "the key's owner must be named: {msg}"
+        );
+        assert!(
+            msg.contains("principal-register"),
+            "the error must point at the fix: {msg}"
+        );
+        // A local-only registration is not enough: the remote reads the pushed
+        // ref, so the command shown must carry `--push origin`.
+        assert!(
+            msg.contains("--push origin"),
+            "the register command must publish: {msg}"
+        );
+        // Rotation is destructive and the message has to say so.
+        assert!(
+            msg.contains("turns unverified"),
+            "rotation semantics: {msg}"
+        );
+        // Verification is a function of the registry at this moment
+        // (`docs/D1_PROTOCOL.md` §4.5): rotating alice to bob's key later makes
+        // the entry verify, so the refusal must be conditional — never the old
+        // "unverified forever" claim.
+        assert!(
+            msg.contains("does not verify until"),
+            "the mismatch is conditional on rotation: {msg}"
+        );
+        assert_no_absolute_claim(&msg);
+        // The same key with its own actor still passes.
+        ensure_actor_key_binding(&repo, "bob", &bob_key, &bob_sk).unwrap();
+    }
+
+    /// The refusal wording must not reintroduce an absolute verification claim:
+    /// the registry is consulted at read time (§4.5), so rotation can change
+    /// the outcome.
+    fn assert_no_absolute_claim(msg: &str) {
+        let lower = msg.to_lowercase();
+        for absolute in ["forever", "permanent", "unfixable"] {
+            assert!(
+                !lower.contains(absolute),
+                "the refusal must not claim `{absolute}`: {msg}"
+            );
+        }
+    }
+
+    /// The host registry cache (`refs/walgit/principals/<p>`, written by
+    /// `collab principal-fetch`) alone is enough to bind a key: the binding
+    /// reads the union of the repo-local registry and the host cache
+    /// (`docs/D1_PROTOCOL.md` §4.5), so a fetched principal passes without a
+    /// repo-local registration.
+    #[test]
+    fn host_registry_cache_alone_binds_the_key() {
+        let (tmp, repo) = init_repo();
+        let (path, pk, sk) = keypair_file(tmp.path(), 4);
+        let oid = git_write_blob(
+            &repo,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "principal": "p",
+                "public_key": pk,
+                "registered_at": 0,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        git_update_ref(&repo, "refs/walgit/principals/p", Some(&oid)).unwrap();
+        ensure_actor_key_binding(&repo, "p", &path, &sk).unwrap();
+    }
+
+    /// The unregistered-actor refusal must lead with the host-registry remedy,
+    /// require `--key` on the join (a keyless join mints a fresh seed and its
+    /// repo-local registration shadows a host one), publish the registration,
+    /// and not claim the entry is doomed when the principal may be host-registered.
+    #[test]
+    fn unregistered_actor_is_refused_with_fetch_first_and_keyed_join() {
+        let (tmp, repo) = init_repo();
+        let (path, _, sk) = keypair_file(tmp.path(), 3);
+        let err = ensure_actor_key_binding(&repo, "ghost", &path, &sk).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no collab key registered for ghost"), "{msg}");
+        // Host-level registration is the first remedy (repo-local registry is
+        // only a cache of it).
+        let fetch_at = msg
+            .find("principal-fetch")
+            .unwrap_or_else(|| panic!("host registry remedy missing: {msg}"));
+        let join_at = msg
+            .find("collab join")
+            .unwrap_or_else(|| panic!("join remedy missing: {msg}"));
+        assert!(fetch_at < join_at, "fetch must come first: {msg}");
+        // A join recommendation without `--key` is the bug this guards.
+        let (_, from_join) = msg.split_at(join_at);
+        assert!(
+            from_join.contains("--key <registered seed>"),
+            "join must adopt the registered seed: {msg}"
+        );
+        assert!(
+            from_join.contains("--push origin"),
+            "join must publish the registration: {msg}"
+        );
+        // A fresh clone needs the collab refs before any registration is visible.
+        assert!(msg.contains("git fetch <remote>"), "{msg}");
+        // The old absolute claim was wrong for host-registered principals.
+        assert!(!msg.contains("would never verify"), "{msg}");
+    }
+
+    /// `--actor` omitted resolves through `<git-dir>/walgit/identity` (what
+    /// `collab join` writes next to the registration), and that pairing passes.
+    #[test]
+    fn default_actor_follows_the_worktree_identity() {
+        let (tmp, repo) = init_repo();
+        let dir = project_identity_dir(&repo).unwrap();
+        std::fs::create_dir_all(dir.join("keys")).unwrap();
+        let (key_path, pk, sk) = keypair_file(tmp.path(), 9);
+        std::fs::copy(&key_path, dir.join("keys").join("worker.ed25519")).unwrap();
+        register(&repo, "worker", &pk);
+        std::fs::write(
+            dir.join("identity"),
+            serde_json::to_string(&serde_json::json!({
+                "principal": "worker",
+                "key": "keys/worker.ed25519",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (actor, resolved) = resolve_identity(&repo, None, None).unwrap();
+        assert_eq!(actor, "worker");
+        let key = read_signing_key(&resolved).unwrap();
+        assert_eq!(key.verifying_key(), sk.verifying_key());
+        ensure_actor_key_binding(&repo, &actor, &resolved, &key).unwrap();
+    }
+
+    fn entry_args(repo: &Path, actor: &str, key: PathBuf) -> EntryArgs {
+        EntryArgs {
+            repo: repo.to_path_buf(),
+            push: None,
+            kind: "issue".into(),
+            id: "t1".into(),
+            actor: actor.into(),
+            parent: String::new(),
+            body: r#"{"title":"x"}"#.into(),
+            base: None,
+            head: None,
+            key,
+            related: Vec::new(),
+            depends_on: Vec::new(),
+            attach: Vec::new(),
+            auto_fold: false,
+            fold_threshold: 10,
+        }
+    }
+
+    #[test]
+    fn run_entry_writes_when_actor_and_key_match() {
+        let (tmp, repo) = init_repo();
+        let (alice_key, alice_pk, _) = keypair_file(tmp.path(), 1);
+        register(&repo, "alice", &alice_pk);
+        run_entry(&entry_args(&repo, "alice", alice_key)).unwrap();
+        assert!(
+            inbox_refs(&repo).starts_with("refs/collab/inbox/alice/"),
+            "a legitimate entry is still written: {}",
+            inbox_refs(&repo)
+        );
+    }
+
+    #[test]
+    fn run_entry_refuses_another_principals_key_and_writes_nothing() {
+        let (tmp, repo) = init_repo();
+        let (alice_key, alice_pk, _) = keypair_file(tmp.path(), 1);
+        let (_, bob_pk, _) = keypair_file(tmp.path(), 2);
+        register(&repo, "alice", &alice_pk);
+        register(&repo, "bob", &bob_pk);
+
+        let err = run_entry(&entry_args(&repo, "bob", alice_key)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("belongs to alice"), "{msg}");
+        assert!(
+            inbox_refs(&repo).is_empty(),
+            "a refused write must not leave an inbox ref: {}",
+            inbox_refs(&repo)
+        );
     }
 }
