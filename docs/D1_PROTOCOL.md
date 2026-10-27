@@ -501,6 +501,11 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
 
 - **首列命中**：卡片进入**声明顺序第一个**满足全部已声明谓词的列；不匹配任何列的线程**不在
   看板上**（「说你想看到的，而不是拿到你没要求的」）。
+- **告警列不占位**：`unverified = true` 的列是**告警附加列**，不是落位列。卡片命中它时仍继续
+  向后找**第一个非告警列**（其状态/工作流列）并同时出现在那里——一条未验签条目不会再把卡从
+  `open`/`in-progress`/`needs-review` 挤掉。既有成员关系不变：已被更早的列落位的卡片不会被
+  拖进告警列（终态列仍然先赢），告警列的成员与改动前的首列命中结果完全一致——这条规则只会
+  往列里**加**卡，绝不减卡。
 - 谓词语义：`kind` 非空 → 线程含该 kind；`status` 非空 → `card.status == 该值`；
   `merge` 非空 → 含 patch 且 verdict 命中（`allowed` → `merge.allowed==true`；`blocked` → false）；
   `unverified=true` → `card.unverified > 0`。空字段 = 任意。

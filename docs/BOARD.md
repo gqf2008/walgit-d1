@@ -18,12 +18,15 @@ name = "open"      # 必填，列名
 kind = ""          # 可选：线程必须包含该 kind 的条目
 status = "open"    # 可选：卡片有效状态必须等于它
 merge = ""         # 可选："allowed" | "blocked"（对 patch 的合并规则判定；无 patch 不匹配）
-unverified = false # 可选：true 时只收"至少含 1 条未验签条目"的卡片
+unverified = false # 可选：true 时只收"至少含 1 条未验签条目"的卡片（告警附加列，不抢落位列）
 ```
 
 规则：
 
 1. **首列命中**：卡片进入**第一个**满足谓词的列；所有字段都空的一列是 catch-all。
+   例外是 `unverified = true` 的**告警附加列**：它不占位——卡片命中它之后仍会进入第一个
+   后续的普通列，因此未验签条目不会把卡从 open / in-progress / needs-review 里挤掉。
+   已被更早列落位的卡片不会被拖进告警列（成员关系与原先的首列命中一致，只加不减）。
 2. **未命中不显示**：不匹配任何列的线程不在看板上——"说你想看到的，而不是拿到你没要求的"。
 3. **`status` 语义**（`card_status`）：按线程条目顺序重放，最后一个匹配者生效——
    每条 `status` 条目以 `body.status` 设置；`merge_result` 带 `{"merged": true}` 置 `merged`；

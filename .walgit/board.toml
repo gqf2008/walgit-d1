@@ -32,7 +32,8 @@ direction = "desc" # desc(默认,新在前) | asc
 #   kind       —— 线程必须包含该 kind 的条目
 #   status     —— 卡片有效状态(card_status)必须等于它
 #   merge      —— "allowed" | "blocked"：patch 的合并规则判定（无 patch 的线程不匹配）
-#   unverified —— true 时只收"至少含 1 条未验签条目"的卡片
+#   unverified —— true 时只收"至少含 1 条未验签条目"的卡片；这是**告警附加列**：
+#                 卡片仍会进入其状态列，不会因为一条未验签条目而从 open/in-progress 等列消失
 [[column]]
 name = "open"
 status = "open"

@@ -263,7 +263,8 @@
 > 批次落地（§8 的看板视图 + §11 问题 3 的决定）：
 > - **投影核心**：`BoardDef`（`.walgit/board.toml`，`version = 1`，`[[column]]`
 >   谓词 kind / status / merge(allowed\|blocked) / unverified，声明序
->   first-match-wins，无列匹配的卡不上板）+ `build_board` 纯函数进
+>   first-match-wins，无列匹配的卡不上板；`unverified` 列是告警附加列、不占位
+>   （2026-10-27 修正：未验签卡仍留在其状态列））+ `build_board` 纯函数进
 >   `walgit-wal::collab`；定义解析 fail-closed（坏版本 / 无列 / 空或重名列 /
 >   未知 merge 判词 / 未知字段 = 错误，绝不静默兜底）；排序默认 last_ts 降序、
 >   卡 id 作全序兜底——同一 refs 集合必然投影出逐字节一致的看板。

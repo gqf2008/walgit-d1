@@ -865,6 +865,11 @@ matching no column are omitted, and within a column cards sort by the
 definition's `sort` (default `last_ts` descending, card id as the total-order
 tie-break, so the bytes are deterministic). Cards without a `patch` never
 match a `merge = "allowed"|"blocked"` column (there is no verdict).
+A column with `unverified = true` is an **alert lane, not a placement lane**:
+a card that matches it is still placed in the first later column that matches,
+so one unverified entry cannot hide a card from its `open`/`in-progress`/
+`needs-review` lane. A card already placed by an earlier column is not dragged
+into the alert lane, so the rule only adds cards to columns, never removes one.
 
 All three read endpoints answer from the synced WAL view (`Need::Objects`): entry
 blobs are read locally when packs fit, faulted through the remote reader

@@ -1127,6 +1127,9 @@ pub const BOARD_PATH: &str = ".walgit/board.toml";
 /// predicate it satisfies; empty predicate fields match anything, so a column
 /// with none of them set is the catch-all. Cards matching no column are not on
 /// the board — say what you want to see, don't get what you didn't ask for.
+/// A column with `unverified = true` is an alert lane instead of a placement
+/// lane: it still lists its matches, but the search continues to the first
+/// later placement column (`build_board`, `docs/D1_PROTOCOL.md` §8.3).
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BoardColumnDef {
@@ -1141,7 +1144,9 @@ pub struct BoardColumnDef {
     /// Cards without a `patch` match neither value (there is no verdict).
     #[serde(default)]
     pub merge: String,
-    /// Only cards carrying at least one unverified entry.
+    /// Only cards carrying at least one unverified entry. Such a column is an
+    /// **alert** lane: matching it never stops the card from reaching its
+    /// workflow lane (see the type doc).
     #[serde(default)]
     pub unverified: bool,
 }
@@ -1501,10 +1506,18 @@ fn entry_prose(body: &serde_json::Value) -> String {
 
 /// The board projection: a pure function `(entries, principals, rules, board
 /// definition) → columns`. Threads group by entry `id` exactly as
-/// `build_report` does; each becomes at most one card in the first column whose
-/// predicate it satisfies, sorted by the definition's sort. Two clients reading
-/// the same refs compute byte-identical boards — that property is the e2e
-/// acceptance (CLI offline aggregation vs the server endpoint).
+/// `build_report` does; each becomes a card in the first **placement** column
+/// whose predicate it satisfies, sorted by the definition's sort. Two clients
+/// reading the same refs compute byte-identical boards — that property is the
+/// e2e acceptance (CLI offline aggregation vs the server endpoint).
+///
+/// `unverified = true` columns are **alert lanes, not placement lanes**
+/// (`docs/D1_PROTOCOL.md` §8.3): a card that matches one is still placed in the
+/// first later column that matches, so a single unverified entry can no longer
+/// hide a card from its `open`/`in-progress`/`needs-review` lane. The alert
+/// membership is exactly what first-match-wins would have produced before:
+/// a card already placed by an earlier column is not dragged into the alert
+/// lane, so this rule only ever **adds** cards to columns, never removes one.
 pub fn build_board(
     entries: &[&EntryRef],
     principals: &HashMap<String, String, impl std::hash::BuildHasher>,
@@ -1608,8 +1621,27 @@ pub fn build_board(
             merge,
             claim: claim_view.to_board(),
         };
-        if let Some((_, col)) = columns.iter_mut().find(|(def, _)| card_matches(&card, def)) {
-            col.cards.push(card);
+        // First-match-wins decides placement, with one addition (docs/D1_PROTOCOL.md
+        // §8.3): an `unverified` column is an alert lane, not a placement lane.
+        // A card that matches one keeps searching for the first later column that
+        // places it, so the alert never hides the card from its workflow lane.
+        // The alert membership itself is unchanged — a card already placed by an
+        // earlier column is not pulled into the alert lane — so this rule only
+        // ever adds a card to a column, never removes one.
+        let mut alerted = false;
+        for (def, col) in &mut columns {
+            if !card_matches(&card, def) {
+                continue;
+            }
+            if def.unverified {
+                if !alerted {
+                    col.cards.push(card.clone());
+                    alerted = true;
+                }
+                continue;
+            }
+            col.cards.push(card.clone());
+            break;
         }
     }
     for (_, col) in &mut columns {
@@ -1862,10 +1894,67 @@ name = "everything else"
         assert_eq!(t1.last_ts, 5, "max ts over the thread");
         assert!(t1.merge.as_ref().expect("patch verdict").allowed);
         assert_eq!(column_of(&board, "done").cards[0].id, "t3");
+        assert_eq!(column_of(&board, "suspect").cards.len(), 1, "t1 was placed by review, so the alert lane does not duplicate it");
         assert_eq!(column_of(&board, "suspect").cards[0].id, "t2");
         assert_eq!(column_of(&board, "suspect").cards[0].unverified, 1);
         assert!(column_of(&board, "mergeable").cards.is_empty(), "first match wins");
-        assert!(column_of(&board, "everything else").cards.is_empty());
+        assert_eq!(
+            column_of(&board, "everything else").cards[0].id,
+            "t2",
+            "an alert lane does not consume the card: it still reaches its placement lane"
+        );
+    }
+
+    /// Regression: an `unverified` alert lane declared **before** the workflow
+    /// lanes used to swallow the card (first-match-wins), so a single
+    /// unverified entry made a card vanish from open/in-progress/needs-review.
+    /// The alert lane still lists the card, and its workflow lane does too.
+    #[test]
+    fn unverified_alert_lane_does_not_hide_the_workflow_lane() {
+        let (sk, pk) = keypair();
+        let mut principals = HashMap::new();
+        principals.insert("alice".to_string(), pk);
+
+        let mut t1_issue = entry("t1", "issue", "alice", "", 100, serde_json::json!({"title": "needs attention"}));
+        let t1_comment = entry("t1", "comment", "bob", "", 110, serde_json::json!({"text": "unsigned"}));
+        let mut t2_issue = entry("t2", "issue", "alice", "", 120, serde_json::json!({"title": "clean"}));
+        let t3_issue = entry("t3", "issue", "alice", "", 130, serde_json::json!({"title": "unverified but closed"}));
+        let mut t3_closed = entry("t3", "status", "alice", "", 140, serde_json::json!({"status": "closed"}));
+        signed(&sk, &mut t1_issue);
+        // t1's comment stays unsigned: verified=false, the visible red.
+        signed(&sk, &mut t2_issue);
+        // t3's root stays unsigned; its status entry is signed.
+        signed(&sk, &mut t3_closed);
+
+        let owned = refs_of(&[t1_issue, t1_comment, t2_issue, t3_issue, t3_closed]);
+        let refs: Vec<&EntryRef> = owned.iter().collect();
+        let def = parse_board_def(
+            "version = 1\n\
+             [[column]]\nname = \"closed\"\nstatus = \"closed\"\n\
+             [[column]]\nname = \"unverified\"\nunverified = true\n\
+             [[column]]\nname = \"open\"\nstatus = \"open\"\n\
+             [[column]]\nname = \"other\"\n",
+        )
+        .expect("board def");
+        let board = build_board(&refs, &principals, &MergeRules::default(), &def, NOW);
+
+        let ids = |name: &str| -> Vec<String> {
+            column_of(&board, name).cards.iter().map(|c| c.id.clone()).collect()
+        };
+        assert_eq!(ids("unverified"), ["t1"], "the alert lane keeps the unverified card");
+        assert_eq!(
+            ids("open"),
+            ["t2", "t1"],
+            "t1 stays findable in its workflow lane, next to the clean card"
+        );
+        assert_eq!(ids("closed"), ["t3"], "terminal lanes still win: no alert duplication");
+        assert!(ids("other").is_empty());
+        assert_eq!(column_of(&board, "unverified").cards[0].unverified, 1);
+
+        // A fully verified card is untouched: one card, one placement lane, and
+        // never an alert-lane appearance.
+        assert_eq!(column_of(&board, "open").cards[0].id, "t2");
+        assert_eq!(column_of(&board, "open").cards[0].unverified, 0);
     }
 
     #[test]
