@@ -1948,7 +1948,7 @@ name = "everything else"
             "t1 stays findable in its workflow lane, next to the clean card"
         );
         assert_eq!(ids("closed"), ["t3"], "terminal lanes still win: no alert duplication");
-        assert!(ids("other").is_empty());
+        assert_eq!(ids("other").len(), 0, "the catch-all stays empty");
         assert_eq!(column_of(&board, "unverified").cards[0].unverified, 1);
 
         // A fully verified card is untouched: one card, one placement lane, and
