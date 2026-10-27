@@ -846,7 +846,9 @@ async fn gc_fold_keeps_aggregation_byte_identical_and_the_tail_stays_live() -> T
         kind: "comment".into(),
         id: "t2".into(),
         actor: "alice".into(),
-        ts: ts as i64,
+        // Epoch seconds: the signed reinterpretation is what the entry
+        // format wants (clippy::cast_possible_wrap forbids the raw cast).
+        ts: ts.cast_signed(),
         parent: t2s.clone(),
         refs: None,
         body: serde_json::json!({"text": "wrong key"}),

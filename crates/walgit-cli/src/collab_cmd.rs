@@ -1381,6 +1381,12 @@ fn signing_key_matches_registered(key: &SigningKey, registered_public_key: &str)
 /// the worktree identity (`<git-dir>/walgit/identity` + `keys/`) *and* the
 /// registration ref — so a joined worktree always passes. The identity is
 /// consulted only to name the key's owner in the error.
+///
+/// The host half of the registry holds only what `collab principal-fetch`
+/// cached, so "no key registered here" is a statement about this checkout, not
+/// about the principal: a host-level registration the caller has not fetched is
+/// invisible, and the refusal says so (pointing at `principal-fetch`) instead of
+/// claiming the write could never verify.
 pub(crate) fn ensure_actor_key_binding(
     repo: &Path,
     actor: &str,
@@ -1394,23 +1400,34 @@ pub(crate) fn ensure_actor_key_binding(
             let owner = key_owners(repo, &principals, key);
             bail!(
                 "cannot sign as actor {actor} with the key at {}: {owner}, and {actor} is \
-                 registered with a different public key — such an entry/claim is permanently \
-                 unverified (the log is append-only). Use the key registered for {actor}, sign as \
-                 the actor this key belongs to, or re-register {actor} explicitly (`walgit collab \
-                 principal-register --principal {actor} --key <keyfile>`; rotating a principal's \
-                 key unverifies all of its past entries)",
+                 registered with a different public key — verification uses only the key \
+                 registered for an entry's own actor, and the log is append-only, so a mismatched \
+                 signature stays unverified forever. Use the key registered for {actor}, sign as \
+                 the actor this key belongs to, or rotate {actor} to this key on purpose: `walgit \
+                 collab principal-register --principal {actor} --key <keyfile> --push origin`. \
+                 Without `--push origin` the registration stays local and the entries you push \
+                 stay unverified on the remote; rotation is destructive, because every past \
+                 entry signed by {actor} turns unverified. A repo-local registration is \
+                 authoritative over the host registry, so rotating here also shadows a host-level \
+                 registration of {actor}",
                 key_path.display()
             )
         }
         None => {
             let owner = key_owners(repo, &principals, key);
             bail!(
-                "cannot sign as actor {actor} with the key at {}: {owner}, and {actor} has no \
-                 registered collab key in this repository, so the entry/claim would never verify. \
-                 Run `walgit collab join --principal {actor}` (or `walgit collab principal-register \
-                 --principal {actor} --key <keyfile>`) first; in a fresh clone, fetch the collab \
-                 refs (`git fetch <remote> '+refs/collab/*:refs/collab/*'`) so the registration is \
-                 visible",
+                "cannot sign as actor {actor} with the key at {}: {owner}, and this repository \
+                 has no collab key registered for {actor}, so the signature cannot be checked \
+                 here (this is a local view, not proof that {actor} is unregistered elsewhere). \
+                 If {actor} is registered on the host, run `walgit collab principal-fetch` to \
+                 cache the host registry under refs/walgit/principals/* — writes then verify \
+                 against the host-registered key. Otherwise register the seed you already hold: \
+                 `walgit collab join --principal {actor} --key <registered seed> --push origin` \
+                 — `--key` is required, because join without it generates a fresh random seed, \
+                 and a repo-local registration overrides the host registry, silently shadowing \
+                 {actor}'s host identity (whose past entries then turn unverified). In a fresh \
+                 clone, fetch the collab refs first (`git fetch <remote> \
+                 '+refs/collab/*:refs/collab/*'`) so an existing registration is visible",
                 key_path.display()
             )
         }
@@ -4390,18 +4407,55 @@ mod actor_key_binding_tests {
             msg.contains("principal-register"),
             "the error must point at the fix: {msg}"
         );
+        // A local-only registration is not enough: the remote reads the pushed
+        // ref, so the command shown must carry `--push origin`.
+        assert!(
+            msg.contains("--push origin"),
+            "the register command must publish: {msg}"
+        );
+        // Rotation is destructive and the message has to say so.
+        assert!(
+            msg.contains("turns unverified"),
+            "rotation semantics: {msg}"
+        );
         // The same key with its own actor still passes.
         ensure_actor_key_binding(&repo, "bob", &bob_key, &bob_sk).unwrap();
     }
 
+    /// The unregistered-actor refusal must lead with the host-registry remedy,
+    /// require `--key` on the join (a keyless join mints a fresh seed and its
+    /// repo-local registration shadows a host one), publish the registration,
+    /// and not claim the entry is doomed when the principal may be host-registered.
     #[test]
-    fn unregistered_actor_is_refused_with_the_join_hint() {
+    fn unregistered_actor_is_refused_with_fetch_first_and_keyed_join() {
         let (tmp, repo) = init_repo();
         let (path, _, sk) = keypair_file(tmp.path(), 3);
         let err = ensure_actor_key_binding(&repo, "ghost", &path, &sk).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("no registered collab key"), "{msg}");
-        assert!(msg.contains("collab join --principal ghost"), "{msg}");
+        assert!(msg.contains("no collab key registered for ghost"), "{msg}");
+        // Host-level registration is the first remedy (repo-local registry is
+        // only a cache of it).
+        let fetch_at = msg
+            .find("principal-fetch")
+            .unwrap_or_else(|| panic!("host registry remedy missing: {msg}"));
+        let join_at = msg
+            .find("collab join")
+            .unwrap_or_else(|| panic!("join remedy missing: {msg}"));
+        assert!(fetch_at < join_at, "fetch must come first: {msg}");
+        // A join recommendation without `--key` is the bug this guards.
+        let (_, from_join) = msg.split_at(join_at);
+        assert!(
+            from_join.contains("--key <registered seed>"),
+            "join must adopt the registered seed: {msg}"
+        );
+        assert!(
+            from_join.contains("--push origin"),
+            "join must publish the registration: {msg}"
+        );
+        // A fresh clone needs the collab refs before any registration is visible.
+        assert!(msg.contains("git fetch <remote>"), "{msg}");
+        // The old absolute claim was wrong for host-registered principals.
+        assert!(!msg.contains("would never verify"), "{msg}");
     }
 
     /// `--actor` omitted resolves through `<git-dir>/walgit/identity` (what
