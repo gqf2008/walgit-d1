@@ -39,6 +39,11 @@ installer-managed installation installs a detected release **by itself** (90 s a
 while macOS and source checkouts only notify and wait for the tray menu. `WALGIT_AUTO_UPGRADE=0`
 pins a machine to manual, and a version that rolled back once is never auto-retried.
 
+On **macOS the tray is a menu-bar agent** (D63): no Dock icon, no Cmd+Tab entry — the status item
+is the menu. When the status item is occluded (full menu bar, the notch, a full-screen app), the
+remaining entry point is `open -a walgit-tray`, which opens the Web UI of the instance the tray is
+configured for.
+
 - **macOS:** DMG channel — download the release DMG, verify SHA-256 and the signed/notarized app,
   replace the installed app, run the health check, and roll back on failure.
 - **Windows:** installer channel — download `walgit-setup-<version>-x64.exe`, verify its exact

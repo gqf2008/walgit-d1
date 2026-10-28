@@ -1001,11 +1001,11 @@ fn run(
     }
 }
 
-// ---------- macOS Dock reopen 钩子(#200) ----------
+// ---------- macOS reopen 钩子(#200, D63) ----------
 
-/// 点 Dock 图标（或 `open -a`）→ 打开 Web UI。
+/// `open -a walgit-tray`（Dock 图标已按 D63 移除）→ 打开 Web UI。
 ///
-/// macOS 把这件事投递给**应用 delegate** 的
+/// 一个已在运行的 app 被“再次打开”时，macOS 把这件事投递给**应用 delegate** 的
 /// `applicationShouldHandleReopen:hasVisibleWindows:`；winit 持有 delegate 且不实现也不
 /// 转发它，而替换 winit 的 delegate 会破坏事件循环。所以启动时（主线程、事件循环开始
 /// 前）往 **winit 的 delegate 类**上注入这一个方法：
@@ -1024,46 +1024,46 @@ fn install_dock_reopen_hook() {
     use objc2_app_kit::NSApplication;
     use objc2_foundation::MainThreadMarker;
 
-    /// The delegate callback: open the Web UI when the Dock icon (or `open -a`)
-    /// asks the app to come back. `false` = "I handled it, there is no window to
-    /// show" (this app has no windows of its own).
+    /// The delegate callback: open the Web UI when the app is asked to reopen
+    /// (`open -a walgit-tray`; there is no Dock icon since D63). `false` = "I
+    /// handled it, there is no window to show" (this app has no windows).
     unsafe extern "C" fn should_handle_reopen(
         _this: &AnyObject,
         _cmd: Sel,
         _sender: *mut AnyObject,
         _has_visible_windows: Bool,
     ) -> Bool {
-        log_line("dock: reopen — opening the Web UI");
+        log_line("reopen: opening the Web UI");
         open_web();
         Bool::NO
     }
 
     let Some(mtm) = MainThreadMarker::new() else {
-        log_line("dock: reopen hook skipped (not on the main thread)");
+        log_line("reopen: hook skipped (not on the main thread)");
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
     // SAFETY: main thread (MainThreadMarker above) and the app exists.
     let Some(delegate) = (unsafe { app.delegate() }) else {
-        log_line("dock: reopen hook skipped (no NSApplication delegate)");
+        log_line("reopen: hook skipped (no NSApplication delegate)");
         return;
     };
     let delegate_ptr: *const AnyObject = std::ptr::from_ref(&*delegate).cast();
     let class_ptr = unsafe { objc2::ffi::object_getClass(delegate_ptr.cast()) };
     if class_ptr.is_null() {
-        log_line("dock: reopen hook skipped (delegate has no class)");
+        log_line("reopen: hook skipped (delegate has no class)");
         return;
     }
     let selector = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
     if !unsafe { objc2::ffi::class_getInstanceMethod(class_ptr, selector.as_ptr()) }.is_null() {
-        log_line("dock: reopen hook skipped (the delegate already implements it)");
+        log_line("reopen: hook skipped (the delegate already implements it)");
         return;
     }
     // `BOOL` is `B` on aarch64 and `c` on x86_64: take it from the type itself
     // instead of hardcoding either.
     let bool_encoding = Bool::ENCODING.to_string();
     let Ok(types) = std::ffi::CString::new(format!("{bool_encoding}@:@{bool_encoding}")) else {
-        log_line("dock: reopen hook skipped (bad type encoding)");
+        log_line("reopen: hook skipped (bad type encoding)");
         return;
     };
     // SAFETY: the selector is absent (checked above), so this cannot shadow an
@@ -1078,19 +1078,19 @@ fn install_dock_reopen_hook() {
         objc2::ffi::class_addMethod(class_ptr.cast_mut(), selector.as_ptr(), imp, types.as_ptr())
     };
     log_line(&format!(
-        "dock: reopen hook installed={added} on the winit delegate class"
+        "reopen: hook installed={added} on the winit delegate class"
     ));
 
     // `WALGIT_REOPEN_SELFTEST=1`: prove the injected method is callable without a
-    // window server (CI has no Dock to click). This invokes exactly the IMP
-    // AppKit calls on a Dock click, then leaves before the event loop.
+    // window server (CI has nothing to click). This invokes exactly the IMP
+    // AppKit calls on a reopen, then leaves before the event loop.
     if std::env::var("WALGIT_REOPEN_SELFTEST").as_deref() != Ok("1") {
         return;
     }
     // `ffi::BOOL` is `bool` on arm64 but `i8` on x86_64: go through `Bool`
     // instead of a bare `!` (which does not compile on the latter).
     if Bool::from_raw(added).is_false() {
-        log_line("dock: selftest skipped (the method was not added)");
+        log_line("reopen: selftest skipped (the method was not added)");
         return;
     }
     // SAFETY: the selector exists with this exact signature (we just added it,
@@ -2126,16 +2126,15 @@ fn main() {
         log_line("autostart marker: starting service");
         let _ = service_start();
     }
-    // macOS: a *regular* app (Dock icon + Cmd+Tab), not an accessory one. The
-    // status item can be occluded — a full menu bar, the notch, a full-screen
-    // app — and an accessory app has no other entry point at all (#197).
-    // The bundle's `LSUIElement=false` is what LaunchServices reads; setting the
-    // policy here keeps a bare `cargo run` (no bundle) equally reachable.
+    // macOS: a menu-bar *agent*, not a Dock app (D63). The bundle's
+    // `LSUIElement=true` is what LaunchServices reads; setting the accessory
+    // policy here makes a bare `cargo run` (no bundle, so no Info.plist) behave
+    // the same way instead of putting a Dock icon back.
     let mut loop_builder = EventLoop::<Msg>::with_user_event();
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-        loop_builder.with_activation_policy(ActivationPolicy::Regular);
+        loop_builder.with_activation_policy(ActivationPolicy::Accessory);
     }
     let event_loop = loop_builder.build().unwrap();
     let proxy = Arc::new(event_loop.create_proxy());

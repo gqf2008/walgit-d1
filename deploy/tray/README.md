@@ -24,14 +24,16 @@
 - **打开 Web UI**:直接打开页面(三平台一致)
 - **退出托盘(服务保持运行)**
 
-> macOS 入口(#197/#200):App Bundle 声明 `LSUIElement=false`,托盘同时驻留
-> **Dock** 与菜单栏 —— 菜单栏状态项会被塞满、被刘海挡住在全屏应用下不可见,
-> 没有 Dock 入口就等于整个应用找不到(Swift 版有 Dock,本轮迁移曾丢掉,已恢复)。
-> **点 Dock 图标 = 打开 Web UI**:macOS 把这件事投递给应用 delegate 的
+> macOS 入口(D63,取代 #197 的 Dock 方案):App Bundle 声明 `LSUIElement=true`,
+> 托盘只驻留**菜单栏**,不占 Dock、不进 Cmd+Tab——它就是一个后台 agent。
+> 菜单栏状态项是唯一入口;**`open -a walgit-tray` = 打开 Web UI**:对一个已运行
+> 的 app 来说,macOS 把"再次打开"投递给应用 delegate 的
 > `applicationShouldHandleReopen:hasVisibleWindows:`,winit 不转发它,所以托盘在
 > 启动时把该方法注入 **winit 的 delegate 类**(它没实现,故不覆盖其行为;实现见
-> `deploy/tray/tray-rs/src/main.rs` 的 `install_dock_reopen_hook`)。CI 没有 Dock
-> 可点,`test.sh` 用 `WALGIT_REOPEN_SELFTEST=1` 直接调那个选择子作为回归门禁。
+> `deploy/tray/tray-rs/src/main.rs` 的 `install_dock_reopen_hook`)。CI 没有窗口
+> 服务器,`test.sh` 用 `WALGIT_REOPEN_SELFTEST=1` 直接调那个选择子作为回归门禁。
+> 运行时的 activation policy 也设成 `Accessory`,所以裸 `cargo run`(没有
+> Info.plist)同样不弹 Dock 图标。
 
 ## 升级语义
 
@@ -134,8 +136,9 @@ CI 使用 `APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD` 直传公证凭据
 只在 `~/.walgit` 初始化缺失的状态配置(旧 `~/walgit` 布局则复制状态并留
 5 分钟升级桥),产物做 ad-hoc 整体签名,独立
 `codesign --verify --deep --strict` 可过。`build-dmg.sh` 走全链:app 签名+
-公证+装订 → hdiutil 出 DMG(拖放安装)→ DMG 签名+公证+装订。Dock 品牌
-图标:把 `walgit.icns` 放在同目录再跑 build.sh(可选,缺省用通用图标)。
+公证+装订 → hdiutil 出 DMG(拖放安装)→ DMG 签名+公证+装订。App 图标
+`walgit.icns`(Finder / 通知里看到的那个)仍然打进 bundle:把 `walgit.icns` 放在
+同目录再跑 build.sh(可选,缺省用通用图标)。Dock 里不显示它(D63)。
 开机自启:系统设置 → 通用 → 登录项 → 添加 walgit-tray.app。
 
 菜单上的版本语义:upgrade 行显示**托盘 app 版本**(`版本 X`),正在跑的服务

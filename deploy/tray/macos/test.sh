@@ -281,10 +281,10 @@ EOF
     chmod +x "$base/bin/codesign"
     PATH="$base/bin:$PATH" WALGIT_BIN="$base/walgit" WALGIT_TRAY_BIN="$TRAY_BIN" \
         TRAY_APP_DIR="$base" ./build.sh 0.5.0 >/dev/null
-    # #197：菜单栏状态项被遮挡时，Dock 是唯一入口 —— 这条键必须一直是 false，
-    # 否则应用会退回"纯菜单栏"，图标一被挤掉就彻底找不到。
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist" 2>/dev/null)" = "false" ] \
-        || { echo "FAIL(layout): LSUIElement must be false (a Dock icon is the fallback entry point)" >&2; return 1; }
+    # D63：纯菜单栏 agent —— Dock 图标已移除，LSUIElement 必须一直是 true，
+    # 否则“无 Dock 图标”这件事会随一次 Info.plist 手滑悄悄回退。
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist" 2>/dev/null)" = "true" ] \
+        || { echo "FAIL(layout): LSUIElement must be true (menu-bar agent, no Dock icon)" >&2; return 1; }
     [ -x "$app/Contents/Resources/walgit" ] || { echo "FAIL(layout): missing bundled walgit" >&2; return 1; }
     [ -x "$app/Contents/Resources/release-install.sh" ] || { echo "FAIL(layout): missing release-install.sh" >&2; return 1; }
     [ -f "$app/Contents/Resources/walgit.toml" ] || { echo "FAIL(layout): missing state template" >&2; return 1; }
@@ -710,7 +710,7 @@ reopen_hook_fixture() {
         *"reopen-selftest handled=false"*) ;;
         *) echo "FAIL(reopen): selftest did not invoke the hook: $out" >&2; return 1 ;;
     esac
-    grep -q "dock: reopen hook installed=true" "$state/tray.log" \
+    grep -q "reopen: hook installed=true" "$state/tray.log" \
         || { echo "FAIL(reopen): hook not installed on the delegate class" >&2; return 1; }
     # The action itself: the hook must have asked for the Web UI URL. (A log line
     # alone stayed green even with `open_web()` deleted — review finding.)

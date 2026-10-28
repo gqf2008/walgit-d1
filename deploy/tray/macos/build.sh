@@ -63,15 +63,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleIconFile</key><string>walgit</string>
-    <!-- A Dock icon, not a pure menu-bar agent (#197): the status item can be
-         occluded (full menu bar, the notch, full-screen apps), and without a
-         Dock icon the app is then unreachable — no Dock, no Cmd+Tab. -->
-    <key>LSUIElement</key><false/>
+    <!-- A menu-bar agent, not a Dock app (D63): no Dock icon and no Cmd+Tab
+         entry. The status item is the entry point; "open -a walgit-tray" on the
+         running app still reaches it (the reopen hook in tray-rs opens the Web
+         UI). No backticks here: the heredoc is unquoted, so a backtick pair
+         would run as a command. -->
+    <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 PLIST
-# Dock 图标(icns)——如无现成 icns,app 会以通用图标显示,不影响功能。
+# App 图标(icns)——Finder 和通知里看到的就是它,打进 bundle;Dock 里不显示
+# (D63)。如无现成 icns,app 会以通用图标显示,不影响功能。
 if [ -f walgit.icns ]; then
     cp walgit.icns "$RES_DIR/walgit.icns"
 fi

@@ -828,6 +828,21 @@ decision in §4 — or the PR is; never "fix later".
   evidence, or `status: blocked` when it halts the work. The card is the worker's only report
   channel: never the console alone, never a side chat.)*
 
+- **D63** **The macOS tray is a menu-bar agent — no Dock icon (2026-10-28,
+  cc-ai-tray-no-dock).** Superseding #197's "regular app with a Dock fallback": the bundle
+  declares `LSUIElement=true` and the runtime activation policy is `Accessory`, so the app
+  lives only in the menu bar — no Dock icon, no Cmd+Tab entry — and a bare `cargo run` (no
+  `Info.plist`) behaves the same way. The status item is the entry point; the **only**
+  remaining programmatic one is `open -a walgit-tray`, which still delivers #200's
+  `applicationShouldHandleReopen:hasVisibleWindows:` to the delegate class the tray injects
+  its hook into (that hook, its `WALGIT_REOPEN_SELFTEST` seam and its fixture are unchanged
+  apart from the log prefix). Accepted consequence, stated so nobody re-litigates it as a
+  bug: when the status item is occluded (full menu bar, the notch, a full-screen app) there
+  is no clickable entry point — `open -a` from a terminal is what remains. `walgit.icns`
+  stays in the bundle (Finder, notifications); it is not a Dock icon.
+  `deploy/tray/macos/test.sh` asserts the key is `true`, so a hand-edited `Info.plist`
+  cannot silently bring the Dock icon back.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
