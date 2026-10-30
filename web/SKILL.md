@@ -160,7 +160,13 @@ tray detects and installs them. Details: the ops skill (§ Install above) and
 Everything works against a **checkout** of a repository on this host. Global:
 `--config` (default `~/.walgit/walgit.toml`, env `WALGIT_CONFIG`); in zsh wrap
 it in a shell function, never `W="walgit …"; $W …`. `walgit serve` runs the
-host; `walgit config check|dump` validates or dumps the configuration.
+host; `walgit config check|dump` validates or dumps the configuration;
+`walgit token list|add|rm` manages the static API tokens (`server.auth.tokens`)
+in that file — `add <principal> --token-env NAME [--no-write] [--admin]` keeps
+the secret out of the file, the edit is validated before it is written, and the
+server picks it up on restart. It cannot mint or revoke `wgt_…` access tokens:
+those come from `/_auth/tokens` (oidc sign-in) and are revoked only by rotating
+`session_secret`.
 
 **Collaborate (`walgit collab …`)** — read: `ls`, `thread <id>`,
 `thread-heads`, `pr <id>`, `board` (the `.walgit/board.toml` projection),

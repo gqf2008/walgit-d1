@@ -1,4 +1,4 @@
-//! `walgit` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | config)
+//! `walgit` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | config | token)
 //! and `walgit-server` (`walgit serve` under the name a standalone deployment expects, D39),
 //! both thin bins over this library.
 //!
@@ -26,6 +26,7 @@ mod proc_group;
 pub mod repo;
 mod serve;
 mod service_cmd;
+mod token_cmd;
 #[cfg(test)]
 mod testutil;
 mod wal_cmd;
@@ -241,6 +242,15 @@ enum Command {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+    /// Manage the host's static API tokens (`server.auth.tokens` in
+    /// `walgit.toml`): list them, add one for a principal, remove one. The
+    /// file is edited in place and validated before it is replaced, and the
+    /// server picks the change up on its next start. `wgt_…` access tokens
+    /// (`/_auth/tokens`) are a different mechanism and are not managed here.
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
     },
 }
 
@@ -639,6 +649,45 @@ enum WalAction {
 }
 
 #[derive(Subcommand)]
+enum TokenAction {
+    /// Print every configured token: principal, write, admin, and where the
+    /// secret comes from (never the secret itself).
+    List,
+    /// Add one token, or replace the principal's with --force.
+    Add {
+        /// The principal the token authenticates as (never `anon`).
+        principal: String,
+        /// The token value. Prefer --token-env or --token-stdin: this one is
+        /// visible in the shell history and in `ps`.
+        #[arg(long)]
+        token: Option<String>,
+        /// Read the token from this environment variable at every start, so
+        /// the secret never sits in `walgit.toml`.
+        #[arg(long = "token-env")]
+        token_env: Option<String>,
+        /// Read the token from the first line of stdin.
+        #[arg(long = "token-stdin")]
+        token_stdin: bool,
+        /// Push permission is on by default; this makes the token read-only.
+        #[arg(long = "no-write")]
+        no_write: bool,
+        /// Admin permission (per-repo settings, policy, the storage editor).
+        #[arg(long)]
+        admin: bool,
+        /// Replace the principal's existing token instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the token(s) of one principal.
+    Rm {
+        principal: String,
+        /// Succeed even when the principal has no token.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigAction {
     /// Parse and validate the config file; print OK or the error.
     Check {
@@ -754,6 +803,23 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
         // config file. Everything else keeps the fail-closed rule above:
         // a typo'd --config must not open a default bucket.
         Config::default()
+    } else if edits_the_config_in_place(&command) {
+        // `walgit token add|rm` repairs the very file `Config::load` can reject
+        // — a `mode = "token"` file with no token yet is the first-run case, and
+        // refusing it would leave hand-editing as the only way out. The edit is
+        // composed and validated on its own before it is written (`Config::parse`
+        // of the whole resulting document), so an unusable file still cannot be
+        // produced here.
+        match Config::load(config) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "walgit: {e:#}\nwalgit: editing {} anyway — the result is validated before it is written",
+                    config.display()
+                );
+                Config::default()
+            }
+        }
     } else {
         load_config(config)
     };
@@ -764,6 +830,17 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
         .build()?;
 
     rt.block_on(async move { dispatch(command, cfg, config.to_path_buf()).await })
+}
+
+/// True for the commands that write `walgit.toml` itself (`walgit token`):
+/// their input is the file, not the configuration it produces.
+fn edits_the_config_in_place(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Token {
+            action: TokenAction::Add { .. } | TokenAction::Rm { .. }
+        }
+    )
 }
 
 /// True only for the `walgit repo` HTTP reads (issue #61): commands that talk
@@ -798,6 +875,7 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
     let cfg = std::sync::Arc::new(cfg);
     match command {
         Command::Config { action } => config_cmd::run(action, &cfg),
+        Command::Token { action } => token_cmd::run(action, &cfg, &config_path),
         Command::Synth {
             out,
             size,
@@ -882,6 +960,45 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
                 import::run(from, repo, reuse_packs, refs, &cfg).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod config_write_tests {
+    use super::{Command, TokenAction, edits_the_config_in_place, is_host_read};
+
+    fn add(principal: &str) -> Command {
+        Command::Token {
+            action: TokenAction::Add {
+                principal: principal.to_string(),
+                token: None,
+                token_env: Some("WALGIT_TOKEN".to_string()),
+                token_stdin: false,
+                no_write: false,
+                admin: false,
+                force: false,
+            },
+        }
+    }
+
+    #[test]
+    fn only_the_token_commands_may_repair_a_config_they_cannot_load() {
+        assert!(edits_the_config_in_place(&add("alice")));
+        assert!(edits_the_config_in_place(&Command::Token {
+            action: TokenAction::Rm {
+                principal: "alice".to_string(),
+                force: false,
+            },
+        }));
+        // `list` reports on the configuration: a file that does not load is a
+        // real answer there, not something to edit around.
+        assert!(!edits_the_config_in_place(&Command::Token {
+            action: TokenAction::List,
+        }));
+        assert!(!edits_the_config_in_place(&Command::Serve));
+        // and it is not the missing-file exemption either (that one is for
+        // HTTP reads that never touch a config at all)
+        assert!(!is_host_read(&add("alice")));
     }
 }
 

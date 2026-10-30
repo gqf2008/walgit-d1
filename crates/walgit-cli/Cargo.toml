@@ -54,6 +54,10 @@ tokio-util.workspace = true
 futures.workspace = true
 bytes.workspace = true
 toml.workspace = true
+# `walgit token add|rm` edits `walgit.toml` in place; toml_edit keeps the file's
+# comments and ordering, which a serialize-from-struct round trip would lose
+# (the same reason the server's setup wizard and storage editor use it).
+toml_edit = "0.25.13"
 reqwest.workspace = true
 # `ring` is the runtime crypto provider installed in lib.rs (one per process).
 # Note aws-lc-rs stays in the dependency graph through other crates

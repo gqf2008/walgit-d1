@@ -155,7 +155,19 @@ names), `[cache]`, `[maintenance]`, `[bundles]`, `[compaction]`. Check it with:
 ```bash
 walgit config --config ~/.walgit/walgit.toml check   # and: dump
 walgit repo list                                     # repos visible in the configured store
+
+# static API tokens (server.auth.tokens): list / add / remove
+walgit token list                                    # principal, write, admin, secret source (never the secret)
+walgit token add alice --token-env WALGIT_TOKEN_ALICE --admin
+walgit token add ci --token-stdin --no-write         # read-only robot; secret from stdin
+walgit token rm ci
 ```
+
+`walgit token add|rm` edits `walgit.toml` in place (comments kept), validates the whole resulting
+document before replacing it atomically, and the server reads the list at start — restart it. Prefer
+`--token-env` / `--token-stdin` over `--token`: the literal lands in the shell history and `ps`. A
+token is a principal plus `write` (push, default on) and `admin` (settings/policy, default off);
+`wgt_…` access tokens from `/_auth/tokens` are a different mechanism and cannot be managed here.
 
 Credentials come from the env vars the config names (e.g. `R2_ACCESS_KEY` / `R2_SECRET_KEY`) or the
 installer-managed credentials file; never print them.

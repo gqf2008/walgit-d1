@@ -158,7 +158,9 @@ fn temp_sibling(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Write the config file **atomically** (issue #129): a same-directory temp
 /// file created 0600, filled, fsynced, then renamed over the target. The
-/// wizard save and the admin editor save (D44) share this one path.
+/// wizard save, the admin editor save (D44) and the CLI's `walgit token
+/// add|rm` all write through this one path — a config file is never written
+/// twice in two different ways.
 ///
 /// `walgit.toml` is the only durable carrier of the literal credentials, and
 /// a lost file strands the instance (a missing `--config` file is exit 2,
@@ -171,7 +173,7 @@ fn temp_sibling(path: &std::path::Path) -> std::path::PathBuf {
 /// makes the rename itself durable ([`sync_parent_dir`]), the temp cleanup
 /// only ever touches a file this call created, and the 0600 is a chmod, not
 /// a `mode()` request the umask can mask away.
-pub(crate) fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     write_atomic_via(path, &temp_sibling(path), text)
 }
 

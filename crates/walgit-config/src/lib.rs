@@ -247,7 +247,10 @@ pub enum AuthMode {
 #[serde(deny_unknown_fields)]
 pub struct StaticToken {
     pub principal: String,
-    /// Read from env var if set, else literal.
+    /// The literal token. Empty when `token_env` supplies it (the preferred
+    /// shape: the secret then never sits in `walgit.toml`), which is why the
+    /// field defaults — a `token_env`-only entry is complete.
+    #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub token_env: Option<String>,

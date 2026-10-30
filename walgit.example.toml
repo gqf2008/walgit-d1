@@ -45,10 +45,22 @@ mode = "none"                     # "none" | "token" | "oidc"
                                   #   oidc  — any OpenID Connect issuer: browser sign-in through it, ID tokens as bearers,
                                   #           walgit-issued access tokens for git (/_auth/tokens), plus `tokens` for robots
 anonymous_read = true             # must be false in oidc mode
-# tokens = [                      # token → principal; `token_env` reads the value from the environment at startup
+# tokens = [                      # token → principal. `walgit token list|add|rm` edits this list in
+#                                 # place (validated, atomic, comments kept) — hand-editing works too.
+#                                 # Any number of entries, one principal each; `token_env` reads the
+#                                 # value from the environment at startup (prefer it over a literal).
+#                                 # `write` (default true) = can push; `admin` (default false) = can PUT/DELETE
+#                                 # settings and policy.json. Matched by exact value, first entry wins — never
+#                                 # repeat a value, and never give two entries the same principal (the board
+#                                 # would no longer tell them apart).
 #   { principal = "alice", token_env = "WALGIT_TOKEN_ALICE", write = true, admin = true },
-#   { principal = "ci", token = "literal-secret", write = false },
+#   { principal = "ci", token_env = "WALGIT_TOKEN_CI", write = true },
+#   { principal = "reader", token = "literal-secret", write = false },
 # ]
+#                                 # token mode needs at least one. In oidc mode the same list still works
+#                                 # (robots, CI) next to browser sign-in and the `wgt_…` tokens minted at
+#                                 # /_auth/tokens (stateless: unlimited, individually unrevokable, all revoked
+#                                 # by rotating session_secret).
 # admin_emails = []                # oidc: emails that may delete repos or PUT/DELETE settings and policy.json
 # admin_domains = []               # oidc: email domains that may delete repos or PUT/DELETE settings and policy.json
 # issuer = "https://id.example.com"        # oidc: discovery at <issuer>/.well-known/openid-configuration
