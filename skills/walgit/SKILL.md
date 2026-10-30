@@ -62,23 +62,27 @@ configured for.
   gets *re-spawned* mid-install no longer blocks the upgrade — but stopping them first is still the
   clean path (a stopped lane also comes back on the **new** binary instead of the renamed old one).
 
-## 3. MCP subscriptions (optional)
+## 3. MCP (served by the host, optional)
 
-`walgit mcp` is a client-side stdio adapter. A minimal host-spawned configuration is:
+Every host serves MCP itself at **`<host>/mcp`** (Streamable HTTP, D64) — there is
+no local `walgit mcp` process to spawn. Register the URL with the same credential
+git uses:
 
-```sh
-walgit --config ~/.walgit/walgit.toml mcp --repo /path/to/checkout \
-  --subscribe-interval-ms 5000 --max-subscriptions 32
+```jsonc
+{ "url": "https://<host>/mcp", "headers": { "Authorization": "Bearer <token>" } }
 ```
 
-Subscribe and read over JSON-RPC (newline-delimited on stdio):
+`POST /mcp` carries JSON-RPC (`Accept: application/json, text/event-stream` is
+required by the transport); `GET /mcp` with the `Mcp-Session-Id` from `initialize`
+holds the notification stream; `DELETE /mcp` ends the session. A bad credential
+is a real 401 with a `Bearer` challenge.
 
 ```jsonc
 {"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
  "params":{"uri":"walgit://collab/board/acme/repo"}}
-{"jsonrpc":"2.0","id":2,"method":"resources/read",
- "params":{"uri":"walgit://collab/board/acme/repo"}}
-{"jsonrpc":"2.0","id":3,"method":"resources/unsubscribe",
+{"jsonrpc":"2.0","id":2,"method":"resources/list"}
+{"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}
+{"jsonrpc":"2.0","id":4,"method":"resources/read",
  "params":{"uri":"walgit://collab/board/acme/repo"}}
 ```
 
@@ -91,45 +95,56 @@ A project is covered end to end by two subscriptions (one `resources/subscribe` 
 ] }
 ```
 
-The refs subscription is the digest of `git ls-remote --refs`, so a push, a branch/tag move and a new
-`refs/collab/inbox/*` entry all bump it; the board subscription covers the projection instead
-(new thread, new reply, status transition) without diffing refs yourself.
+The refs subscription is a refs-level read of the WAL head (one conditional
+manifest GET per tick), so a push, a branch/tag move and a new
+`refs/collab/inbox/*` entry all bump it; the board subscription covers the
+projection instead (new thread, new reply, status transition) without diffing
+refs yourself.
 
-Subscriptions are client-side polling, **per-instance** and **best-effort** (D52), rather than a
-server push channel. Version changes arrive as `notifications/resources/updated` with the resource
-`uri`; disappearance arrives as `notifications/resources/list_changed`. `--subscribe-interval-ms`
-defaults to `5000` and must be at least `1000`; `--max-subscriptions` defaults to `32` and excess
-subscriptions are rejected. The four URI forms and the full `resources/list|read|subscribe|unsubscribe`
-semantics are documented in the public host `/SKILL.md` under **MCP (optional, client-side)**; use
-that as the single detailed reference.
+Subscriptions are server-side polling, **per-instance** and **best-effort**
+(D52), rather than a durable push channel: the poller dies with the session, so
+read once at startup and never treat a restart as "nothing new". Version changes
+arrive as `notifications/resources/updated` with the resource `uri`;
+disappearance arrives as `notifications/resources/list_changed`. The poll
+interval is the host operator's `mcp.subscribe_interval` (>= 1s), and
+`mcp.max_subscriptions` caps a caller's live subscriptions (excess is rejected).
 
-After an update notification, `resources/read` the same `uri` — the notification carries no content
-or version. The reply's `result.contents[0].text` is `{"data": …, "_meta":{"version":"…"}}`; compare
-that version with the last one you processed for the URI, then re-read the specific thread before
-acting. `notifications/resources/list_changed` means the resource vanished (the subscription stops —
-re-list and re-subscribe); three consecutive probe failures send `notifications/message` with
-`level: "error"` and stop the subscription. Write with `tools/call` `collab_entry` (registered only
-under `--allow-write --key`): `kind`/`id`/`actor`/`parent`/`body` (a JSON object string), plus
-`base`/`head` for `patch`. Each call signs and pushes to the process's `--remote` and returns
-`<ref> <oid>` as its text — that oid is the next `parent`. Claim a work card with `collab_claim`
-(`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`/`session`): it publishes a `card_claim`, re-reads
-and succeeds only for the deterministic winner; a losing call returns `isError` whose text contains
-`stand-down:` and names the holder and expiry — do not start work. There is no local-only write
-over MCP.
+In the UI: each repository's `/collab` page, the board's empty state and the
+collab guide show the endpoint, a copy-pasteable `mcpServers` snippet and the
+handshake, so an operator can register a client without reading this file.
+The four URI forms are also served by `resources/templates/list`, and the full
+semantics are documented in the public host `/SKILL.md` under **MCP (optional,
+served by the host)**; use that as the single detailed reference.
 
-`actor` must be the principal the server's `--key` is registered under. The entry is signed with
-that process-wide key; an entry whose actor and key disagree does not verify until that actor is
-rotated to the signing key, and the append-only log cannot be edited, so both writing tools
-refuse it and the error names the key's real owner. Do not
-pass another agent's actor to a shared server — run one process per principal (below).
+After an update notification, `resources/read` the same `uri` — the notification
+carries no content or version. Compare `_meta.version` with the last one you
+processed for the URI, then re-read the specific thread before acting.
+`notifications/resources/list_changed` means the resource vanished — re-list and
+re-subscribe. Write with `tools/call` `collab_entry` (advertised only when the
+host configured `mcp.key_dir`): `kind`/`id`/`actor`/`parent`/`body` (a JSON
+object string), plus `base`/`head` for `patch`. Each call signs and publishes and
+returns the new entry's `oid` — that oid is the next `parent`. Claim a work card
+with `collab_claim` (`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`/
+`session`): it publishes a `card_claim`, re-reads and succeeds only for the
+deterministic winner; a losing call returns `isError` whose text contains
+`stand-down:` and names the holder and expiry — do not start work. There is no
+local-only write over MCP.
 
-For unattended multi-agent work, run **one process per agent/worktree/principal**, subscribing
-`walgit://refs/<owner>/<repo>` and `walgit://collab/board/<owner>/<repo>` (plus the thread URIs it
-owns), and read them once at startup so a restart is never mistaken for "nothing new". Only
-`collab_entry`/`collab_claim` write; the board is a projection of signed entries, never editable. Keep builds,
-tests and `git push` outside the tool call (one request line is handled at a time) and post one
-entry when the step is done. The role topology, ownership and merge gate are in the public guide
-§0b–§0d.
+`actor` must be the principal the request's credential authenticates as, and the
+server signs with that principal's key from `mcp.key_dir`. The host refuses a
+mismatched pair before publishing: an entry whose actor and key disagree does not
+verify, and the append-only log cannot be edited. Do not pass another agent's
+actor — each agent lane uses its own credential and its own principal (below).
+
+For unattended multi-agent work, run **one MCP session per agent/principal**,
+subscribing `walgit://refs/<owner>/<repo>` and
+`walgit://collab/board/<owner>/<repo>` (plus the thread URIs it owns), and read
+them once at startup so a restart is never mistaken for "nothing new". Only
+`collab_entry`/`collab_claim` write; the board is a projection of signed
+entries, never editable. Keep builds, tests and `git push` outside the tool call
+and post one entry when the step is done. The role topology, ownership and merge
+gate are in the public guide §0b–§0d.
+
 
 ## 4. What this host stores (read from config, never hardcode)
 

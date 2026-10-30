@@ -27,7 +27,7 @@
 > | 薄 API 写路径 + 服务端聚合 | `crates/walgit-server/src/web/api.rs`（`collab_*`、`collab_load`） |
 > | host 注册表服务端 | `crates/walgit-server/src/web/v1.rs`（`/api/v1/principals`） |
 > | SDK（canonical / 签名 / post） | `web/sdk/repos.ts` |
-> | MCP 客户端面（工具 + `walgit://` 资源） | `crates/walgit-cli/src/mcp_cmd.rs`（说明见 `web/SKILL.md`） |
+> | MCP 面（工具 + `walgit://` 资源 + 订阅） | `crates/walgit-server/src/mcp/`（`/mcp`，D64；说明见 `web/SKILL.md`） |
 >
 > 一致性验收锚点（§16 列全）：`crates/walgit-wal/src/collab.rs` 的内嵌测试、
 > `crates/walgit-cli/tests/collab_e2e.rs`、`crates/walgit-server/tests/web_api.rs` 的
@@ -746,12 +746,12 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   `seq + 1`（或定义为「下一条待读」）。
 - **HTTP SSE**：`text/event-stream` 信封，best-effort（可能丢包）；要无损 push 语义必须自建
   sidecar 从 pull 车道转发（D46）。
-- **MCP 客户端面**：`walgit mcp`（stdio，host 拉起）把同一离线聚合暴露为工具与 `walgit://`
+- **MCP 面**：宿主自己在内置的 `/mcp`（Streamable HTTP，D64）暴露同一聚合的工具与 `walgit://`
   资源：只读工具 `collab_ls/thread/pr/board/report`、`ci_status`；写工具 `collab_entry` 与
   `collab_claim`（均需 `--allow-write` + key；`collab_claim` 把工作卡认领收敛做成一次调用）。资源 `walgit://collab/board/<o>/<r>`、
   `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
-  **adapter 侧轮询、best-effort**（同 D46，不是服务端推送）；字节不过 MCP（clone/fetch/push
-  仍走 git/bundle-uri）。实现：`crates/walgit-cli/src/mcp_cmd.rs`，说明见 `web/SKILL.md`。
+  **服务端 refs 级轮询、best-effort**（同 D52，不是持久推送）；字节不过 MCP（clone/fetch/push
+  仍走 git/bundle-uri）。实现：`crates/walgit-server/src/mcp/`，说明见 `web/SKILL.md`。
 
 ### 11.3 去重与幂等（汇总）
 

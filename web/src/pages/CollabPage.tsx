@@ -5,6 +5,7 @@ import { useRepo } from "./RepoLayout";
 import { useData } from "../data";
 import { Box } from "../components/Layout";
 import { CollabWriteBox } from "../components/CollabWrite";
+import { McpSetup } from "../components/McpSetup";
 import { useI18n, kindLabel } from "../i18n";
 
 function fmtTime(ts: number): string {
@@ -60,6 +61,11 @@ function CollabView({ full, report }: { full: string; report: CollabReport }) {
         <div className="box-header" style={{ marginTop: 8 }}>{t_("collab.newThread")}</div>
         <CollabWriteBox full={full} id={newId} parent="" onPosted={() => setNewId(uuid())} />
       </Box>
+
+      {/* The same host serves this repository's collaboration surface over MCP
+          (D64): the endpoint, a client snippet and the resource URIs, always —
+          a thread-less repository is exactly where a first agent arrives. */}
+      <McpSetup full={full} />
 
       <Box title={t_("collab.threads")}>
         {report.threads.length === 0 && <div className="pad muted">{t_("collab.noThreads")}</div>}

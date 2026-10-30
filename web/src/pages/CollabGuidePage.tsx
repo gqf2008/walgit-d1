@@ -3,6 +3,7 @@ import { api, type CollabBoard, type CollabEntryRef, type CollabThread } from ".
 import { useRepo } from "./RepoLayout";
 import { useData } from "../data";
 import { Box } from "../components/Layout";
+import { McpSetup } from "../components/McpSetup";
 import { useI18n, kindLabel, type TFunc } from "../i18n";
 import { ciColor } from "./CollabThreadPage";
 
@@ -48,6 +49,10 @@ export function CollabGuidePage() {
       <ClaimSection full={full} race={data.race} />
       <BugsSection />
       <CommandsSection />
+      {/* This host serves the same collaboration surface over MCP (D64), so an
+          agent that reads this page can wire itself to it without a local
+          adapter: the endpoint, a client snippet, the resource URIs. */}
+      <McpSetup full={full} />
     </>
   );
 }

@@ -98,38 +98,53 @@ self-signed host it pins the CA. Git answers a real 401 by erasing the stored
 credential and asking again — that is the intended loop; `git config
 http.https://<host>/.proactiveAuth=auto` sends the token proactively.
 
-## MCP (optional, client-side)
+## MCP (optional, served by the host)
 
-Host-spawned over stdio — configure a command, not a URL:
+Every host serves MCP itself at **`<host>/mcp`** — Streamable HTTP, no local
+process to spawn. Point a client at the URL and give it the same credential you
+give git:
 
 ```jsonc
-{ "command": "walgit", "args": ["mcp"] }                     // read-only
-{ "command": "walgit", "args": ["mcp", "--repo", "/path/to/checkout",
-                                "--subscribe-interval-ms", "5000",
-                                "--max-subscriptions", "32"] }
-{ "command": "walgit", "args": ["mcp", "--allow-write", "--key", "/path/key.ed25519"] }
+// token mode / a robot: a bearer
+{ "url": "https://<host>/mcp",
+  "headers": { "Authorization": "Bearer <token>" } }
+// oidc: a walgit access token works the same way (`/_auth/tokens`)
 ```
 
-Its tools **are** this CLI (one implementation, no second contract). Read-only
-surface: `repo_list/owners/refs/resolve/tree/blob/commits/diff`,
-`collab_ls/thread/pr/board/report`, `ci_status`, `wal_ls`. The writing tools —
-`collab_entry` and `collab_claim` — exist only under `--allow-write --key`, and an entry's
-`actor` must be the principal that key is registered under (a mismatched pair writes an entry
-that does not verify until that actor is rotated to the key, and the append-only log cannot be
-edited, so the call is refused). Destructive operations are not exposed at
-all; bytes never travel over MCP.
+The transport is the MCP session lane: `POST /mcp` for JSON-RPC (answered with
+one `application/json` or `text/event-stream` message — send
+`Accept: application/json, text/event-stream`), `GET /mcp` with the
+`Mcp-Session-Id` handed back by `initialize` holds the notification stream, and
+`DELETE /mcp` ends the session. A missing or expired credential is a real 401
+with a `Bearer` challenge (never `Basic`: `/mcp` is browser-reachable).
 
-Resources (`resources/list|read|subscribe`): `walgit://refs/<o>/<r>`,
+Tools: `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_board`,
+`collab_thread`, `collab_report`, `wal_ls` — the host's own JSON API underneath,
+so freshness and placement are the same as a browser's. The writing tools —
+`collab_entry` and `collab_claim` — exist only when the operator configured
+`mcp.key_dir`, and an entry's `actor` must be the principal the request's
+credential authenticates as: the server refuses a write signed with a key that
+is not the caller's (an entry that does not verify cannot be repaired in an
+append-only log). Destructive operations are not exposed at all; bytes never
+travel over MCP (clone/fetch/push stay git + bundle-uri).
+
+Resources: `resources/list`, `resources/templates/list`, then
+`resources/read`/`subscribe` on `walgit://refs/<o>/<r>`,
 `walgit://wal/<o>/<r>?from=<seq>`, `walgit://collab/board/<o>/<r>`,
 `walgit://collab/thread/<o>/<r>/<id>`. Two subscriptions cover a project —
 refs (every git action + inbox) and board (the whole projection). A
 `notifications/resources/updated` carries only the `uri`: always
-`resources/read`, compare `_meta.version`, ignore unchanged, and treat an
-event as a trigger to re-read — never act on the notification alone.
-Subscriptions are adapter-side polling, best-effort, process-local (D52): on
-start/restart read once and keep the version as your cursor. One `walgit mcp`
-process per agent, in its own worktree, with its own principal and key; filter
-your own writes by the head entry's `actor`.
+`resources/read`, compare `_meta.version`, ignore unchanged, and treat an event
+as a trigger to re-read — never act on the notification alone. Subscriptions are
+server-side polling of a refs-level read, best-effort and per-instance (D52):
+after a restart, read once and keep the version as your cursor. One session per
+agent lane, with its own principal; filter your own writes by the head entry's
+`actor`.
+
+In the bundled UI, every repository's `/collab` page (and the board's empty
+state, and the collab guide) renders this endpoint with a copy-pasteable
+`mcpServers` snippet and handshake — start there if you would rather copy than
+compose.
 
 ## Host operations & upgrades
 

@@ -13,6 +13,7 @@ pub mod instance;
 pub mod lfs;
 pub mod lfs_upstream;
 pub mod maintain;
+pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod ops;
@@ -82,6 +83,13 @@ pub struct AppState {
     /// supervisor (the tray, D43) to restart. Tests leave it false — a save
     /// responds and the test lives.
     pub setup_exit: bool,
+    /// `/mcp` sessions (D64): an in-memory subscription set and SSE channel per
+    /// client. Disposable — a restart costs warmth, never truth.
+    pub mcp: mcp::Mcp,
+    /// The router this instance serves, installed by [`router`] once so
+    /// in-process callers (the `/mcp` tools, [`mcp::api::Call`]) reach exactly
+    /// the deployed surface — same placement, same authz, same shapes.
+    pub inner_router: std::sync::OnceLock<Router>,
 }
 
 impl AppState {
@@ -126,6 +134,8 @@ impl AppState {
             needs_setup: cfg.needs_setup(),
             config_path: None,
             setup_exit: false,
+            mcp: mcp::Mcp::default(),
+            inner_router: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -194,6 +204,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         // the instance.
         .merge(store_settings::router(state.clone()).with_state(()))
         .merge(web::login::router(state.clone()).with_state(()))
+        // The Model Context Protocol, served by this host itself (D64):
+        // Streamable HTTP on one endpoint, tools over the in-process JSON API,
+        // resources over the WAL. `/mcp` is one segment after no repo prefix,
+        // so it reserves the owner name like `/api` and `/repos` do.
+        .merge(mcp::router(state.clone()))
         .fallback(dispatch)
         // Sliding browser sessions: re-issue a session cookie older than ttl/4.
         .layer(axum::middleware::from_fn_with_state(
@@ -235,8 +250,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.inflight.clone(),
             middleware::request_id,
-        ))
-        .with_state(state.clone());
+        ));
     // Setup state (D43): the wizard gate is the outermost policy — ahead of
     // auth (no credentials exist yet), compression and spans. Mounted only
     // while `needs_setup`; the configured path never pays for the check.
@@ -245,7 +259,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     } else {
         app
     }
-        .with_state(state)
+    .with_state(state)
 }
 
 async fn host_from_authority(mut req: Request<Body>) -> Request<Body> {

@@ -20,7 +20,6 @@ mod collab_cmd;
 mod compact;
 mod import;
 mod import_direct;
-mod mcp_cmd;
 mod mirror;
 mod principal_cmd;
 mod proc_group;
@@ -37,7 +36,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use walgit_config::Config;
-use walgit_server::telemetry::{tracing_init, tracing_init_to_stderr};
+use walgit_server::telemetry::tracing_init;
 
 #[derive(Parser)]
 #[command(
@@ -78,28 +77,6 @@ struct ServerCli {
 enum Command {
     /// Run the HTTP server (smart HTTP v0/v2, LFS, bundles, optional compaction/bundle loops).
     Serve,
-    /// Serve the Model Context Protocol on stdio: **client-side** adapter, tools
-    /// are this CLI. Read-only unless `--allow-write`.
-    Mcp {
-        /// Local checkout the `collab_*` tools read (and write).
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        /// Register the writing tool (`collab_entry`); off by default.
-        #[arg(long)]
-        allow_write: bool,
-        /// Ed25519 seed used to sign `collab_entry` writes.
-        #[arg(long)]
-        key: Option<PathBuf>,
-        /// Remote `collab_entry` pushes to.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-        /// Poll interval for MCP resource subscriptions (milliseconds, >= 1000).
-        #[arg(long, default_value_t = mcp_cmd::DEFAULT_SUBSCRIBE_INTERVAL_MS)]
-        subscribe_interval_ms: u64,
-        /// Maximum number of live MCP resource subscriptions.
-        #[arg(long, default_value_t = mcp_cmd::DEFAULT_MAX_SUBSCRIPTIONS)]
-        max_subscriptions: u64,
-    },
     /// Trigger compaction (geometric repack) for one repo or all.
     Compact {
         /// `owner/name` — omit with `--all` for every repo.
@@ -780,12 +757,7 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
     } else {
         load_config(config)
     };
-    // `mcp` owns stdout as a JSON-RPC stream: its logs must never land there.
-    if matches!(command, Command::Mcp { .. }) {
-        tracing_init_to_stderr(&cfg);
-    } else {
-        tracing_init(&cfg);
-    }
+    tracing_init(&cfg);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -834,25 +806,6 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
             seed,
         } => synth::run(&out, size, commits, files, seed),
         Command::Serve => serve::run(&cfg, &config_path).await,
-        Command::Mcp {
-            repo,
-            allow_write,
-            key,
-            remote,
-            subscribe_interval_ms,
-            max_subscriptions,
-        } => {
-            mcp_cmd::run(mcp_cmd::Options {
-                repo,
-                config: config_path.clone(),
-                allow_write,
-                key,
-                remote,
-                subscribe_interval_ms,
-                max_subscriptions,
-            })
-            .await
-        }
         Command::Service { action } => service_cmd::run(&action, &config_path).await,
         Command::Compact {
             repo,

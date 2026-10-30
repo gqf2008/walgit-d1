@@ -216,7 +216,7 @@ async fn host_principal_delete(
 
 // ---- CORS (browser lane from other origins) -----------------------------------
 
-fn origin_allowed(cfg: &walgit_config::Config, origin: &str) -> bool {
+pub(crate) fn origin_allowed(cfg: &walgit_config::Config, origin: &str) -> bool {
     cfg.server.cors_origins.iter().any(|pat| {
         if let Some((scheme, host)) = pat.split_once("://*.") {
             origin

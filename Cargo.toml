@@ -94,6 +94,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip", "compression-br", "decompression-gzip", "timeout", "limit", "catch-panic", "set-header"] }
 http = "1"
+rmcp = { version = "3.5", default-features = false, features = ["server", "transport-streamable-http-server", "tower"] }
 http-body = "1"
 http-body-util = "0.1"
 gix = { version = "0.86", default-features = false, features = ["sha1", "sha256", "max-performance-safe", "blocking-network-client", "parallel", "revision", "interrupt", "worktree-mutation", "index"] }

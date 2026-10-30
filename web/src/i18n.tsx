@@ -48,6 +48,26 @@ const en = {
   "collab.newThread": "New thread",
   "collab.noThreads": "No threads yet — post the first entry above.",
   "collab.noPrs": "No patches.",
+
+  // MCP box on the collab pages (D64): the host serves MCP itself at /mcp.
+  "mcp.title": "MCP (served by this host)",
+  "mcp.lede":
+    "This host speaks the Model Context Protocol itself at {endpoint} (HTTP Streamable): one endpoint, no local adapter process. Point an agent client at it and the tools are this host's own API — repository reads, the board, the log, and (where the operator enabled it) signed collab writes.",
+  "mcp.register": "Register (client config)",
+  "mcp.register.note":
+    "The bearer is the credential git already uses; keep it in the client's own secret store. For a self-signed host also point the client at the CA published on /services/public/ca.pem.",
+  "mcp.handshake": "Handshake (curl)",
+  "mcp.handshake.note":
+    "Two headers are required: Accept must list both application/json and text/event-stream, and Content-Type must be application/json. The answer carries Mcp-Session-Id — send it back on every later request and on the GET stream that receives notifications.",
+  "mcp.resources": "Resources",
+  "mcp.resources.note":
+    "Resources are refs-level JSON: {repo} is this repository, and any other repository takes the same shape. resources/subscribe watches one URI server-side and pushes notifications/resources/updated when the WAL moves — a bounded poll, best-effort, per instance.",
+  "mcp.rule.bytes":
+    "Bytes never travel over MCP: clone and fetch stay on git, with bundle-uri moving the bulk.",
+  "mcp.rule.write":
+    "A write must be the caller's own actor. The host signs it with that principal's key from mcp.key_dir; without one the write tools are not advertised at all.",
+  "mcp.rule.subs":
+    "A claim that is already held answers stand-down: stop, do not start work on that card.",
   "collab.byActor": "By actor",
   "collab.byKind": "By kind",
   "collab.th.title": "title",
@@ -802,6 +822,24 @@ const zhCN: Record<I18nKey, string> = {
   "collab.newThread": "新讨论串",
   "collab.noThreads": "还没有讨论串——在上方发布第一条条目。",
   "collab.noPrs": "还没有补丁。",
+
+  // Collab 页面的 MCP 说明（D64）：托管方自己提供 /mcp。
+  "mcp.title": "MCP（由本服务器提供）",
+  "mcp.lede":
+    "本服务器自己提供 Model Context Protocol 端点 {endpoint}（HTTP Streamable）：一个端点，不需要本地适配进程。把 agent 客户端指向它，工具就是本服务器自己的 API —— 仓库读取、看板、WAL 日志，以及（运维打开后）带签名的协作写入。",
+  "mcp.register": "接入配置（客户端）",
+  "mcp.register.note":
+    "这里的 bearer 就是 git 已经在用的凭据，请放在客户端自己的密钥存储里。自签名证书的服务器还要让客户端信任 /services/public/ca.pem 公布的 CA。",
+  "mcp.handshake": "握手（curl）",
+  "mcp.handshake.note":
+    "两个请求头是必须的：Accept 要同时列出 application/json 与 text/event-stream，Content-Type 要是 application/json。应答里带 Mcp-Session-Id —— 之后的每个请求，以及接收通知的 GET 流，都要把它带回来。",
+  "mcp.resources": "资源",
+  "mcp.resources.note":
+    "资源是 refs 级的 JSON：{repo} 是当前仓库，其他仓库是同样的形状。resources/subscribe 会在服务端盯住一个 URI，WAL 一动就推 notifications/resources/updated —— 有界轮询、尽力而为、仅在单个实例内。",
+  "mcp.rule.bytes": "字节不走 MCP：克隆与拉取仍在 git 上，批量数据由 bundle-uri 搬运。",
+  "mcp.rule.write":
+    "写入必须是调用者自己的 actor：服务器用 mcp.key_dir 里该 principal 的密钥签名；没有密钥时写入类工具根本不会出现在 tools/list 里。",
+  "mcp.rule.subs": "卡片已被他人占用时返回 stand-down：停手，不要开始这张卡的工作。",
   "collab.byActor": "按签名者",
   "collab.byKind": "按类型",
   "collab.th.title": "标题",
@@ -1547,6 +1585,24 @@ const zhTW: Record<I18nKey, string> = {
   "collab.newThread": "新討論串",
   "collab.noThreads": "還沒有討論串——在上方發佈第一條條目。",
   "collab.noPrs": "還沒有補丁。",
+
+  // Collab 頁面的 MCP 說明（D64）：託管方自己提供 /mcp。
+  "mcp.title": "MCP（由本伺服器提供）",
+  "mcp.lede":
+    "本伺服器自己提供 Model Context Protocol 端點 {endpoint}（HTTP Streamable）：一個端點，不需要本機轉接程序。把 agent 客戶端指向它，工具就是本伺服器自己的 API —— 倉庫讀取、看板、WAL 日誌，以及（維運開啟後）帶簽章的協作寫入。",
+  "mcp.register": "接入設定（客戶端）",
+  "mcp.register.note":
+    "這裡的 bearer 就是 git 已在使用的憑證，請放在客戶端自己的密鑰儲存裡。自簽憑證的伺服器還要讓客戶端信任 /services/public/ca.pem 公布的 CA。",
+  "mcp.handshake": "握手（curl）",
+  "mcp.handshake.note":
+    "兩個請求標頭是必須的：Accept 要同時列出 application/json 與 text/event-stream，Content-Type 要是 application/json。回應會帶 Mcp-Session-Id —— 之後的每個請求，以及接收通知的 GET 流，都要把它帶回來。",
+  "mcp.resources": "資源",
+  "mcp.resources.note":
+    "資源是 refs 級的 JSON：{repo} 是目前倉庫，其他倉庫是同樣的形狀。resources/subscribe 會在伺服器端盯住一個 URI，WAL 一動就推 notifications/resources/updated —— 有界輪詢、盡力而為、僅在單一實例內。",
+  "mcp.rule.bytes": "位元組不走 MCP：複製與抓取仍在 git 上，批量資料由 bundle-uri 搬運。",
+  "mcp.rule.write":
+    "寫入必須是呼叫者自己的 actor：伺服器用 mcp.key_dir 裡該 principal 的金鑰簽章；沒有金鑰時寫入類工具根本不會出現在 tools/list 裡。",
+  "mcp.rule.subs": "卡片已被他人佔用時回傳 stand-down：停手，不要開始這張卡的工作。",
   "collab.byActor": "按簽署者",
   "collab.byKind": "按類型",
   "collab.th.title": "標題",

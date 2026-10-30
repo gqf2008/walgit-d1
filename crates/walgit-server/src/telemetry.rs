@@ -524,27 +524,7 @@ pub fn tracing_init(cfg: &Config) {
     }
 }
 
-/// Install the subscriber with every line on **stderr**.
-///
-/// `walgit mcp` speaks JSON-RPC on stdout: one log line there is a protocol
-/// violation the host cannot recover from (it is not a JSON-RPC message), so this
-/// variant never writes to stdout. It also ignores `log_format` — the JSON/Cloud
-/// layer is stdout-shaped by design, and a local MCP session wants plain lines
-/// next to the host's own stderr anyway.
-pub fn tracing_init_to_stderr(cfg: &Config) {
-    use tracing_subscriber::prelude::*;
-    if !claim_init() {
-        return;
-    }
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.telemetry.log_filter));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-}
-
-/// One subscriber per process: whichever `tracing_init*` runs first wins.
+/// One subscriber per process: whichever `tracing_init` runs first wins.
 fn claim_init() -> bool {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.set(()).is_ok()

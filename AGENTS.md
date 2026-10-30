@@ -601,7 +601,10 @@ decision in §4 — or the PR is; never "fix later".
   against dummy payloads and runs a real start-twice-stop smoke, so neither half waits for a
   release tag to be exercised.
 
-- **D49** **MCP is a client-side adapter (`walgit mcp`), never a server endpoint (2026-09-18,
+- **D49** *(Superseded 2026-10-30 by D64: the host serves MCP itself at `/mcp` and `walgit mcp` is
+  deleted. What carries over unchanged: the surface is read-only by default, the one/two writing
+  tools need an explicit opt-in and a key, and destructive operations are advertised nowhere.)*
+  **MCP is a client-side adapter (`walgit mcp`), never a server endpoint (2026-09-18,
   cc-ai-mcp-client).** An agent host spawns it over stdio; it speaks newline-delimited JSON-RPC 2.0
   (`initialize` / `tools/list` / `tools/call` / `ping`) and its tools **are** the CLI — every call
   runs this same binary's subcommand, so there is exactly one implementation and no second contract
@@ -653,7 +656,11 @@ decision in §4 — or the PR is; never "fix later".
   verifies the old version and health, and relaunches the old tray; the sequence and rollback are
   exercised with fake installers in `tray-rs` tests.
 
-- **D52** **MCP resource subscriptions are adapter-side polling, never a server event surface
+- **D52** *(Superseded 2026-10-30 by D64 for the MCP lane's shape: the transport and the poller now
+  live in the server, so "adapter-side" became "server-side". The substance below is unchanged and
+  still binding — subscriptions poll, they are best-effort and per-instance, and they are never a
+  durable push channel.)*
+  **MCP resource subscriptions are adapter-side polling, never a server event surface
   (2026-09-19, cc-ai-mcp-subscribe).** `walgit mcp` adds
   `resources/list` / `resources/read` / `resources/subscribe` / `resources/unsubscribe` for
   `walgit://refs/…`, `walgit://wal/…?from=…`, `walgit://collab/board/…` and
@@ -842,6 +849,50 @@ decision in §4 — or the PR is; never "fix later".
   stays in the bundle (Finder, notifications); it is not a Dock icon.
   `deploy/tray/macos/test.sh` asserts the key is `true`, so a hand-edited `Info.plist`
   cannot silently bring the Dock icon back.
+
+- **D64** **MCP is served by the host itself at `/mcp`; the stdio adapter is gone
+  (2026-10-30, cc-ai-mcp-server).** Every instance exposes the Model Context Protocol on
+  **Streamable HTTP** at `POST|GET|DELETE /mcp` (`crates/walgit-server/src/mcp/`, on `rmcp`'s
+  tower transport — `server`, `transport-streamable-http-server`, `tower` features). It is the
+  same data the browser and git see, so it is the same lane: `POST` carries JSON-RPC and answers
+  one `application/json` **or** `text/event-stream` message (the transport requires
+  `Accept: application/json, text/event-stream` and `Content-Type: application/json`, answers
+  `406`/`415` on the HTTP line when they are missing, `404` for an unknown `Mcp-Session-Id`),
+  `GET` with the session id holds the notification stream, `DELETE` ends the session (`204`;
+  rmcp answers `202`, which the adapter rewrites). Sessions are in memory — a restart costs a
+  client one `initialize`, nothing durable.
+  **Auth is the existing one, unchanged**: `st.auth.require_read` on the caller's credential
+  (session cookie, `wgt_…` token, or a static bearer), a real `401` with a **`Bearer`-only**
+  challenge (a `Basic` challenge on a browser-reachable surface pops the native password
+  dialog, §1.3), and an `Origin` that is either allowed by `server.cors_origins` or this
+  request's own. **The tools are the host's own JSON API**, dispatched in-process
+  (`AppState::inner_router`, a `tower::ServiceExt::oneshot` on the same `Router`) with the
+  caller's `Authorization`/`Cookie`/`Host`/`User-Agent` replayed — so placement (D30's 503),
+  freshness (§2.3), `actor == caller` and every response shape are the code that already
+  answers a browser, never a second contract to drift from. Read tools are always advertised
+  (`repo_*`, `collab_board/thread/report`, `wal_ls`); **write tools (`collab_entry`,
+  `collab_claim`) exist only when the operator set `mcp.key_dir`**, sign **as the caller's own
+  actor** with that principal's key (`<key_dir>/<principal>.ed25519`, the `collab join` seed
+  shape), are refused *before* publishing when the key is not bound to that actor (an entry
+  that does not verify cannot be repaired in an append-only log), and publish through
+  `POST /{o}/{r}/api/collab/entries` so policy and the done-transition gate stay single-sourced.
+  There is no server identity and no destructive operation on the surface (D49's rule, kept).
+  **Resources** are `walgit://refs/<o>/<r>`, `walgit://wal/<o>/<r>?from=<seq>`,
+  `walgit://collab/board/<o>/<r>` and `walgit://collab/thread/<o>/<r>/<id>`:
+  `resources/list` (one store listing, bounded), `resources/templates/list`, `resources/read`,
+  and `resources/subscribe` — a **server-side bounded poll** of a refs-level read (one
+  conditional `manifest.pb` GET per tick) emitting `notifications/resources/updated` with the
+  `uri` only, `notifications/resources/list_changed` when the resource disappears. Bytes never
+  travel over MCP; clone/fetch/push stay git + bundle-uri. Config is host-level and outside
+  D24's per-repo settings: `[mcp] key_dir`, `subscribe_interval` (>= 1s), `max_subscriptions`,
+  `session_ttl`. **Supersedes D49 and the adapter half of D52**: `walgit mcp` (the stdio
+  adapter that shelled out to this CLI) is deleted — keeping it would be a second
+  implementation of the same surface — while D52's substance stands: subscriptions are
+  adapter-side (now server-side) **polling, best-effort, per-instance**, never a durable push
+  channel and never a held request (D55). The bundled UI teaches the endpoint where an agent
+  arrives: a **MCP box** (`web/src/components/McpSetup.tsx`) on every repository's `/collab`
+  page and on the board's empty state renders the endpoint, a `mcpServers` snippet and the
+  handshake, all data-free — the four resource templates come from the route, never a request.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

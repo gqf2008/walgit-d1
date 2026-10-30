@@ -8,6 +8,7 @@ import { Markdown } from "../components/Markdown";
 import { enableCollabKey } from "../components/CollabWrite";
 import { CollabKeyStatus } from "../components/CollabKeyStatus";
 import { AgentFlow } from "../components/AgentFlow";
+import { McpSetup } from "../components/McpSetup";
 import { signCanonical } from "../collab";
 import { useI18n, statusLabel } from "../i18n";
 
@@ -231,9 +232,12 @@ export function CollabBoardPage() {
         )}
       </div>
       {visibleColumns.length === 0 ? (
-        <Box>
-          <div className="pad muted">{t("board.noCards")}</div>
-        </Box>
+        <>
+          <Box>
+            <div className="pad muted">{t("board.noCards")}</div>
+          </Box>
+          <McpSetup full={full} />
+        </>
       ) : (
         <div className="board-grid">
           {visibleColumns.map((col) => (

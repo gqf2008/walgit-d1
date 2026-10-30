@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Guard the user-facing surface: every top-level CLI command and every
-# `walgit mcp` flag must be explained in the public agent guide.
+# Guard the user-facing surface: every top-level CLI command must be
+# explained in the public agent guide.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,11 +36,7 @@ commands="$({
     in_commands && $1 ~ /^[a-z][a-z0-9-]*$/ { print $1 }
 ')"
 
-flags="$({
-    "$bin" mcp --help
-} | grep -oE -- '--[a-z0-9-]+' | sort -u)"
-
-# The two extractions are the guard's whole input: if either comes back empty
+# The extraction is the guard's whole input: if it comes back empty
 # (clap's help layout changed, the wrong binary was built, `awk` matched
 # nothing) the loops below would check nothing and still print OK. That is the
 # "guard that cannot fail" shape, so an empty or implausibly small surface is a
@@ -49,13 +45,11 @@ flags="$({
     echo "check-skill-covers-cli: no top-level command extracted from \`$bin --help\`" >&2
     exit 2
 }
-[ -n "$flags" ] || {
-    echo "check-skill-covers-cli: no flag extracted from \`$bin mcp --help\`" >&2
-    exit 2
-}
-# 20 items are documented today (2 exemptions); the floor leaves room for a
-# deliberate exemption or two while catching a shrunken extraction.
-min_checked="${WALGIT_MIN_CHECKED:-15}"
+# 14 items are documented today (2 exemptions -> 12 checked); the floor leaves
+# room for an exemption or two while catching a shrunken extraction. It is a
+# floor on the *extraction*, never on what the guide may document: a command
+# that disappears from the CLI comes out of this count in the same change.
+min_checked="${WALGIT_MIN_CHECKED:-11}"
 
 missing=0
 checked=0
@@ -75,28 +69,9 @@ check_command() {
     fi
 }
 
-check_flag() {
-    local flag="$1"
-    if reason="$(exemption_reason "$flag")"; then
-        printf 'EXEMPT flag    %-28s %s\n' "$flag" "$reason"
-        return
-    fi
-    checked=$((checked + 1))
-    if grep -Fq -- "$flag" "$skill"; then
-        printf 'OK     flag    %s\n' "$flag"
-    else
-        printf 'MISSING flag    %s\n' "$flag" >&2
-        missing=1
-    fi
-}
-
 while IFS= read -r command; do
     [ -n "$command" ] && check_command "$command"
 done <<<"$commands"
-
-while IFS= read -r flag; do
-    [ -n "$flag" ] && check_flag "$flag"
-done <<<"$flags"
 
 if [ "$checked" -lt "$min_checked" ]; then
     echo "check-skill-covers-cli: only $checked items were checked (floor $min_checked)" >&2

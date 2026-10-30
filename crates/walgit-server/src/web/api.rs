@@ -1570,10 +1570,12 @@ async fn collab_principal(
 /// Entries that do not parse are skipped — one corrupt inbox entry must not
 /// take the dashboard down; the deterministic aggregation over the rest is
 /// identical to what the `walgit collab` CLI computes locally.
-struct CollabState {
-    entries: Vec<EntryRef>,
-    principals: HashMap<String, String>,
-    rules: MergeRules,
+pub(crate) struct CollabState {
+    pub(crate) entries: Vec<EntryRef>,
+    /// principal → registered public key (the repo's registry overlaid with the
+    /// host registry, exactly as verification resolves it).
+    pub(crate) principals: HashMap<String, String>,
+    pub(crate) rules: MergeRules,
 }
 
 /// Metric samples: histograms take `f64`, and the counts here (refs, entries,
@@ -1585,6 +1587,23 @@ struct CollabState {
 )]
 fn metric_f64(n: u64) -> f64 {
     n as f64
+}
+
+/// The collab aggregation as an API handler sees it — refs-level, no objects.
+///
+/// The MCP write tools (`/{o}/{r}`'s `/mcp`) need exactly this before they
+/// publish: the thread corpus to chain onto, and the principal registry to check
+/// that their signature can verify. Sharing the loader keeps one definition of
+/// "what the collab log says" between the HTTP surface and `/mcp`.
+pub(crate) async fn collab_state(
+    st: &AppState,
+    headers: &HeaderMap,
+    owner: &str,
+    name: &str,
+) -> Result<CollabState, ApiError> {
+    let handle = open(st, headers, owner, name).await?;
+    let repo = view(st, handle, Need::Refs, Reporter::none()).await?;
+    collab_load(st, &repo).await
 }
 
 async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
