@@ -6,16 +6,16 @@ import { useI18n } from "../i18n";
 
 /**
  * The site root "/" (redesigned 2026-10-23): one sentence that says what
- * walgit is, a paragraph leading into /SKILL.md, and five copyable role
- * prompts (leader / developer / reviewer / tester / devops) matching the
- * D59/D62 topology. The old static model essay moved out — the same story
+ * walgit is, a paragraph leading into /SKILL.md, and the two copyable role
+ * prompts (leader / worker) that the D59/D62 topology has: the leader files,
+ * dispatches, reviews and merges; the worker claims, implements and delivers. The old static model essay moved out — the same story
  * is taught on a repository's live data at /<owner>/<repo>/collab/guide
  * (#41), linked from here when the host has a repository. The host-wide
  * repository index stays the top-nav「仓库」entry (/repos, #59); the CLI
  * cheat sheet is /commands (D61). An empty host shows the install slate.
  */
 
-const ROLES = ["leader", "dev", "reviewer", "tester", "devops"] as const;
+const ROLES = ["leader", "dev"] as const;
 
 export function Home() {
   const owners = useData("owners", api.owners);

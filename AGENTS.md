@@ -789,6 +789,14 @@ decision in §4 — or the PR is; never "fix later".
   owner, one worktree, never a shared checkout or key. Durable truth stays in `refs/collab/*`;
   process state is local and disposable. Normative statement in `web/SKILL.md` §0d (and §0/§0b)
   and `skills/walgit/SKILL.md` §5b.
+  *(Amended 2026-10-30: **there are two roles, leader and worker** — the dedicated acceptance
+  sub-agent of the original text is folded into the leader. The leader reviews the worker's
+  patch itself: it is by construction a different principal than the worker (per-worktree
+  identity, D58/D62), so `merge_rule_eval`'s gate — a verified non-author `approve` — is
+  unchanged and no human click is added. A leader still does not review a commit it wrote: that
+  one card's review goes to another worker's principal, or the work is filed so a second
+  principal exists. The UI's role-prompt block (`web/src/pages/Home.tsx`) and both SKILL.md
+  files carry exactly these two prompts; the reviewer/tester/devops prompts are gone.)*
 - **D60** **The bundled UI can carry an operator-supplied admin token in the bearer lane
   (2026-10-10, cc-ai-token-mode-store-ui).** A `token`-mode instance has no browser sign-in
   (only oidc mints a session cookie — `auth.rs`), but the first-run wizard *produces* token

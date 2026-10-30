@@ -17,10 +17,10 @@ describe("Home (2026-10-23 redesign)", () => {
     expect(skill.closest("a")?.getAttribute("href")).toBe("/SKILL.md");
   });
 
-  it("renders the five role prompts with copyable bodies", () => {
+  it("renders the two role prompts with copyable bodies", () => {
     render(<HomeBody live={{ owner: "acme", repo: "r2demo" }} />);
     expect(screen.getByText("home.roles.t")).toBeTruthy();
-    for (const role of ["leader", "dev", "reviewer", "tester", "devops"]) {
+    for (const role of ["leader", "dev"]) {
       expect(screen.getByText(`home.role.${role}.t`)).toBeTruthy();
       expect(screen.getByText(`home.role.${role}.body`)).toBeTruthy();
     }

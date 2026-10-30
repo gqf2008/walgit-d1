@@ -218,15 +218,14 @@ that covers the everyday path in ~60 lines; this section is the operator detail.
 `/commands` in the bundled UI (D61); `/SKILL.md` §0a–§0e carries the normative workflow.
 
 **Parallel team first.** For parallel work, register one principal + Ed25519 key per
-agent *before* opening threads — a worker pool (`<proj>-worker-1..N`), a reviewer pool
-(`<proj>-reviewer-1..N`), and a coordinator (`<proj>-coordinator`). N active agents = N
-cards = N worktrees/branches; one card has one owner; the reviewer must sign with a
-different principal than the author and reject a self-approve (the merge rule drops the
-verified patch author, so the coordinator still checks the actor — an unverified patch does
-not populate the author set); the coordinator performs the merge. Never let
-multiple agents sign under one shared key (`sqb` or otherwise): the board and audit can
-then no longer distinguish implementer, reviewer, and merger. See `/SKILL.md` §0b for
-the full topology and copyable checklist.
+agent *before* opening threads — a worker pool (`<proj>-worker-1..N`) and a leader
+(`<proj>-leader`). N active agents = N cards = N worktrees/branches; one card has one
+owner; **the leader does the review**, signing as a different principal than the worker
+and rejecting a self-approve (the merge rule drops the verified patch author, so the
+leader still checks the actor — an unverified patch does not populate the author set);
+the leader performs the merge. Never let multiple agents sign under one shared key (`sqb`
+or otherwise): the board and audit can then no longer distinguish implementer, reviewer,
+and merger. See `/SKILL.md` §0b for the full topology and copyable checklist.
 
 ```bash
 walgit collab join --repo <checkout> --principal <principal> --push origin
@@ -325,7 +324,7 @@ W collab claim --id <thread-id> --worktree wt-x --branch feat/x \
 | `status` | `{"status","owner","worktree?","branch?","work","note?"}` | move the card / explicit hand-off (a live claim re-pins `owner` to its winner — hand a claimed card off by letting the claim lapse, or keep claims short) |
 | `card_claim` | `{"ttl":300,"worktree?","branch?","work?"}` (root entry, `parent=""`) | ownership claim before work (`collab claim`; convergence in §8.4) |
 | `patch` | `{"title","message"}` + `--base/--head` | implementation branch |
-| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review, run as its own party (own principal/key; a headless sub-agent counts); the merge rule drops `svc-*` actors and verified-patch authors, but the coordinator still checks the actor (an unverified patch does not populate the author set) |
+| `review` | `{"decision":"approve\|request_changes\|comment","agent","note"}` | independent review, run as its own party (own principal/key; a headless sub-agent counts); the merge rule drops `svc-*` actors and verified-patch authors, but the leader still checks the actor (an unverified patch does not populate the author set) |
 | `merge_result` | `{"merged":true,"oid":…,"result":"merged","note":…}` | merge record, **one entry** (the board/PR state keys on `merged:true`) |
 | `comment` | `{"note"}` | progress notes (does not move the card) |
 
@@ -344,10 +343,10 @@ file the `issue`, then the worker claims it (or, without claims, add a `status` 
 parked work still names its owner (`blocked` / `needs-human`); an owner in a `comment` does not count.
 
 Standard flow: `issue` → **`collab claim` (exit 0 before any work)** → work in the claimed
-worktree → `patch` → `status: needs-review` → independent `review` by another principal →
-coordinator merges locally & pushes → `merge_result {"merged":true,"oid":…}` → `status: closed`.
-Remove the worktree after closure. Keep the board and the thread as the single record; never edit
-state files by hand.
+worktree → `patch` → `status: needs-review` → the **leader** reviews (a different principal) →
+the leader merges locally & pushes → `merge_result {"merged":true,"oid":…}` → `status: closed`.
+The worktree stays after closure (D62 — it is where the identity lives; a merged *branch* may be
+pruned). Keep the board and the thread as the single record; never edit state files by hand.
 
 **Reviews, tests and decision discipline: see `/SKILL.md` §3–§4** — an independent party with its own
 principal/key runs them (the author's self-test is not evidence), and `needs-human` is reserved for
@@ -355,44 +354,48 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 
 ## 5b. Autonomous delivery — one console per project (D59)
 
-人类只做两端：**布置任务**与**观察**；验收由**验收子代理**独立判定，无阻塞项**自合并**。人类不传话、
+人类只做两端：**布置任务**与**观察**；验收由 leader 独立判定，无阻塞项**自合并**。人类不传话、
 不逐步批准、不点合并。一个项目只开**一个控制台**（人类界面），中间全是后台子代理。完整规范见
 `/SKILL.md` §0d–§0e。
 
-- **协调者 orchestrator**（控制台 agent 或它起的常驻客户端循环）：watch `refs/collab/*` → 派卡 → 起/收
-  子代理 → 记录合并。**客户端行为，无服务器端点、无新持久状态**（D46/D49/D55）。
+**角色只有两个：leader 与 worker。**
+
+- **leader**（控制台 agent 或它起的常驻客户端循环）：watch `refs/collab/*` → 拆卡派卡 → 起/收
+  worker 子代理 → **自己审**（它与 worker 是不同 principal）→ 记录合并。**客户端行为，无服务器端点、
+  无新持久状态**（D46/D55）。
 - **worker 子代理**：一卡一 owner 一 worktree（各自身份）；**开工前先 `collab claim`，退出码非 0 不得开工**
   （收敛认领，§8.4）→ 在**自己的 worktree 里建开发分支**（`git worktree add .worktrees/<unit> -b feat/<thread>`）→
   实现 → push 分支 → `patch` → `needs-review`。**任何问题都写回卡片**（D62）：报错、测试红、缺依赖、有歧义——
   一律 `comment`（带证据）落卡，卡住就走 `status: blocked`；卡片是 worker 唯一的汇报通道，不许只写在自己的
   控制台里。
-- **验收子代理**：与作者**不同 principal**，按卡的机器可校验验收项独立判定，签 `review`
-  （`approve` / `request_changes` + Critical/Important/Minor findings + 实际跑过的证据）。
-- **自合并**：验收无 Critical/Important 且验收项全绿 → orchestrator 本地合并、push、记一条
+- **审 = leader 的活**：在 pinned commit 上按卡的机器可校验验收项独立跑一遍，签 `review`
+  （`approve` / `request_changes` + Critical/Important/Minor findings + 实际跑过的证据）。leader 不审自己写的
+  提交——那一张卡的 review 交给另一个 worker（它自己的 principal），或者先把工作拆出第二个 principal。
+- **自合并**：验收无 Critical/Important 且验收项全绿 → leader 本地合并、push、记一条
   `merge_result`，再 `status: closed`。门禁就是 `merge_rule_eval` 已强制的“非作者、已验签 approve”，
   无需人类点。
-- **阻塞路由**：Critical/Important 或验收不过 → 打回 worker（新 `status: in-progress`）或派 fixer；
+- **阻塞路由**：Critical/Important 或验收不过 → 打回 worker（新 `status: in-progress`）；
   需求歧义/授权/外部输入 → `needs-human`（唯一的人类介入点）；Minor 不阻塞。
-- **子代理与监督**：orchestrator 用**宿主 agent 自身的能力**起短命后台子代理（**不规定 runtime**：CLI agent、
-  编程式会话、远端 worker 皆可），一卡一个、各自 worktree 与 key；它负责超时/预算/崩溃重启/日志。coordinator
+- **子代理与监督**：leader 用**宿主 agent 自身的能力**起短命后台子代理（**不规定 runtime**：CLI agent、
+  编程式会话、远端 worker 皆可），一卡一个、各自 worktree 与 key；它负责超时/预算/崩溃重启/日志。leader
   本体工作在 main checkout 的 `main` 上（拆卡、审、并 worker 分支）；**永不删除 worker 的 worktree**（D62）：
   worktree 承载协作身份，留存即团队名册。合并后的**分支**可清，worktree 留着；要退役一个 principal 走
   `collab principal-revoke`（签名注册行为），不是 `git worktree remove`。进程状态本地可丢，持久事实只在
   `refs/collab/*`。
-- 并发上限 2–4 worker + 1–2 验收；改动同一文件/schema 的卡串行。
+- 并发上限 2–4 worker；改动同一文件/schema 的卡串行。
 
 **从「目标」自动开跑（runbook）**：读到本节的 agent 按 `/SKILL.md` §0e 执行，不必等人类拆步：
 
 1. 先跑首次接触例程（§5、`/SKILL.md` §0a）：注册/沿用自己的 principal，fetch `refs/collab/*`，读 board。
-2. 按拿到的东西定位角色：给的是**目标**且能起子代理 → coordinator；给的是**卡 id** → worker；
-   给的是待判的 patch → 验收方；只读到文档 → observer（只读）。
+2. 按拿到的东西定位角色：给的是**目标**且能起子代理 → leader；给的是**卡 id** → worker；
+   给的是待判的 patch → 该线程的 leader 来审；只读到文档 → observer（只读）。
 3. 目标先落成卡：一个交付一条 `issue`（目标、唯一 owner、**机器可校验的验收项**）+ 一条
-   `status`（owner/worktree/branch/work）。人类交办的是目标时，写卡是 coordinator 的第一个动作，不是停下的理由。
-4. coordinator 给每张无主卡起一个 worker 子代理，brief 至少含：卡 id、worktree、principal、
+   `status`（owner/worktree/branch/work）。人类交办的是目标时，写卡是 leader 的第一个动作，不是停下的理由。
+4. leader 给每张无主卡起一个 worker 子代理，brief 至少含：卡 id、worktree、principal、
    「重读 head 后先认领；实现→push→patch→needs-review 后停止；任何问题 `comment` 写回卡片、卡住走
    `status: blocked`；不审自己的 patch、不合并」。
-5. worker 完成后**停止**，不要轮询评审；验收由另一个 principal 在 pinned commit 上跑验收命令并签
-   `review`；无 Critical/Important 且全绿 → coordinator 合并、记 `merge_result`、`status: closed`、清合并分支
+5. worker 完成后**停止**，不要轮询评审；**leader 自己**在 pinned commit 上跑验收命令并签
+   `review`；无 Critical/Important 且全绿 → leader 合并、记 `merge_result`、`status: closed`、清合并分支
    （worktree 保留，D62）。
 6. 触发靠 MCP 订阅或 `collab watch`（§6）：事件只表示「去重读」，启动/重启后先整体读一次并记住版本；
    按 head entry 的 `actor` 过滤自己写入的回声。

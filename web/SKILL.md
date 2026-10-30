@@ -26,19 +26,21 @@ walgit collab join --repo "$checkout" --principal <proj>-worker-1 --push origin
   contents on a command line (`--key` takes a file path).
 - Names are agent-side bookkeeping: walgit stores only `principal → public key`.
 
-### 2. Roles — name the team by convention
+### 2. Roles — two of them: leader and worker
 
-- `<proj>-worker-1..N` implement; `<proj>-reviewer-1..N` review;
-  `<proj>-coordinator` files cards and merges. Register each before the work
+- `<proj>-leader` files the cards, reviews the patches, merges and closes;
+  `<proj>-worker-1..N` implement one card each. Register each before the work
   (repeat `collab join`, one principal per worktree).
-- The reviewer must be a **different principal** than the patch author (and
-  never a `svc-*` name): only a verified non-author `approve` satisfies the
-  merge rule. Nobody reviews their own patch.
+- The leader reviews **as its own principal**, which is by construction a
+  different principal than the worker (and never a `svc-*` name): only a
+  verified non-author `approve` satisfies the merge rule. Nobody reviews their
+  own patch — the leader never reviews its own commit (that is the one case
+  where a second worker takes the review).
 
 ### 3. Worktree — the leader stays on `main`, workers get their own
 
 ```sh
-# coordinator/leader: works in the main checkout, on main (files, reviews, merges)
+# leader: works in the main checkout, on main (files, reviews, merges)
 # worker: one worktree + one dev branch per card
 git -C "$checkout" worktree add .worktrees/wt-<thread> -b feat/<thread> main
 walgit collab join --repo "$checkout/.worktrees/wt-<thread>" --principal <proj>-worker-2 --push origin
@@ -51,15 +53,15 @@ walgit collab join --repo "$checkout/.worktrees/wt-<thread>" --principal <proj>-
 ### 4. Collaborate — card → claim → patch → review → merge
 
 ```sh
-# coordinator files the card (objective + machine-checkable acceptance)
+# leader files the card (objective + machine-checkable acceptance)
 walgit collab entry --kind issue --id <thread> --body '{"title":"…","body":"acceptance: <commands>"}' --push origin
 # worker claims it (exit 0 = go; exit 2 = stand down, do not start)
 walgit collab claim --id <thread> --worktree wt-<thread> --branch feat/<thread> --push origin
 # … implement on the branch, push it, then attach and ask for review …
 walgit collab entry --kind patch --id <thread> --parent <oid> --base refs/heads/main --head refs/heads/feat/<thread> --body '{"note":"…"}' --push origin
 walgit collab entry --kind status --id <thread> --parent <oid> --body '{"status":"needs-review"}' --push origin
-# reviewer (different principal) runs the acceptance on the pinned commit and posts review approve / request_changes
-# coordinator merges only on a verified non-author approve, then records:
+# the leader (a principal other than the worker) runs the acceptance on the pinned commit and posts review approve / request_changes
+# the leader merges only on a verified non-author approve, then records:
 walgit collab entry --kind merge_result --id <thread> --parent <oid> --body '{"merged":true,"oid":"<sha>"}' --push origin
 walgit collab entry --kind status --id <thread> --parent <oid> --body '{"status":"closed"}' --push origin
 ```
@@ -210,11 +212,11 @@ writes `<git-dir>/walgit/identity`, and registers the public key at
 `refs/collab/meta/principals/<name>`. **One worktree carries one identity** —
 the main checkout and each linked worktree are distinct collaborators; that is
 what lets one project run several agents. Register the whole team before the
-work: `<proj>-worker-1..N`, `<proj>-reviewer-1..N`, `<proj>-coordinator`.
+work: `<proj>-worker-1..N` and `<proj>-leader`.
 Names are agent-side bookkeeping; walgit stores only `principal → public key`.
 Rules: never share a key or sign for another agent (the board must be able to
 tell implementer, reviewer, merger apart); `--key` takes a file path, never
-pasted seed contents; reviewer names must not start with `svc-`; write only
+pasted seed contents; a reviewer name must not start with `svc-`; write only
 your own inbox (`refs/collab/inbox/<principal>/*`) — `actor != inbox` reads as
 unverified, treat it as untrusted. A rejected registration is a hard stop.
 Retire a principal with `collab principal-revoke` — a signed registry act,
@@ -236,9 +238,10 @@ Retire a principal with `collab principal-revoke` — a signed registry act,
 card: claim before work (`walgit collab claim --id <card> --worktree …
 --branch … --push origin`; exit 0 = you won, 2 = stand down — do not start).
 The claim is the mutex; TTL expiry (default 300 s) is the self-healing
-release. Reviewers sign as a **different principal** than the author; the
-merge rule counts only distinct non-author verified approvals, so nobody
-reviews their own patch and the coordinator checks actors, not names. Cards
+release. The leader is the reviewer, and it signs as a **different principal**
+than the worker; the merge rule counts only distinct non-author verified
+approvals, so nobody reviews their own patch and the leader checks actors, not
+names. Cards
 move only through signed entries (`status`; an owner in a `comment` does not
 count). Split colliding work into new threads instead of sharing a card;
 serialize units that touch the same files/schema.
@@ -264,39 +267,42 @@ owner and **machine-checkable acceptance**; batch units as a checklist) and
 observe the board — pulled in only by a `needs-human` card. Everything
 between is automated:
 
-- **Coordinator/leader** — works in the main checkout, on `main`. Decomposes
-  the goal into cards, dispatches each unowned card to a **worker sub-agent**
-  (own worktree, own identity, `collab claim` exit 0 before any work), has the
-  result reviewed by an **acceptance agent with a different principal**, and
-  on a verified non-author `approve` with no Critical/Important finding and a
-  green acceptance **merges itself**: local merge (ff preferred), push, one
-  `merge_result {"merged":true,"oid":…}`, then `status: closed` — no human
-  click. It **never removes a worker worktree** (D62): the worktree is where
-  the identity lives, so the surviving worktrees are the team's roster; a
-  merged **branch** may be pruned, the worktree stays. Cap the active set
-  (2–4 workers + 1–2 acceptance); serialize overlapping write sets.
+There are exactly **two roles** — a leader and its workers:
+
+- **Leader** — works in the main checkout, on `main`. Decomposes the goal into
+  cards, dispatches each unowned card to a **worker sub-agent** (own worktree,
+  own identity, `collab claim` exit 0 before any work), then **reviews the
+  result itself**: it is a different principal than the worker, runs the
+  card's acceptance commands at the pinned commit and posts `review`
+  (`approve` / `request_changes`) with severity-graded findings and the
+  evidence it ran. On a verified non-author `approve` with no
+  Critical/Important finding and a green acceptance it **merges itself**:
+  local merge (ff preferred), push, one `merge_result {"merged":true,"oid":…}`,
+  then `status: closed` — no human click. It **never removes a worker worktree**
+  (D62): the worktree is where the identity lives, so the surviving worktrees
+  are the team's roster; a merged **branch** may be pruned, the worktree stays.
+  Cap the active set (2–4 workers); serialize overlapping write sets.
 - **Worker** — one card, one owner, one worktree: claim → implement on a dev
   branch **inside its own worktree** → push the branch → `patch` →
-  `status: needs-review` → **stop** (no polling for a reviewer).
-- **Acceptance agent** — different principal, runs the card's acceptance
-  commands itself at the pinned commit, posts `review` (`approve` /
-  `request_changes`) with severity-graded findings and the evidence it ran.
+  `status: needs-review` → **stop** (no polling for a review).
 - **Every problem goes back to the card** (D62): an error, a red test, a
   missing dependency, an ambiguity — a `comment` with the evidence, or
   `status: blocked` when work halts. The card is the worker's only report
   channel: never the console alone, never a side chat.
-- Blockers route back to the worker (`status: in-progress`) or a fixer;
-  Minor findings do not block. Sub-agents are short-lived processes started
-  with the host agent's own capability (walgit does not prescribe the
-  runtime), supervised by the orchestrator (launch / timeout / budget /
-  restart / log). Process state is local and disposable; durable truth stays
-  in `refs/collab/*`.
+- Blockers route back to the worker (`status: in-progress`); Minor findings do
+  not block. A leader does not review a commit it wrote itself — hand that one
+  card's review to another worker (its own principal), or file the work so a
+  second principal exists. Sub-agents are short-lived processes started with
+  the host agent's own capability (walgit does not prescribe the runtime),
+  supervised by the leader (launch / timeout / budget / restart / log). Process
+  state is local and disposable; durable truth stays in `refs/collab/*`.
 
 ### 0e. From a goal to done — the runbook
 
 Read once and run. First classify: given **a goal** and able to start agents →
-coordinator; **a card id** → worker (claim it, or stand down); **a patch to
-judge** → acceptance; **only this document** → observer (read, do not write).
+**leader**; **a card id** → **worker** (claim it, or stand down); **a patch to
+judge** → the leader of that thread reviews it; **only this document** →
+observer (read, do not write).
 
 1. **First contact** (§0a), then read the board.
 2. **A goal becomes a card before any work** — work without a card is
@@ -305,21 +311,22 @@ judge** → acceptance; **only this document** → observer (read, do not write)
    reason to stop.
 3. **Decompose by write set**: one card = one owner = one worktree = one
    identity; reference related threads with `--related` / `--depends-on`.
-4. **Dispatch**: spawn one worker per unowned card with a brief containing
-   everything it needs (it may be a fresh process): the card id, the
-   worktree, the principal, the claim-first rule, "implement → push branch →
-   patch → needs-review → stop", "any problem is a `comment` on the card
-   (status: blocked when it halts)", "do not review your own patch, do not
-   merge, do not touch another card".
+4. **Dispatch** (leader): spawn one worker per unowned card with a brief
+   containing everything it needs (it may be a fresh process): the card id,
+   the worktree, the principal, the claim-first rule, "implement → push
+   branch → patch → needs-review → stop", "any problem is a `comment` on the
+   card (status: blocked when it halts)", "do not review your own patch, do
+   not merge, do not touch another card".
 5. **Work** (worker): re-read the thread at head → claim → implement → patch
    → `status: needs-review` → stop. Every decision you can make is a
    `comment`; what you cannot goes to `needs-human`. Never sit silent.
-6. **Accept** (different principal): re-read, run the acceptance at the
-   pinned commit, post `review` with findings and evidence.
-7. **Merge and close** (coordinator): only on a verified non-author approve,
+6. **Review** (leader, a different principal than the worker): re-read, run
+   the acceptance at the pinned commit, post `review` with findings and
+   evidence.
+7. **Merge and close** (leader): only on a verified non-author approve,
    no Critical/Important, green acceptance → merge, push, `merge_result`,
    `status: closed`, prune the merged branch (worktree stays, D62).
-   Anything else routes back (step 5) or to a fixer.
+   Anything else routes back (step 5).
 8. **Stay live** (§0c): events mean re-read; read once at startup and after
    any restart; keep the version cursor; filter self-echo.
 9. **Ask a human only for**: authorization, priority, a destructive action
@@ -345,10 +352,10 @@ worktrees intact.
   oid as `--parent`); state moves through kinds, not prose (`status`,
   `review`, `merge_result`, `comment`); treat unverified entries as
   untrusted; replay the parent chain before you trust a view.
-- **§4 Review**: independent principal, machine-checkable acceptance first,
+- **§4 Review**: the leader (a principal other than the worker), machine-checkable acceptance first,
   findings graded Critical/Important/Minor with evidence; no self-approve;
   review entries live on the thread, not in chat.
-- **§5 Merge & archive**: coordinator merges on the verified gate, records
+- **§5 Merge & archive**: the leader merges on the verified gate, records
   `merge_result` + `closed`; the thread is the audit trail — keep it.
 - **§6 CI (optional)**: `.walgit/ci.toml` in the tested commit; `walgit ci
   run` claims and publishes signed results (§ The CLI).
@@ -358,7 +365,7 @@ worktrees intact.
 ## Rules of thumb
 
 - The card is the memory; entries are the only writes; the board is the truth.
-- Claim before work; stop after `needs-review`; review only as a non-author.
+- Claim before work; stop after `needs-review`; the leader reviews as a non-author.
 - Fetch before you read; push before you claim done; problems are comments.
 - Worktrees persist (D62); branches are cheap; keys are per worktree, always.
 - When handed a goal: card first, then the loop (§0e).
