@@ -668,12 +668,18 @@ enum TokenAction {
         /// Read the token from the first line of stdin.
         #[arg(long = "token-stdin")]
         token_stdin: bool,
-        /// Push permission is on by default; this makes the token read-only.
-        #[arg(long = "no-write")]
+        /// Push permission (the default; `--force` keeps the replaced row's).
+        #[arg(long, overrides_with = "no_write")]
+        write: bool,
+        /// Push permission off: this token may only read.
+        #[arg(long = "no-write", overrides_with = "write")]
         no_write: bool,
         /// Admin permission (per-repo settings, policy, the storage editor).
-        #[arg(long)]
+        #[arg(long, overrides_with = "no_admin")]
         admin: bool,
+        /// Admin permission off.
+        #[arg(long = "no-admin", overrides_with = "admin")]
+        no_admin: bool,
         /// Replace the principal's existing token instead of refusing.
         #[arg(long)]
         force: bool,
@@ -974,8 +980,10 @@ mod config_write_tests {
                 token: None,
                 token_env: Some("WALGIT_TOKEN".to_string()),
                 token_stdin: false,
+                write: false,
                 no_write: false,
                 admin: false,
+                no_admin: false,
                 force: false,
             },
         }

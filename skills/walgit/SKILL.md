@@ -160,14 +160,20 @@ walgit repo list                                     # repos visible in the conf
 walgit token list                                    # principal, write, admin, secret source (never the secret)
 walgit token add alice --token-env WALGIT_TOKEN_ALICE --admin
 walgit token add ci --token-stdin --no-write         # read-only robot; secret from stdin
+walgit token add ci --token-stdin --force            # rotate ci's secret, keep its permissions
 walgit token rm ci
 ```
 
-`walgit token add|rm` edits `walgit.toml` in place (comments kept), validates the whole resulting
-document before replacing it atomically, and the server reads the list at start — restart it. Prefer
-`--token-env` / `--token-stdin` over `--token`: the literal lands in the shell history and `ps`. A
-token is a principal plus `write` (push, default on) and `admin` (settings/policy, default off);
-`wgt_…` access tokens from `/_auth/tokens` are a different mechanism and cannot be managed here.
+`walgit token add|rm` edits `walgit.toml` in place (comments elsewhere kept), validates the resulting
+document on its own — `Config::parse_document`, so this shell's `WALGIT__*` env cannot bless a file
+that would not boot elsewhere — and only then replaces it atomically; the server reads the list at
+start, so restart it. Prefer `--token-env` / `--token-stdin` over `--token`: the literal lands in the
+shell history and `ps`. A token is a principal plus `write` (push, default on) and `admin`
+(settings/policy, default off). `--force` replaces the secret and **keeps** the replaced row's
+permissions unless you pass `--write`/`--no-write` or `--admin`/`--no-admin`; a repeated token value
+is refused (first match wins, so the second row would be dead), and `rm` of the last token of a
+`mode = "token"` host is refused because it would lock every client out. `wgt_…` access tokens from
+`/_auth/tokens` are a different mechanism and cannot be managed here.
 
 Credentials come from the env vars the config names (e.g. `R2_ACCESS_KEY` / `R2_SECRET_KEY`) or the
 installer-managed credentials file; never print them.

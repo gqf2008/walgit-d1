@@ -189,10 +189,9 @@ export function CommandsPage() {
           note={t("cmds.s5.once")}
         />
         <CommandRow
-          cmd='walgit mcp --repo "$checkout" --subscribe-interval-ms 5000 --max-subscriptions 32'
+          cmd='claude mcp add --transport http walgit https://<host>/mcp --header "Authorization: Bearer $WALGIT_TOKEN"'
           note={t("cmds.s5.mcp")}
         />
-        <CommandRow cmd="walgit mcp --allow-write --key <key>" />
         <CommandRow cmd="walgit://refs/<owner>/<repo>  ·  walgit://collab/board/<owner>/<repo>" note={t("cmds.s5.uris")} />
       </Section>
 

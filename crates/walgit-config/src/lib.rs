@@ -54,10 +54,14 @@ pub struct McpConfig {
     /// watch` uses (D55), never a held request.
     #[serde(with = "humantime_serde")]
     pub subscribe_interval: Duration,
-    /// Cap on live subscriptions per MCP session.
+    /// Cap on live subscriptions **per caller** (principal), across that
+    /// caller's sessions — the unit the poller cost is spent in (one poll per
+    /// subscription per `subscribe_interval`).
     pub max_subscriptions: usize,
     /// An MCP session with no request and no open SSE stream for this long is
-    /// dropped (memory-only state; a restart loses nothing else).
+    /// dropped (memory-only state; a restart loses nothing else). Handed to
+    /// rmcp's `LocalSessionManager` as its `keep_alive`, so the transport itself
+    /// reaps the session, its subscriptions with it.
     #[serde(with = "humantime_serde")]
     pub session_ttl: Duration,
 }
@@ -1372,9 +1376,25 @@ impl Default for TelemetryConfig {
 
 impl Config {
     pub fn parse(toml_text: &str) -> Result<Config> {
+        let mut cfg = Self::parse_document(toml_text)?;
+        cfg.apply_env(std::env::vars())?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// The document on its own: TOML, then `validate()` — **no** `WALGIT__*`
+    /// environment.
+    ///
+    /// This is the check for "is this file a config a host could start from",
+    /// used by anything that *writes* `walgit.toml` (`walgit token add|rm`,
+    /// the setup wizard's compose step). [`parse`] layers the caller's
+    /// environment on top, which is right for *reading* a config the running
+    /// host uses and wrong for judging a file: an env var in the operator's
+    /// shell must not be able to make a file valid that would not boot on a
+    /// host without it.
+    pub fn parse_document(toml_text: &str) -> Result<Config> {
         let mut cfg: Config = toml::from_str(toml_text).context("parsing walgit.toml")?;
         cfg.cache.dir = expand_tilde(&cfg.cache.dir);
-        cfg.apply_env(std::env::vars())?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -1654,6 +1674,30 @@ impl Config {
                 "server.auth.tokens[] for {:?} needs `token` or `token_env`",
                 t.principal
             );
+        }
+        // Two rows with the same literal token are not a rotation, they are a
+        // shadowed row: authentication matches the first value it finds, so the
+        // second can never be reached and usually means a copy-paste. (Two rows
+        // with the *same principal* are legitimate — one principal may hold
+        // several credentials while one is being rotated out.)
+        for (i, t) in a.tokens.iter().enumerate() {
+            if t.token.is_empty() {
+                continue;
+            }
+            if let Some(j) = a
+                .tokens
+                .get(..i)
+                .and_then(|seen| {
+                    seen.iter()
+                        .position(|o| !o.token.is_empty() && o.token == t.token)
+                })
+            {
+                anyhow::bail!(
+                    "server.auth.tokens[{i}] ({:?}) repeats the token of server.auth.tokens[{j}]; \
+                     a repeated value is never consulted — give each principal its own",
+                    t.principal
+                );
+            }
         }
         if let Some(secret) = a.session_secret.as_deref().filter(|s| !s.is_empty()) {
             anyhow::ensure!(

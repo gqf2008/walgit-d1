@@ -12,6 +12,11 @@
 //! `oneshot` enters the router directly — no socket, no TLS, no edge. The one
 //! cost is that the API is reached through its own URL grammar, so paths and
 //! query values must be encoded here.
+//!
+//! Reads go through [`Call`]. The two writes do not: `collab_entry` and
+//! `collab_claim` read the thread through `collab_state` (the same loader the
+//! API uses) before they publish, because a decision needs the aggregation, not
+//! one rendered page.
 
 use std::sync::Arc;
 
@@ -66,16 +71,33 @@ impl<'a> Call<'a> {
         // credential, the session cookie (browser lane), and the host (absolute
         // URLs in recipes/overview). Everything else — Accept, encodings,
         // content-length, MCP's own headers — is set by this client.
+        //
+        // `user-agent` is deliberately NOT replayed: the browser host
+        // canonicalisation redirects a browser UA on a loopback host, and a 302
+        // is not an answer (D64).
         let mut kept = HeaderMap::new();
-        for name in [
-            header::AUTHORIZATION,
-            header::COOKIE,
-            header::HOST,
-            header::USER_AGENT,
-        ] {
+        for name in [header::AUTHORIZATION, header::COOKIE, header::HOST] {
             if let Some(v) = headers.get(&name) {
                 kept.insert(name, v.clone());
             }
+        }
+        // Behind an edge the client's credential is not `Authorization` at all:
+        // the hop owns that header and forwards the client's in
+        // `X-Walgit-Authorization`, announcing it in `X-Walgit-Capabilities`
+        // (D39). Both must travel together to the inner request — dropping them
+        // made the inner `require_read` resolve the *hop's* principal (often
+        // admin) and silently granted the caller its reads.
+        for name in [
+            crate::auth::FORWARDED_AUTHORIZATION_HEADER,
+            crate::static_object::CAPABILITIES_HEADER,
+        ] {
+            let (Ok(header_name), Some(value)) = (
+                axum::http::HeaderName::from_bytes(name.as_bytes()),
+                headers.get(name),
+            ) else {
+                continue;
+            };
+            kept.insert(header_name, value.clone());
         }
         Self { st, headers: kept }
     }

@@ -746,9 +746,12 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   `seq + 1`（或定义为「下一条待读」）。
 - **HTTP SSE**：`text/event-stream` 信封，best-effort（可能丢包）；要无损 push 语义必须自建
   sidecar 从 pull 车道转发（D46）。
-- **MCP 面**：宿主自己在内置的 `/mcp`（Streamable HTTP，D64）暴露同一聚合的工具与 `walgit://`
-  资源：只读工具 `collab_ls/thread/pr/board/report`、`ci_status`；写工具 `collab_entry` 与
-  `collab_claim`（均需 `--allow-write` + key；`collab_claim` 把工作卡认领收敛做成一次调用）。资源 `walgit://collab/board/<o>/<r>`、
+- **MCP 面**：宿主自己在内置的 `/mcp`（Streamable HTTP，D64）暴露**宿主自己的 JSON API** 的工具与
+  `walgit://` 资源 —— 工具名与宿主 API 一一对应（`repo_*` 读仓库，`collab_board`/`collab_thread`/
+  `collab_report` 读聚合，`wal_ls` 读保留日志），写工具 `collab_entry` 与 `collab_claim` 只在配了
+  `[mcp] key_dir` 时出现，且**只用调用者自己的 principal 密钥签名**（actor 必须等于调用者，发布前校验
+  principal↔key 绑定；`collab_claim` 把工作卡认领收敛做成一次调用）。资源 `walgit://refs/<o>/<r>`、
+  `walgit://wal/<o>/<r>{?from}`、`walgit://collab/board/<o>/<r>`、
   `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
   **服务端 refs 级轮询、best-effort**（同 D52，不是持久推送）；字节不过 MCP（clone/fetch/push
   仍走 git/bundle-uri）。实现：`crates/walgit-server/src/mcp/`，说明见 `web/SKILL.md`。

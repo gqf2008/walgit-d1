@@ -24,6 +24,11 @@ describe("Home (2026-10-23 redesign)", () => {
       expect(screen.getByText(`home.role.${role}.t`)).toBeTruthy();
       expect(screen.getByText(`home.role.${role}.body`)).toBeTruthy();
     }
+    // The topology has exactly two roles (D59 amendment): no acceptance,
+    // reviewer, tester or devops prompt may come back without this failing.
+    for (const gone of ["reviewer", "tester", "devops", "acceptance"]) {
+      expect(screen.queryByText(`home.role.${gone}.t`)).toBeNull();
+    }
     // Live link to the first repo's collab guide when the host has a repo.
     expect(screen.getByText("home.live").closest("a")?.getAttribute("href")).toBe(
       "/acme/r2demo/collab/guide",

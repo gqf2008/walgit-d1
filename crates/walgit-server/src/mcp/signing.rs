@@ -27,20 +27,12 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 
-/// A collab ref segment (actor / principal): the same rule the CLI applies, so
-/// a name that would be mangled in `refs/collab/inbox/<actor>/…` is refused
-/// here rather than quietly creating a ref nobody can find.
+/// A collab ref segment (actor / principal): **the** rule, not a copy of it —
+/// `ref_segment_ok` is the check the API applies before it publishes
+/// `refs/collab/inbox/<actor>/…`, so a name this accepts is a name a push
+/// accepts, and a name it refuses is refused before a signature exists.
 pub fn ref_segment(label: &str, s: &str) -> Result<(), String> {
-    let ok = !s.is_empty()
-        && s.len() <= 255
-        && !s.contains("..")
-        && s != "."
-        && s != ".."
-        && !s.to_ascii_lowercase().ends_with(".lock")
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-'))
-        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
-    if ok {
+    if crate::web::api::ref_segment_ok(s) {
         Ok(())
     } else {
         Err(format!(
@@ -126,6 +118,49 @@ mod tests {
         assert!(ref_segment("actor", "-lead").is_err());
         assert!(ref_segment("actor", "x.lock").is_err());
         assert!(ref_segment("actor", "sp ace").is_err());
+        // The rule is the API's: whatever `ref_segment_ok` says, this says.
+        for name in ["alice", ".alice", "a..b", "alice.lock", "-x", "x/y", ""] {
+            assert_eq!(
+                ref_segment("actor", name).is_ok(),
+                crate::web::api::ref_segment_ok(name),
+                "{name:?}"
+            );
+        }
+    }
+
+    /// The guard the whole write tier rests on: an entry signed with a key that
+    /// is not the actor's registered key is refused before it is published.
+    #[test]
+    fn a_key_is_refused_unless_it_is_the_one_registered_for_the_actor() {
+        let right = SigningKey::from_bytes(&[3u8; 32]);
+        let wrong = SigningKey::from_bytes(&[4u8; 32]);
+        let registered = base64_encode(right.verifying_key().as_bytes());
+        let mut entry = walgit_wal::collab::Entry {
+            version: 1,
+            kind: "comment".into(),
+            id: "card-1".into(),
+            actor: "worker-1".into(),
+            ts: 1,
+            parent: String::new(),
+            refs: None,
+            body: serde_json::json!({}),
+            sig: String::new(),
+        };
+        entry.sig = walgit_wal::collab::sign_entry(&mut entry, &right);
+        assert!(check_binding("worker-1", Some(&registered), &entry, Path::new("w.ed25519")).is_ok());
+
+        entry.sig = walgit_wal::collab::sign_entry(&mut entry, &wrong);
+        let e = check_binding("worker-1", Some(&registered), &entry, Path::new("w.ed25519"))
+            .unwrap_err();
+        assert!(e.contains("not the key registered"), "{e}");
+
+        let e = check_binding("worker-1", None, &entry, Path::new("w.ed25519")).unwrap_err();
+        assert!(e.contains("no collab public key registered"), "{e}");
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
     #[test]

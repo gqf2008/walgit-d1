@@ -306,8 +306,9 @@ max_object_bytes = "16GiB"
                                    # there is no server identity. Omit the key and the MCP surface is read-only.
 subscribe_interval = "5s"         # one resource subscription = one conditional manifest read per repo per tick;
                                    # >= 1s (D55: the same refs-level lane `walgit collab watch` uses)
-max_subscriptions = 32             # live subscriptions per MCP session
+max_subscriptions = 32             # live subscriptions per caller (principal), across that caller's sessions
 session_ttl = "30m"               # an MCP session with no request and no open SSE stream is dropped after this
+                                   # (rmcp's session keep-alive; the session's subscriptions go with it)
 
 # Where a repository's history lives when it is not (all) here. Usually a per-repo setting
 # (`walgit repo settings set owner/name` → `[upstream] …`); one token for both services.

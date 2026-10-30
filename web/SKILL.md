@@ -164,8 +164,14 @@ host; `walgit config check|dump` validates or dumps the configuration;
 `walgit token list|add|rm` manages the static API tokens (`server.auth.tokens`)
 in that file — `add <principal> --token-env NAME [--no-write] [--admin]` keeps
 the secret out of the file, the edit is validated before it is written, and the
-server picks it up on restart. It cannot mint or revoke `wgt_…` access tokens:
-those come from `/_auth/tokens` (oidc sign-in) and are revoked only by rotating
+server picks it up on restart. `--force` replaces a principal's existing row,
+and it replaces only the **secret**: permissions stay as they were unless you
+say otherwise (`--write` / `--no-write`, `--admin` / `--no-admin`), so rotating
+a read-only token cannot quietly hand it write. A token value may belong to one
+principal only; a repeat is refused instead of written as a dead row. `rm` on
+the last token of a `mode = "token"` host refuses — it would lock every client
+out. It cannot mint or revoke `wgt_…` access tokens: those come from
+`/_auth/tokens` (oidc sign-in) and are revoked only by rotating
 `session_secret`.
 
 **Collaborate (`walgit collab …`)** — read: `ls`, `thread <id>`,

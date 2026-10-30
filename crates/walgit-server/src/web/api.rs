@@ -1148,7 +1148,15 @@ struct CollabPrincipalPost {
     public_key: String,
 }
 
-pub(crate) fn ref_segment_ok(s: &str) -> bool {
+/// The one rule for a name that becomes a ref path segment of its own
+/// (`refs/collab/inbox/<actor>/…`, `refs/collab/meta/principals/<principal>`).
+///
+/// Shared by every surface that can create such a segment or name a principal
+/// for one: the collab API (`collab_entries`, `collab_principal`), the MCP write
+/// tier (`mcp::signing::ref_segment`) and `walgit token add` — so what a client
+/// is allowed to name, and what an operator is allowed to configure, cannot drift
+/// apart.
+pub fn ref_segment_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 255
         && !s.contains("..") // git forbids `..` inside a component; the WAL

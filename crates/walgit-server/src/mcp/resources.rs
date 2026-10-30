@@ -256,9 +256,27 @@ pub fn templates() -> Vec<ResourceTemplate> {
 /// The refs-level seq of a repository: the version of *every* resource (they
 /// are all projections of the WAL). One conditional `manifest.pb` read, or a
 /// 304 when this instance's copy is fresh (`wal.freshness_ttl`).
-pub async fn version(st: &Arc<AppState>, uri: &Uri) -> Result<String, ErrorData> {
-    let (seq, _handle) = refs_level(st, uri.owner(), uri.repo()).await?;
+pub(super) async fn version(st: &Arc<AppState>, uri: &Uri) -> Result<String, PollError> {
+    let (seq, _handle) = refs_level_poll(st, uri.owner(), uri.repo()).await?;
     Ok(format!("seq:{seq}"))
+}
+
+/// Why a read failed: the repository is gone (so the resource *list* changed),
+/// or this instance cannot read it right now (transient). The distinction is
+/// what lets a subscription emit `list_changed` honestly instead of guessing
+/// (D64).
+pub(super) enum PollError {
+    Gone,
+    Other(ErrorData),
+}
+
+impl PollError {
+    pub(super) fn into_error_data(self) -> ErrorData {
+        match self {
+            Self::Gone => ErrorData::invalid_params("no such repository", None),
+            Self::Other(e) => e,
+        }
+    }
 }
 
 pub(super) async fn refs_level(
@@ -266,21 +284,35 @@ pub(super) async fn refs_level(
     owner: &str,
     repo: &str,
 ) -> Result<(u64, Arc<walgit_wal::RepoHandle>), ErrorData> {
-    let id = walgit_git::RepoId::new(owner, repo)
-        .map_err(|e| ErrorData::invalid_params(format!("{owner}/{repo}: {e}"), None))?;
-    let handle = st
-        .registry
-        .open(&id)
+    refs_level_poll(st, owner, repo)
         .await
-        .map_err(|e| ErrorData::internal_error(format!("opening {id}: {e}"), None))?;
+        .map_err(PollError::into_error_data)
+}
+
+async fn refs_level_poll(
+    st: &Arc<AppState>,
+    owner: &str,
+    repo: &str,
+) -> Result<(u64, Arc<walgit_wal::RepoHandle>), PollError> {
+    let id = walgit_git::RepoId::new(owner, repo)
+        .map_err(|e| PollError::Other(ErrorData::invalid_params(format!("{owner}/{repo}: {e}"), None)))?;
+    let handle = st.registry.open(&id).await.map_err(|e| match e {
+        walgit_wal::WalError::NotFound => PollError::Gone,
+        other => PollError::Other(ErrorData::internal_error(
+            format!("opening {id}: {other}"),
+            None,
+        )),
+    })?;
     // `read_log` (the WAL resource) and the manifest read both need the refs
     // phase; taking the guard here and dropping it immediately keeps the seq
     // consistent with the guard's own sync without holding it across I/O.
     {
-        let _guard = handle
-            .sync_refs()
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("syncing refs of {id}: {e}"), None))?;
+        let _guard = handle.sync_refs().await.map_err(|e| {
+            PollError::Other(ErrorData::internal_error(
+                format!("syncing refs of {id}: {e}"),
+                None,
+            ))
+        })?;
     }
     Ok((handle.applied_seq(), handle))
 }
@@ -353,8 +385,20 @@ pub async fn read(
         uri: uri_str.to_string(),
         mime_type: Some(JSON_MIME.to_string()),
         text: serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()),
-        meta: None,
+        // The version a subscriber compares: `web/SKILL.md` tells clients to
+        // read `_meta.version` and re-read when it moved, so it must be as
+        // stable across the four kinds as `resources/subscribe` was (it is the
+        // same refs-level seq the poller sends).
+        meta: Some(meta(&format!("seq:{seq}"))),
     })
+}
+
+/// `_meta` carrying the resource version (the value `resources/subscribe`
+/// notifies about).
+fn meta(version: &str) -> MetaObject {
+    let mut map = serde_json::Map::new();
+    map.insert("version".to_string(), Value::String(version.to_string()));
+    MetaObject(map)
 }
 
 /// The WAL window from `from` (0 = the newest page), bounded by [`WAL_PAGE`].

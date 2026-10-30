@@ -236,15 +236,74 @@ fn schema(properties: &Value, required: &Value) -> Value {
     })
 }
 
-/// `tools/list`.
-pub fn list(write: bool) -> Value {
-    json!({
-        "tools": defs(write).into_iter().map(|t| json!({
-            "name": t.name,
-            "description": t.description,
-            "inputSchema": t.schema,
-        })).collect::<Vec<_>>()
-    })
+/// The tool surface as one closed set. Every tool has a name, a tier and an arm
+/// in [`run`]; the dispatch match is exhaustive over this enum, so a tool can
+/// neither be advertised without an implementation nor implemented without
+/// being advertised (the test below pins the schema table to it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    RepoList,
+    RepoOwners,
+    RepoRefs,
+    RepoResolve,
+    RepoTree,
+    RepoBlob,
+    RepoCommits,
+    RepoDiff,
+    CollabBoard,
+    CollabThread,
+    CollabReport,
+    WalLs,
+    CollabEntry,
+    CollabClaim,
+}
+
+const ALL: [Kind; 14] = [
+    Kind::RepoList,
+    Kind::RepoOwners,
+    Kind::RepoRefs,
+    Kind::RepoResolve,
+    Kind::RepoTree,
+    Kind::RepoBlob,
+    Kind::RepoCommits,
+    Kind::RepoDiff,
+    Kind::CollabBoard,
+    Kind::CollabThread,
+    Kind::CollabReport,
+    Kind::WalLs,
+    Kind::CollabEntry,
+    Kind::CollabClaim,
+];
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RepoList => "repo_list",
+            Self::RepoOwners => "repo_owners",
+            Self::RepoRefs => "repo_refs",
+            Self::RepoResolve => "repo_resolve",
+            Self::RepoTree => "repo_tree",
+            Self::RepoBlob => "repo_blob",
+            Self::RepoCommits => "repo_commits",
+            Self::RepoDiff => "repo_diff",
+            Self::CollabBoard => "collab_board",
+            Self::CollabThread => "collab_thread",
+            Self::CollabReport => "collab_report",
+            Self::WalLs => "wal_ls",
+            Self::CollabEntry => "collab_entry",
+            Self::CollabClaim => "collab_claim",
+        }
+    }
+
+    /// The write tier: advertised (and callable) only when this host can sign
+    /// for a caller (`mcp.key_dir`), per D49.
+    fn write(self) -> bool {
+        matches!(self, Self::CollabEntry | Self::CollabClaim)
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        ALL.into_iter().find(|k| k.name() == name)
+    }
 }
 
 /// Hold `arguments` to the schema the tool advertises — the same rules the
@@ -357,8 +416,15 @@ async fn run(
 ) -> Result<Value, ToolError> {
     let call = Call::new(st, headers);
     let p = |path: String| async move { call.get(&path).await.map_err(ToolError::exec) };
-    match name {
-        "repo_list" => {
+    let kind = Kind::parse(name)
+        .ok_or_else(|| ToolError::invalid(format!("unknown tool `{name}`")))?;
+    // `tools/list` hides the write tier when this host cannot sign for a caller;
+    // a call by name must not reach what the list hides (D49).
+    if kind.write() && st.cfg.mcp.key_dir.is_none() {
+        return Err(ToolError::invalid(format!("unknown tool `{name}`")));
+    }
+    match kind {
+        Kind::RepoList => {
             let mut repos = st
                 .registry
                 .list()
@@ -371,7 +437,7 @@ async fn run(
                 })).collect::<Vec<_>>()
             }))
         }
-        "repo_owners" => match str_arg(args, "owner") {
+        Kind::RepoOwners => match str_arg(args, "owner") {
             Some(owner) => p(format!("/services/api/owners/{}", enc(owner)))
                 .await
                 .map(|v| json!({ "owner": owner, "repos": v })),
@@ -379,7 +445,7 @@ async fn run(
                 .await
                 .map(|v| json!({ "owners": v })),
         },
-        "repo_refs" => {
+        Kind::RepoRefs => {
             let (owner, repo) = repo_arg(args)?;
             let base = format!("/{}/{}", enc(&owner), enc(&repo));
             match str_arg(args, "kind") {
@@ -393,7 +459,7 @@ async fn run(
                 ))),
             }
         }
-        "repo_resolve" => {
+        Kind::RepoResolve => {
             let (owner, repo) = repo_arg(args)?;
             let rev = str_arg(args, "rev").ok_or_else(|| ToolError::invalid("`rev` is required"))?;
             p(format!(
@@ -404,7 +470,7 @@ async fn run(
             ))
             .await
         }
-        "repo_tree" => {
+        Kind::RepoTree => {
             let (owner, repo) = repo_arg(args)?;
             let rev = str_arg(args, "rev").ok_or_else(|| ToolError::invalid("`rev` is required"))?;
             let mut spec = enc(rev);
@@ -414,7 +480,7 @@ async fn run(
             }
             p(format!("/{}/{}/api/tree/{}", enc(&owner), enc(&repo), spec)).await
         }
-        "repo_blob" => {
+        Kind::RepoBlob => {
             let (owner, repo) = repo_arg(args)?;
             let rev = str_arg(args, "rev").ok_or_else(|| ToolError::invalid("`rev` is required"))?;
             let path = str_arg(args, "path").ok_or_else(|| ToolError::invalid("`path` is required"))?;
@@ -427,7 +493,7 @@ async fn run(
             ))
             .await
         }
-        "repo_commits" => {
+        Kind::RepoCommits => {
             let (owner, repo) = repo_arg(args)?;
             let q = query(&[
                 ("ref", str_arg(args, "ref").map(std::string::ToString::to_string)),
@@ -437,7 +503,7 @@ async fn run(
             ]);
             p(format!("/{}/{}/api/commits{}", enc(&owner), enc(&repo), q)).await
         }
-        "repo_diff" => {
+        Kind::RepoDiff => {
             let (owner, repo) = repo_arg(args)?;
             let from = str_arg(args, "from").ok_or_else(|| ToolError::invalid("`from` is required"))?;
             let to = str_arg(args, "to").ok_or_else(|| ToolError::invalid("`to` is required"))?;
@@ -448,11 +514,11 @@ async fn run(
             ]);
             p(format!("/{}/{}/api/diff{}", enc(&owner), enc(&repo), q)).await
         }
-        "collab_board" => {
+        Kind::CollabBoard => {
             let (owner, repo) = repo_arg(args)?;
             p(format!("/{}/{}/api/collab/board", enc(&owner), enc(&repo))).await
         }
-        "collab_thread" => {
+        Kind::CollabThread => {
             let (owner, repo) = repo_arg(args)?;
             let id = str_arg(args, "id").ok_or_else(|| ToolError::invalid("`id` is required"))?;
             p(format!(
@@ -463,40 +529,59 @@ async fn run(
             ))
             .await
         }
-        "collab_report" => {
+        Kind::CollabReport => {
             let (owner, repo) = repo_arg(args)?;
             p(format!("/{}/{}/api/collab/report", enc(&owner), enc(&repo))).await
         }
-        "wal_ls" => {
+        Kind::WalLs => {
             let (owner, repo) = repo_arg(args)?;
-            let (head, handle) = super::resources::refs_level(st, &owner, &repo)
+            let (_, handle) = super::resources::refs_level(st, &owner, &repo)
                 .await
                 .map_err(|e| ToolError::Execution(e.to_string()))?;
-            let from = u64_arg(args, "from")
-                .unwrap_or_else(|| head.saturating_sub(199).max(1));
-            let to = u64_arg(args, "to").unwrap_or(from.saturating_add(199)).min(head);
-            let entries = handle
-                .read_log(from, Some(to))
+            // One window definition, shared with the `walgit://wal/…` resource:
+            // `from` unset means the newest page, and the span is `WAL_PAGE`.
+            let from = u64_arg(args, "from").unwrap_or(0);
+            let (entries, head_seq) = super::resources::wal_page(&handle, from)
                 .await
-                .map_err(|e| ToolError::Execution(format!("reading the WAL log: {e}")))?;
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            let first = entries
+                .first()
+                .and_then(|e| e.get("seq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(head_seq);
+            let last = entries
+                .last()
+                .and_then(|e| e.get("seq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(first);
+            // An explicit `to` narrows the page to what the caller asked for.
+            let (entries, last) = match u64_arg(args, "to") {
+                Some(to) if to >= first && to < last => {
+                    let kept = entries
+                        .into_iter()
+                        .filter(|e| e.get("seq").and_then(Value::as_u64).unwrap_or(0) <= to)
+                        .collect::<Vec<_>>();
+                    (kept, to)
+                }
+                _ => (entries, last),
+            };
             Ok(json!({
                 "repo": format!("{owner}/{repo}"),
-                "head_seq": head,
-                "from": from,
-                "to": to,
-                "more": to < head,
-                "entries": entries.iter().map(super::resources::entry_json).collect::<Vec<_>>(),
+                "head_seq": head_seq,
+                "from": first,
+                "to": last,
+                "more": last < head_seq,
+                "entries": entries,
             }))
         }
-        "collab_entry" => {
+        Kind::CollabEntry => {
             let (owner, repo) = repo_arg(args)?;
             write_entry(st, headers, principal, &owner, &repo, args).await
         }
-        "collab_claim" => {
+        Kind::CollabClaim => {
             let (owner, repo) = repo_arg(args)?;
             write_claim(st, headers, principal, session, &owner, &repo, args).await
         }
-        other => Err(ToolError::invalid(format!("unhandled tool {other}"))),
     }
 }
 
@@ -748,9 +833,12 @@ fn claim_entry(id: &str, actor: &str, key: &ed25519_dalek::SigningKey, body: Val
 
 /// The write is the caller's own act (the inner API enforces the same rule;
 /// this fails before a signature is produced, with a sentence that says why).
+///
+/// There is deliberately no `"anon"` exemption: `auth.mode = "none"` already
+/// names the caller `anon`, and a `tokens[]` row *called* `anon` must not become
+/// a way to write as somebody else. The API's `actor == caller` is the gate.
 fn require_own_actor(principal: &str, actor: &str, verb: &str) -> Result<(), ToolError> {
-    // `auth.mode = "none"` (loopback dev, D39) has no distinct identity.
-    if principal == "anon" || actor == principal {
+    if actor == principal {
         return Ok(());
     }
     Err(ToolError::Execution(format!(
@@ -842,9 +930,28 @@ mod tests {
     #[test]
     fn a_write_must_be_the_callers_own_actor() {
         assert!(require_own_actor("worker-1", "worker-1", "write as").is_ok());
-        // `mode = "none"` presents every caller as `anon`.
-        assert!(require_own_actor("anon", "anything", "write as").is_ok());
+        // `mode = "none"` presents every caller as `anon`, which is a name like
+        // any other — it earns no exemption.
+        assert!(require_own_actor("anon", "anon", "write as").is_ok());
+        assert!(require_own_actor("anon", "coordinator", "write as").is_err());
         let e = require_own_actor("worker-1", "coordinator", "write as").unwrap_err();
         assert!(format!("{e:?}").contains("coordinator"), "{e:?}");
+    }
+
+    #[test]
+    fn the_schema_table_and_the_dispatch_table_name_the_same_tools() {
+        // `defs` carries descriptions and schemas; `Kind` carries names, tiers
+        // and dispatch. This is what keeps the two from drifting apart.
+        let from_defs: Vec<&str> = defs(true).into_iter().map(|t| t.name).collect();
+        let from_kind: Vec<&str> = ALL.iter().map(|k| k.name()).collect();
+        assert_eq!(from_defs, from_kind, "defs() and Kind disagree");
+        for t in defs(true) {
+            let kind = Kind::parse(t.name).expect("defs() named an unknown tool");
+            assert_eq!(t.write, kind.write(), "{}", t.name);
+        }
+        // The read tier is exactly the tools that are not writes.
+        let read: Vec<&str> = defs(false).into_iter().map(|t| t.name).collect();
+        assert!(read.iter().all(|n| !Kind::parse(n).unwrap().write()));
+        assert_eq!(read.len(), ALL.len() - 2);
     }
 }

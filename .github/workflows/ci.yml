@@ -156,50 +156,6 @@ jobs:
       # the script (control fields, layout, naming) on every PR with debug binaries,
       # the way a tag build would with release ones (issue #108). Build the bins
       # explicitly: the earlier steps' test builds may not leave plain executables.
-      # D49: the MCP adapter is a stdio protocol. The unit tests cover the message
-      # layer in-process; this covers the *binary* speaking it — framing, no reply
-      # to notifications, and the read-only surface (a writing tool must not be
-      # listed until `--allow-write`).
-      - name: MCP stdio smoke
-        run: |
-          # The earlier steps build test binaries; make sure the plain executable
-          # exists before piping a session into it.
-          cargo build -q -p walgit-cli --bin walgit
-          printf '%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-            "{not json" \
-            '{"jsonrpc":"2.0","id":3,"method":"nope"}' \
-            | RUST_LOG=walgit=trace timeout 30 target/debug/walgit mcp --config walgit.example.toml > mcp-smoke.jsonl 2> mcp-smoke.err
-          # The tracing smoke is only real if a trace level known to be emitted
-          # reaches stderr. Without this, an empty stderr (or logs accidentally
-          # on stdout) could still read green.
-          test -s mcp-smoke.err || { echo "MCP smoke stderr is empty — tracing smoke is vacuous"; exit 1; }
-          grep -Fq 'mcp stdio ready' mcp-smoke.err
-          python3 - <<'PY'
-          import json
-          lines = [json.loads(l) for l in open("mcp-smoke.jsonl")]
-          assert len(lines) == 4, lines  # the notification must not produce a reply
-          assert all(l.get("jsonrpc") == "2.0" for l in lines), lines
-          init, tools, bad, unknown = lines
-          # stdout is a JSON-RPC stream: with `RUST_LOG=walgit=trace` set, a
-          # single tracing line landing there would make this parse fail. (Logs
-          # go to stderr; `walgit mcp` installs a stderr subscriber for exactly
-          # this reason.)
-          #
-          # Ids come back in order, and the reply to the *last* request proves the
-          # session kept going rather than stopping at the first one.
-          assert [l["id"] for l in lines] == [1, 2, None, 3], lines
-          assert init["result"]["protocolVersion"] == "2024-11-05", init
-          names = [t["name"] for t in tools["result"]["tools"]]
-          assert "repo_tree" in names, names
-          assert "collab_entry" not in names, names
-          assert bad["error"]["code"] == -32700, bad
-          assert unknown["error"]["code"] == -32601, unknown
-          print(f"MCP smoke OK - {len(names)} read-only tools")
-          PY
-          python3 scripts/mcp-subscribe-smoke.py target/debug/walgit walgit.example.toml
       - name: Assemble and inspect the linux .deb
         run: |
           cargo build --workspace --bin walgit --bin walgit-server
@@ -274,26 +230,6 @@ jobs:
           done
       - name: S3 store contract
         run: just test-s3
-      # The MCP WAL resource probe is store-direct, so exercise it against the
-      # same rustfs bucket with a real server push and a real manifest head
-      # change. The local refs/collab smoke still runs without a server in the
-      # warnings+test job; this leg adds only the WAL-specific case.
-      - name: MCP WAL subscription smoke
-        run: |
-          cargo build -q -p walgit-cli --bin walgit --bin walgit-server
-          export AWS_ACCESS_KEY_ID=walgit-dev
-          export AWS_SECRET_ACCESS_KEY=walgit-dev-secret
-          PORT=18080 target/debug/walgit-server --config walgit.standalone.toml > mcp-wal-server.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          for _ in $(seq 1 30); do
-            curl -sfk https://127.0.0.1:18080/healthz && break
-            sleep 1
-          done
-          curl -sfk https://127.0.0.1:18080/healthz >/dev/null
-          GIT_SSL_NO_VERIFY=1 WALGIT_URL=https://127.0.0.1:18080 \
-            python3 scripts/mcp-subscribe-smoke.py \
-              target/debug/walgit walgit.standalone.toml "owner/repo"
 
   # Bounded TLA+/TLC contract checks (docs/spec/README.md). Only the first-
   # batch models run here; the model set lives in the justfile

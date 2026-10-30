@@ -3,12 +3,20 @@
 //! The tokens live in the same `walgit.toml` the next boot reads (D8 — one
 //! config file, one auth story), so this command is the CLI's write half of a
 //! file that the server only ever reads: it edits the document in place
-//! through `toml_edit` (comments and ordering survive — a serialize-from-struct
-//! round trip would drop both), validates the **composed** file exactly the way
-//! the next start will (`Config::parse`), and only then replaces the file
-//! atomically through the same 0600 temp-plus-rename path the setup wizard and
-//! the storage editor use (D43/D44). A torn or invalid `walgit.toml` strands
-//! the instance, so the write is last.
+//! through `toml_edit` (comments and ordering elsewhere in the file survive —
+//! a serialize-from-struct round trip would drop both), validates the
+//! **composed** document with `Config::parse_document` (TOML + `validate()`, no
+//! `WALGIT__*` env: a file must stand on its own, the operator's shell is not
+//! the server's), and only then replaces the file atomically through the same
+//! 0600 temp-plus-rename path the setup wizard and the storage editor use
+//! (D43/D44). A torn or invalid `walgit.toml` strands the instance, so the
+//! write is last.
+//!
+//! One thing is *not* preserved: the file's two shapes for the list are
+//! `tokens = [{…}]` and `[[server.auth.tokens]]`, and this command always writes
+//! the inline array — so comments attached to individual `[[server.auth.tokens]]`
+//! rows are lost when a row changes. Comments anywhere else in the file, and
+//! comments inside an already-inline list, are untouched.
 //!
 //! What a token is: a `principal` (the name that appears in the WAL, in
 //! `X-Walgit-Principal` and in collab entries), `write` (push; default true)
@@ -38,8 +46,10 @@ pub fn run(action: TokenAction, cfg: &Arc<Config>, config_path: &Path) -> Result
             token,
             token_env,
             token_stdin,
+            write,
             no_write,
             admin,
+            no_admin,
             force,
         } => {
             let secret = Secret::resolve(token, token_env, token_stdin)?;
@@ -47,12 +57,24 @@ pub fn run(action: TokenAction, cfg: &Arc<Config>, config_path: &Path) -> Result
                 config_path,
                 &principal,
                 &secret,
-                !no_write,
-                admin,
+                flag(write, no_write),
+                flag(admin, no_admin),
                 force,
+                cfg.server.auth.mode,
             )
         }
         TokenAction::Rm { principal, force } => rm(config_path, &principal, force),
+    }
+}
+
+/// `(positive, negative)` flag pair → `Some(true)` / `Some(false)` / `None`
+/// when the operator said nothing. `None` is what lets `add --force` keep the
+/// replaced row's permissions instead of silently resetting them.
+fn flag(yes: bool, no: bool) -> Option<bool> {
+    match (yes, no) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
     }
 }
 
@@ -156,10 +178,14 @@ fn list(cfg: &Config) {
     }
     println!("{:<24} {:>5} {:>5}  SECRET", "PRINCIPAL", "WRITE", "ADMIN");
     for t in &auth.tokens {
-        let secret = match &t.token_env {
-            Some(name) if t.token.is_empty() => match std::env::var(name) {
-                Ok(_) => format!("env {name}"),
-                Err(_) => format!("env {name} (unset in this shell)"),
+        // `token_env` wins over a literal when both are set (`auth.rs`
+        // `resolve_tokens`), so the listing must not claim the literal is in use.
+        let secret = match (&t.token_env, t.token.is_empty()) {
+            (Some(name), _) if !name.is_empty() => match std::env::var(name) {
+                Ok(_) if t.token.is_empty() => format!("env {name}"),
+                Ok(_) => format!("env {name} (overrides the literal in walgit.toml)"),
+                Err(_) if t.token.is_empty() => format!("env {name} (unset in this shell)"),
+                Err(_) => format!("env {name} (unset here; the literal fallback is in use)"),
             },
             _ if t.token.is_empty() => "MISSING (no token, no token_env)".to_string(),
             _ => "literal in walgit.toml".to_string(),
@@ -189,9 +215,10 @@ fn add(
     config_path: &Path,
     principal: &str,
     secret: &Secret,
-    write: bool,
-    admin: bool,
+    write: Option<bool>,
+    admin: Option<bool>,
     force: bool,
+    mode: AuthMode,
 ) -> Result<()> {
     check_principal(principal)?;
     // `anon` is what an unauthenticated request is called (auth.rs); a token
@@ -200,8 +227,24 @@ fn add(
     if principal == "anon" {
         bail!("`anon` is the name of an unauthenticated request; pick a real principal name");
     }
-    let row = secret.row(principal, write, admin);
+    let mut replaced: Option<(bool, bool)> = None;
+    let mut write_out = write.unwrap_or(true);
+    let mut admin_out = admin.unwrap_or(false);
     save_rows(config_path, SAVE_ADD, |rows| {
+        // A repeated *value* is never consulted (first match wins), so refuse it
+        // here rather than let a dead row into the file. The file validator
+        // says the same thing on the next boot.
+        if let Secret::Literal(v) = secret
+            && let Some(other) = rows.iter().find(|r| {
+                principal_of(r) != Some(principal)
+                    && r.get("token").and_then(Value::as_str) == Some(v.as_str())
+            })
+        {
+            bail!(
+                "that token value is already in use by {:?}; give `{principal}` its own",
+                principal_of(other).unwrap_or("another principal")
+            );
+        }
         match rows.iter().rposition(|r| principal_of(r) == Some(principal)) {
             Some(_) if !force => bail!(
                 "`{principal}` already has a token in {}; pass --force to replace it,\n\
@@ -209,25 +252,45 @@ fn add(
                 config_path.display()
             ),
             Some(i) => {
+                // A replacement changes the *secret*; permissions stay as they
+                // were unless the operator said otherwise, so rotating a
+                // read-only token cannot silently hand it write.
+                let old = rows.get(i).map(|r| (permission(r, "write", true), permission(r, "admin", false)));
+                if let Some((w, a)) = old {
+                    replaced = Some((w, a));
+                    write_out = write.unwrap_or(w);
+                    admin_out = admin.unwrap_or(a);
+                }
+                let row = secret.row(principal, write_out, admin_out);
                 rows.retain(|r| principal_of(r) != Some(principal));
-                rows.insert(i.min(rows.len()), row.clone());
+                rows.insert(i.min(rows.len()), row);
                 Ok(1)
             }
             None => {
-                rows.push(row.clone());
+                rows.push(secret.row(principal, write_out, admin_out));
                 Ok(1)
             }
         }
     })?;
+    let kept = match replaced {
+        Some(_) if write.is_none() || admin.is_none() => " (permissions kept from the replaced row)",
+        _ => "",
+    };
     println!(
-        "added token for `{principal}` (write {}, admin {}, {}) to {}",
-        yes(write),
-        yes(admin),
+        "added token for `{principal}` (write {}, admin {}, {}) to {}{kept}",
+        yes(write_out),
+        yes(admin_out),
         secret.describe(),
         config_path.display()
     );
+    hint_for_mode(mode);
     restart_note();
     Ok(())
+}
+
+/// A permission column of a token row, defaulted the way the server defaults it.
+fn permission(row: &InlineTable, key: &str, default: bool) -> bool {
+    row.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
 fn rm(config_path: &Path, principal: &str, force: bool) -> Result<()> {
@@ -290,18 +353,38 @@ where
     set_tokens(&mut doc, rows)?;
     let composed = doc.to_string();
     // Validate first, write second: a file that would not boot is never
-    // installed. `Config::parse` is the exact sequence the next start runs —
-    // TOML, then `WALGIT__*` env, then `validate()`.
-    Config::parse(&composed).with_context(|| {
-        format!(
-            "the edited {} would not start; nothing was written (fix the file and retry)",
-            config_path.display()
-        )
+    // installed. `parse_document` is the file on its own — TOML, then
+    // `validate()` — deliberately **without** this shell's `WALGIT__*` env, so
+    // an environment variable cannot bless a file that would not boot on a host
+    // without it.
+    Config::parse_document(&composed).map_err(|e| {
+        let detail = format!("{e:#}");
+        if detail.contains("at least one token") {
+            anyhow::anyhow!(
+                "{} would be left with no token while `server.auth.mode = \"token\"`, which \
+                 locks every client out. Add the replacement first, set \
+                 `server.auth.mode = \"none\"`/`\"oidc\"`, or write the file by hand. Nothing \
+                 was written ({detail})",
+                config_path.display()
+            )
+        } else {
+            anyhow::anyhow!(
+                "the edited {} would not start; nothing was written. Cause: {detail}",
+                config_path.display()
+            )
+        }
     })?;
-    if composed != text {
-        walgit_server::setup_wizard::write_atomic(config_path, &composed)
-            .map_err(|e| anyhow::anyhow!("writing {}: {e}", config_path.display()))?;
+    if composed == text {
+        // The edit asked for what the file already says (e.g. `--force`
+        // re-creating an identical row): say so instead of reporting a write.
+        eprintln!(
+            "note: {} already said exactly that, so the file was left unchanged",
+            config_path.display()
+        );
+        return Ok(changed);
     }
+    walgit_server::setup_wizard::write_atomic(config_path, &composed)
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", config_path.display()))?;
     Ok(changed)
 }
 
@@ -366,8 +449,10 @@ fn principal_of(row: &InlineTable) -> Option<&str> {
 }
 
 /// A principal name travels into URLs, log lines, `X-Walgit-Principal`, ref
-/// paths (`refs/collab/inbox/<actor>/…`) and key file names, so it is held to
-/// the shape those all accept.
+/// paths (`refs/collab/inbox/<actor>/…`), `<principal>.ed25519` key file names
+/// and the MCP write gate, so it is held to **the** ref-segment rule the server
+/// applies (`walgit_server::web::api::ref_segment_ok`) rather than a looser copy
+/// of it — a name this accepts is a name every one of those accepts.
 fn check_principal(principal: &str) -> Result<()> {
     if principal.is_empty() {
         bail!("the principal name is empty");
@@ -375,12 +460,10 @@ fn check_principal(principal: &str) -> Result<()> {
     if principal.len() > 128 {
         bail!("the principal name is longer than 128 bytes");
     }
-    if !principal
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
-    {
+    if !walgit_server::web::api::ref_segment_ok(principal) {
         bail!(
-            "`{principal}`: a principal name is ASCII letters, digits, `-`, `_`, `.` and `@` \
+            "`{principal}`: a principal name is ASCII letters, digits, `-`, `_`, `.` and `@`, \
+             starting with a letter or digit, without `..` and without a `.lock` suffix \
              (it becomes a ref path segment and a key file name)"
         );
     }
@@ -471,6 +554,104 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A token-mode config whose `[server.auth]` already holds `tokens`
+    /// (an empty string for none).
+    fn token_mode_config(tokens: &str) -> String {
+        format!(
+            "[server]\nlisten = \"127.0.0.1:8080\"\n\n[server.auth]\nmode = \"token\"\n{tokens}\n\n\
+             [store]\nbackend = \"memory\"\nmemory_backend_intentional = true\n"
+        )
+    }
+
+    /// `add` → the file, not just `set_tokens` in memory: the ordering
+    /// (read → edit → validate → write) is what the command is.
+    #[test]
+    fn adding_a_token_writes_a_file_the_server_can_boot_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("walgit.toml");
+        std::fs::write(&path, token_mode_config("")).unwrap();
+        add(
+            &path,
+            "alice",
+            &Secret::Literal("a1".to_string()),
+            None,
+            Some(true),
+            false,
+            AuthMode::Token,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let t = &cfg.server.auth.tokens[0];
+        assert_eq!(t.principal, "alice");
+        assert_eq!(t.token, "a1");
+        assert!(t.write, "write defaults on");
+        assert!(t.admin);
+    }
+
+    /// A rotation changes the secret, not the permissions: `--force` without a
+    /// permission flag must not hand a read-only token the write bit.
+    #[test]
+    fn a_replacement_keeps_the_permissions_it_did_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("walgit.toml");
+        std::fs::write(
+            &path,
+            token_mode_config(
+                "tokens = [{ principal = \"alice\", token = \"old\", write = false }]"
+            ),
+        )
+        .unwrap();
+        add(
+            &path,
+            "alice",
+            &Secret::Literal("new".to_string()),
+            None,
+            None,
+            true,
+            AuthMode::Token,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.server.auth.tokens[0].token, "new");
+        assert!(!cfg.server.auth.tokens[0].write, "permissions were kept");
+    }
+
+    #[test]
+    fn a_repeated_token_value_is_refused_before_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("walgit.toml");
+        let before =
+            token_mode_config("tokens = [{ principal = \"alice\", token = \"same\" }]");
+        std::fs::write(&path, &before).unwrap();
+        let err = add(
+            &path,
+            "bob",
+            &Secret::Literal("same".to_string()),
+            None,
+            None,
+            false,
+            AuthMode::Token,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("already in use by \"alice\""), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// The most likely `rm` is the last one, and it would lock every client out.
+    #[test]
+    fn removing_the_last_token_names_the_lockout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("walgit.toml");
+        std::fs::write(
+            &path,
+            token_mode_config("tokens = [{ principal = \"alice\", token = \"a1\" }]"),
+        )
+        .unwrap();
+        let err = rm(&path, "alice", false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("locks every client out"), "{text}");
     }
 
     #[test]

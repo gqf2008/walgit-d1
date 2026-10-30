@@ -682,3 +682,106 @@ async fn a_repository_that_does_not_exist_is_a_tool_error_not_a_crash() -> Resul
     assert!(!text.is_empty(), "{out}");
     Ok(())
 }
+
+/// Every advertised read tool must actually answer for a real repository: the
+/// tool table is the surface an agent trusts, and a name that only exists in
+/// `tools/list` is a lie the suite would not otherwise catch (D49's rule — a
+/// call cannot reach what the list hides, and the list must not hide a name that
+/// has no implementation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<()> {
+    let server = Server::start().await?;
+    server.put_repo("t", "all").await?;
+    let src = push_repo(&server, "t", "all", 2)?;
+    let head = git_in(&src, &["rev-parse", "main"])?.trim().to_string();
+    let sid = initialize(&server).await?;
+
+    let tools = call(&server, &sid, "tools/list", json!({})).await?;
+    let names: Vec<String> = tools["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
+    // Read tier only: this host has no `mcp.key_dir`.
+    assert!(!names.iter().any(|n| n == "collab_entry"), "{names:?}");
+
+    for name in &names {
+        let arguments = match name.as_str() {
+            "repo_list" => json!({}),
+            "repo_owners" => json!({"owner": "t"}),
+            "repo_refs" | "collab_board" | "collab_report" | "wal_ls" => json!({"repo": "t/all"}),
+            "repo_resolve" => json!({"repo": "t/all", "rev": "main"}),
+            "repo_tree" => json!({"repo": "t/all", "rev": &head}),
+            "repo_blob" => json!({"repo": "t/all", "rev": &head, "path": "f0_0.txt"}),
+            "repo_commits" => json!({"repo": "t/all", "n": 5}),
+            "repo_diff" => json!({"repo": "t/all", "from": &head, "to": &head}),
+            "collab_thread" => json!({"repo": "t/all", "id": "no-such-thread"}),
+            other => anyhow::bail!("the tool table advertised `{other}` with no case in this test"),
+        };
+        let out = call(
+            &server,
+            &sid,
+            "tools/call",
+            json!({"name": name, "arguments": arguments}),
+        )
+        .await?;
+        // A missing thread is a tool *error* by design; everything else answers.
+        if name == "collab_thread" {
+            continue;
+        }
+        assert_ne!(out["isError"], true, "{name}: {out}");
+        let text = out["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(!text.is_empty(), "{name} answered with nothing: {out}");
+        // Every read tool's payload is JSON the model can parse.
+        serde_json::from_str::<Value>(text)
+            .unwrap_or_else(|e| panic!("{name} did not answer with JSON: {e}: {text}"));
+    }
+    Ok(())
+}
+
+/// Two sessions of the same principal may subscribe to the same URI: the
+/// registry is keyed by (principal, session, uri), so the second one is not
+/// silently swallowed by the first — a client that reconnected would otherwise
+/// get a success and no notifications forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sessions_of_one_caller_can_watch_the_same_resource() -> Result<()> {
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.mcp.subscribe_interval = Duration::from_secs(1);
+    })
+    .await?;
+    server.put_repo("t", "twice").await?;
+    let src = push_repo(&server, "t", "twice", 1)?;
+    let one = initialize(&server).await?;
+    let two = initialize(&server).await?;
+    let uri = "walgit://refs/t/twice";
+    for sid in [&one, &two] {
+        call(
+            &server,
+            sid,
+            "resources/subscribe",
+            json!({"uri": uri}),
+        )
+        .await?;
+    }
+    // Both streams are held open before the refs move, so neither can be a
+    // notification that only the first subscriber received.
+    let url = format!("{}/mcp", server.base_url);
+    let mut readers = Vec::new();
+    for sid in [one.clone(), two.clone()] {
+        let url = url.clone();
+        readers.push(tokio::spawn(async move {
+            wait_for_updated(&url, &sid, Duration::from_secs(20)).await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::fs::write(src.join("f0_0.txt"), b"second\n")?;
+    git_in(&src, &["add", "-A"])?;
+    git_in(&src, &["-c", "commit.gpgsign=false", "commit", "-qm", "second"])?;
+    git_in(&src, &["push", "-q", "origin", "main"])?;
+    for (i, reader) in readers.into_iter().enumerate() {
+        let seen = reader.await?;
+        assert!(seen, "session {i} was not notified");
+    }
+    Ok(())
+}
