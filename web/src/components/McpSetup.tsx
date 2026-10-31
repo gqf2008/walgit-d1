@@ -124,6 +124,18 @@ export function mcpSubscribe(endpoint: string, uri: string): string {
   ].join("\n");
 }
 
+/** The stream the notifications arrive on: one `GET /mcp`, held open with the
+ * session the handshake minted. Without it a subscription answers success and
+ * delivers nothing, which is the failure this line exists to prevent. */
+export function mcpStream(endpoint: string): string {
+  return [
+    `curl -N ${endpoint} \\`,
+    '  -H "Authorization: Bearer ${WALGIT_TOKEN}" \\',
+    '  -H "Accept: text/event-stream" \\',
+    '  -H "mcp-session-id: <Mcp-Session-Id from the handshake>"',
+  ].join("\n");
+}
+
 /** What arrives on the notification stream once the watched URI moves. */
 export function mcpNotification(uri: string): string {
   return [
@@ -157,8 +169,12 @@ export function McpSetup({ full }: { full: string }) {
         </p>
         <p className="cmds-note">{t("mcp.resources.note", { repo: full })}</p>
         <div className="box-header">{t("mcp.subscribe")}</div>
+        <CodeBlock code={mcpSubscribe(endpoint, `walgit://refs/${full}`)} />
         <CodeBlock code={mcpSubscribe(endpoint, `walgit://collab/board/${full}`)} />
         <p className="cmds-note">{t("mcp.subscribe.note")}</p>
+        <div className="box-header">{t("mcp.stream")}</div>
+        <CodeBlock code={mcpStream(endpoint)} />
+        <p className="cmds-note">{t("mcp.stream.note")}</p>
         <div className="box-header">{t("mcp.notify")}</div>
         <CodeBlock code={mcpNotification(`walgit://collab/board/${full}`)} />
         <p className="cmds-note">{t("mcp.notify.note")}</p>

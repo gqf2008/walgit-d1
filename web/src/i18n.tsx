@@ -61,10 +61,13 @@ const en = {
     "Two headers are required: Accept must list both application/json and text/event-stream, and Content-Type must be application/json. The answer carries Mcp-Session-Id — send it back on every later request and on the GET stream that receives notifications.",
   "mcp.resources": "Resources",
   "mcp.resources.note":
-    "Resources are refs-level JSON: {repo} is this repository, and any other repository takes the same shape. resources/subscribe watches one URI server-side and pushes notifications/resources/updated when the WAL moves — a bounded poll, best-effort, per instance.",
+    "Resources are refs-level JSON: {repo} is this repository, and any other repository takes the same shape. A subscription watches one URI server-side and pushes notifications/resources/updated when the WAL moves — a bounded poll, best-effort, per instance. Two cover a project: refs (every git action and inbox entry) and board (the whole projection).",
   "mcp.subscribe": "Subscribe (watch one URI)",
   "mcp.subscribe.note":
     "resources/unsubscribe takes the same body with method resources/unsubscribe. A subscription is a bounded server-side poll of the refs level, not a held request: it survives nothing, so a reconnecting client re-reads the URI once and continues.",
+  "mcp.stream": "Open the notification stream",
+  "mcp.stream.note":
+    "One held GET per session: subscriptions push their notifications here. Without it resources/subscribe answers success and delivers nothing — the stream, not the subscription, is what a client keeps open.",
   "mcp.notify": "What arrives on the GET stream",
   "mcp.notify.note":
     "The notification carries the URI only — read the resource and compare _meta.version to see what changed. notifications/resources/list_changed means a watched repository disappeared (deleted or renamed); re-read resources/list.",
@@ -830,10 +833,13 @@ const zhCN: Record<I18nKey, string> = {
     "两个请求头是必须的：Accept 要同时列出 application/json 与 text/event-stream，Content-Type 要是 application/json。应答里带 Mcp-Session-Id —— 之后的每个请求，以及接收通知的 GET 流，都要把它带回来。",
   "mcp.resources": "资源",
   "mcp.resources.note":
-    "资源是 refs 级的 JSON：{repo} 是当前仓库，其他仓库是同样的形状。resources/subscribe 会在服务端盯住一个 URI，WAL 一动就推 notifications/resources/updated —— 有界轮询、尽力而为、仅在单个实例内。",
+    "资源是 refs 级的 JSON：{repo} 是当前仓库，其他仓库是同样的形状。订阅会在服务端盯住一个 URI，WAL 一动就推 notifications/resources/updated —— 有界轮询、尽力而为、仅在单个实例内。一个项目订两个就够：refs（git 操作与收件箱）和 board（整个看板投影）。",
   "mcp.subscribe": "订阅（盯住一个 URI）",
   "mcp.subscribe.note":
     "退订用同样的请求体，method 换成 resources/unsubscribe。订阅是服务端对 refs 层的有界轮询，不是挂住的长请求：它不跨重启存活，所以客户端重连后先 read 一次当前值再继续。",
+  "mcp.stream": "打开通知流",
+  "mcp.stream.note":
+    "每个会话一条挂住的 GET：订阅产生的通知都从这里出去。不开这条流的话，resources/subscribe 会回答成功但什么都不会送到 —— 客户端要保持打开的是这条流，而不是订阅本身。",
   "mcp.notify": "GET 流上收到的东西",
   "mcp.notify.note":
     "通知只带 URI —— 用 resources/read 读回资源并比对 _meta.version 才能知道变了什么。notifications/resources/list_changed 表示被订阅的仓库消失了（删除或改名），重新读一次 resources/list。",
@@ -1588,10 +1594,13 @@ const zhTW: Record<I18nKey, string> = {
     "兩個請求標頭是必須的：Accept 要同時列出 application/json 與 text/event-stream，Content-Type 要是 application/json。回應會帶 Mcp-Session-Id —— 之後的每個請求，以及接收通知的 GET 流，都要把它帶回來。",
   "mcp.resources": "資源",
   "mcp.resources.note":
-    "資源是 refs 級的 JSON：{repo} 是目前倉庫，其他倉庫是同樣的形狀。resources/subscribe 會在伺服器端盯住一個 URI，WAL 一動就推 notifications/resources/updated —— 有界輪詢、盡力而為、僅在單一實例內。",
+    "資源是 refs 級的 JSON：{repo} 是目前倉庫，其他倉庫是同樣的形狀。訂閱會在伺服器端盯住一個 URI，WAL 一動就推 notifications/resources/updated —— 有界輪詢、盡力而為、僅在單一實例內。一個專案訂兩個就夠：refs（git 操作與收件匣）和 board（整個看板投影）。",
   "mcp.subscribe": "訂閱（盯住一個 URI）",
   "mcp.subscribe.note":
     "退訂用同樣的請求體，method 換成 resources/unsubscribe。訂閱是伺服器對 refs 層的有界輪詢，不是掛住的長請求：它不跨重啟存活，所以客戶端重連後先 read 一次當前值再繼續。",
+  "mcp.stream": "打開通知流",
+  "mcp.stream.note":
+    "每個會話一條掛住的 GET：訂閱產生的通知都從這裡出去。不開這條流的話，resources/subscribe 會回答成功但什麼都不會送到 —— 客戶端要保持打開的是這條流，而不是訂閱本身。",
   "mcp.notify": "GET 流上收到的東西",
   "mcp.notify.note":
     "通知只帶 URI —— 用 resources/read 讀回資源並比對 _meta.version 才能知道變了什麼。notifications/resources/list_changed 表示被訂閱的倉庫消失了（刪除或改名），重新讀一次 resources/list。",

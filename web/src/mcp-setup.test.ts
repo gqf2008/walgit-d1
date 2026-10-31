@@ -4,6 +4,7 @@ import {
   mcpEndpoint,
   mcpHandshake,
   mcpNotification,
+  mcpStream,
   mcpSubscribe,
 } from "./components/McpSetup";
 
@@ -51,6 +52,15 @@ describe("mcp setup snippets", () => {
     const message = JSON.parse(body);
     expect(message.method).toBe("resources/subscribe");
     expect(message.params.uri).toBe("walgit://collab/board/acme/web");
+  });
+
+  it("opens the stream the notifications arrive on", () => {
+    // The failure this pins: a subscription that answers 200 and delivers
+    // nothing because no GET /mcp is held open for the session.
+    const curl = mcpStream("https://walgit.example/mcp");
+    expect(curl).toContain("curl -N https://walgit.example/mcp");
+    expect(curl).toContain("Accept: text/event-stream");
+    expect(curl).toContain("mcp-session-id:");
   });
 
   it("documents the notification the stream actually carries", () => {
