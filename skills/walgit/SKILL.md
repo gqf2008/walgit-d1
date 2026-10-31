@@ -110,13 +110,14 @@ interval is the host operator's `mcp.subscribe_interval` (>= 1s), and
 `mcp.max_subscriptions` caps a caller's live subscriptions (excess is rejected).
 
 In the UI: each repository's `/collab` page, the board's empty state and the
-collab guide show the endpoint, a copy-pasteable `mcpServers` snippet (bearer as
-`${WALGIT_TOKEN}` — a client that does not expand `${VAR}` needs the token pasted
-in), the handshake, a `resources/subscribe` call and the notification frame the
-stream carries, so an operator can register a client without reading this file.
-The four URI forms are also served by `resources/templates/list`, and the full
-semantics are documented in the public host `/SKILL.md` under **MCP (optional,
-served by the host)**; use that as the single detailed reference.
+collab guide state the same two facts as **one paragraph with one copy button** —
+the endpoint and this repository's three resource URIs (`walgit://refs/…`,
+`walgit://wal/…`, `walgit://collab/board/…`) — so an operator can copy it into an
+agent and let the agent configure its own client. The page carries no curl and no
+protocol reminders: MCP is a standard, and the four URI forms are served by
+`resources/templates/list`. The full semantics are documented in the public host
+`/SKILL.md` under **MCP (optional, served by the host)**; use that as the single
+detailed reference.
 
 After an update notification, `resources/read` the same `uri` — the notification
 carries no content or version. Compare `_meta.version` with the last one you

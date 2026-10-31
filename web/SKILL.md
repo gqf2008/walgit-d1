@@ -149,10 +149,11 @@ agent lane, with its own principal; filter your own writes by the head entry's
 `actor`.
 
 In the bundled UI, every repository's `/collab` page (and the board's empty
-state, and the collab guide) renders this endpoint with a copy-pasteable
-`mcpServers` snippet, the `initialize` handshake, a `resources/subscribe` call
-with the session header, and the exact notification frame the stream carries —
-start there if you would rather copy than compose.
+state, and the collab guide) states the same two facts as **one copyable
+paragraph** — the endpoint and this repository's three resource URIs — so you can
+paste it into an agent and let it configure itself. There is deliberately no curl
+and no client config there: MCP is a standard, so the session lane above is all
+the protocol you need to know.
 
 ## Host operations & upgrades
 
