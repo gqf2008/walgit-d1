@@ -809,3 +809,145 @@ async fn two_sessions_of_one_caller_can_watch_the_same_resource() -> Result<()> 
     }
     Ok(())
 }
+
+/// A body that is not a JSON-RPC message at all is a *client framing* bug, and
+/// the transport must say so instead of answering 200 with nothing. rmcp
+/// reports it as `415` with the deserializer's reason (the stdio lane's
+/// `-32700` has no HTTP equivalent); what matters is that it is refused, never
+/// silently accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_body_that_is_not_json_is_refused_with_a_reason() -> Result<()> {
+    let server = Server::start().await?;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/mcp", server.base_url))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body("{ this is not json")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let text = resp.text().await?;
+    assert!(
+        text.contains("deserialize") || text.contains("key must be"),
+        "{text}"
+    );
+    Ok(())
+}
+
+/// A terminated session takes its pollers with it: they have nobody to notify,
+/// and each one costs a bucket read per interval. Without the reap they also
+/// keep counting against `mcp.max_subscriptions`, so a reconnecting client is
+/// eventually refused forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminating_a_session_drops_its_subscriptions() -> Result<()> {
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.mcp.subscribe_interval = Duration::from_secs(1);
+    })
+    .await?;
+    server.put_repo("t", "reap").await?;
+    push_repo(&server, "t", "reap", 1)?;
+    let sid = initialize(&server).await?;
+    call(
+        &server,
+        &sid,
+        "resources/subscribe",
+        json!({"uri": "walgit://refs/t/reap"}),
+    )
+    .await?;
+    assert_eq!(server.state.mcp.len(), 1, "the poller must be registered");
+    // `DELETE /mcp` ends the session (204), and the registry goes with it.
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/mcp", server.base_url))
+        .header("Mcp-Session-Id", &sid)
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        server.state.mcp.len(),
+        0,
+        "a terminated session leaves no poller behind"
+    );
+    Ok(())
+}
+
+/// The cap is per caller, not per session: one caller cannot buy more pollers by
+/// opening more sessions, and a refusal is a *request* error the client can act
+/// on (`-32602`), not a silently dropped subscription.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_subscription_cap_is_enforced_per_caller() -> Result<()> {
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.mcp.subscribe_interval = Duration::from_secs(1);
+        cfg.mcp.max_subscriptions = 1;
+    })
+    .await?;
+    server.put_repo("t", "cap").await?;
+    push_repo(&server, "t", "cap", 1)?;
+    let first = initialize(&server).await?;
+    call(
+        &server,
+        &first,
+        "resources/subscribe",
+        json!({"uri": "walgit://refs/t/cap"}),
+    )
+    .await?;
+    // A second session of the same caller is a *second* subscription, not the
+    // idempotent path: its notifications travel down its own stream (the
+    // next-door test proves both sessions get them), so it needs its own poller
+    // — and the budget is per caller across its sessions, not per stream.
+    let second = initialize(&server).await?;
+    let (status, _, body) = post_as(
+        &server,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "resources/subscribe",
+                "params": {"uri": "walgit://refs/t/cap"}}),
+        Some(&second),
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], json!(-32602), "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("max_subscriptions"),
+        "{body}"
+    );
+    // The same session asking again for the same URI *is* idempotent (this is
+    // what a reconnecting client does), so it still succeeds under the cap.
+    call(
+        &server,
+        &first,
+        "resources/subscribe",
+        json!({"uri": "walgit://refs/t/cap"}),
+    )
+    .await?;
+    assert_eq!(server.state.mcp.len(), 1, "one URI, one session, one poller");
+    Ok(())
+}
+
+/// `wal_ls`'s `to` is a bound, not a hint: a window below the page the host
+/// loaded answers empty rather than handing back log lines the caller excluded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wal_ls_honours_an_explicit_to_bound() -> Result<()> {
+    let server = Server::start().await?;
+    server.put_repo("t", "log").await?;
+    push_repo(&server, "t", "log", 3)?;
+    let sid = initialize(&server).await?;
+    let all = call(&server, &sid, "tools/call", json!({"name": "wal_ls", "arguments": {"repo": "t/log"}})).await?;
+    let text = all["content"][0]["text"].as_str().unwrap_or_default();
+    let body: Value = serde_json::from_str(text)?;
+    let head = body["head_seq"].as_u64().expect("head_seq");
+    assert!(head >= 1, "{body}");
+    // `to` far below the loaded window: nothing in range, and it says so.
+    let narrow = call(
+        &server,
+        &sid,
+        "tools/call",
+        json!({"name": "wal_ls", "arguments": {"repo": "t/log", "to": 0}}),
+    )
+    .await?;
+    let body: Value = serde_json::from_str(narrow["content"][0]["text"].as_str().unwrap_or_default())?;
+    assert_eq!(body["entries"].as_array().map(Vec::len), Some(0), "{body}");
+    assert_eq!(body["to"].as_u64(), Some(0), "{body}");
+    Ok(())
+}

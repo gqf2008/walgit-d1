@@ -880,10 +880,12 @@ decision in §4 — or the PR is; never "fix later".
   answers a browser, never a second contract to drift from. Read tools are always advertised
   (`repo_*`, `collab_board/thread/report`, `wal_ls`); **the one write tool is `collab_publish`**,
   which takes an entry the client **already signed** with its own principal key and forwards it
-  to `POST /{o}/{r}/api/collab/entries` — the host verifies the signature against the key
-  registered for `actor`, refuses an `actor` that is not the authenticated caller, and **holds
-  no key and signs nothing** (signing stays where the identity is, D58/D62; an entry that does
-  not verify cannot be repaired in an append-only log). Policy and the done-transition gate stay
+  to `POST /{o}/{r}/api/collab/entries` — the host refuses an `actor` that is not the
+  authenticated caller and **holds no key and signs nothing** (signing stays where the identity
+  is, D58/D62). The **signature is not checked on write**: it is verified when entries are
+  aggregated (`is_verified`), because an entry and the `principal-register` naming its key may
+  land in either order and the git-push lane cannot check it at all — an entry that does not
+  verify lands in the log and never counts, and cannot be repaired there (append-only). Policy and the done-transition gate stay
   single-sourced on that endpoint. There is no server identity and no destructive operation on
   the surface (D49's rule, kept).
   **Resources** are `walgit://refs/<o>/<r>`, `walgit://wal/<o>/<r>?from=<seq>`,
@@ -904,6 +906,18 @@ decision in §4 — or the PR is; never "fix later".
   and the two tool names were deleted in favour of the single pass-through `collab_publish`.
   The earlier shape had the host hold collaborators' seeds to sign for them; that custody was
   a second mechanism the HTTP surface does not need, and it made the server a signing oracle.)*
+  *(Amended 2026-10-31, adversarial review: `DELETE /mcp` **reaps** the terminated session's
+  pollers (`Mcp::forget_session`) instead of leaving them reading the bucket forever and counting
+  against `mcp.max_subscriptions` until the process dies, and the poller probes its peer's liveness
+  every tick, not only when the version moved (rmcp drops the send result, so an idle repository
+  never reports a dead session). The subscription budget is **per caller across its sessions** —
+  each session's notifications travel down its own stream, so each needs its own poller. Inner
+  calls now forward `X-Walgit-Principal` from the *outer verdict* (never from the request), so a
+  caller cannot inherit a forwarder's (often admin) identity through `Call`. `resources/read`
+  answers `_meta.version` for the board as `seq:<n>:t:<minutes>`, because a `card_claim` TTL
+  expiring moves no ref but does move the projection (D52's amendment). `/mcp` is a single CORS
+  policy, not two: it is in `web/v1.rs::is_cors_api_path` with `Mcp-Session-Id` exposed, and the
+  endpoint has no preflight of its own.)*
   The bundled UI teaches the endpoint where an agent arrives: a **MCP box**
   (`web/src/components/McpSetup.tsx`) on every repository's `/collab` page and on the board's
   empty state is **one paragraph with one copy button** — it states the endpoint and the

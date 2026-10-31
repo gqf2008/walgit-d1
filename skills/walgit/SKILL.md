@@ -86,13 +86,14 @@ is a real 401 with a `Bearer` challenge.
  "params":{"uri":"walgit://collab/board/acme/repo"}}
 ```
 
-A project is covered end to end by two subscriptions (one `resources/subscribe` call each):
+A project is covered end to end by two subscriptions (one `resources/subscribe` call each, the
+shape shown above, `uri` set to each in turn):
 
 ```jsonc
-{ "subscribe": [
-    "walgit://refs/<owner>/<repo>",           // every git action — push, branch/tag — plus refs/collab/inbox/*
-    "walgit://collab/board/<owner>/<repo>"    // the whole board projection: new threads, replies, status flow
-] }
+[
+  "walgit://refs/<owner>/<repo>",           // every git action — push, branch/tag — plus refs/collab/inbox/*
+  "walgit://collab/board/<owner>/<repo>"    // the whole board projection: new threads, replies, status flow
+]
 ```
 
 The refs subscription is a refs-level read of the WAL head (one conditional

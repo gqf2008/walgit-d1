@@ -126,7 +126,10 @@ with a `Bearer` challenge (never `Basic`: `/mcp` is browser-reachable).
 
 Tools: `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_board`,
 `collab_thread`, `collab_report`, `wal_ls` — the host's own JSON API underneath,
-so freshness and placement are the same as a browser's. The one writing tool is
+so freshness and placement are the same as a browser's. A revision argument is
+`rev`; `repo_commits` accepts `ref` and `rev` (same meaning, and a CLI-style
+`HEAD~3` resolves). `wal_ls` reads the retained log `from`/`to` (1-based seqs)
+and answers `more` when the window it returned is not the end. The one writing tool is
 `collab_publish`: it takes an entry you have **already signed** with your own
 key (`walgit collab entry` builds and signs one) and hands it to
 `POST /{owner}/{repo}/api/collab/entries`. The host verifies the signature

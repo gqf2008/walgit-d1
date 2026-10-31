@@ -252,18 +252,24 @@ fn add(
                 config_path.display()
             ),
             Some(i) => {
-                // A replacement changes the *secret*; permissions stay as they
-                // were unless the operator said otherwise, so rotating a
-                // read-only token cannot silently hand it write.
-                let old = rows.get(i).map(|r| (permission(r, "write", true), permission(r, "admin", false)));
+                // A replacement changes the *secret* of the row it matched;
+                // permissions stay as they were unless the operator said
+                // otherwise, so rotating a read-only token cannot silently
+                // hand it write. Other rows of the same principal are left
+                // alone: `validate` allows several credentials per principal
+                // (that is how a rotation overlaps), so deleting them here
+                // would revoke a credential nobody asked to revoke.
+                let old = rows
+                    .get(i)
+                    .map(|r| (permission(r, "write", true), permission(r, "admin", false)));
                 if let Some((w, a)) = old {
                     replaced = Some((w, a));
                     write_out = write.unwrap_or(w);
                     admin_out = admin.unwrap_or(a);
                 }
-                let row = secret.row(principal, write_out, admin_out);
-                rows.retain(|r| principal_of(r) != Some(principal));
-                rows.insert(i.min(rows.len()), row);
+                if let Some(row) = rows.get_mut(i) {
+                    *row = secret.row(principal, write_out, admin_out);
+                }
                 Ok(1)
             }
             None => {
@@ -640,6 +646,43 @@ mod tests {
     }
 
     /// The most likely `rm` is the last one, and it would lock every client out.
+    /// `--force` replaces the row it matched. One principal may hold several
+    /// credentials while a rotation overlaps (`Config::validate` says so), so a
+    /// replace must not revoke the ones the operator did not name.
+    #[test]
+    fn a_replacement_leaves_the_principals_other_credentials_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("walgit.toml");
+        std::fs::write(
+            &path,
+            token_mode_config(
+                "tokens = [{ principal = \"alice\", token = \"old\" },\n\
+                 { principal = \"alice\", token = \"overlap\" }]",
+            ),
+        )
+        .unwrap();
+        add(
+            &path,
+            "alice",
+            &Secret::Literal("new".into()),
+            None,
+            None,
+            true,
+            AuthMode::Token,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // The last row for the principal is the one replaced; the earlier
+        // credential survives the rotation.
+        assert!(text.contains("\"old\""), "{text}");
+        assert!(text.contains("\"new\""), "{text}");
+        assert!(!text.contains("\"overlap\""), "{text}");
+        assert_eq!(
+            Config::parse_document(&text).unwrap().server.auth.tokens.len(),
+            2
+        );
+    }
+
     #[test]
     fn removing_the_last_token_names_the_lockout() {
         let dir = tempfile::tempdir().unwrap();

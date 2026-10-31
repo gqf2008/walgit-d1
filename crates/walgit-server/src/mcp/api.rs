@@ -62,7 +62,14 @@ pub struct Call<'a> {
 }
 
 impl<'a> Call<'a> {
-    pub fn new(st: &'a Arc<AppState>, headers: &HeaderMap) -> Self {
+    /// `principal` is the identity the outer `/mcp` request authenticated as.
+    /// It is replayed as `X-Walgit-Principal`, which is the header the inner
+    /// request's own `require_read`/`require_write` resolve the caller from:
+    /// behind an edge or a push broker the credential in `Authorization` is the
+    /// *hop's*, so without this the inner request runs as the forwarder (which
+    /// is usually an admin) and `collab_publish`'s `actor == caller` compares
+    /// against the wrong name.
+    pub fn new(st: &'a Arc<AppState>, headers: &HeaderMap, principal: &str) -> Self {
         // Only what an inner request needs to be the *same* caller: the
         // credential, the session cookie (browser lane), and the host (absolute
         // URLs in recipes/overview). Everything else — Accept, encodings,
@@ -94,6 +101,16 @@ impl<'a> Call<'a> {
                 continue;
             };
             kept.insert(header_name, value.clone());
+        }
+        // Set from the authenticated principal, never copied from the request:
+        // the outer `require_read` already decided whether the caller may
+        // forward an identity (only a `trusted_forwarders` principal may), so
+        // this carries that verdict instead of re-openning the question.
+        if let Ok(value) = axum::http::HeaderValue::from_str(principal) {
+            kept.insert(
+                axum::http::HeaderName::from_static(crate::auth::PRINCIPAL_HEADER),
+                value,
+            );
         }
         Self { st, headers: kept }
     }

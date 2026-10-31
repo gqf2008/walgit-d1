@@ -1369,8 +1369,21 @@ impl Default for TelemetryConfig {
 
 impl Config {
     pub fn parse(toml_text: &str) -> Result<Config> {
-        let mut cfg = Self::parse_document(toml_text)?;
-        cfg.apply_env(std::env::vars())?;
+        // Read path: the document alone is not the whole config — a host may
+        // legitimately leave a credential to `WALGIT__*` (the example config
+        // says so), so `validate` runs **once, after** the overlay. Validating
+        // the file first would refuse a config that boots.
+        Self::parse_with(toml_text, std::env::vars())
+    }
+
+    /// [`parse`] with the overlay supplied by the caller (tests, embedders).
+    /// The order is the contract: TOML, environment, then one `validate`.
+    pub fn parse_with(
+        toml_text: &str,
+        vars: impl Iterator<Item = (String, String)>,
+    ) -> Result<Config> {
+        let mut cfg = Self::from_toml(toml_text)?;
+        cfg.apply_env(vars)?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -1386,9 +1399,16 @@ impl Config {
     /// shell must not be able to make a file valid that would not boot on a
     /// host without it.
     pub fn parse_document(toml_text: &str) -> Result<Config> {
+        let cfg = Self::from_toml(toml_text)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// TOML plus the defaults that are a function of it — nothing that can
+    /// fail on its own, so both callers validate explicitly afterwards.
+    fn from_toml(toml_text: &str) -> Result<Config> {
         let mut cfg: Config = toml::from_str(toml_text).context("parsing walgit.toml")?;
         cfg.cache.dir = expand_tilde(&cfg.cache.dir);
-        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -2261,5 +2281,38 @@ mod bundle_strategy_validation {
         c.bundles.strategy[1].base = Some("hourly".into());
         c.bundles.strategy[2].base = Some("daily".into());
         assert!(c.validate().unwrap_err().to_string().contains("cycle"));
+    }
+
+    /// The read path must validate *after* the environment overlay: a host is
+    /// allowed to leave a credential to `WALGIT__*` (the example config says
+    /// so), and validating the file alone silently turned that into a boot
+    /// failure. The write path stays the opposite on purpose.
+    #[test]
+    fn a_file_completed_by_the_environment_parses_but_does_not_stand_on_its_own() {
+        let text = r#"
+[server]
+listen = "127.0.0.1:8080"
+[server.auth]
+mode = "oidc"
+anonymous_read = false
+oauth_client_id = "walgit-web"
+allowed_domains = ["example.com"]
+[store]
+backend = "memory"
+memory_backend_intentional = true
+"#;
+        let err = Config::parse_document(text).unwrap_err().to_string();
+        assert!(err.contains("oauth_client_secret"), "{err}");
+        let env = [
+            ("WALGIT__SERVER__AUTH__OAUTH_CLIENT_SECRET", "client-secret"),
+            ("WALGIT__SERVER__AUTH__SESSION_SECRET", "session-secret-0123456789abcdef0"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let cfg = Config::parse_with(text, env).expect("the environment completes the file");
+        assert_eq!(
+            cfg.server.auth.oauth_client_secret.as_deref(),
+            Some("client-secret")
+        );
     }
 }

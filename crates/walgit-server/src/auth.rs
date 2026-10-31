@@ -39,6 +39,10 @@ use walgit_config::{ACCESS_TOKEN_PREFIX, AuthMode, StaticToken};
 /// Client `Authorization` as copied by an edge before it replaces that header with its own
 /// hop credential. Read only when the edge announces `client-authorization`.
 pub const FORWARDED_AUTHORIZATION_HEADER: &str = "x-walgit-authorization";
+/// End-user identity a trusted forwarder (a front, a push broker) states for the request it
+/// is relaying. Honoured only after the forwarding caller authenticates and is listed in
+/// `trusted_forwarders` (§1.3/D28).
+pub const PRINCIPAL_HEADER: &str = "x-walgit-principal";
 /// Name of the browser session cookie.
 pub const SESSION_COOKIE: &str = "walgit_session";
 /// Clock skew tolerated on ID tokens.
@@ -625,7 +629,7 @@ impl Authenticator {
     ) -> Result<Principal, AuthError> {
         let caller = self.authenticate_inner(headers).await?;
         let Some(forwarded) = headers
-            .get("x-walgit-principal")
+            .get(PRINCIPAL_HEADER)
             .and_then(|v| v.to_str().ok())
             .map(str::trim)
             .filter(|v| !v.is_empty())

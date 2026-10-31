@@ -38,11 +38,17 @@ export function McpSetup({ full }: { full: string }) {
   });
 
   const timer = useRef<number | undefined>(undefined);
-  const [copied, setCopied] = useState(false);
+  // "copied" is only claimed when the clipboard actually took the text. The
+  // fallback (an insecure context has no clipboard API) selects the paragraph
+  // instead, and says so: a button that answers "copied" while the clipboard is
+  // untouched is worse than one that admits it could not.
+  const [state, setState] = useState<"idle" | "copied" | "selected">("idle");
   async function copy() {
+    let copied = true;
     try {
       await navigator.clipboard.writeText(brief);
     } catch {
+      copied = false;
       // No clipboard (insecure context): select the paragraph so the reader
       // can copy it with the keyboard instead.
       const selection = window.getSelection();
@@ -54,9 +60,9 @@ export function McpSetup({ full }: { full: string }) {
         selection.addRange(range);
       }
     }
-    setCopied(true);
+    setState(copied ? "copied" : "selected");
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 1400);
+    timer.current = window.setTimeout(() => setState("idle"), 1400);
   }
 
   return (
@@ -65,8 +71,17 @@ export function McpSetup({ full }: { full: string }) {
         <p id="mcp-brief" className="cmds-note">
           {brief}
         </p>
-        <button type="button" className="cmds-copy" onClick={copy}>
-          {copied ? t("cmds.copied") : t("cmds.copy")}
+        <button
+          type="button"
+          className="cmds-copy"
+          onClick={copy}
+          aria-live="polite"
+        >
+          {state === "copied"
+            ? t("cmds.copied")
+            : state === "selected"
+              ? t("cmds.selected")
+              : t("cmds.copy")}
         </button>
       </div>
     </Box>

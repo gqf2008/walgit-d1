@@ -234,9 +234,13 @@ pub(crate) fn origin_allowed(cfg: &walgit_config::Config, origin: &str) -> bool 
     })
 }
 
-const CORS_HEADERS: &str = "Authorization, Content-Type, Accept, If-None-Match, X-Requested-With";
+const CORS_HEADERS: &str = "Authorization, Content-Type, Accept, If-None-Match, X-Requested-With, \
+Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID, X-Walgit-Authorization, X-Walgit-Capabilities";
 const CORS_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, OPTIONS";
-const CORS_EXPOSE: &str = "ETag, Cache-Control, Content-Type, Location";
+// `Mcp-Session-Id` is not a safelisted response header: without it a
+// cross-origin browser client cannot read the session id `initialize` answers
+// with, and every later request would 400.
+const CORS_EXPOSE: &str = "ETag, Cache-Control, Content-Type, Location, Mcp-Session-Id";
 
 /// CORS for `/api*`: only origins in `server.cors_origins` get credentials;
 /// preflights are answered here (unauthenticated — a preflight carries no
@@ -295,10 +299,13 @@ pub async fn cors(State(st): State<Arc<AppState>>, req: Request<Body>, next: Nex
     resp
 }
 
-/// Where CORS applies (D27): the non-repo `/api*` and `/api-browser*` roots and
-/// the repo lanes `/{o}/{r}/api[-browser](/…)?`. Never the SPA pages, git, auth.
+/// Where CORS applies (D27): the non-repo `/api*` and `/api-browser*` roots,
+/// the repo lanes `/{o}/{r}/api[-browser](/…)?`, and `/mcp` (D64 — its preflight
+/// and its response headers are this one policy, not a second copy). Never the
+/// SPA pages, git, auth.
 pub fn is_cors_api_path(path: &str) -> bool {
-    path == "/api"
+    path == "/mcp"
+        || path == "/api"
         || path.starts_with("/api/")
         || path == API_BROWSER
         || path.starts_with("/api-browser/")
@@ -622,6 +629,9 @@ mod tests {
         assert!(is_cors_api_path("/acme/monorepo/api/refs"));
         assert!(is_cors_api_path("/acme/monorepo/api-browser/refs"));
         assert!(is_cors_api_path("/o/r/api/settings/effective"));
+        // `/mcp` uses this one policy for its preflight and its response
+        // headers (D64/D23: one implementation, never a second copy).
+        assert!(is_cors_api_path("/mcp"));
         assert!(!is_cors_api_path("/acme/monorepo/settings")); // SPA
         assert!(!is_cors_api_path("/acme/monorepo.git/info/refs"));
         assert!(!is_cors_api_path("/_auth/check"));

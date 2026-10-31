@@ -1,8 +1,8 @@
 //! MCP resources: the `walgit://` URIs a client can list, template, read and
 //! subscribe to (D64).
 //!
-//! Four kinds, the same four the agent-side adapter (`walgit mcp`) exposes, so
-//! a client sees one vocabulary on both lanes:
+//! Four kinds, one vocabulary: these are the URIs `web/SKILL.md` documents and
+//! the ones the bundled UI prints on each repository's collab page.
 //!
 //! | URI | What it answers |
 //! |---|---|
@@ -253,12 +253,33 @@ pub fn templates() -> Vec<ResourceTemplate> {
     ]
 }
 
-/// The refs-level seq of a repository: the version of *every* resource (they
-/// are all projections of the WAL). One conditional `manifest.pb` read, or a
-/// 304 when this instance's copy is fresh (`wal.freshness_ttl`).
+/// The version of one resource. Refs, the log and a thread are projections of
+/// the WAL, so the refs-level seq *is* their version (one conditional
+/// `manifest.pb` read, or a 304 when this instance's copy is fresh —
+/// `wal.freshness_ttl`).
+///
+/// The board is not: it is also a function of the wall clock, because a
+/// `card_claim` TTL expiring moves no ref but does move the `owner` column
+/// (D52's 2026-10-20 amendment). So its version carries the minute as well,
+/// reusing the exact string `read` reports as `_meta.version` — a subscriber
+/// compares the two and re-reads.
 pub(super) async fn version(st: &Arc<AppState>, uri: &Uri) -> Result<String, PollError> {
     let (seq, _handle) = refs_level_poll(st, uri.owner(), uri.repo()).await?;
-    Ok(format!("seq:{seq}"))
+    Ok(version_of(uri, seq, unix_now()))
+}
+
+/// `seq:<n>` — plus the minute for the board (see [`version`]).
+fn version_of(uri: &Uri, seq: u64, now: u64) -> String {
+    match uri {
+        Uri::Board { .. } => format!("seq:{seq}:t:{}", now / 60),
+        _ => format!("seq:{seq}"),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Why a read failed: the repository is gone (so the resource *list* changed),
@@ -321,10 +342,11 @@ async fn refs_level_poll(
 pub async fn read(
     st: &Arc<AppState>,
     headers: &axum::http::HeaderMap,
+    principal: &str,
     uri_str: &str,
 ) -> Result<ResourceContents, ErrorData> {
     let uri = parse(uri_str)?;
-    let call = Call::new(st, headers);
+    let call = Call::new(st, headers, principal);
     let (owner, repo) = (uri.owner().to_string(), uri.repo().to_string());
     let base = format!("/{}/{}", enc(&owner), enc(&repo));
     let (seq, handle) = refs_level(st, &owner, &repo).await?;
@@ -360,12 +382,26 @@ pub async fn read(
         }
         Uri::Wal { from, .. } => {
             let (entries, head_seq) = wal_page(&handle, *from).await?;
+            let first = entries
+                .first()
+                .and_then(|e| e.get("seq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(*from);
+            let last = entries
+                .last()
+                .and_then(|e| e.get("seq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(first);
             json!({
                 "repo": format!("{owner}/{repo}"),
                 "head_seq": head_seq,
-                "from": entries.first().and_then(|e| e.get("seq")).cloned().unwrap_or(json!(from)),
+                "from": first,
+                "to": last,
                 "entries": entries,
-                "more": entries.len() as u64 == WAL_PAGE && head_seq > from.saturating_add(WAL_PAGE),
+                // Computed from the page actually returned, not from the
+                // requested `from`: `from = 0` means "the newest page", where
+                // there is by definition nothing newer to page to.
+                "more": head_seq > last,
             })
         }
         Uri::Board { .. } => call
@@ -389,7 +425,7 @@ pub async fn read(
         // read `_meta.version` and re-read when it moved, so it must be as
         // stable across the four kinds as `resources/subscribe` was (it is the
         // same refs-level seq the poller sends).
-        meta: Some(meta(&format!("seq:{seq}"))),
+        meta: Some(meta(&version_of(&uri, seq, unix_now()))),
     })
 }
 
@@ -479,6 +515,33 @@ pub fn api_err(e: &ApiError) -> ErrorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The board's version is also a function of the clock (D52's 2026-10-20
+    /// amendment: a `card_claim` TTL expiring moves no ref but does move the
+    /// projection), while every other resource stays a pure function of the seq.
+    #[test]
+    fn only_the_board_version_carries_the_clock() {
+        let board = Uri::Board {
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        let refs = Uri::Refs {
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        assert_eq!(version_of(&board, 42, 600), "seq:42:t:10");
+        assert_ne!(
+            version_of(&board, 42, 600),
+            version_of(&board, 42, 660),
+            "a minute later the board projection may differ"
+        );
+        assert_eq!(version_of(&refs, 42, 600), "seq:42");
+        assert_eq!(
+            version_of(&refs, 42, 660),
+            version_of(&refs, 42, 600),
+            "refs do not move with the clock"
+        );
+    }
 
     #[test]
     fn parses_the_four_kinds() {

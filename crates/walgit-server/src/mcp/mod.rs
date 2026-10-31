@@ -45,10 +45,9 @@
 
 pub mod api;
 pub mod resources;
+mod subscriptions;
 mod tools;
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,7 +65,7 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         JsonObject, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig,
+        ReadResourceResult, ServerCapabilities, ServerConfig,
         SubscribeRequestParams, Tool as McpTool, UnsubscribeRequestParams,
     },
     service::{RequestContext, RoleServer},
@@ -99,53 +98,12 @@ pub struct Caller {
     pub principal: String,
 }
 
-/// Subscriptions: `(principal, session, uri)` → the poller watching it.
-///
-/// All three parts are in the key because all three are part of the answer. The
-/// principal, because authorization decides it. The session, because the
-/// notification travels down *that* stream: keying without it made a reconnect
-/// get `ok` for a poller still bound to the old, dead peer (silently no
-/// notifications), and made one session's `unsubscribe` abort another's poller.
-/// And the URI, because that is what is watched.
-///
-/// One lock covers the cap check, the reservation and the abort-handle install,
-/// and every entry carries a generation so a stale handle can never remove the
-/// entry that replaced it. The registry is per-instance and disposable (D52).
-#[derive(Default)]
-pub struct Mcp {
-    subs: parking_lot::Mutex<HashMap<Key, Subscription>>,
-    generation: AtomicU64,
-}
+/// The subscription registry lives in [`subscriptions`] (the pollers go with
+/// it); re-exported here because `AppState` owns one.
+pub use subscriptions::Mcp;
 
-/// `(principal, session, uri)`.
-type Key = (String, String, String);
-
-struct Subscription {
-    /// The refs-level seq the client was last told about.
-    version: String,
-    /// Identifies this poller, so `unsubscribe` and the poller's own guard only
-    /// ever touch the entry they own.
-    generation: u64,
-    /// `None` only between "slot reserved" and "task spawned" (both under the
-    /// same lock, so no other request can observe it).
-    abort: Option<tokio::task::AbortHandle>,
-}
-
-impl Mcp {
-    pub fn is_empty(&self) -> bool {
-        self.subs.lock().is_empty()
-    }
-    pub fn len(&self) -> usize {
-        self.subs.lock().len()
-    }
-    /// Stop watching one URI for one session (a no-op when nothing watches it).
-    pub fn unsubscribe(&self, principal: &str, session: &str, uri: &str) {
-        let key: Key = (principal.to_string(), session.to_string(), uri.to_string());
-        if let Some(abort) = self.subs.lock().remove(&key).and_then(|s| s.abort) {
-            abort.abort();
-        }
-    }
-}
+/// The session header rmcp's Streamable HTTP transport uses.
+const SESSION_HEADER: &str = "mcp-session-id";
 
 /// `/mcp`, mounted by `crate::router`.
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -232,13 +190,16 @@ async fn serve(
 ) -> Response {
     let headers = req.headers().clone();
     let is_delete = req.method() == Method::DELETE;
+    // `OPTIONS` never reaches here: `crate::web::v1`'s CORS layer answers every
+    // preflight for `is_cors_api_path` (which `/mcp` is part of, D23/D64). One
+    // policy, one implementation — a second copy here was a divergence waiting
+    // to happen.
+    let session = headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     if !origin_allowed(&state, &headers) {
         return StatusCode::FORBIDDEN.into_response();
-    }
-    // A CORS preflight carries no credential by definition: answering it with a
-    // 401 would leave a browser client unable to ask at all.
-    if req.method() == Method::OPTIONS {
-        return preflight(&headers);
     }
     let principal = match state.auth.require_read(&headers).await {
         Ok(p) => p,
@@ -256,8 +217,16 @@ async fn serve(
             let mut resp = resp.map(Body::new);
             // A terminated session is `204 No Content` in the spec; rmcp answers
             // `202 Accepted`, which a client reads as "still running".
-            if is_delete && resp.status() == StatusCode::ACCEPTED {
-                *resp.status_mut() = StatusCode::NO_CONTENT;
+            if is_delete {
+                if resp.status() == StatusCode::ACCEPTED {
+                    *resp.status_mut() = StatusCode::NO_CONTENT;
+                }
+                // A terminated session's pollers have nobody to notify and each
+                // one costs a bucket read per interval: drop them with it (the
+                // registry key carries the session id for exactly this).
+                if let Some(session) = session {
+                    state.mcp.forget_session(&session);
+                }
             }
             resp.into_response()
         }
@@ -292,40 +261,6 @@ fn unauthorized() -> Response {
     resp.headers_mut().insert(
         axum::http::header::WWW_AUTHENTICATE,
         axum::http::HeaderValue::from_static("Bearer realm=\"walgit\""),
-    );
-    resp
-}
-
-/// `OPTIONS /mcp`: the CORS answer a browser needs before it may send the
-/// bearer at all. Only an allowed `Origin` gets headers.
-fn preflight(headers: &HeaderMap) -> Response {
-    let mut resp = StatusCode::NO_CONTENT.into_response();
-    let Some(origin) = headers.get(axum::http::header::ORIGIN).cloned() else {
-        return resp;
-    };
-    let h = resp.headers_mut();
-    h.insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
-    h.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-        axum::http::HeaderValue::from_static("true"),
-    );
-    h.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-        axum::http::HeaderValue::from_static("POST, GET, DELETE, OPTIONS"),
-    );
-    h.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-        axum::http::HeaderValue::from_static(
-            "authorization, content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id, x-walgit-authorization, x-walgit-capabilities",
-        ),
-    );
-    h.insert(
-        axum::http::header::ACCESS_CONTROL_MAX_AGE,
-        axum::http::HeaderValue::from_static("600"),
-    );
-    h.insert(
-        axum::http::header::VARY,
-        axum::http::HeaderValue::from_static("origin"),
     );
     resp
 }
@@ -450,7 +385,7 @@ impl ServerHandler for WalgitMcp {
         let args = request
             .arguments
             .map_or_else(|| Value::Object(JsonObject::new()), Value::Object);
-        match tools::call(&self.st, &req.headers, &request.name, &args).await
+        match tools::call(&self.st, &req.headers, &req.principal, &request.name, &args).await
         {
             Ok(value) => Ok(CallToolResponse::Complete(CallToolResult::success(
                 vec![ContentBlock::text(tools::as_text(&value))],
@@ -499,7 +434,8 @@ impl ServerHandler for WalgitMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let req = request_in(&context)?;
-        let contents = resources::read(&self.st, &req.headers, &request.uri).await?;
+        let contents =
+            resources::read(&self.st, &req.headers, &req.principal, &request.uri).await?;
         Ok(ReadResourceResponse::Complete(ReadResourceResult::new(vec![
             contents,
         ])))
@@ -512,7 +448,8 @@ impl ServerHandler for WalgitMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
         let req = request_in(&context)?;
-        self.watch(
+        subscriptions::watch(
+            &self.st,
             &req.principal,
             &req.session,
             &request.uri,
@@ -539,160 +476,6 @@ impl ServerHandler for WalgitMcp {
     }
 }
 
-impl WalgitMcp {
-    /// Start watching one URI for this caller's session (idempotent: a second
-    /// `subscribe` for the same session and URI keeps the existing poller).
-    async fn watch(
-        &self,
-        principal: &str,
-        session: &str,
-        uri_str: &str,
-        peer: rmcp::service::Peer<RoleServer>,
-    ) -> Result<(), ErrorData> {
-        let uri = resources::parse(uri_str)?;
-        let cfg = &self.st.cfg.mcp;
-        let interval = cfg.subscribe_interval;
-        if interval.is_zero() {
-            return Err(ErrorData::internal_error(
-                "mcp.subscribe_interval is zero",
-                None,
-            ));
-        }
-        // The version is read *outside* the registry lock: it is a bucket
-        // round trip, and subscribing must not serialize every other client.
-        let version = resources::version(&self.st, &uri)
-            .await
-            .map_err(resources::PollError::into_error_data)?;
-        let key: Key = (principal.to_string(), session.to_string(), uri_str.to_string());
-        // From here to the end of the function is one critical section: the cap
-        // check, the reservation and the abort handle. Two racing `subscribe`s
-        // can then never both pass the cap, and no `unsubscribe` can slip
-        // between "reserved" and "watching".
-        let mut subs = self.st.mcp.subs.lock();
-        if subs.contains_key(&key) {
-            return Ok(());
-        }
-        // Counted per caller across its sessions: the budget is what one caller
-        // costs the bucket per interval, not one stream's.
-        let mine = subs.keys().filter(|k| k.0 == principal).count();
-        if mine >= cfg.max_subscriptions {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "at most {} subscriptions per caller (mcp.max_subscriptions)",
-                    cfg.max_subscriptions
-                ),
-                None,
-            ));
-        }
-        let generation = self.st.mcp.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        subs.insert(
-            key.clone(),
-            Subscription {
-                version,
-                generation,
-                abort: None,
-            },
-        );
-        let task = tokio::spawn(poll(
-            self.st.clone(),
-            key.clone(),
-            generation,
-            uri,
-            interval,
-            peer,
-        ));
-        match subs.get_mut(&key) {
-            Some(slot) if slot.generation == generation => {
-                slot.abort = Some(task.abort_handle());
-            }
-            // Unreachable while the entry cannot be removed under this lock;
-            // aborting is the only safe answer if that ever stops being true.
-            _ => task.abort(),
-        }
-        Ok(())
-    }
-}
-
-/// One subscription's poller. Bounded by `interval`, ended by `unsubscribe`, by
-/// a session that went away, or by its own failure — and [`Unregister`] is what
-/// keeps the registry honest however it ends.
-async fn poll(
-    st: Arc<AppState>,
-    key: Key,
-    generation: u64,
-    uri: resources::Uri,
-    interval: Duration,
-    peer: rmcp::service::Peer<RoleServer>,
-) {
-    let _guard = Unregister {
-        st: st.clone(),
-        key: key.clone(),
-        generation,
-    };
-    loop {
-        tokio::time::sleep(interval).await;
-        let next = match resources::version(&st, &uri).await {
-            Ok(v) => v,
-            Err(resources::PollError::Gone) => {
-                // The repository no longer exists: the resource is gone, which
-                // is the one thing `notifications/resources/list_changed`
-                // means. This is where that capability earns its place — it is
-                // never sent "just because".
-                let _ = peer.notify_resource_list_changed().await;
-                return;
-            }
-            Err(resources::PollError::Other(e)) => {
-                tracing::debug!(uri = %key.2, error = %e, "resource poll failed; unsubscribing");
-                return;
-            }
-        };
-        let moved = {
-            let mut subs = st.mcp.subs.lock();
-            match subs.get_mut(&key) {
-                Some(s) if s.generation == generation && s.version != next => {
-                    s.version = next;
-                    true
-                }
-                Some(_) => false,
-                // Someone else removed it (unsubscribe, or a newer poller): stop.
-                None => return,
-            }
-        };
-        if moved
-            && peer
-                .notify_resource_updated(ResourceUpdatedNotificationParam::new(key.2.clone()))
-                .await
-                .is_err()
-        {
-            // A failed send means the session is gone: this poller has nobody
-            // to tell, so it stops and the guard cleans up.
-            return;
-        }
-    }
-}
-
-/// Registry cleanup for one poller. `Drop` is sync, and the registry lock is a
-/// `parking_lot` mutex, so no `await` is needed. The generation is what stops a
-/// dying poller from deleting the entry that replaced it.
-struct Unregister {
-    st: Arc<AppState>,
-    key: Key,
-    generation: u64,
-}
-
-impl Drop for Unregister {
-    fn drop(&mut self) {
-        let mut subs = self.st.mcp.subs.lock();
-        if subs
-            .get(&self.key)
-            .is_some_and(|s| s.generation == self.generation)
-        {
-            subs.remove(&self.key);
-        }
-    }
-}
-
-/// What a model is told once, at `initialize`.
 const INSTRUCTIONS: &str = "\
 walgit is an object-store-backed git host. This endpoint serves its tools and
 resources over MCP; the same facts are readable over HTTP (`GET /SKILL.md`
@@ -703,9 +486,11 @@ Rules that cost a wrong call if skipped:
   (`https://<host>/<owner>/<repo>.git`); this endpoint only reads and writes
   metadata.
 * `collab_publish` takes an entry you have already signed with your own key
-  (`walgit collab entry` builds and signs one). The host verifies it against
-  the key registered for `actor` and refuses `actor` != the authenticated
-  caller; it never signs for you and holds no key.
+  (`walgit collab entry` builds and signs one) and refuses `actor` != the
+  authenticated caller; it never signs for you and holds no key. The signature
+  is checked when entries are aggregated, so one signed with a key that is not
+  registered for its `actor` is accepted here and then never counts — publish
+  as the principal you actually hold.
 * Claim a card by publishing a `card_claim` entry (`walgit collab claim`), then
   re-read the board: another agent may hold it. A \"stand-down\" answer means
   stop, not retry.
