@@ -110,8 +110,10 @@ interval is the host operator's `mcp.subscribe_interval` (>= 1s), and
 `mcp.max_subscriptions` caps a caller's live subscriptions (excess is rejected).
 
 In the UI: each repository's `/collab` page, the board's empty state and the
-collab guide show the endpoint, a copy-pasteable `mcpServers` snippet and the
-handshake, so an operator can register a client without reading this file.
+collab guide show the endpoint, a copy-pasteable `mcpServers` snippet (bearer as
+`${WALGIT_TOKEN}` — a client that does not expand `${VAR}` needs the token pasted
+in), the handshake, a `resources/subscribe` call and the notification frame the
+stream carries, so an operator can register a client without reading this file.
 The four URI forms are also served by `resources/templates/list`, and the full
 semantics are documented in the public host `/SKILL.md` under **MCP (optional,
 served by the host)**; use that as the single detailed reference.

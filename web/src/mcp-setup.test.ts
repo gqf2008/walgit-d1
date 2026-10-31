@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { mcpClientConfig, mcpEndpoint, mcpHandshake } from "./components/McpSetup";
+import {
+  mcpClientConfig,
+  mcpEndpoint,
+  mcpHandshake,
+  mcpNotification,
+  mcpSubscribe,
+} from "./components/McpSetup";
 
 /**
  * The MCP box (D64) shows copy-pasteable snippets; these assertions pin the two
@@ -19,7 +25,9 @@ describe("mcp setup snippets", () => {
     const server = config.mcpServers.walgit;
     expect(server.type).toBe("http");
     expect(server.url).toBe("https://walgit.example/mcp");
-    expect(server.headers.Authorization).toBe("Bearer $WALGIT_TOKEN");
+    // Braced form: the clients that expand anything expand `${VAR}`; a bare
+    // `$NAME` reaches the wire as literal text.
+    expect(server.headers.Authorization).toBe("Bearer ${WALGIT_TOKEN}");
   });
 
   it("handshakes with an initialize message and both required headers", () => {
@@ -33,5 +41,24 @@ describe("mcp setup snippets", () => {
     expect(message.params.protocolVersion).toBe("2025-06-18");
     // rmcp rejects an initialize without a versioned `clientInfo`.
     expect(message.params.clientInfo.version).toBeTruthy();
+  });
+
+  it("subscribes with the session header the handshake returned", () => {
+    const curl = mcpSubscribe("https://walgit.example/mcp", "walgit://collab/board/acme/web");
+    expect(curl).toContain("mcp-session-id:");
+    expect(curl).toContain("Accept: application/json, text/event-stream");
+    const body = curl.slice(curl.indexOf("-d '") + 4, curl.lastIndexOf("'"));
+    const message = JSON.parse(body);
+    expect(message.method).toBe("resources/subscribe");
+    expect(message.params.uri).toBe("walgit://collab/board/acme/web");
+  });
+
+  it("documents the notification the stream actually carries", () => {
+    const frame = mcpNotification("walgit://collab/board/acme/web");
+    const data = frame.split("\n").find((l) => l.startsWith("data: "));
+    const message = JSON.parse(data!.slice("data: ".length));
+    expect(message.method).toBe("notifications/resources/updated");
+    // The uri only — the client must re-read to learn what changed.
+    expect(message.params).toEqual({ uri: "walgit://collab/board/acme/web" });
   });
 });

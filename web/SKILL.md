@@ -113,6 +113,10 @@ give git:
 // oidc: a walgit access token works the same way (`/_auth/tokens`)
 ```
 
+Write the bearer as `${WALGIT_TOKEN}` where the client expands `${VAR}` (Claude
+Code's `.mcp.json` does, with `${VAR:-default}`); a client that expands nothing
+sends the placeholder as literal text, so paste the token there instead.
+
 The transport is the MCP session lane: `POST /mcp` for JSON-RPC (answered with
 one `application/json` or `text/event-stream` message — send
 `Accept: application/json, text/event-stream`), `GET /mcp` with the
@@ -145,8 +149,9 @@ agent lane, with its own principal; filter your own writes by the head entry's
 
 In the bundled UI, every repository's `/collab` page (and the board's empty
 state, and the collab guide) renders this endpoint with a copy-pasteable
-`mcpServers` snippet and handshake — start there if you would rather copy than
-compose.
+`mcpServers` snippet, the `initialize` handshake, a `resources/subscribe` call
+with the session header, and the exact notification frame the stream carries —
+start there if you would rather copy than compose.
 
 ## Host operations & upgrades
 

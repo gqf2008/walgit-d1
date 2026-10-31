@@ -64,7 +64,12 @@ export function mcpEndpoint(origin: string): string {
   return `${origin.replace(/\/+$/, "")}/mcp`;
 }
 
-/** A client-side registration snippet (`mcpServers` shape every MCP host reads). */
+/** A client-side registration snippet (`mcpServers` shape every MCP host reads).
+ *
+ * `${WALGIT_TOKEN}` — braces, not a bare `$NAME`: the clients that expand
+ * anything expand this form (Claude Code's `.mcp.json` `${VAR}`/`${VAR:-default}`),
+ * and the ones that expand nothing show the placeholder instead of silently
+ * sending the literal text as a bearer. */
 export function mcpClientConfig(endpoint: string): string {
   return [
     "{",
@@ -72,7 +77,7 @@ export function mcpClientConfig(endpoint: string): string {
     '    "walgit": {',
     '      "type": "http",',
     `      "url": "${endpoint}",`,
-    '      "headers": { "Authorization": "Bearer $WALGIT_TOKEN" }',
+    '      "headers": { "Authorization": "Bearer ${WALGIT_TOKEN}" }',
     "    }",
     "  }",
     "}",
@@ -93,10 +98,37 @@ export function mcpHandshake(endpoint: string): string {
   });
   return [
     `curl -sS -D - ${endpoint} \\`,
-    '  -H "Authorization: Bearer $WALGIT_TOKEN" \\',
+    '  -H "Authorization: Bearer ${WALGIT_TOKEN}" \\',
     '  -H "Content-Type: application/json" \\',
     '  -H "Accept: application/json, text/event-stream" \\',
     `  -d '${body}'`,
+  ].join("\n");
+}
+
+/** A subscription, by hand: the same POST shape, with the session header the
+ * handshake returned. */
+export function mcpSubscribe(endpoint: string, uri: string): string {
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "resources/subscribe",
+    params: { uri },
+  });
+  return [
+    `curl -sS ${endpoint} \\`,
+    '  -H "Authorization: Bearer ${WALGIT_TOKEN}" \\',
+    '  -H "Content-Type: application/json" \\',
+    '  -H "Accept: application/json, text/event-stream" \\',
+    '  -H "mcp-session-id: <Mcp-Session-Id from the handshake>" \\',
+    `  -d '${body}'`,
+  ].join("\n");
+}
+
+/** What arrives on the notification stream once the watched URI moves. */
+export function mcpNotification(uri: string): string {
+  return [
+    "event: message",
+    `data: {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"${uri}"}}`,
   ].join("\n");
 }
 
@@ -124,6 +156,12 @@ export function McpSetup({ full }: { full: string }) {
           ].join("\n")}
         </p>
         <p className="cmds-note">{t("mcp.resources.note", { repo: full })}</p>
+        <div className="box-header">{t("mcp.subscribe")}</div>
+        <CodeBlock code={mcpSubscribe(endpoint, `walgit://collab/board/${full}`)} />
+        <p className="cmds-note">{t("mcp.subscribe.note")}</p>
+        <div className="box-header">{t("mcp.notify")}</div>
+        <CodeBlock code={mcpNotification(`walgit://collab/board/${full}`)} />
+        <p className="cmds-note">{t("mcp.notify.note")}</p>
         <ul className="cmds-note" style={{ margin: 0, paddingLeft: 18 }}>
           <li>{t("mcp.rule.bytes")}</li>
           <li>{t("mcp.rule.write")}</li>
