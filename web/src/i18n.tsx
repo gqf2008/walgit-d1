@@ -51,32 +51,11 @@ const en = {
 
   // MCP box on the collab pages (D64): the host serves MCP itself at /mcp.
   "mcp.title": "MCP (served by this host)",
-  "mcp.lede":
-    "This host speaks the Model Context Protocol itself at {endpoint} (HTTP Streamable): one endpoint, no local adapter process. Point an agent client at it and the tools are this host's own API — repository reads, the board, the log, and (where the operator enabled it) signed collab writes.",
-  "mcp.register": "Register (client config)",
-  "mcp.register.note":
-    "${WALGIT_TOKEN} is expanded by clients that support ${VAR} (Claude Code's .mcp.json does); one that does not will send the placeholder, so paste the token there instead — it is the credential git already uses, keep it in the client's own secret store. For a self-signed host also point the client at the CA published on /services/public/ca.pem.",
-  "mcp.handshake": "Handshake (curl)",
-  "mcp.handshake.note":
-    "Two headers are required: Accept must list both application/json and text/event-stream, and Content-Type must be application/json. The answer carries Mcp-Session-Id — send it back on every later request and on the GET stream that receives notifications.",
-  "mcp.resources": "Resources",
-  "mcp.resources.note":
-    "Resources are refs-level JSON: {repo} is this repository, and any other repository takes the same shape. A subscription watches one URI server-side and pushes notifications/resources/updated when the WAL moves — a bounded poll, best-effort, per instance. Two cover a project: refs (every git action and inbox entry) and board (the whole projection).",
+  "mcp.endpoint": "Endpoint",
   "mcp.subscribe": "Subscribe (watch one URI)",
-  "mcp.subscribe.note":
-    "resources/unsubscribe takes the same body with method resources/unsubscribe. A subscription is a bounded server-side poll of the refs level, not a held request: it survives nothing, so a reconnecting client re-reads the URI once and continues.",
   "mcp.stream": "Open the notification stream",
   "mcp.stream.note":
     "One held GET per session: subscriptions push their notifications here. Without it resources/subscribe answers success and delivers nothing — the stream, not the subscription, is what a client keeps open.",
-  "mcp.notify": "What arrives on the GET stream",
-  "mcp.notify.note":
-    "The notification carries the URI only — read the resource and compare _meta.version to see what changed. notifications/resources/list_changed means a watched repository disappeared (deleted or renamed); re-read resources/list.",
-  "mcp.rule.bytes":
-    "Bytes never travel over MCP: clone and fetch stay on git, with bundle-uri moving the bulk.",
-  "mcp.rule.write":
-    "A write must be the caller's own actor, and it arrives already signed: collab_publish forwards your entry to the host's own collab API, which refuses an actor that is not your credential's principal. The host holds no key.",
-  "mcp.rule.subs":
-    "A claim that is already held answers stand-down: stop, do not start work on that card.",
   "collab.byActor": "By actor",
   "collab.byKind": "By kind",
   "collab.th.title": "title",
@@ -823,30 +802,11 @@ const zhCN: Record<I18nKey, string> = {
 
   // Collab 页面的 MCP 说明（D64）：托管方自己提供 /mcp。
   "mcp.title": "MCP（由本服务器提供）",
-  "mcp.lede":
-    "本服务器自己提供 Model Context Protocol 端点 {endpoint}（HTTP Streamable）：一个端点，不需要本地适配进程。把 agent 客户端指向它，工具就是本服务器自己的 API —— 仓库读取、看板、WAL 日志，以及（运维打开后）带签名的协作写入。",
-  "mcp.register": "接入配置（客户端）",
-  "mcp.register.note":
-    "${WALGIT_TOKEN} 由支持 ${VAR} 展开的客户端替换（Claude Code 的 .mcp.json 支持）；不展开的客户端会把占位符原样发出去，那就直接粘贴 token —— 它就是 git 已经在用的凭据，请放在客户端自己的密钥存储里。自签名证书的服务器还要让客户端信任 /services/public/ca.pem 公布的 CA。",
-  "mcp.handshake": "握手（curl）",
-  "mcp.handshake.note":
-    "两个请求头是必须的：Accept 要同时列出 application/json 与 text/event-stream，Content-Type 要是 application/json。应答里带 Mcp-Session-Id —— 之后的每个请求，以及接收通知的 GET 流，都要把它带回来。",
-  "mcp.resources": "资源",
-  "mcp.resources.note":
-    "资源是 refs 级的 JSON：{repo} 是当前仓库，其他仓库是同样的形状。订阅会在服务端盯住一个 URI，WAL 一动就推 notifications/resources/updated —— 有界轮询、尽力而为、仅在单个实例内。一个项目订两个就够：refs（git 操作与收件箱）和 board（整个看板投影）。",
+  "mcp.endpoint": "接入端点",
   "mcp.subscribe": "订阅（盯住一个 URI）",
-  "mcp.subscribe.note":
-    "退订用同样的请求体，method 换成 resources/unsubscribe。订阅是服务端对 refs 层的有界轮询，不是挂住的长请求：它不跨重启存活，所以客户端重连后先 read 一次当前值再继续。",
   "mcp.stream": "打开通知流",
   "mcp.stream.note":
     "每个会话一条挂住的 GET：订阅产生的通知都从这里出去。不开这条流的话，resources/subscribe 会回答成功但什么都不会送到 —— 客户端要保持打开的是这条流，而不是订阅本身。",
-  "mcp.notify": "GET 流上收到的东西",
-  "mcp.notify.note":
-    "通知只带 URI —— 用 resources/read 读回资源并比对 _meta.version 才能知道变了什么。notifications/resources/list_changed 表示被订阅的仓库消失了（删除或改名），重新读一次 resources/list。",
-  "mcp.rule.bytes": "字节不走 MCP：克隆与拉取仍在 git 上，批量数据由 bundle-uri 搬运。",
-  "mcp.rule.write":
-    "写入必须是调用者自己的 actor，而且是**已签名**的条目：collab_publish 只把它转交给宿主自己的协作条目 API，该 API 会拒绝 actor 不是你本人 principal 的条目。服务器不持有任何私钥。",
-  "mcp.rule.subs": "卡片已被他人占用时返回 stand-down：停手，不要开始这张卡的工作。",
   "collab.byActor": "按签名者",
   "collab.byKind": "按类型",
   "collab.th.title": "标题",
@@ -1584,30 +1544,11 @@ const zhTW: Record<I18nKey, string> = {
 
   // Collab 頁面的 MCP 說明（D64）：託管方自己提供 /mcp。
   "mcp.title": "MCP（由本伺服器提供）",
-  "mcp.lede":
-    "本伺服器自己提供 Model Context Protocol 端點 {endpoint}（HTTP Streamable）：一個端點，不需要本機轉接程序。把 agent 客戶端指向它，工具就是本伺服器自己的 API —— 倉庫讀取、看板、WAL 日誌，以及（維運開啟後）帶簽章的協作寫入。",
-  "mcp.register": "接入設定（客戶端）",
-  "mcp.register.note":
-    "${WALGIT_TOKEN} 由支援 ${VAR} 展開的客戶端替換（Claude Code 的 .mcp.json 支援）；不展開的客戶端會把佔位符原樣送出，那就直接貼上 token —— 它就是 git 已在使用的憑證，請放在客戶端自己的密鑰儲存裡。自簽憑證的伺服器還要讓客戶端信任 /services/public/ca.pem 公布的 CA。",
-  "mcp.handshake": "握手（curl）",
-  "mcp.handshake.note":
-    "兩個請求標頭是必須的：Accept 要同時列出 application/json 與 text/event-stream，Content-Type 要是 application/json。回應會帶 Mcp-Session-Id —— 之後的每個請求，以及接收通知的 GET 流，都要把它帶回來。",
-  "mcp.resources": "資源",
-  "mcp.resources.note":
-    "資源是 refs 級的 JSON：{repo} 是目前倉庫，其他倉庫是同樣的形狀。訂閱會在伺服器端盯住一個 URI，WAL 一動就推 notifications/resources/updated —— 有界輪詢、盡力而為、僅在單一實例內。一個專案訂兩個就夠：refs（git 操作與收件匣）和 board（整個看板投影）。",
+  "mcp.endpoint": "接入端點",
   "mcp.subscribe": "訂閱（盯住一個 URI）",
-  "mcp.subscribe.note":
-    "退訂用同樣的請求體，method 換成 resources/unsubscribe。訂閱是伺服器對 refs 層的有界輪詢，不是掛住的長請求：它不跨重啟存活，所以客戶端重連後先 read 一次當前值再繼續。",
   "mcp.stream": "打開通知流",
   "mcp.stream.note":
     "每個會話一條掛住的 GET：訂閱產生的通知都從這裡出去。不開這條流的話，resources/subscribe 會回答成功但什麼都不會送到 —— 客戶端要保持打開的是這條流，而不是訂閱本身。",
-  "mcp.notify": "GET 流上收到的東西",
-  "mcp.notify.note":
-    "通知只帶 URI —— 用 resources/read 讀回資源並比對 _meta.version 才能知道變了什麼。notifications/resources/list_changed 表示被訂閱的倉庫消失了（刪除或改名），重新讀一次 resources/list。",
-  "mcp.rule.bytes": "位元組不走 MCP：複製與抓取仍在 git 上，批量資料由 bundle-uri 搬運。",
-  "mcp.rule.write":
-    "寫入必須是呼叫者自己的 actor，而且是**已簽名**的條目：collab_publish 只把它轉交給宿主自己的協作條目 API，該 API 會拒絕 actor 不是你本人 principal 的條目。伺服器不持有任何私鑰。",
-  "mcp.rule.subs": "卡片已被他人佔用時回傳 stand-down：停手，不要開始這張卡的工作。",
   "collab.byActor": "按簽署者",
   "collab.byKind": "按類型",
   "collab.th.title": "標題",
