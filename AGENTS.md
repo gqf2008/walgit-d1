@@ -904,14 +904,14 @@ decision in §4 — or the PR is; never "fix later".
   and the two tool names were deleted in favour of the single pass-through `collab_publish`.
   The earlier shape had the host hold collaborators' seeds to sign for them; that custody was
   a second mechanism the HTTP surface does not need, and it made the server a signing oracle.)*
-  The bundled UI teaches the endpoint where an agent
-  arrives: a **MCP box** (`web/src/components/McpSetup.tsx`) on every repository's `/collab`
-  page and on the board's empty state states exactly two facts — the endpoint, and the
+  The bundled UI teaches the endpoint where an agent arrives: a **MCP box**
+  (`web/src/components/McpSetup.tsx`) on every repository's `/collab` page and on the board's
+  empty state is **one paragraph with one copy button** — it states the endpoint and the
   `walgit://` URIs this project exposes for `resources/read` and `resources/subscribe` (refs,
   the retained log, the board projection; the shapes for any other repository and the
-  per-thread URI come from `resources/templates/list`). It carries no curl, no client config
-  and no protocol reminders: MCP is a standard, so a client already knows the session header
-  and the methods, and the box answers only "where do I point a client, what can it watch".
+  per-thread URI come from `resources/templates/list`), so a reader copies it into an agent and
+  the agent configures its own client. No curl, no client config, no protocol reminders: MCP is
+  a standard, so the session header and the methods are the spec's job.
   All data-free — the only repo-scoped text is built from the route, never a request.
 
 Decision identifiers are stable; gaps in the numbering are intentional.

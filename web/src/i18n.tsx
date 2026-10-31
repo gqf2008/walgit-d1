@@ -51,8 +51,8 @@ const en = {
 
   // MCP box on the collab pages (D64): the host serves MCP itself at /mcp.
   "mcp.title": "MCP (served by this host)",
-  "mcp.endpoint": "Endpoint",
-  "mcp.resources": "Resources (read / subscribe)",
+  "mcp.brief":
+    "This host serves MCP over Streamable HTTP at {endpoint}. Point your MCP client there; this repository exposes {refs} (refs), {wal} (the retained log) and {board} (the collab board) for resources/read and resources/subscribe.",
   "collab.byActor": "By actor",
   "collab.byKind": "By kind",
   "collab.th.title": "title",
@@ -799,8 +799,8 @@ const zhCN: Record<I18nKey, string> = {
 
   // Collab 页面的 MCP 说明（D64）：托管方自己提供 /mcp。
   "mcp.title": "MCP（由本服务器提供）",
-  "mcp.endpoint": "接入端点",
-  "mcp.resources": "资源（可读 / 可订阅）",
+  "mcp.brief":
+    "本机通过 Streamable HTTP 在 {endpoint} 提供 MCP。把 MCP 客户端指向它即可：本仓库暴露 {refs}（refs）、{wal}（保留的日志）、{board}（协作看板），都可读、可订阅。",
   "collab.byActor": "按签名者",
   "collab.byKind": "按类型",
   "collab.th.title": "标题",
@@ -1538,8 +1538,8 @@ const zhTW: Record<I18nKey, string> = {
 
   // Collab 頁面的 MCP 說明（D64）：託管方自己提供 /mcp。
   "mcp.title": "MCP（由本伺服器提供）",
-  "mcp.endpoint": "接入端點",
-  "mcp.resources": "資源（可讀 / 可訂閱）",
+  "mcp.brief":
+    "本機透過 Streamable HTTP 在 {endpoint} 提供 MCP。把 MCP 客戶端指向它即可：本倉庫暴露 {refs}（refs）、{wal}（保留的日誌）、{board}（協作看板），都可讀、可訂閱。",
   "collab.byActor": "按簽署者",
   "collab.byKind": "按類型",
   "collab.th.title": "標題",

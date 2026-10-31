@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { mcpEndpoint, mcpResources } from "./components/McpSetup";
 
 /**
- * The MCP box (D64) states two facts — the endpoint and the URIs this project
- * exposes. Both are things a client cannot guess and that a rendering refactor
- * could quietly break; the protocol itself (session header, `Accept`, JSON-RPC)
- * is the spec's, so nothing here pins it.
+ * The MCP box (D64) is one paragraph a reader can copy and hand to an agent, so
+ * these pin the two facts it carries — the endpoint's shape and the URIs this
+ * project exposes. The protocol itself (session header, methods, notification
+ * shape) is the spec's, so nothing here pins it.
  */
 describe("mcp setup", () => {
   it("appends the one endpoint to the host root", () => {
