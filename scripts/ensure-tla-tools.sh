@@ -12,12 +12,16 @@ VERSION="v1.8.0"
 # (built 2026-10-15), and the pin was re-derived to 15d103b7...; on 2026-10-21
 # the asset rolled to the 2026-10-20 build (X-Git-Revision d2e1472, digest
 # 5bd7b64d...); on 2026-10-24 it rolled again to revision 2ef2af8c767b76e5db5cba
-# 2878f027ac07aad36c. That current pin was verified on 2026-10-25 from the
-# GitHub release-asset digest, the downloaded bytes and MANIFEST.MF
-# (`gh api repos/tlaplus/tlaplus/releases`). A mismatch still fails closed:
+# 2878f027ac07aad36c. That pin was verified on 2026-10-25 from the GitHub
+# release-asset digest, the downloaded bytes and MANIFEST.MF
+# (`gh api repos/tlaplus/tlaplus/releases`); on 2026-10-30 15:45Z it rolled
+# again (MANIFEST Build-TimeStamp 2026-10-30T15:41:39Z, Implementation-Version
+# "2.0 2026-10-30") and the pin was re-derived the same way — digest
+# 011267fc..., matching the release asset digest, the downloaded bytes and
+# Main-class tlc2.TLC. A mismatch still fails closed:
 # inspect MANIFEST.MF, upstream commit history and the release asset digest
 # before changing it. Never accept an unverified replacement automatically.
-SHA256="d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f"
+SHA256="011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd"
 URL="https://github.com/tlaplus/tlaplus/releases/download/$VERSION/tla2tools.jar"
 
 # `command -v java` alone accepts macOS's /usr/bin/java stub, which exists but
