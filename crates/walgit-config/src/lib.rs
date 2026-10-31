@@ -33,21 +33,15 @@ pub struct Config {
 }
 
 /// The MCP (Model Context Protocol) surface served by this instance at `/mcp`
-/// over Streamable HTTP (D64). The endpoint is always mounted: its read tools
-/// call the same JSON API a human uses, with the caller's own credential. The
-/// two **write** tools (`collab_entry`, `collab_claim`) exist only when
-/// `key_dir` names a directory of Ed25519 seeds — one file per principal,
-/// `<principal>.ed25519` holding the raw 32-byte seed (D58's file shape) —
-/// because a signed collab entry cannot be produced without a key and the
-/// server will not invent one. Every write is still published through the
-/// ordinary `POST …/api/collab/entries` path, so `actor == caller` and the
-/// done-transition gate apply unchanged.
+/// over Streamable HTTP (D64). The endpoint is always mounted and is a
+/// projection of the JSON API a human uses, with the caller's own credential:
+/// every tool is one endpoint, and the single **write** tool (`collab_publish`)
+/// is the ordinary `POST …/api/collab/entries` — it takes an entry the client
+/// has already signed. This process holds no collaborator's key, so signing
+/// stays where the identity is (D58).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpConfig {
-    /// Directory of Ed25519 seeds the server may sign as. `None` = read-only
-    /// MCP surface (the default).
-    pub key_dir: Option<PathBuf>,
     /// Poll interval of one resource subscription (`notifications/resources/
     /// updated`). One conditional manifest read per subscribed repo per tick:
     /// at least 1 s, default 5 s — the same at-least-once lane `walgit collab
@@ -69,7 +63,6 @@ pub struct McpConfig {
 impl Default for McpConfig {
     fn default() -> Self {
         McpConfig {
-            key_dir: None,
             subscribe_interval: Duration::from_secs(5),
             max_subscriptions: 32,
             session_ttl: Duration::from_mins(30),
@@ -1542,14 +1535,6 @@ impl Config {
             !self.mcp.session_ttl.is_zero(),
             "mcp.session_ttl must be > 0 (an idle MCP session is dropped after it)"
         );
-        if let Some(dir) = &self.mcp.key_dir {
-            anyhow::ensure!(
-                dir.is_dir(),
-                "mcp.key_dir {} is not a directory (it holds `<principal>.ed25519` seeds, one per \
-                 principal the server may sign as; drop the key for a read-only MCP surface)",
-                dir.display()
-            );
-        }
         // #130 added these socket bounds; #135 pins their floor: `0s` is not
         // "no bound" — reqwest/AWS SDK fail every connect or idle check
         // immediately, so the store looks permanently down (each failure

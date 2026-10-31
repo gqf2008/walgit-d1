@@ -878,13 +878,14 @@ decision in §4 — or the PR is; never "fix later".
   caller's `Authorization`/`Cookie`/`Host`/`User-Agent` replayed — so placement (D30's 503),
   freshness (§2.3), `actor == caller` and every response shape are the code that already
   answers a browser, never a second contract to drift from. Read tools are always advertised
-  (`repo_*`, `collab_board/thread/report`, `wal_ls`); **write tools (`collab_entry`,
-  `collab_claim`) exist only when the operator set `mcp.key_dir`**, sign **as the caller's own
-  actor** with that principal's key (`<key_dir>/<principal>.ed25519`, the `collab join` seed
-  shape), are refused *before* publishing when the key is not bound to that actor (an entry
-  that does not verify cannot be repaired in an append-only log), and publish through
-  `POST /{o}/{r}/api/collab/entries` so policy and the done-transition gate stay single-sourced.
-  There is no server identity and no destructive operation on the surface (D49's rule, kept).
+  (`repo_*`, `collab_board/thread/report`, `wal_ls`); **the one write tool is `collab_publish`**,
+  which takes an entry the client **already signed** with its own principal key and forwards it
+  to `POST /{o}/{r}/api/collab/entries` — the host verifies the signature against the key
+  registered for `actor`, refuses an `actor` that is not the authenticated caller, and **holds
+  no key and signs nothing** (signing stays where the identity is, D58/D62; an entry that does
+  not verify cannot be repaired in an append-only log). Policy and the done-transition gate stay
+  single-sourced on that endpoint. There is no server identity and no destructive operation on
+  the surface (D49's rule, kept).
   **Resources** are `walgit://refs/<o>/<r>`, `walgit://wal/<o>/<r>?from=<seq>`,
   `walgit://collab/board/<o>/<r>` and `walgit://collab/thread/<o>/<r>/<id>`:
   `resources/list` (one store listing, bounded), `resources/templates/list`, `resources/read`,
@@ -892,12 +893,18 @@ decision in §4 — or the PR is; never "fix later".
   conditional `manifest.pb` GET per tick) emitting `notifications/resources/updated` with the
   `uri` only, `notifications/resources/list_changed` when the resource disappears. Bytes never
   travel over MCP; clone/fetch/push stay git + bundle-uri. Config is host-level and outside
-  D24's per-repo settings: `[mcp] key_dir`, `subscribe_interval` (>= 1s), `max_subscriptions`,
+  D24's per-repo settings: `[mcp] subscribe_interval` (>= 1s), `max_subscriptions`,
   `session_ttl`. **Supersedes D49 and the adapter half of D52**: `walgit mcp` (the stdio
   adapter that shelled out to this CLI) is deleted — keeping it would be a second
   implementation of the same surface — while D52's substance stands: subscriptions are
   adapter-side (now server-side) **polling, best-effort, per-instance**, never a durable push
-  channel and never a held request (D55). The bundled UI teaches the endpoint where an agent
+  channel and never a held request (D55).
+  *(Amended 2026-10-31: the surface is a **projection of the JSON API, nothing more** —
+  `mcp.key_dir`, the server-side signing path (`mcp/signing.rs`, `write_entry`/`write_claim`)
+  and the two tool names were deleted in favour of the single pass-through `collab_publish`.
+  The earlier shape had the host hold collaborators' seeds to sign for them; that custody was
+  a second mechanism the HTTP surface does not need, and it made the server a signing oracle.)*
+  The bundled UI teaches the endpoint where an agent
   arrives: a **MCP box** (`web/src/components/McpSetup.tsx`) on every repository's `/collab`
   page and on the board's empty state renders the endpoint, a `mcpServers` snippet and the
   handshake, all data-free — the four resource templates come from the route, never a request.

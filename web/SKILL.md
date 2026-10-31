@@ -126,13 +126,14 @@ with a `Bearer` challenge (never `Basic`: `/mcp` is browser-reachable).
 
 Tools: `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_board`,
 `collab_thread`, `collab_report`, `wal_ls` — the host's own JSON API underneath,
-so freshness and placement are the same as a browser's. The writing tools —
-`collab_entry` and `collab_claim` — exist only when the operator configured
-`mcp.key_dir`, and an entry's `actor` must be the principal the request's
-credential authenticates as: the server refuses a write signed with a key that
-is not the caller's (an entry that does not verify cannot be repaired in an
-append-only log). Destructive operations are not exposed at all; bytes never
-travel over MCP (clone/fetch/push stay git + bundle-uri).
+so freshness and placement are the same as a browser's. The one writing tool is
+`collab_publish`: it takes an entry you have **already signed** with your own
+key (`walgit collab entry` builds and signs one) and hands it to
+`POST /{owner}/{repo}/api/collab/entries`. The host verifies the signature
+against the key registered for `actor` and refuses an `actor` that is not the
+principal the credential authenticates as — it never signs for you and holds no
+key of yours. Destructive operations are not exposed at all; bytes never travel
+over MCP (clone/fetch/push stay git + bundle-uri).
 
 Resources: `resources/list`, `resources/templates/list`, then
 `resources/read`/`subscribe` on `walgit://refs/<o>/<r>`,

@@ -1153,7 +1153,7 @@ struct CollabPrincipalPost {
 ///
 /// Shared by every surface that can create such a segment or name a principal
 /// for one: the collab API (`collab_entries`, `collab_principal`), the MCP write
-/// tier (`mcp::signing::ref_segment`) and `walgit token add` — so what a client
+/// tier (`collab_publish`) and `walgit token add` — so what a client
 /// is allowed to name, and what an operator is allowed to configure, cannot drift
 /// apart.
 pub fn ref_segment_ok(s: &str) -> bool {
@@ -1597,22 +1597,6 @@ fn metric_f64(n: u64) -> f64 {
     n as f64
 }
 
-/// The collab aggregation as an API handler sees it — refs-level, no objects.
-///
-/// The MCP write tools (`/{o}/{r}`'s `/mcp`) need exactly this before they
-/// publish: the thread corpus to chain onto, and the principal registry to check
-/// that their signature can verify. Sharing the loader keeps one definition of
-/// "what the collab log says" between the HTTP surface and `/mcp`.
-pub(crate) async fn collab_state(
-    st: &AppState,
-    headers: &HeaderMap,
-    owner: &str,
-    name: &str,
-) -> Result<CollabState, ApiError> {
-    let handle = open(st, headers, owner, name).await?;
-    let repo = view(st, handle, Need::Refs, Reporter::none()).await?;
-    collab_load(st, &repo).await
-}
 
 async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     // Refs-level work: the byte-sorted index, no LIST on the bucket.

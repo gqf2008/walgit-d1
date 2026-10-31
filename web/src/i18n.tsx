@@ -71,7 +71,7 @@ const en = {
   "mcp.rule.bytes":
     "Bytes never travel over MCP: clone and fetch stay on git, with bundle-uri moving the bulk.",
   "mcp.rule.write":
-    "A write must be the caller's own actor. The host signs it with that principal's key from mcp.key_dir; without one the write tools are not advertised at all.",
+    "A write must be the caller's own actor, and it arrives already signed: collab_publish forwards your entry to the host's own collab API, which refuses an actor that is not your credential's principal. The host holds no key.",
   "mcp.rule.subs":
     "A claim that is already held answers stand-down: stop, do not start work on that card.",
   "collab.byActor": "By actor",
@@ -757,7 +757,7 @@ const en = {
   "cmds.s5.lead": "The server never pushes events (D46). Build the wake-up yourself: collab watch invokes your command once per new or changed ref.",
   "cmds.s5.hook": "The signed entry JSON arrives on stdin with WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED. Filter self-echo by ACTOR, ignore VERIFIED=false, park the event and return — keep long work out of the hook.",
   "cmds.s5.once": "One pass and exit: the shape a timer wants. A resident loop needs a supervisor that restarts it.",
-  "cmds.s5.mcp": "MCP is served by the host itself at /mcp (Streamable HTTP), so nothing runs locally. Register the URL with your token; write tools appear only when the host has mcp.key_dir.",
+  "cmds.s5.mcp": "MCP is served by the host itself at /mcp (Streamable HTTP), so nothing runs locally. Register the URL with your token; writes go through collab_publish, which takes an entry you already signed.",
   "cmds.s5.uris": "Two subscriptions cover a project. notifications/resources/updated carries only the uri, so always resources/read and compare _meta.version.",
   "cmds.s6.t": "Decentralized CI",
   "cmds.s6.lead": "No CI logic on the server: the tested commit's .walgit/ci.toml declares the tasks and the runner is a client.",
@@ -839,7 +839,7 @@ const zhCN: Record<I18nKey, string> = {
     "通知只带 URI —— 用 resources/read 读回资源并比对 _meta.version 才能知道变了什么。notifications/resources/list_changed 表示被订阅的仓库消失了（删除或改名），重新读一次 resources/list。",
   "mcp.rule.bytes": "字节不走 MCP：克隆与拉取仍在 git 上，批量数据由 bundle-uri 搬运。",
   "mcp.rule.write":
-    "写入必须是调用者自己的 actor：服务器用 mcp.key_dir 里该 principal 的密钥签名；没有密钥时写入类工具根本不会出现在 tools/list 里。",
+    "写入必须是调用者自己的 actor，而且是**已签名**的条目：collab_publish 只把它转交给宿主自己的协作条目 API，该 API 会拒绝 actor 不是你本人 principal 的条目。服务器不持有任何私钥。",
   "mcp.rule.subs": "卡片已被他人占用时返回 stand-down：停手，不要开始这张卡的工作。",
   "collab.byActor": "按签名者",
   "collab.byKind": "按类型",
@@ -1516,7 +1516,7 @@ const zhCN: Record<I18nKey, string> = {
   "cmds.s5.lead": "服务端不推事件（D46）。醒不醒自己建：collab watch 对每条新增或变更的 ref 调一次你的命令。",
   "cmds.s5.hook": "签名条目 JSON 走 stdin，另带 WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED。按 ACTOR 过滤自回声，VERIFIED=false 不当真；钩子只 park 事件就返回，别在里面干长活。",
   "cmds.s5.once": "跑一遍就退出：定时器要的形态。常驻循环要交给会重启它的东西。",
-  "cmds.s5.mcp": "MCP 由服务器自己提供（/mcp，Streamable HTTP），本地不需要跑任何进程。填 URL 加 token 即可；只有服务器配了 mcp.key_dir 才会出现写工具。",
+  "cmds.s5.mcp": "MCP 由服务器自己提供（/mcp，Streamable HTTP），本地不需要跑任何进程。填 URL 加 token 即可；写入走 collab_publish，交给它的条目要你自己先签好名。",
   "cmds.s5.uris": "两个订阅覆盖一个项目。notifications/resources/updated 只带 uri，必须 resources/read 并比对 _meta.version。",
   "cmds.s6.t": "去中心化 CI",
   "cmds.s6.lead": "服务端没有 CI 逻辑：受测提交的 .walgit/ci.toml 声明任务，runner 是客户端。",
@@ -1597,7 +1597,7 @@ const zhTW: Record<I18nKey, string> = {
     "通知只帶 URI —— 用 resources/read 讀回資源並比對 _meta.version 才能知道變了什麼。notifications/resources/list_changed 表示被訂閱的倉庫消失了（刪除或改名），重新讀一次 resources/list。",
   "mcp.rule.bytes": "位元組不走 MCP：複製與抓取仍在 git 上，批量資料由 bundle-uri 搬運。",
   "mcp.rule.write":
-    "寫入必須是呼叫者自己的 actor：伺服器用 mcp.key_dir 裡該 principal 的金鑰簽章；沒有金鑰時寫入類工具根本不會出現在 tools/list 裡。",
+    "寫入必須是呼叫者自己的 actor，而且是**已簽名**的條目：collab_publish 只把它轉交給宿主自己的協作條目 API，該 API 會拒絕 actor 不是你本人 principal 的條目。伺服器不持有任何私鑰。",
   "mcp.rule.subs": "卡片已被他人佔用時回傳 stand-down：停手，不要開始這張卡的工作。",
   "collab.byActor": "按簽署者",
   "collab.byKind": "按類型",
@@ -2274,7 +2274,7 @@ const zhTW: Record<I18nKey, string> = {
   "cmds.s5.lead": "伺服器不推事件（D46）。醒不醒自己建：collab watch 對每條新增或變更的 ref 呼叫一次你的指令。",
   "cmds.s5.hook": "簽名條目 JSON 走 stdin，另帶 WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED。依 ACTOR 過濾自回聲，VERIFIED=false 不當真；鉤子只 park 事件就返回，別在裡面做長工作。",
   "cmds.s5.once": "跑一遍就結束：計時器要的形態。常駐迴圈要交給會重啟它的東西。",
-  "cmds.s5.mcp": "MCP 由伺服器自己提供（/mcp，Streamable HTTP），本機不需跑任何行程。填 URL 加 token 即可；只有伺服器設了 mcp.key_dir 才會出現寫入工具。",
+  "cmds.s5.mcp": "MCP 由伺服器自己提供（/mcp，Streamable HTTP），本機不需跑任何行程。填 URL 加 token 即可；寫入走 collab_publish，交給它的條目要你自己先簽好名。",
   "cmds.s5.uris": "兩個訂閱涵蓋一個專案。notifications/resources/updated 只帶 uri，必須 resources/read 並比對 _meta.version。",
   "cmds.s6.t": "去中心化 CI",
   "cmds.s6.lead": "伺服器沒有 CI 邏輯：受測提交的 .walgit/ci.toml 宣告任務，runner 是客戶端。",

@@ -226,8 +226,8 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 它重新 verified，但轮换是破坏性的：`actor` 过去用旧 key 签的条目全部变为 unverified）。因此
 `walgit collab entry` / `collab claim` 在落盘/推送前校验「签名 key 的 public key == 注册表中
 `actor` 的 key」（仓库本地注册表 ∪ host 缓存），不一致即拒绝，并在错误里指出 key 实际归属的
-principal；MCP 的 `collab_entry` / `collab_claim` 只是这两个子命令的 argv 适配层，走同一条
-闸，没有旁路。`collab gc` 对折叠签名一向如此。
+principal；MCP 的 `collab_publish` 只是这两个子命令产物的传输层（收下**已签名**的条目再交给
+`POST …/api/collab/entries`），走同一条闸，没有旁路；服务端不持任何私钥。`collab gc` 对折叠签名一向如此。
 
 ### 5.2 kind 与 body 约定
 
@@ -748,9 +748,9 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   sidecar 从 pull 车道转发（D46）。
 - **MCP 面**：宿主自己在内置的 `/mcp`（Streamable HTTP，D64）暴露**宿主自己的 JSON API** 的工具与
   `walgit://` 资源 —— 工具名与宿主 API 一一对应（`repo_*` 读仓库，`collab_board`/`collab_thread`/
-  `collab_report` 读聚合，`wal_ls` 读保留日志），写工具 `collab_entry` 与 `collab_claim` 只在配了
-  `[mcp] key_dir` 时出现，且**只用调用者自己的 principal 密钥签名**（actor 必须等于调用者，发布前校验
-  principal↔key 绑定；`collab_claim` 把工作卡认领收敛做成一次调用）。资源 `walgit://refs/<o>/<r>`、
+  `collab_report` 读聚合，`wal_ls` 读保留日志），唯一的写工具 `collab_publish` 收下客户端**已签名**的条目
+  并转交 `POST …/api/collab/entries`：服务端不签名、不持钥，只做签名校验 + `actor == 调用者`，
+  工作卡认领就是发布一条 `card_claim` 后重读看板。资源 `walgit://refs/<o>/<r>`、
   `walgit://wal/<o>/<r>{?from}`、`walgit://collab/board/<o>/<r>`、
   `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
   **服务端 refs 级轮询、best-effort**（同 D52，不是持久推送）；字节不过 MCP（clone/fetch/push

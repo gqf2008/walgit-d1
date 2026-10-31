@@ -13,10 +13,9 @@
 //! cost is that the API is reached through its own URL grammar, so paths and
 //! query values must be encoded here.
 //!
-//! Reads go through [`Call`]. The two writes do not: `collab_entry` and
-//! `collab_claim` read the thread through `collab_state` (the same loader the
-//! API uses) before they publish, because a decision needs the aggregation, not
-//! one rendered page.
+//! Every tool goes through [`Call`], the one write included (`collab_publish`
+//! is a POST and nothing else): the API decides what a write means, so there is
+//! no second path to keep in step with it.
 
 use std::sync::Arc;
 
@@ -54,9 +53,6 @@ impl From<ApiError> for rmcp::ErrorData {
         rmcp::ErrorData::internal_error(e.to_string(), None)
     }
 }
-
-/// The collab aggregation, shared with `/{o}/{r}/api` (one loader, one truth).
-pub(crate) use crate::web::api::collab_state;
 
 /// One tool call's identity: the caller's headers, replayed on every inner
 /// request.

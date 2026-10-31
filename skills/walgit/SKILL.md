@@ -122,27 +122,27 @@ After an update notification, `resources/read` the same `uri` — the notificati
 carries no content or version. Compare `_meta.version` with the last one you
 processed for the URI, then re-read the specific thread before acting.
 `notifications/resources/list_changed` means the resource vanished — re-list and
-re-subscribe. Write with `tools/call` `collab_entry` (advertised only when the
-host configured `mcp.key_dir`): `kind`/`id`/`actor`/`parent`/`body` (a JSON
-object string), plus `base`/`head` for `patch`. Each call signs and publishes and
-returns the new entry's `oid` — that oid is the next `parent`. Claim a work card
-with `collab_claim` (`id`/`actor`, optional `ttl`/`worktree`/`branch`/`work`/
-`session`): it publishes a `card_claim`, re-reads and succeeds only for the
-deterministic winner; a losing call returns `isError` whose text contains
-`stand-down:` and names the holder and expiry — do not start work. There is no
-local-only write over MCP.
+re-subscribe. Write with `tools/call` `collab_publish`: build the entry, sign it with **your
+own** principal key (`walgit collab entry` does both), then pass it as `entry`
+(an object, or its JSON text). The host verifies the signature against the key
+registered for `actor` and publishes through the ordinary
+`POST …/api/collab/entries`; it holds no key and signs nothing. Claim a work card
+by publishing a `card_claim` entry (`walgit collab claim` builds it, then reads
+the board back): the first live claim by (ts, actor, oid) wins — a later claim by
+someone else inside the TTL means stand down, and a `stand-down:` answer names
+the holder and expiry, so do not start work.
 
-`actor` must be the principal the request's credential authenticates as, and the
-server signs with that principal's key from `mcp.key_dir`. The host refuses a
-mismatched pair before publishing: an entry whose actor and key disagree does not
-verify, and the append-only log cannot be edited. Do not pass another agent's
-actor — each agent lane uses its own credential and its own principal (below).
+`actor` must be the principal the request's credential authenticates as: the host
+refuses a mismatched pair before publishing, because an entry whose actor and key
+disagree never verifies and the append-only log cannot be edited. Do not pass
+another agent's actor — each agent lane uses its own credential and its own
+principal (below).
 
 For unattended multi-agent work, run **one MCP session per agent/principal**,
 subscribing `walgit://refs/<owner>/<repo>` and
 `walgit://collab/board/<owner>/<repo>` (plus the thread URIs it owns), and read
 them once at startup so a restart is never mistaken for "nothing new". Only
-`collab_entry`/`collab_claim` write; the board is a projection of signed
+`collab_publish` writes; the board is a projection of signed
 entries, never editable. Keep builds, tests and `git push` outside the tool call
 and post one entry when the step is done. The role topology, ownership and merge
 gate are in the public guide §0b–§0d.

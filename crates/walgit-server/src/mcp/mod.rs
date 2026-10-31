@@ -45,8 +45,7 @@
 
 pub mod api;
 pub mod resources;
-pub mod signing;
-pub mod tools;
+mod tools;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -371,15 +370,9 @@ pub struct WalgitMcp {
     st: Arc<AppState>,
 }
 
-impl WalgitMcp {
-    fn write(&self) -> bool {
-        self.st.cfg.mcp.key_dir.is_some()
-    }
-}
-
 /// The HTTP request an SDK handler was called for: headers to replay, the
 /// principal to act as, and the MCP session (the default `session` a
-/// `collab_claim` records, so a resumed session recognises its own claim).
+/// a client may record in a `card_claim` entry).
 struct RequestIn {
     headers: HeaderMap,
     principal: String,
@@ -435,10 +428,7 @@ impl ServerHandler for WalgitMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        // `tools/list` filters by tier: a write tool is advertised only when
-        // this host can sign for a caller (`mcp.key_dir`), so `tools/call` can
-        // never reach what the list hides (D49).
-        let items = tools::defs(self.write())
+        let items = tools::defs()
             .into_iter()
             .map(|t| {
                 let schema: JsonObject = match t.schema.as_object() {
@@ -460,15 +450,7 @@ impl ServerHandler for WalgitMcp {
         let args = request
             .arguments
             .map_or_else(|| Value::Object(JsonObject::new()), Value::Object);
-        match tools::call(
-            &self.st,
-            &req.headers,
-            &req.principal,
-            &req.session,
-            &request.name,
-            &args,
-        )
-        .await
+        match tools::call(&self.st, &req.headers, &request.name, &args).await
         {
             Ok(value) => Ok(CallToolResponse::Complete(CallToolResult::success(
                 vec![ContentBlock::text(tools::as_text(&value))],
@@ -720,12 +702,13 @@ Rules that cost a wrong call if skipped:
 * Bytes never travel over MCP. To move a repository, `git clone` its URL
   (`https://<host>/<owner>/<repo>.git`); this endpoint only reads and writes
   metadata.
-* To write a collaboration entry (`collab_entry`, `collab_claim`) you must be
-  the actor you name: the entry is signed with the key registered for it. The
-  server refuses `actor != caller`.
-* `collab_claim` before starting work on a card, re-read its result before you
-  trust it: another agent may hold the card. A \"stand-down\" error means stop,
-  not retry.
+* `collab_publish` takes an entry you have already signed with your own key
+  (`walgit collab entry` builds and signs one). The host verifies it against
+  the key registered for `actor` and refuses `actor` != the authenticated
+  caller; it never signs for you and holds no key.
+* Claim a card by publishing a `card_claim` entry (`walgit collab claim`), then
+  re-read the board: another agent may hold it. A \"stand-down\" answer means
+  stop, not retry.
 * Ownership of a card is carried by `status` entries, not comments.
 * Subscriptions are polls (`resources/subscribe`): an update notification says
   `re-read`, never `here is the diff`.";
@@ -740,7 +723,8 @@ mod tests {
         // travel here and that a write must be its own actor; losing either
         // sentence would make the surface look like a normal MCP tool set.
         assert!(INSTRUCTIONS.contains("Bytes never travel over MCP"));
-        assert!(INSTRUCTIONS.contains("actor != caller"));
+        assert!(INSTRUCTIONS.contains("already signed"));
+        assert!(INSTRUCTIONS.contains("holds no key"));
         assert!(INSTRUCTIONS.contains("stand-down"));
         assert!(INSTRUCTIONS.contains("status"));
     }

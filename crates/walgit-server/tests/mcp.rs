@@ -262,7 +262,7 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
     let head = git_in(&src, &["rev-parse", "main"])?.trim().to_string();
     let sid = initialize(&server).await?;
 
-    // tools/list carries the read tier and — with no `mcp.key_dir` — no write
+    // tools/list carries the read surface and the one pass-through write tool
     // tool at all (D49: `tools/call` cannot reach what `tools/list` hides).
     let tools = call(&server, &sid, "tools/list", json!({})).await?;
     let names: Vec<&str> = tools["tools"]
@@ -274,8 +274,7 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
     for expected in ["repo_list", "repo_refs", "collab_board", "wal_ls"] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
-    assert!(!names.contains(&"collab_entry"), "{names:?}");
-    assert!(!names.contains(&"collab_claim"), "{names:?}");
+    assert!(names.contains(&"collab_publish"), "{names:?}");
 
     // The repositories this host serves.
     let listed = call(&server, &sid, "tools/call", json!({"name": "repo_list", "arguments": {}})).await?;
@@ -530,29 +529,12 @@ fn register_principal(repo: &std::path::Path, principal: &str, public_key: &str)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_write_is_signed_as_the_callers_actor_or_refused_before_it_is_published() -> Result<()> {
+async fn a_write_is_an_entry_the_client_signed_and_the_host_only_forwards() -> Result<()> {
     // `token` mode, because a write is authorized as *the caller*: with
-    // `mode = none` every request is `anon` and an entry signed as anyone else
-    // would be refused by the API's actor check (which is the point — that check
-    // is why this lane cannot invent a server identity).
+    // `mode = none` every request is `anon` and the API refuses any entry whose
+    // actor is not the caller. The host holds no key: the entry arrives signed.
     let token = "worker-s3cret";
-    let keys = tempfile::tempdir()?;
-    // A deterministic 32-byte seed, in the format `walgit collab join` writes
-    // (hex, D58) — the operator moves a worktree key here as-is.
-    let seed = [7u8; 32];
-    std::fs::write(
-        keys.path().join("worker.ed25519"),
-        format!("{}\n", hex::encode(seed)),
-    )?;
-    // A key for a principal the caller is NOT — the misconfiguration the guard
-    // exists for.
-    std::fs::write(
-        keys.path().join("someone-else.ed25519"),
-        format!("{}\n", hex::encode([9u8; 32])),
-    )?;
-    let key_dir = keys.path().to_path_buf();
     let server = Server::start_with_tweak(move |cfg| {
-        cfg.mcp.key_dir = Some(key_dir);
         cfg.server.auth.mode = walgit_config::AuthMode::Token;
         cfg.server.auth.anonymous_read = false;
         cfg.server.auth.tokens = vec![walgit_config::StaticToken {
@@ -578,17 +560,16 @@ async fn a_write_is_signed_as_the_callers_actor_or_refused_before_it_is_publishe
     git_in(&src, &["remote", "add", "origin", &url])?;
     git_in(&src, &["push", "-q", "origin", "main"])?;
 
-    let public_key = base64::engine::general_purpose::STANDARD.encode(
-        ed25519_dalek::SigningKey::from_bytes(&seed)
-            .verifying_key()
-            .to_bytes(),
-    );
+    // The identity is the client's all the way down: the test is the signer.
+    let seed = [7u8; 32];
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public_key =
+        base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
     register_principal(&src, "worker", &public_key)?;
 
     let sid = initialize_as(&server, Some(token)).await?;
     let bearer = Some(token);
 
-    // With a key directory the write tools are registered …
     let tools = call_as(&server, &sid, "tools/list", json!({}), bearer).await?;
     let names: Vec<&str> = tools["tools"]
         .as_array()
@@ -596,40 +577,36 @@ async fn a_write_is_signed_as_the_callers_actor_or_refused_before_it_is_publishe
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert!(names.contains(&"collab_entry"), "{names:?}");
-    assert!(names.contains(&"collab_claim"), "{names:?}");
-
-    // … but writing as anyone but the caller is refused before a signature
-    // exists: the log is append-only, so an unverifiable entry is forever.
-    let refused = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_entry", "arguments": {
-            "repo": "t/write", "kind": "issue", "id": "card-1",
-            "actor": "someone-else", "body": "{\"title\":\"x\"}"}}),
-        bearer,
-    )
-    .await?;
-    assert_eq!(refused["isError"], true, "{refused}");
-    let text = refused["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(text.contains("someone-else"), "{text}");
+    // One write tool, always advertised: whether it may write is the API's
+    // answer (403 for a caller without write), not a property of the table.
+    assert!(names.contains(&"collab_publish"), "{names:?}");
+    assert!(!names.contains(&"collab_entry"), "{names:?}");
 
     // A real signed entry lands in the thread …
+    let issue = signed_entry(&key, "issue", "card-1", "worker", json!({
+        "title": "first card",
+        "acceptance": "it reads back",
+    }));
     let written = call_as(
         &server,
         &sid,
         "tools/call",
-        json!({"name": "collab_entry", "arguments": {
-            "repo": "t/write", "kind": "issue", "id": "card-1",
-            "actor": "worker",
-            "body": "{\"title\":\"first card\",\"acceptance\":\"it reads back\"}"}}),
+        json!({"name": "collab_publish", "arguments": {"repo": "t/write", "entry": &issue}}),
         bearer,
     )
     .await?;
     assert_ne!(written["isError"], true, "{written}");
     let text = written["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("card-1"), "{text}");
+    // The answer is the API's own (`{oid, ref, seq}`), unchanged.
+    let published: Value = serde_json::from_str(text)?;
+    assert!(published["oid"].is_string(), "{text}");
+    assert!(
+        published["ref"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("refs/collab/inbox/worker/"),
+        "{text}"
+    );
 
     // … and is what a resource read returns, verified.
     let read = call_as(
@@ -647,23 +624,68 @@ async fn a_write_is_signed_as_the_callers_actor_or_refused_before_it_is_publishe
     assert_eq!(entries[0]["entry"]["kind"], "issue");
     assert_eq!(entries[0]["principal"], "worker");
     assert_eq!(entries[0]["verified"], true, "{thread}");
+    let head_oid = entries[0]["oid"].as_str().expect("oid").to_string();
 
-    // Claiming is the same pipeline (read → publish → re-read) and reports the
-    // card it won; the card is unowned before the claim.
+    // A claim is just another signed entry (the JSON-text form of `entry`),
+    // parented on the thread head.
+    let mut claim = signed_entry(&key, "card_claim", "card-1", "worker", json!({
+        "ttl": 300,
+        "worktree": "wt-1",
+        "branch": "feat/card-1",
+        "work": "read the tests",
+    }));
+    claim["parent"] = json!(head_oid);
     let claimed = call_as(
         &server,
         &sid,
         "tools/call",
-        json!({"name": "collab_claim", "arguments": {
-            "repo": "t/write", "id": "card-1", "actor": "worker",
-            "worktree": "wt-1", "branch": "feat/card-1", "work": "read the tests"}}),
+        json!({"name": "collab_publish", "arguments": {
+            "repo": "t/write",
+            "entry": serde_json::to_string(&claim)?,
+        }}),
         bearer,
     )
     .await?;
     assert_ne!(claimed["isError"], true, "{claimed}");
-    let text = claimed["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("claimed"), "{text}");
+
+    // Writing as somebody else is refused by the host before anything is
+    // appended: an entry whose actor is not the caller has no author.
+    let forged = signed_entry(&key, "comment", "card-1", "someone-else", json!({"body": "hi"}));
+    let refused = call_as(
+        &server,
+        &sid,
+        "tools/call",
+        json!({"name": "collab_publish", "arguments": {"repo": "t/write", "entry": &forged}}),
+        bearer,
+    )
+    .await?;
+    assert_eq!(refused["isError"], true, "{refused}");
     Ok(())
+}
+
+/// A signed collab entry, the shape `walgit collab entry` produces: the client
+/// owns the key, the canonical bytes and the signature.
+fn signed_entry(
+    key: &ed25519_dalek::SigningKey,
+    kind: &str,
+    id: &str,
+    actor: &str,
+    body: Value,
+) -> Value {
+    use walgit_wal::collab::{sign_entry, Entry};
+    let mut entry = Entry {
+        version: 1,
+        kind: kind.to_string(),
+        id: id.to_string(),
+        actor: actor.to_string(),
+        ts: 1_760_000_000,
+        parent: String::new(),
+        refs: None,
+        body,
+        sig: String::new(),
+    };
+    entry.sig = sign_entry(&mut entry, key);
+    serde_json::to_value(entry).expect("entry")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -703,11 +725,13 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
         .iter()
         .filter_map(|t| t["name"].as_str().map(str::to_string))
         .collect();
-    // Read tier only: this host has no `mcp.key_dir`.
-    assert!(!names.iter().any(|n| n == "collab_entry"), "{names:?}");
+    // `collab_publish` needs a signed entry, so this read sweep skips it.
+    assert!(names.iter().any(|n| n == "collab_publish"), "{names:?}");
 
     for name in &names {
         let arguments = match name.as_str() {
+            // The write tool needs a signed entry; it has its own test.
+            "collab_publish" => continue,
             "repo_list" => json!({}),
             "repo_owners" => json!({"owner": "t"}),
             "repo_refs" | "collab_board" | "collab_report" | "wal_ls" => json!({"repo": "t/all"}),
