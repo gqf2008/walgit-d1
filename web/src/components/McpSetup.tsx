@@ -4,19 +4,19 @@ import { useI18n } from "../i18n";
 
 /**
  * 「MCP」box on the collab pages (D64): this host serves the Model Context
- * Protocol itself at `/mcp` over HTTP Streamable, so a client needs a URL and
- * the URI of the resource it wants to watch — nothing runs locally.
+ * Protocol itself at `/mcp` over HTTP Streamable.
  *
- * Deliberately three lines: the endpoint, the two subscriptions that cover this
- * project, and the stream the notifications arrive on (a subscription without a
- * held stream answers success and delivers nothing, which is the one mistake
- * worth spending a line on). Static: the only repo-scoped text is the URI built
- * from the route, never from a request.
+ * Two things and nothing else — the endpoint, and the `walgit://` URIs this
+ * project exposes for `resources/read` and `resources/subscribe`. MCP is a
+ * standard: how to call it (session header, `Accept`, JSON-RPC) is the spec's
+ * job, not this page's, and every client already knows it.
+ *
+ * Static: the only repo-scoped text is built from the route, never a request.
  */
 
-/** One copy-on-click block (clipboard first; selection as the fallback —
- * the same two-step the `/commands` page uses). */
-function CodeBlock({ code }: { code: string }) {
+/** One copy-on-click line (clipboard first; selection as the fallback — the
+ * same two-step the `/commands` page uses). */
+function CopyLine({ value }: { value: string }) {
   const { t } = useI18n();
   const node = useRef<HTMLElement>(null);
   const timer = useRef<number | undefined>(undefined);
@@ -30,7 +30,7 @@ function CodeBlock({ code }: { code: string }) {
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(value);
       flash("copied");
     } catch {
       const el = node.current;
@@ -50,7 +50,7 @@ function CodeBlock({ code }: { code: string }) {
   return (
     <div className="cmds-row">
       <code ref={node} className="mono">
-        {code}
+        {value}
       </code>
       <button type="button" className="cmds-copy" onClick={copy} aria-label={`${t("cmds.copy")}: ${label}`}>
         {label}
@@ -64,50 +64,29 @@ export function mcpEndpoint(origin: string): string {
   return `${origin.replace(/\/+$/, "")}/mcp`;
 }
 
-/** A subscription: one POST, authorized like every other request, carrying the
- * session the `initialize` answer handed back. */
-export function mcpSubscribe(endpoint: string, uri: string): string {
-  const body = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 2,
-    method: "resources/subscribe",
-    params: { uri },
-  });
+/** The resources `owner/repo` exposes: refs, the retained log, and the board
+ * projection. `resources/templates/list` carries the shapes for any other
+ * repository (and the per-thread one). */
+export function mcpResources(full: string): string[] {
   return [
-    `curl -sS ${endpoint} \\`,
-    '  -H "Authorization: Bearer ${WALGIT_TOKEN}" \\',
-    '  -H "Content-Type: application/json" \\',
-    '  -H "Accept: application/json, text/event-stream" \\',
-    '  -H "mcp-session-id: <Mcp-Session-Id from initialize>" \\',
-    `  -d '${body}'`,
-  ].join("\n");
-}
-
-/** The stream the notifications arrive on: one `GET /mcp`, held open with the
- * same session. Without it a subscription answers success and delivers nothing. */
-export function mcpStream(endpoint: string): string {
-  return [
-    `curl -N ${endpoint} \\`,
-    '  -H "Authorization: Bearer ${WALGIT_TOKEN}" \\',
-    '  -H "Accept: text/event-stream" \\',
-    '  -H "mcp-session-id: <Mcp-Session-Id from initialize>"',
-  ].join("\n");
+    `walgit://refs/${full}`,
+    `walgit://wal/${full}`,
+    `walgit://collab/board/${full}`,
+  ];
 }
 
 export function McpSetup({ full }: { full: string }) {
   const { t } = useI18n();
   const origin = typeof window === "undefined" ? "https://<host>" : window.location.origin;
-  const endpoint = mcpEndpoint(origin);
   return (
     <Box title={t("mcp.title")}>
       <div className="pad">
         <div className="box-header">{t("mcp.endpoint")}</div>
-        <CodeBlock code={endpoint} />
-        <div className="box-header">{t("mcp.subscribe")}</div>
-        <CodeBlock code={mcpSubscribe(endpoint, `walgit://refs/${full}`)} />
-        <CodeBlock code={mcpSubscribe(endpoint, `walgit://collab/board/${full}`)} />
-        <p className="cmds-note">{t("mcp.stream.note")}</p>
-        <CodeBlock code={mcpStream(endpoint)} />
+        <CopyLine value={mcpEndpoint(origin)} />
+        <div className="box-header">{t("mcp.resources")}</div>
+        {mcpResources(full).map((uri) => (
+          <CopyLine key={uri} value={uri} />
+        ))}
       </div>
     </Box>
   );

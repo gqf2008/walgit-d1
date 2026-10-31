@@ -52,10 +52,7 @@ const en = {
   // MCP box on the collab pages (D64): the host serves MCP itself at /mcp.
   "mcp.title": "MCP (served by this host)",
   "mcp.endpoint": "Endpoint",
-  "mcp.subscribe": "Subscribe (watch one URI)",
-  "mcp.stream": "Open the notification stream",
-  "mcp.stream.note":
-    "One held GET per session: subscriptions push their notifications here. Without it resources/subscribe answers success and delivers nothing — the stream, not the subscription, is what a client keeps open.",
+  "mcp.resources": "Resources (read / subscribe)",
   "collab.byActor": "By actor",
   "collab.byKind": "By kind",
   "collab.th.title": "title",
@@ -803,10 +800,7 @@ const zhCN: Record<I18nKey, string> = {
   // Collab 页面的 MCP 说明（D64）：托管方自己提供 /mcp。
   "mcp.title": "MCP（由本服务器提供）",
   "mcp.endpoint": "接入端点",
-  "mcp.subscribe": "订阅（盯住一个 URI）",
-  "mcp.stream": "打开通知流",
-  "mcp.stream.note":
-    "每个会话一条挂住的 GET：订阅产生的通知都从这里出去。不开这条流的话，resources/subscribe 会回答成功但什么都不会送到 —— 客户端要保持打开的是这条流，而不是订阅本身。",
+  "mcp.resources": "资源（可读 / 可订阅）",
   "collab.byActor": "按签名者",
   "collab.byKind": "按类型",
   "collab.th.title": "标题",
@@ -1545,10 +1539,7 @@ const zhTW: Record<I18nKey, string> = {
   // Collab 頁面的 MCP 說明（D64）：託管方自己提供 /mcp。
   "mcp.title": "MCP（由本伺服器提供）",
   "mcp.endpoint": "接入端點",
-  "mcp.subscribe": "訂閱（盯住一個 URI）",
-  "mcp.stream": "打開通知流",
-  "mcp.stream.note":
-    "每個會話一條掛住的 GET：訂閱產生的通知都從這裡出去。不開這條流的話，resources/subscribe 會回答成功但什麼都不會送到 —— 客戶端要保持打開的是這條流，而不是訂閱本身。",
+  "mcp.resources": "資源（可讀 / 可訂閱）",
   "collab.byActor": "按簽署者",
   "collab.byKind": "按類型",
   "collab.th.title": "標題",

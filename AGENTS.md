@@ -906,12 +906,13 @@ decision in §4 — or the PR is; never "fix later".
   a second mechanism the HTTP surface does not need, and it made the server a signing oracle.)*
   The bundled UI teaches the endpoint where an agent
   arrives: a **MCP box** (`web/src/components/McpSetup.tsx`) on every repository's `/collab`
-  page and on the board's empty state renders exactly three things — the endpoint, one
-  `resources/subscribe` call per resource this project needs watched, and the `GET /mcp`
-  stream those notifications arrive on — all data-free (the only repo-scoped text is the URI
-  built from the route, never a request). It deliberately carries no client config, handshake
-  or rules: the box answers "where do I point a client, and how do I watch this project", and
-  the rest belongs to `web/SKILL.md`.
+  page and on the board's empty state states exactly two facts — the endpoint, and the
+  `walgit://` URIs this project exposes for `resources/read` and `resources/subscribe` (refs,
+  the retained log, the board projection; the shapes for any other repository and the
+  per-thread URI come from `resources/templates/list`). It carries no curl, no client config
+  and no protocol reminders: MCP is a standard, so a client already knows the session header
+  and the methods, and the box answers only "where do I point a client, what can it watch".
+  All data-free — the only repo-scoped text is built from the route, never a request.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 
