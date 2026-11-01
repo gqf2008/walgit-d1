@@ -19,11 +19,14 @@
 //! at-least-once semantics: the notification means "re-read", never "here is the
 //! delta", so a dropped or coalesced event costs nothing.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::model::{MetaObject, Resource, ResourceContents, ResourceTemplate};
 use rmcp::ErrorData;
 use serde_json::{json, Value};
+
+use axum::http::HeaderMap;
 
 use super::api::{enc, query, ApiError, Call};
 use crate::AppState;
@@ -253,27 +256,198 @@ pub fn templates() -> Vec<ResourceTemplate> {
     ]
 }
 
-/// The version of one resource. Refs, the log and a thread are projections of
-/// the WAL, so the refs-level seq *is* their version (one conditional
-/// `manifest.pb` read, or a 304 when this instance's copy is fresh —
-/// `wal.freshness_ttl`).
+/// The version of one resource — and the cache that makes it honest.
 ///
-/// The board is not: it is also a function of the wall clock, because a
-/// `card_claim` TTL expiring moves no ref but does move the `owner` column
-/// (D52's 2026-10-20 amendment). So its version carries the minute as well,
-/// reusing the exact string `read` reports as `_meta.version` — a subscriber
-/// compares the two and re-reads.
-pub(super) async fn version(st: &Arc<AppState>, uri: &Uri) -> Result<String, PollError> {
-    let (seq, _handle) = refs_level_poll(st, uri.owner(), uri.repo()).await?;
-    Ok(version_of(uri, seq, unix_now()))
+/// The version must move **iff** what `resources/read` would return changes. A
+/// repository-wide seq is not that: every subscriber of every card woke on
+/// every ref write (a `ci-artifacts` blob landing woke card watchers), and a
+/// `card_claim` TTL lapsing moves no ref at all while it does move the board's
+/// owner column (D52's 2026-10-20 amendment). The first attempt at the second
+/// half carried `now / 60` and woke every board subscriber once a minute
+/// forever — `walgit-mcp-resource-version-churn-20261101`.
+///
+/// So a board or thread version is computed from the projection the read would
+/// serve, never from the clock and never from the repository's seq:
+/// * board: `b:<witness>[:claim:<expires_at>]` — `<witness>` fingerprints the
+///   cards themselves (id, tip, status, owner), so it moves when a card moves
+///   and not when an unrelated ref does; `claim:` is the earliest claim that is
+///   still live, so a lapse is exactly one more move;
+/// * thread: `h:<tip oid>` — that thread's own tip (`h:-` while unknown);
+/// * refs / wal: `seq:<n>` — they *are* the repository-wide view, so that is
+///   their version, and subscribing to them watches the whole repository.
+pub(super) async fn version(
+    st: &Arc<AppState>,
+    headers: &HeaderMap,
+    principal: &str,
+    uri: &Uri,
+) -> Result<String, PollError> {
+    let (seq, handle) = refs_level_poll(st, uri.owner(), uri.repo()).await?;
+    version_at(st, headers, principal, uri, seq, &handle).await
 }
 
-/// `seq:<n>` — plus the minute for the board (see [`version`]).
-fn version_of(uri: &Uri, seq: u64, now: u64) -> String {
+/// [`version`] for a caller that already synced refs (a read would otherwise
+/// pay for the manifest twice).
+async fn version_at(
+    st: &Arc<AppState>,
+    headers: &HeaderMap,
+    principal: &str,
+    uri: &Uri,
+    seq: u64,
+    handle: &walgit_wal::RepoHandle,
+) -> Result<String, PollError> {
     match uri {
-        Uri::Board { .. } => format!("seq:{seq}:t:{}", now / 60),
-        _ => format!("seq:{seq}"),
+        Uri::Board { .. } => {
+            let projection = projection(st, headers, principal, uri, handle).await?;
+            Ok(board_version(&projection, unix_now().cast_signed()))
+        }
+        Uri::Thread { thread, .. } => {
+            let projection = projection(st, headers, principal, uri, handle).await?;
+            Ok(thread_version(projection.heads.get(thread).map(String::as_str)))
+        }
+        Uri::Refs { .. } | Uri::Wal { .. } => Ok(format!("seq:{seq}")),
     }
+}
+
+/// The board's version: the cards' witness, plus the earliest claim that is
+/// still live. A board with no claim has no clock in its version at all.
+fn board_version(projection: &Projection, now: i64) -> String {
+    let claim = projection
+        .expiries
+        .iter()
+        .copied()
+        .filter(|expires_at| *expires_at >= now)
+        .min();
+    match claim {
+        Some(expires_at) => format!("b:{:016x}:claim:{expires_at}", projection.witness),
+        None => format!("b:{:016x}", projection.witness),
+    }
+}
+
+/// A thread's version: its own tip, so a write anywhere else moves nothing.
+fn thread_version(head: Option<&str>) -> String {
+    format!("h:{}", head.unwrap_or("-"))
+}
+
+/// What a board/thread version is computed from. Built from the board document
+/// itself, so the version and the body `resources/read` returns cannot disagree.
+pub(super) struct Projection {
+    /// Fingerprint of `refs/collab/{inbox,meta}` — the cache key. It ignores
+    /// the `ci-artifacts` namespace deliberately: those refs change constantly
+    /// and no projection reads them, so they must not cost a rebuild.
+    pub collab: u64,
+    /// Fingerprint of the cards the board projects.
+    pub witness: u64,
+    /// The board document, i.e. exactly what reading the board returns.
+    pub board: Value,
+    /// `thread id → tip oid` (`BoardCard::last_oid`).
+    pub heads: HashMap<String, String>,
+    /// `expires_at` of every card that carries a claim.
+    pub expiries: Vec<i64>,
+}
+
+/// The projection for this repository, cached across subscribers and rebuilt
+/// only when the collab refs moved.
+async fn projection(
+    st: &Arc<AppState>,
+    headers: &HeaderMap,
+    principal: &str,
+    uri: &Uri,
+    handle: &walgit_wal::RepoHandle,
+) -> Result<Arc<Projection>, PollError> {
+    let (owner, repo) = (uri.owner(), uri.repo());
+    let key = format!("{owner}/{repo}");
+    let collab = collab_digest(handle);
+    if let Some(hit) = st.mcp.projection(&key, collab) {
+        return Ok(hit);
+    }
+    let base = format!("/{}/{}", enc(owner), enc(repo));
+    let board = Call::new(st, headers, principal)
+        .get(&format!("{base}/api/collab/board"))
+        .await
+        .map_err(|e| PollError::Other(api_err(&e)))?;
+    let (heads, expiries, witness) = index_board(&board);
+    Ok(st.mcp.remember_projection(
+        key,
+        Arc::new(Projection {
+            collab,
+            witness,
+            board,
+            heads,
+            expiries,
+        }),
+    ))
+}
+
+/// Fingerprint of the refs a collab projection is built from.
+///
+/// Read from the local ref index (already synced), not the bucket: this runs on
+/// every tick of every board/thread subscription, and its only job is to answer
+/// "could the projection have changed?" without paying for the aggregation.
+fn collab_digest(handle: &walgit_wal::RepoHandle) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match handle.local().refs() {
+        Ok(snapshot) => {
+            for r in snapshot.refs.iter().filter(|r| {
+                let name = r.name.as_str();
+                name.starts_with("refs/collab/inbox/") || name.starts_with("refs/collab/meta/")
+            }) {
+                r.name.hash(&mut hasher);
+                r.oid.hash(&mut hasher);
+            }
+        }
+        // No local refs (a repository whose object work lives elsewhere): give
+        // the caller a fingerprint that cannot be mistaken for a cached one.
+        Err(_) => return 0,
+    }
+    hasher.finish()
+}
+
+/// `thread id → tip oid`, every claim's expiry and the cards' witness, out of
+/// one board document.
+fn index_board(board: &Value) -> (HashMap<String, String>, Vec<i64>, u64) {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut heads = HashMap::new();
+    let mut expiries = Vec::new();
+    for (column_index, column) in board
+        .get("columns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        column_index.hash(&mut hasher);
+        for card in column
+            .get("cards")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for field in ["id", "last_oid", "status", "owner"] {
+                card.get(field)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .hash(&mut hasher);
+            }
+            if let (Some(id), Some(oid)) = (
+                card.get("id").and_then(Value::as_str),
+                card.get("last_oid").and_then(Value::as_str),
+            ) {
+                heads.insert(id.to_string(), oid.to_string());
+            }
+            if let Some(expires_at) = card
+                .get("claim")
+                .and_then(|claim| claim.get("expires_at"))
+                .and_then(Value::as_i64)
+            {
+                expiries.push(expires_at);
+            }
+        }
+    }
+    (heads, expiries, hasher.finish())
 }
 
 fn unix_now() -> u64 {
@@ -350,6 +524,9 @@ pub async fn read(
     let (owner, repo) = (uri.owner().to_string(), uri.repo().to_string());
     let base = format!("/{}/{}", enc(&owner), enc(&repo));
     let (seq, handle) = refs_level(st, &owner, &repo).await?;
+    let version = version_at(st, headers, principal, &uri, seq, &handle)
+        .await
+        .map_err(PollError::into_error_data)?;
     let body = match &uri {
         Uri::Refs { .. } => {
             let summary = call
@@ -404,10 +581,15 @@ pub async fn read(
                 "more": head_seq > last,
             })
         }
-        Uri::Board { .. } => call
-            .get(&format!("{base}/api/collab/board"))
-            .await
-            .map_err(|e| api_err(&e))?,
+        // The projection *is* the board body: one build serves the read, the
+        // version and every subscriber's next tick (see [`projection`]).
+        Uri::Board { .. } => {
+            projection(st, headers, principal, &uri, &handle)
+                .await
+                .map_err(PollError::into_error_data)?
+                .board
+                .clone()
+        }
         Uri::Thread { thread, .. } => call
             .get(&format!("{base}/api/collab/threads/{}", enc(thread)))
             .await
@@ -422,10 +604,10 @@ pub async fn read(
         mime_type: Some(JSON_MIME.to_string()),
         text: serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()),
         // The version a subscriber compares: `web/SKILL.md` tells clients to
-        // read `_meta.version` and re-read when it moved, so it must be as
-        // stable across the four kinds as `resources/subscribe` was (it is the
-        // same refs-level seq the poller sends).
-        meta: Some(meta(&version_of(&uri, seq, unix_now()))),
+        // read `_meta.version` and re-read when it moved, so it must be the
+        // exact string `resources/subscribe` notifies about — same function,
+        // not a second spelling of it.
+        meta: Some(meta(&version)),
     })
 }
 
@@ -516,31 +698,99 @@ pub fn api_err(e: &ApiError) -> ErrorData {
 mod tests {
     use super::*;
 
-    /// The board's version is also a function of the clock (D52's 2026-10-20
-    /// amendment: a `card_claim` TTL expiring moves no ref but does move the
-    /// projection), while every other resource stays a pure function of the seq.
+    fn projection_of(witness: u64, expiries: &[i64]) -> Projection {
+        Projection {
+            collab: 1,
+            witness,
+            board: json!({}),
+            heads: HashMap::from([("card-1".to_string(), "oid1".to_string())]),
+            expiries: expiries.to_vec(),
+        }
+    }
+
+    /// The bug this replaced (`walgit-mcp-resource-version-churn-20261101`): the
+    /// board version carried `now / 60`, so every board subscriber was woken
+    /// once a minute forever without anything changing.
     #[test]
-    fn only_the_board_version_carries_the_clock() {
-        let board = Uri::Board {
-            owner: "o".into(),
-            repo: "r".into(),
-        };
-        let refs = Uri::Refs {
-            owner: "o".into(),
-            repo: "r".into(),
-        };
-        assert_eq!(version_of(&board, 42, 600), "seq:42:t:10");
-        assert_ne!(
-            version_of(&board, 42, 600),
-            version_of(&board, 42, 660),
-            "a minute later the board projection may differ"
-        );
-        assert_eq!(version_of(&refs, 42, 600), "seq:42");
+    fn a_board_with_no_live_claim_has_no_clock_in_its_version() {
+        let board = projection_of(7, &[]);
+        assert_eq!(board_version(&board, 600), "b:0000000000000007");
         assert_eq!(
-            version_of(&refs, 42, 660),
-            version_of(&refs, 42, 600),
-            "refs do not move with the clock"
+            board_version(&board, 60 * 60 * 24),
+            "b:0000000000000007",
+            "a day later, still nothing to wake about"
         );
+    }
+
+    /// A claim's TTL lapsing moves no ref, so the version has to carry it — but
+    /// only the *earliest live* one, and only until it lapses.
+    #[test]
+    fn the_board_version_follows_the_earliest_live_claim() {
+        let board = projection_of(7, &[700, 650, 900]);
+        assert_eq!(
+            board_version(&board, 600),
+            "b:0000000000000007:claim:650"
+        );
+        assert_eq!(
+            board_version(&board, 650),
+            "b:0000000000000007:claim:650",
+            "the last live instant still counts as live"
+        );
+        assert_eq!(
+            board_version(&board, 651),
+            "b:0000000000000007:claim:700",
+            "when the earliest lapses the version moves to the next one"
+        );
+        assert_eq!(
+            board_version(&board, 901),
+            "b:0000000000000007",
+            "with no claim left the version is the cards' witness again"
+        );
+    }
+
+    /// A thread's version is the thread's own tip: a write anywhere else in the
+    /// repository must move nothing (that was the second half of the bug —
+    /// subscribers to a card woke on every `ci-artifacts` ref).
+    #[test]
+    fn a_thread_version_is_its_own_tip() {
+        assert_eq!(thread_version(Some("abc")), "h:abc");
+        assert_eq!(thread_version(None), "h:-");
+    }
+
+    /// The board document is the one index both versions are computed from, so
+    /// parsing it wrong silently reintroduces the churn.
+    #[test]
+    fn the_board_index_carries_heads_witness_and_claim_expiries() {
+        let board = json!({"columns": [{"name": "Open", "cards": [
+            {"id": "card-1", "last_oid": "oid1", "status": "open", "owner": "", "claim": {"expires_at": 700}},
+            {"id": "card-2", "last_oid": "oid2", "status": "in-progress", "owner": "alice", "claim": null},
+            {"id": "card-3"}
+        ]}]});
+        let (heads, expiries, witness) = index_board(&board);
+        assert_eq!(heads.get("card-1").map(String::as_str), Some("oid1"));
+        assert_eq!(heads.get("card-2").map(String::as_str), Some("oid2"));
+        assert_eq!(heads.len(), 2, "a card without a tip names no thread");
+        assert_eq!(expiries, vec![700]);
+
+        // The witness moves with a card's identity and with nothing else.
+        let moved = json!({"columns": [{"name": "Open", "cards": [
+            {"id": "card-1", "last_oid": "oid1", "status": "open", "owner": ""},
+            {"id": "card-2", "last_oid": "oid3", "status": "in-progress", "owner": "alice"}
+            ,{"id": "card-3"}
+        ]}]});
+        assert_ne!(index_board(&moved).2, witness, "a new tip is a new witness");
+        let renamed = json!({"columns": [{"name": "Open", "cards": [
+            {"id": "card-1", "last_oid": "oid1", "status": "open", "owner": ""},
+            {"id": "card-2", "last_oid": "oid2", "status": "in-progress", "owner": "bob"}
+            ,{"id": "card-3"}
+        ]}]});
+        assert_ne!(index_board(&renamed).2, witness, "a new owner is a new witness");
+        let same = json!({"columns": [{"name": "Open", "cards": [
+            {"id": "card-1", "last_oid": "oid1", "status": "open", "owner": ""},
+            {"id": "card-2", "last_oid": "oid2", "status": "in-progress", "owner": "alice"}
+            ,{"id": "card-3"}
+        ]}]});
+        assert_eq!(index_board(&same).2, witness, "the same board is the same witness");
     }
 
     #[test]

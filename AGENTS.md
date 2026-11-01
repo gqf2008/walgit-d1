@@ -957,6 +957,24 @@ decision in §4 — or the PR is; never "fix later".
   a standard, so the session header and the methods are the spec's job.
   All data-free — the only repo-scoped text is built from the route, never a request.
 
+  *(Amended 2026-11-01, `walgit-mcp-resource-version-churn-20261101`: a resource version must move
+  **iff that resource's body would**.)* The first shape used the repository's WAL seq for every
+  URI, so every subscriber of every thread woke on every ref write (a `ci-artifacts` blob landing
+  woke card watchers), and a `card_claim` TTL lapsing — which moves no ref but does move the
+  board's owner column — never woke anyone. The patch for that half carried `now / 60` and woke
+  every board subscriber once a minute forever: measured on a 4104-inbox-entry repository, seq
+  frozen, 1440 wakes/day carrying a 183 KiB body. So versions are now computed from the
+  projection, never from the clock and never from the repository seq: a **thread**'s version is
+  its own tip oid (`h:<tip>`), a **board**'s is a fingerprint of the projected cards plus the
+  earliest claim that is still live (`b:<witness>[:claim:<expires_at>]`, so a lapse is exactly one
+  more move and a board with no claim carries no clock at all), and `refs`/`wal` stay on `seq:<n>`
+  because they *are* the repository-wide view — subscribing to them is watching the whole
+  repository. The projection is built from the board document itself (so the version and the body
+  a read returns cannot disagree), cached per repository and bounded
+  (`MCP_PROJECTIONS_MAX = 32`), and rebuilt only when the fingerprint of
+  `refs/collab/{inbox,meta}` changes — the `ci-artifacts` namespace is excluded on purpose, so a
+  busy CI lane costs a subscriber nothing. `_meta.version` and the notification use one function,
+  not two spellings of it (`crates/walgit-server/src/mcp/resources.rs`).
 - **D65** **One program file per install; a `PATH` entry is a symlink, never a copy (2026-11-01,
   cc-ai-cli-entry-owner).** Program files live where an updater owns them (D51: the macOS app
   bundle, `/usr/bin` from the `.deb`, `%USERPROFILE%\walgit` from Inno Setup); `~/.walgit` is user

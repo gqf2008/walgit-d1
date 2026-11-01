@@ -510,6 +510,7 @@ impl ServerHandler for WalgitMcp {
         let req = request_in(&context)?;
         subscriptions::watch(
             &self.st,
+            &req.headers,
             &req.principal,
             &req.session,
             &request.uri,

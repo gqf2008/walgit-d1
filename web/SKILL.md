@@ -259,7 +259,14 @@ Resources: `resources/list`, `resources/templates/list`, then
 `resources/read`/`subscribe` on `walgit://refs/<o>/<r>`,
 `walgit://wal/<o>/<r>?from=<seq>`, `walgit://collab/board/<o>/<r>`,
 `walgit://collab/thread/<o>/<r>/<id>`. Two subscriptions cover a project —
-refs (every git action + inbox) and board (the whole projection). A
+refs (every git action + inbox) and board (the whole projection), or one
+`walgit://collab/thread/…` if you only care about one card.
+
+A version moves **iff** that resource's body would: a thread's is its own tip
+(another card's write, or any `ci-artifacts` ref, wakes nothing), a board's is
+the cards plus the earliest claim that is still live (so a `card_claim` lapsing
+wakes you once), and `refs`/`wal` are the repository-wide view — subscribing to
+them *is* watching the whole repository. A
 `notifications/resources/updated` carries only the `uri`: always
 `resources/read`, compare `_meta.version`, ignore unchanged, and treat an event
 as a trigger to re-read — never act on the notification alone. Subscriptions are
@@ -392,7 +399,9 @@ serialize units that touch the same files/schema.
 The server never pushes (D46/D55); the lane is a **subscription plus a
 re-read**. Subscribe over MCP to the two resources that cover a project —
 `walgit://refs/<owner>/<repo>` (every git action and inbox write) and
-`walgit://collab/board/<owner>/<repo>` (the whole projection) — then on
+`walgit://collab/board/<owner>/<repo>` (the whole projection), or to
+`walgit://collab/thread/<owner>/<repo>/<id>` when one card is all you follow
+(its version is that card's tip, so unrelated writes do not wake you) — then on
 `notifications/resources/updated` read the resource, compare `_meta.version`
 with your cursor, and act only on what changed. The notification carries the
 URI, never the content. Read once at startup so a restart is never mistaken for

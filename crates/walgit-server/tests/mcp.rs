@@ -445,6 +445,102 @@ async fn a_subscription_pushes_a_notification_when_the_refs_move() -> Result<()>
     Ok(())
 }
 
+/// The version must move iff the resource's body would change
+/// (`walgit-mcp-resource-version-churn-20261101`): a push that touches no
+/// collab ref must not wake a card watcher, and a card's own write must.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_card_subscription_ignores_writes_that_did_not_touch_the_card() -> Result<()> {
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.mcp.subscribe_interval = Duration::from_secs(1);
+    })
+    .await?;
+    server.put_repo("t", "quiet").await?;
+    let src = push_repo(&server, "t", "quiet", 1)?;
+    let sid = initialize(&server).await?;
+
+    // A card, published the way an agent publishes one.
+    let root = publish_entry(&server, &sid, "t/quiet", "quiet-card", "quiet", None).await?;
+
+    let thread_uri = "walgit://collab/thread/t/quiet/quiet-card";
+    let board_uri = "walgit://collab/board/t/quiet";
+    for uri in [thread_uri, board_uri] {
+        let _ = call(&server, &sid, "resources/subscribe", json!({ "uri": uri })).await?;
+    }
+
+    let url = format!("{}/mcp", server.base_url);
+    let quiet_url = url.clone();
+    let reader_sid = sid.clone();
+    let quiet_reader = tokio::spawn(async move {
+        wait_for_updated(&quiet_url, &reader_sid, Duration::from_secs(4)).await
+    });
+
+    // A push moves `refs/heads/main` (and the WAL seq) but no collab ref, so
+    // neither watch may fire. This was the churn: `seq:<n>` as every resource's
+    // version woke every card watcher for every `ci-artifacts` blob.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::fs::write(src.join("f0_0.txt"), b"unrelated\n")?;
+    git_in(&src, &["add", "-A"])?;
+    git_in(&src, &["-c", "commit.gpgsign=false", "commit", "-qm", "unrelated"])?;
+    git_in(&src, &["push", "-q", "origin", "main"])?;
+
+    let woke = tokio::time::timeout(Duration::from_secs(30), quiet_reader).await??;
+    assert!(!woke, "a push that touched no collab ref woke a card subscriber");
+
+    // The card's own write does wake it.
+    let reader_sid = sid.clone();
+    let reader =
+        tokio::spawn(async move { wait_for_updated(&url, &reader_sid, Duration::from_secs(30)).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    publish_entry(&server, &sid, "t/quiet", "quiet-card", "second", Some(&root)).await?;
+    let woke = tokio::time::timeout(Duration::from_secs(40), reader).await??;
+    assert!(woke, "a write to the watched card sent no notification");
+    Ok(())
+}
+
+/// Publish one `issue` entry for `id` as the anonymous caller (the harness's
+/// default `auth.mode = none` makes `anon` the writer).
+async fn publish_entry(
+    server: &Server,
+    sid: &str,
+    repo: &str,
+    id: &str,
+    title: &str,
+    parent: Option<&str>,
+) -> Result<String> {
+    // A follow-up chains to the thread's tip; only a root entry is `parent: ""`
+    // (`docs/D1_PROTOCOL.md` §5) — two roots are two threads, not one card.
+    let entry = json!({
+        "version": 1,
+        "kind": "issue",
+        "id": id,
+        "actor": "anon",
+        "ts": 1_700_000_000,
+        "parent": parent.unwrap_or_default(),
+        "body": { "title": title },
+        "sig": "ed25519:AAAA"
+    });
+    let answer = call(
+        server,
+        sid,
+        "tools/call",
+        json!({
+            "name": "collab_publish",
+            "arguments": { "repo": repo, "entry": entry }
+        }),
+    )
+    .await?;
+    assert!(
+        answer.get("isError") != Some(&json!(true)),
+        "collab_publish refused: {answer}"
+    );
+    let text = answer["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let published: Value = serde_json::from_str(&text)?;
+    Ok(published["oid"].as_str().unwrap_or_default().to_string())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn token_mode_answers_a_bearer_only_challenge() -> Result<()> {
     let server = Server::start_with_tweak(|cfg| {

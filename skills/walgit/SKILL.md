@@ -109,9 +109,14 @@ shape shown above, `uri` set to each in turn):
 
 The refs subscription is a refs-level read of the WAL head (one conditional
 manifest GET per tick), so a push, a branch/tag move and a new
-`refs/collab/inbox/*` entry all bump it; the board subscription covers the
-projection instead (new thread, new reply, status transition) without diffing
-refs yourself.
+`refs/collab/inbox/*` entry all bump it — it watches the whole repository by
+design. The board subscription covers the projection instead (new thread, new
+reply, status transition) without diffing refs yourself, and it stays quiet
+while nothing on the board moves: its version fingerprints the cards plus the
+earliest live claim, so a `ci-artifacts` ref or another repository's churn
+wakes nobody. A single card can be followed with
+`walgit://collab/thread/<owner>/<repo>/<id>`, whose version is that card's own
+tip.
 
 Subscriptions are server-side polling, **per-instance** and **best-effort**
 (D52), rather than a durable push channel: the poller dies with the session, so
