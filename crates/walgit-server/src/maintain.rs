@@ -384,6 +384,19 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
 /// letting the highest-priority failing kind take every fallback turn.
 /// Production passes `SystemTime::now()`; tests use one fixed instant for plan
 /// and settle.
+/// Whether the collab inbox has outgrown its fold threshold (D66). A pure
+/// predicate because three of its four inputs are configuration: the unit runs
+/// nowhere until an operator names the fold identity, and `0` turns it off, so
+/// "nothing was planned" is the case worth pinning.
+fn fold_due(maintenance: &walgit_config::MaintenanceConfig, inbox: usize) -> Option<usize> {
+    let threshold = maintenance.collab_fold_refs;
+    (threshold > 0
+        && maintenance.collab_fold_principal.is_some()
+        && maintenance.collab_fold_key.is_some()
+        && inbox >= threshold)
+        .then_some(inbox)
+}
+
 async fn next_unit_at(
     state: &Arc<AppState>,
     id: &RepoId,
@@ -586,16 +599,10 @@ async fn next_unit_at(
     // aggregation reads snapshot ∪ inbox under a ref budget, so an inbox that
     // only grows is a board that silently stops updating. Cheap (one batch blob
     // read, one CAS publish), which is why it sits below compaction.
-    let fold_refs = cfg.maintenance.collab_fold_refs;
     if !skip("collab-fold")
-        && fold_refs > 0
-        && cfg.maintenance.collab_fold_principal.is_some()
-        && cfg.maintenance.collab_fold_key.is_some()
+        && let Some(inbox) = fold_due(&cfg.maintenance, crate::collab_fold::inbox_refs(&handle))
     {
-        let inbox = crate::collab_fold::inbox_refs(&handle);
-        if inbox >= fold_refs {
-            return Ok(Unit::CollabFold(inbox));
-        }
+        return Ok(Unit::CollabFold(inbox));
     }
     // Lowest priority: the audit itself. Only where the whole pack set is local
     // (fsck over a linked/remote base would read 32 GB through the mount).
@@ -1269,5 +1276,40 @@ mod backoff_tests {
                 .is_empty(),
             "per repo, not global"
         );
+    }
+}
+
+#[cfg(test)]
+mod fold_due_tests {
+    use super::fold_due;
+    use walgit_config::MaintenanceConfig;
+
+    fn configured() -> MaintenanceConfig {
+        MaintenanceConfig {
+            collab_fold_refs: 100,
+            collab_fold_principal: Some("fold-bot".into()),
+            collab_fold_key: Some("/run/secrets/fold.ed25519".into()),
+            ..MaintenanceConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_fold_is_due_only_when_configured_and_the_inbox_is_big() {
+        assert_eq!(fold_due(&configured(), 99), None, "below the threshold");
+        assert_eq!(fold_due(&configured(), 100), Some(100), "at the threshold");
+        assert_eq!(fold_due(&configured(), 5_000), Some(5_000));
+
+        let mut no_key = configured();
+        no_key.collab_fold_key = None;
+        assert_eq!(fold_due(&no_key, 5_000), None, "no identity ⇒ no fold");
+
+        let mut no_principal = configured();
+        no_principal.collab_fold_principal = None;
+        assert_eq!(fold_due(&no_principal, 5_000), None, "no principal ⇒ no fold");
+
+        let mut off = configured();
+        off.collab_fold_refs = 0;
+        assert_eq!(fold_due(&off, 5_000), None, "0 disables the unit");
+        assert_eq!(fold_due(&off, 0), None);
     }
 }

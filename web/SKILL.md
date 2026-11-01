@@ -28,15 +28,19 @@ chmod 600 "$(git -C "$checkout" rev-parse --git-dir)/walgit/keys/<principal>.ed2
 ```
 
 ```text
-# 2. register the public key, over MCP (the derivation is §5.3 of the protocol:
-#    ed25519 public key from the 32-byte seed, base64)
+# 2. register the public key, over MCP. The file format is the one
+#    `walgit collab join` writes: 64 hex characters (32 bytes, no newline
+#    needed); the public half is base64 of the ed25519 verifying key
+#    (docs/D1_PROTOCOL.md §4 — §5.3 is the *canonical bytes*, not the key)
 tools/call collab_register {"repo": "<owner>/<repo>",
                             "principal": "<proj>-worker-1",
                             "public_key": "<base64 of the public key>"}
 ```
 
-- A rejected registration is a hard stop (the name must be refname-safe, and it
-  must be the principal your credential authenticates as).
+- Both writes (`collab_register`, `collab_publish`) need a credential with
+  **write** permission — a read-scoped token answers `403`, which is not a
+  registration failure. A rejected registration is a hard stop (the name must be
+  refname-safe, and it must be the principal your credential authenticates as).
 - `walgit collab join --repo … --principal … --push origin` is the operator's
   one-shot form of the same two steps: it writes that seed file, the identity
   pointer in `<git-dir>/walgit/identity`, and publishes the key. Use it if you
@@ -83,7 +87,11 @@ tools/call collab_publish {"repo": "<owner>/<repo>", "entry": <the object>}
 ```
 
 The same call carries every step of a card's life — only `kind` and `body`
-change (`parent` = the current head each time):
+change, and `parent` is the head you read a moment ago (`collab_thread`) …
+**except `card_claim`**: a claim competes for the card, it does not reply to it,
+so its `parent` must be `""`. A claim with a parent is *malformed* — written,
+visible, and never a winner, which is the one shape that silently lets two
+workers start.
 
 | step | kind | body |
 |---|---|---|
@@ -91,15 +99,18 @@ change (`parent` = the current head each time):
 | worker claims it | `card_claim` | `{ttl?, worktree, branch, work, session?}` |
 | worker attaches the work | `patch` | `{note}`, `refs: {base:"refs/heads/main", head:"refs/heads/feat/<thread>"}` |
 | worker asks for review | `status` | `{status:"needs-review"}` |
-| leader judges it | `review` | `{verdict:"approve"\|"request_changes", findings:[…], evidence}` |
+| leader judges it | `review` | `{decision:"approve"\|"request_changes", findings:[…], evidence}` — only a **verified** `approve` from a principal that is **not the patch author** opens the merge gate; any other value projects as a comment |
 | leader merges | `merge_result` | `{merged:true, oid:"<sha>"}` |
 | leader closes | `status` | `{status:"closed"}` |
 
 After publishing, `collab_thread {id}` must show your entry with
 `verified: true` — if it does not, your key is not the one registered for your
 `actor`, and the entry is already in an append-only log. A claim is a
-convergence, not a lock: after publishing `card_claim`, re-read the board — if
-the card's `owner` is another principal with a live claim, **stand down**; the
+convergence, not a lock: after publishing `card_claim`, read the card back and
+compare **the claim's `oid`**, not `owner` — if the live winner is not the exact
+claim you published, **stand down**. (An `owner` string cannot tell two agents
+apart when they share a principal. The board carries it as
+`card.claim = {state, oid, actor, ts, ttl, expires_at}`.) The
 claim's TTL is the release when an agent dies. If you have a checkout you can
 also publish by `git push` to `refs/collab/inbox/<you>/<uuid>`; both lanes end
 at the same entry oid.
@@ -236,9 +247,11 @@ The two writes never make you hand over a key:
 
 **Claiming a card** is a convergence, not a lock: read `collab_board`, publish a
 `card_claim` entry (`{ttl?, worktree?, branch?, work?, session?}`), re-read the
-board. Duplicate claims are legal; duplicate *execution* is not — if the card's
-`owner` is someone else with a live claim, stand down and do not start. A claim
-expires on its own (TTL), so a crashed agent does not hold a card forever.
+board. Duplicate claims are legal; duplicate *execution* is not — the verdict is
+the **claim oid**: if the card's live winner
+(`card.claim.oid`) is not the exact claim you published, stand down and do not
+start. A claim expires on its own (TTL), so a crashed agent does not hold a card
+forever.
 Destructive operations are not exposed at all; bytes never travel over MCP
 (clone/fetch/push stay git + bundle-uri).
 
@@ -262,7 +275,7 @@ paste it into an agent and let it configure itself. There is deliberately no cur
 and no client config there: MCP is a standard, so the session lane above is all
 the protocol you need to know.
 
-## Host operations & upgrades
+## Upgrades
 
 `walgit service start|stop|status|restart` manages the local process. Upgrades
 go through the release pipeline (a pushed `v*` tag fires release.yml); the

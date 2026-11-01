@@ -924,6 +924,14 @@ pub const SETTINGS_SECTIONS: &[&str] = &["bundles", "maintenance", "compaction",
 /// D24: maximum size of a settings document.
 pub const SETTINGS_MAX_BYTES: usize = 16 * 1024;
 
+/// `[maintenance]` keys that name *this host's* identity and filesystem, not a
+/// repository's policy: they are neither settable per repository (D24) nor
+/// readable through `GET …/api/settings/effective`. Naming a private-key path
+/// or a principal through a repository's settings would let a repository admin
+/// re-point the maintainer's fold identity, and would hand every reader a path
+/// on this host.
+pub const HOST_ONLY_MAINTENANCE: &[&str] = &["collab_fold_principal", "collab_fold_key"];
+
 impl Config {
     /// D24: the effective configuration for one repository = this (the host's
     /// walgit.toml ⊕ env) with the repository's settings TOML merged on top.
@@ -951,6 +959,15 @@ impl Config {
                 "settings: upstream.token_env is host-only (it names an env var on the maintaining host)"
             );
         }
+        if let Some(toml::Value::Table(m)) = overrides.get("maintenance") {
+            for key in HOST_ONLY_MAINTENANCE {
+                anyhow::ensure!(
+                    !m.contains_key(*key),
+                    "settings: maintenance.{key} is host-only (it is the maintainer's own identity, \
+                     and a path on this host)"
+                );
+            }
+        }
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         merge(&mut doc, &overrides);
         let cfg: Config = doc.try_into().context("settings: applying")?;
@@ -960,12 +977,19 @@ impl Config {
     }
 
     /// The effective config a reader may see: only [`SETTINGS_SECTIONS`], and
-    /// never `upstream.token_env` (that name is host-only).
+    /// never a key that is host-only — `upstream.token_env`, and the fold
+    /// identity (`maintenance.collab_fold_principal` / `…_key`, whose value is a
+    /// path on this host and a name no reader may choose).
     pub fn public_settings_toml(&self) -> Result<String> {
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         doc.retain(|k, _| SETTINGS_SECTIONS.contains(&k));
         if let Some(toml::Value::Table(u)) = doc.get_mut("upstream") {
             u.remove("token_env");
+        }
+        if let Some(toml::Value::Table(m)) = doc.get_mut("maintenance") {
+            for key in HOST_ONLY_MAINTENANCE {
+                m.remove(*key);
+            }
         }
         toml::to_string_pretty(&doc).context("encoding settings")
     }
@@ -1946,6 +1970,38 @@ fn rewrite_origin_port(origin: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fold identity is this host's: a repository's settings may neither
+    /// set it (that would let a repo admin re-point the maintainer's key) nor
+    /// read it back (the value is a path on this host, served to every reader).
+    #[test]
+    fn the_fold_identity_is_host_only() {
+        let mut c = Config::default();
+        c.maintenance.collab_fold_principal = Some("fold-bot".into());
+        c.maintenance.collab_fold_key = Some("/run/secrets/fold.ed25519".into());
+
+        let public = c.public_settings_toml().unwrap();
+        assert!(!public.contains("collab_fold_key"), "{public}");
+        assert!(!public.contains("collab_fold_principal"), "{public}");
+        assert!(public.contains("[maintenance]"), "{public}");
+
+        for key in HOST_ONLY_MAINTENANCE {
+            let err = c
+                .with_settings(&format!("[maintenance]\n{key} = \"x\""))
+                .expect_err("a per-repo fold identity must be refused");
+            let msg = format!("{err:#}");
+            assert!(msg.contains(key) && msg.contains("host-only"), "{msg}");
+        }
+        // Anything else in `[maintenance]` still applies per repository. (The
+        // key is cleared here because `validate` insists it names a readable
+        // file — a property of the host, not of this rule.)
+        c.maintenance.collab_fold_key = None;
+        c.maintenance.collab_fold_principal = None;
+        let ok = c
+            .with_settings("[maintenance]\ncollab_fold_refs = 10")
+            .expect("ordinary maintenance settings stay settable");
+        assert_eq!(ok.maintenance.collab_fold_refs, 10);
+    }
 
     #[test]
     fn defaults_parse_and_validate() {

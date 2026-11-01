@@ -1255,6 +1255,16 @@ async fn collab_entries(
     let handle = open(&st, &headers, &owner, &repo_name).await?;
     let r = view(&st, handle.clone(), Need::Refs, Reporter::none()).await?;
     let entry = body.entry;
+    // It has to *be* an entry (docs/D1_PROTOCOL.md §5). The read side tolerates
+    // a non-entry blob (one corrupt ref must not take the dashboard down) and
+    // the fold leaves it in place, so anything else accepted here is a ref that
+    // consumes the aggregation budget (`COLLAB_MAX_ENTRIES`) forever and can
+    // never be pruned: a write principal could wedge a board with 20 k of them.
+    serde_json::from_value::<walgit_wal::collab::Entry>(entry.clone()).map_err(|e| {
+        ApiError::BadRequest(format!(
+            "entry is not a collab entry (docs/D1_PROTOCOL.md §5): {e}"
+        ))
+    })?;
     let actor = entry
         .get("actor")
         .and_then(|a| a.as_str())

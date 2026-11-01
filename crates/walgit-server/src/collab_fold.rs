@@ -245,7 +245,7 @@ pub async fn fold(
     // Rebuild only when the ledger changed: a prune-only fold reuses the
     // baseline snapshot (a rebuild would differ only in `ts` — pure ref churn).
     let rebuilt = changed || over_cap;
-    let blob: Option<Vec<u8>> = if rebuilt {
+    let (blob, dropped): (Option<Vec<u8>>, Vec<String>) = if rebuilt {
         let (snapshot, dropped) = build_capped(
             &signer.principal,
             now(),
@@ -253,15 +253,16 @@ pub async fn fold(
             signer,
             COLLAB_SNAPSHOT_MAX_BYTES,
         )?;
-        if dropped > 0 {
+        if !dropped.is_empty() {
             log(format!(
-                "collab-fold: WARNING snapshot truncated — dropped {dropped} oldest record(s); the \
-                 ledger is marked complete=false"
+                "collab-fold: WARNING snapshot truncated — {} oldest record(s) dropped from the \
+                 snapshot and kept in the inbox; the ledger is marked complete=false",
+                dropped.len()
             ));
         }
-        Some(snapshot)
+        (Some(snapshot), dropped)
     } else {
-        None
+        (None, Vec::new())
     };
     let snapshot_new = match &blob {
         Some(bytes) => Some(
@@ -281,7 +282,19 @@ pub async fn fold(
     if let Some(oid) = &snapshot_new {
         updates.push((SNAPSHOT_REF.to_string(), baseline.clone(), oid.clone()));
     }
+    // Prune exactly what the new snapshot carries. A truncated document keeps
+    // only the newest records, so the ones it dropped stay in the inbox: an
+    // entry deleted here and missing from the snapshot is deleted from the only
+    // copy the repository has (`docs/D1_PROTOCOL.md` §9.3's `complete: false`
+    // is a statement about the snapshot, never a licence to drop records).
+    let dropped_set: std::collections::HashSet<&str> =
+        dropped.iter().map(String::as_str).collect();
+    let mut pruned = 0usize;
     for (name, oid) in &folded {
+        if dropped_set.contains(oid.as_str()) {
+            continue;
+        }
+        pruned += 1;
         updates.push((name.clone(), Some(oid.clone()), String::new()));
     }
     let seq = api::publish_refs(st, &handle, &r, &signer.principal, &updates, blob.as_deref())
@@ -292,17 +305,17 @@ pub async fn fold(
         .or(baseline.as_deref())
         .unwrap_or("new");
     log(format!(
-        "collab-fold: folded {} inbox ref(s) into {SNAPSHOT_REF} ({shown}), seq {seq}; {left} left \
-         in place",
-        folded.len(),
+        "collab-fold: folded {pruned} inbox ref(s) into {SNAPSHOT_REF} ({shown}), seq {seq}; {left} \
+         left in place, {} kept out of the snapshot",
+        dropped.len(),
     ));
 
     Ok(FoldOutcome {
-        folded: folded.len(),
+        folded: pruned,
         left,
         snapshot: snapshot_new.or(baseline),
         rebuilt,
-        dropped: 0,
+        dropped: dropped.len() as u64,
         seq,
     })
 }
@@ -324,11 +337,11 @@ fn build_capped(
     records: Vec<SnapshotRecord>,
     signer: &Signer,
     max_bytes: usize,
-) -> anyhow::Result<(Vec<u8>, u64)> {
+) -> anyhow::Result<(Vec<u8>, Vec<String>)> {
     let sample = build_snapshot(actor, ts, records.clone(), &signer.key);
     let bytes = serde_json::to_vec(&sample)?;
     if bytes.len() <= max_bytes {
-        return Ok((bytes, 0));
+        return Ok((bytes, Vec::new()));
     }
     // Drop oldest-first until it fits. A record's own serialized size bounds its
     // contribution (plus one comma), and `ts` comes from its bytes because the
@@ -359,6 +372,12 @@ fn build_capped(
         dropped.push(*index);
     }
     dropped.sort_unstable();
+    // The oids the truncated document does NOT carry: their inbox refs must
+    // survive, or the fold deletes the only copy of an entry it did not keep.
+    let dropped_oids: Vec<String> = dropped
+        .iter()
+        .filter_map(|i| records.get(*i).map(|r| r.oid.clone()))
+        .collect();
     let dropped_count = dropped.len() as u64;
     let kept: Vec<SnapshotRecord> = records
         .into_iter()
@@ -368,7 +387,7 @@ fn build_capped(
         .collect();
     let _ = total;
     let snap = build_snapshot_truncated(actor, ts, kept, dropped_count, &signer.key);
-    Ok((serde_json::to_vec(&snap)?, dropped_count))
+    Ok((serde_json::to_vec(&snap)?, dropped_oids))
 }
 
 /// The fold principal must be registered with exactly this key.
@@ -411,4 +430,49 @@ async fn check_registered(
         signer.principal
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(oid: &str, ts: i64) -> SnapshotRecord {
+        SnapshotRecord {
+            oid: oid.to_string(),
+            principal: "alice".to_string(),
+            json: format!(r#"{{"version":1,"kind":"issue","id":"c","actor":"alice","ts":{ts},"sig":"x"}}"#),
+        }
+    }
+
+    fn signer() -> Signer {
+        Signer {
+            principal: "alice".to_string(),
+            key: SigningKey::from_bytes(&[7u8; 32]),
+        }
+    }
+
+    /// A truncated snapshot must say **which** records it left out: the caller
+    /// prunes inbox refs by that set, and a record that is neither in the
+    /// snapshot nor in its inbox is gone from an append-only ledger.
+    #[test]
+    fn a_truncated_snapshot_names_the_records_it_dropped() {
+        let records = vec![record("old", 10), record("middle", 20), record("new", 30)];
+        // A cap that fits exactly one record: the newest one.
+        let signer = signer();
+        let one = build_snapshot("alice", 40, vec![record("new", 30)], &signer.key);
+        let cap = serde_json::to_vec(&one).unwrap().len();
+        let (bytes, dropped) = build_capped("alice", 40, records.clone(), &signer, cap).unwrap();
+        assert_eq!(dropped, vec!["old".to_string(), "middle".to_string()], "{dropped:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["complete"], false, "{doc}");
+        assert_eq!(doc["dropped_entries"], 2, "{doc}");
+
+        // Everything fits: nothing is dropped, nothing is marked incomplete.
+        let (bytes, dropped) = build_capped("alice", 40, records, &signer, 1 << 20).unwrap();
+        assert!(dropped.is_empty(), "{dropped:?}");
+        // A complete snapshot carries no `complete`/`dropped_entries` at all:
+        // the fields exist to explain a truncation, not to restate the norm.
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(doc.get("complete").is_none(), "{doc}");
+    }
 }

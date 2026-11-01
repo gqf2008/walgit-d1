@@ -20,10 +20,13 @@
 //!   allowlist (`server.cors_origins`) as the rest of the server, and `OPTIONS`
 //!   is answered here too (the SDK transport registers no preflight, and a
 //!   browser client must not be asked for a credential before it may ask).
-//! * **Host validation** — rmcp's anti-DNS-rebinding check stays on and is fed
-//!   the authorities this deployment answers to (see [`trusted_hosts`]);
-//!   disabling it is the documented fallback for a deployment that never said
-//!   where it lives (`server.public_url`).
+//! * **Host validation** — `Host` must name this deployment: `localhost`, any
+//!   `*.localhost` name, a loopback address, the `server.public_url` authority
+//!   or the bound listen address (see [`host_allowed`]). This is the
+//!   DNS-rebinding guard, and a name never claimed by this deployment is
+//!   refused. rmcp's own matcher is off because it compares **exact** names:
+//!   it refused `walgit.localhost`, the name `walgit.standalone.toml` tells
+//!   people to open.
 //! * **Subscriptions are pollers** (D52/D55). `resources/subscribe` starts one
 //!   bounded task per (caller, session, URI) that reads the repository's
 //!   refs-level seq every `mcp.subscribe_interval` and sends
@@ -141,15 +144,6 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     )
 }
 
-/// The authorities this deployment answers to: loopback, this host's own bind
-/// address, and `server.public_url`'s authority. rmcp rejects a `Host` outside
-/// this set, which is what stops a DNS-rebinding page from talking to a
-/// loopback server through its own domain.
-///
-/// A deployment that never said where it lives (`public_url` unset, wildcard
-/// bind) gets rmcp's permissive default instead — pinning it to loopback there
-/// would break every edge-fronted deployment that never set `public_url`.
-/// `[mcp]` and D64 say so; setting `server.public_url` turns the check on.
 /// Whether the request's `Host` names this deployment (DNS-rebinding guard).
 ///
 /// Accepted: `localhost`, any `*.localhost` name (RFC 6761 §6.3 — such a name
@@ -192,13 +186,15 @@ fn host_allowed(cfg: &walgit_config::Config, host: Option<&str>) -> bool {
 }
 
 /// The host part of a `Host` header or URL authority: no port, no brackets,
-/// lowercased.
+/// lowercased. An IPv6 literal is checked *before* the port split — `::1` and
+/// `[::1]:8080` both carry colons, and cutting at the first one would turn a
+/// configured IPv6 bind into the empty name, i.e. a guard that matches nothing.
 fn host_name(host: &str) -> String {
     let host = host.trim();
     let inner = host.strip_prefix('[').map_or(host, |rest| {
         rest.split_once(']').map_or(rest, |(inside, _)| inside)
     });
-    let name = if host.starts_with('[') {
+    let name = if inner.parse::<std::net::IpAddr>().is_ok() {
         inner
     } else {
         inner.split(':').next().unwrap_or(inner)
@@ -247,9 +243,14 @@ async fn serve(
     // tells people to open — was refused unless `server.public_url` happened to
     // name it. `host_allowed` accepts every name that can only mean this
     // machine and, when nothing is advertised, stays permissive like the SDK was.
-    let host = headers
+    // HTTP/2 clients may send `:authority` and no `Host` header; the SDK folded
+    // both into `req.uri()`'s authority, so read that before giving up.
+    let host_owned = headers
         .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    let host = host_owned.as_deref();
     if !host_allowed(&state.cfg, host) {
         return (
             StatusCode::FORBIDDEN,

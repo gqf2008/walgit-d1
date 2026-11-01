@@ -932,7 +932,9 @@ decision in §4 — or the PR is; never "fix later".
   the board → publish `card_claim` → re-read and stand down if someone else holds it): the
   server keeps no lock, the TTL is the lock, and re-adding `collab_claim` would have been a
   second mechanism. Host validation moved out of rmcp's exact-name matcher into
-  `host_allowed` — `walgit.localhost` (the name `walgit.standalone.toml` advertises) and every
+  `host_allowed` — `walgit.localhost` (the name `walgit.standalone.toml` advertises, and an IPv6
+  literal is matched *before* the port split, with `:authority` read when a client sends no
+  `Host`) and every
   `127.x` alias are names that can only mean this machine, RFC 6761 §6.3, and rmcp refused
   them unless `server.public_url` happened to name the port; a `Host` that is none of the above
   is a 403 that says which config key fixes it.)*
@@ -997,6 +999,18 @@ decision in §4 — or the PR is; never "fix later".
   in the CLI), reuses the baseline snapshot for a prune-only fold, and truncates oldest-first with
   `complete=false` plus a warning when the ledger is over 64 MiB — an automatic path cannot "refuse to
   publish" its way back to serviceability. Test: `crates/walgit-server/tests/collab_fold.rs`.
+
+  *(Amended 2026-11-01, review: **a truncated snapshot names what it dropped** —
+  `build_capped` returns the dropped oids, and the fold prunes only the refs the
+  new snapshot carries. Before, the 64 MiB truncation path computed a count and
+  then deleted every folded inbox ref, i.e. the entries the snapshot left out
+  vanished from an append-only ledger with no retention window to restore them.
+  `FoldOutcome.dropped` reports the real number now, and the truncation path has
+  a unit test. The fold identity (`maintenance.collab_fold_principal` /
+  `…_key`) is genuinely host-only too: `public_settings_toml` strips both and
+  `with_settings` refuses them per repository — the pair names this host's key,
+  and a repository admin could otherwise re-point the maintainer's identity and
+  use the key-path validation as a filesystem probe.)*
   *(Amended 2026-11-01, same decision, cc-ai-collab-fold-unit: the **CI control plane** is the same
   projection. `ci_status` (MCP) → `GET /{o}/{r}/api/collab/ci[?id=]`, which serializes
   `walgit_wal::ci::collect_runs` — the aggregation `walgit ci status` and the report's CI section

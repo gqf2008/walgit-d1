@@ -946,16 +946,19 @@ upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, 
 
 ## 5a. The MCP projection (`/mcp`, D64)
 
-Every endpoint above is also reachable as an MCP tool, because `/mcp` calls this
-same router in-process (`Call::inner()` → `tower::ServiceExt::oneshot`) with the
-caller's own credential. That is a hard requirement, not a convenience: a tool
-answer and an HTTP answer are the same answer, so placement (D30), freshness and
-`actor == caller` cannot drift between the two lanes. `crates/walgit-server/src/mcp/tools.rs`
-writes the endpoint path for each tool; this table is the audit that no read is
-missing and that every omission is a decision.
+Every repo-scoped read above is also reachable as an MCP tool, because `/mcp`
+calls this same router in-process (`Call::inner()` → `tower::ServiceExt::oneshot`)
+with the caller's own credential. That is a hard requirement, not a convenience:
+a tool answer and an HTTP answer are the same answer, so placement (D30),
+freshness and `actor == caller` cannot drift between the two lanes.
+`crates/walgit-server/src/mcp/tools.rs` writes the endpoint path for each tool;
+these two tables are the audit — the first that no read is missing, the second
+that every omission is a decision rather than an oversight.
 
 | Endpoint | Tool |
 |---|---|
+| `GET /services/api/owners`, `…/owners/{owner}` | `repo_owners` |
+| *(none — reads the store's repository list directly)* | `repo_list` |
 | `GET …/api/refs`, `refs/{kind}` | `repo_refs` (`kind` = head\|branches\|tags\|all\|collab) |
 | `GET …/api/refs/name/{rest}`, `resolve[/{rest}]` | `repo_resolve` |
 | `GET …/api/tree/{rest}` | `repo_tree` |
@@ -976,7 +979,7 @@ missing and that every omission is a decision.
 | `GET …/api/collab/ci` | `ci_status` |
 | `POST …/api/collab/entries` | `collab_publish` (payload = an entry the client already signed) |
 | `POST …/api/collab/principal` | `collab_register` (the caller's own public key) |
-| retained WAL log (`/{o}/{r}/api/wal`-equivalent reads) | `wal_ls` |
+| *(none — `RepoHandle::read_log` over the WAL, refs-level)* | `wal_ls` (the retained log; it is provenance, not a route) |
 
 **Not exposed, on purpose:**
 
