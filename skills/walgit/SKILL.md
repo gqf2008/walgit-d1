@@ -67,10 +67,16 @@ configured for.
   gets *re-spawned* mid-install no longer blocks the upgrade — but stopping them first is still the
   clean path (a stopped lane also comes back on the **new** binary instead of the renamed old one).
 
-## 3. MCP (served by the host, optional)
+## 3. MCP (served by the host — the collaboration interface)
 
 Every host serves MCP itself at **`<host>/mcp`** (Streamable HTTP, D64) — there is
-no local `walgit mcp` process to spawn. Register the URL with the same credential
+no local `walgit mcp` process to spawn. **This is the interface** for reading and
+writing collaboration state: git carries bytes, MCP carries everything else. The
+`walgit collab`/`repo`/`ci` subcommands are the local, scriptable forms of the
+same acts (a checkout, a key, a shell) and never a second contract — if you are
+writing an agent, use the tools below.
+
+Register the URL with the same credential
 git uses:
 
 ```jsonc

@@ -936,6 +936,15 @@ decision in §4 — or the PR is; never "fix later".
   `127.x` alias are names that can only mean this machine, RFC 6761 §6.3, and rmcp refused
   them unless `server.public_url` happened to name the port; a `Host` that is none of the above
   is a 403 that says which config key fixes it.)*
+  *(Amended 2026-11-01, D67 tightened: the agent guides present **git + `/mcp` only**. The
+  `walgit collab …` forms lost their recipes in `web/SKILL.md` (identity is a seed plus
+  `collab_register`, a card is a signed entry plus `collab_publish`, watching is
+  `resources/subscribe` + re-read), and `walgit repo …` / `walgit ci …` were demoted with them —
+  the CLI section is now "Host operations": the binary runs the host, edits its config and holds
+  keys, and its collaboration subcommands are the *scripting* forms of the same two lanes, listed
+  by name and documented by `--help`. Same boundary as the HTTP API: still supported, still
+  tested, no longer taught as a way to talk to the host. `scripts/check-skill-covers-cli.sh`
+  keeps its floor by name-matching, which is exactly the "one naming line, no recipe" shape.)*
   The bundled UI teaches the endpoint where an agent arrives: a **MCP box**
   (`web/src/components/McpSetup.tsx`) on every repository's `/collab` page and on the board's
   empty state is **one paragraph with one copy button** — it states the endpoint and the
