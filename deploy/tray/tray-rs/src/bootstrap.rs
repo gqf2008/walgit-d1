@@ -441,7 +441,13 @@ pub fn bootstrap_deploy() {
             crate::log_line("bootstrap: PATH 入口被别人的文件占着,未触碰");
         }
         crate::cli_entry::LinkOutcome::NotCreatable(e) => {
-            crate::log_line(&format!("bootstrap: 建 CLI 入口失败: {e}"));
+            // 显式指定的入口失败要响亮（打包守卫/运维按这句话判定）；默认候选
+            // 全不可写只是环境事实。
+            if ensured.explicit {
+                crate::log_line(&format!("bootstrap: CLI 软链失败: {e}"));
+            } else {
+                crate::log_line(&format!("bootstrap: 建 CLI 入口失败: {e}"));
+            }
         }
     }
 }

@@ -327,6 +327,7 @@ pub fn ensure(program_dir: &Path) -> Ensured {
                 entry: Some(dir),
                 outcome: LinkOutcome::PathAdded,
                 on_path: true,
+                explicit: false,
             };
         }
         let outcome = windows::add_to_user_path(&dir);
@@ -334,6 +335,7 @@ pub fn ensure(program_dir: &Path) -> Ensured {
             entry: Some(dir),
             outcome,
             on_path: false,
+            explicit: false,
         }
     }
 }
