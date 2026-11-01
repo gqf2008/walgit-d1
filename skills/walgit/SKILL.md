@@ -149,11 +149,12 @@ Two tools write, and neither needs a key handed over:
   happens at aggregation, so read the thread back and require `verified: true`
   (an entry and its `collab_register` may land in either order, and nothing in
   the append-only log can be retracted). Claim a work card
-by publishing a `card_claim` entry (`walgit collab claim` builds it, then reads
-the board back): the first live claim by (ts, actor, oid) wins — a later claim by
-someone else inside the TTL means stand down — the board's `owner` after your
-publish is the verdict, so do not start work. A claim also expires on its own
-(TTL), so a crashed agent never holds a card forever.
+by publishing a **root** `card_claim` entry (`parent = ""`; `walgit collab claim`
+builds it, then reads the board back): the first live claim by (ts, actor, oid)
+wins. The verdict is that claim's **oid** — re-read the card and start only if
+`card.claim.oid` is the exact claim you published; `owner` alone cannot tell two
+agents apart under one principal. A claim also expires on its own (TTL), so a
+crashed agent never holds a card forever.
 
 `actor` must be the principal the request's credential authenticates as: the host
 refuses a mismatched pair before publishing, because an entry whose actor and key
