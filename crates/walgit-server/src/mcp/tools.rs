@@ -152,6 +152,20 @@ pub fn defs() -> Vec<Tool> {
                 schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
         },
         Tool {
+            name: Kind::CiStatus.name(),
+            description: "CI runs of a repository (`docs/D1_CI_PROTOCOL.md` §8.3): every run the \
+                          collab ledger carries, with its attempts, the live claim winner, the state \
+                          (pending | claimed | stale | done) and the effective conclusion. One run \
+                          with `id`. Claiming and reporting are ordinary entries — publish \
+                          `kind: \"ci_claim\"` / `kind: \"ci_result\"` through `collab_publish`; the \
+                          runner work itself (clone, build, artifacts) stays on git + HTTP, never \
+                          over MCP.",
+                schema: schema(&json!({
+                    "repo": {"type": "string", "description": REPO_ARG},
+                    "id": {"type": "string", "description": "one run id"},
+                }), &json!(["repo"])),
+        },
+        Tool {
             name: Kind::WalLs.name(),
             description: "WAL entries of a repository (the append-only source of truth), seq-ordered. \
                           `head_seq` is what a resource subscription's version reports.",
@@ -212,12 +226,13 @@ enum Kind {
     CollabBoard,
     CollabThread,
     CollabReport,
+    CiStatus,
     WalLs,
     CollabPublish,
 }
 
 /// Every tool, in advertisement order.
-const ALL: [Kind; 13] = [
+const ALL: [Kind; 14] = [
     Kind::RepoList,
     Kind::RepoOwners,
     Kind::RepoRefs,
@@ -229,6 +244,7 @@ const ALL: [Kind; 13] = [
     Kind::CollabBoard,
     Kind::CollabThread,
     Kind::CollabReport,
+    Kind::CiStatus,
     Kind::WalLs,
     Kind::CollabPublish,
 ];
@@ -236,7 +252,7 @@ const ALL: [Kind; 13] = [
 impl Kind {
     /// Every tool — the one list the schema table, the dispatch match and the
     /// tests all read.
-    const ALL: [Kind; 13] = ALL;
+    const ALL: [Kind; 14] = ALL;
 
     fn name(self) -> &'static str {
         match self {
@@ -251,6 +267,7 @@ impl Kind {
             Self::CollabBoard => "collab_board",
             Self::CollabThread => "collab_thread",
             Self::CollabReport => "collab_report",
+            Self::CiStatus => "ci_status",
             Self::WalLs => "wal_ls",
             Self::CollabPublish => "collab_publish",
         }
@@ -503,6 +520,15 @@ async fn run(
         Kind::CollabReport => {
             let (owner, repo) = repo_arg(args)?;
             p(format!("/{}/{}/api/collab/report", enc(&owner), enc(&repo))).await
+        }
+        Kind::CiStatus => {
+            let (owner, repo) = repo_arg(args)?;
+            let mut path = format!("/{}/{}/api/collab/ci", enc(&owner), enc(&repo));
+            if let Some(id) = args.get("id").and_then(Value::as_str) {
+                path.push_str("?id=");
+                path.push_str(&enc(id));
+            }
+            p(path).await
         }
         Kind::WalLs => {
             let (owner, repo) = repo_arg(args)?;

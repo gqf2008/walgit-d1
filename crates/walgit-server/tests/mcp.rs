@@ -734,7 +734,9 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
             "collab_publish" => continue,
             "repo_list" => json!({}),
             "repo_owners" => json!({"owner": "t"}),
-            "repo_refs" | "collab_board" | "collab_report" | "wal_ls" => json!({"repo": "t/all"}),
+            "repo_refs" | "collab_board" | "collab_report" | "ci_status" | "wal_ls" => {
+                json!({"repo": "t/all"})
+            }
             "repo_resolve" => json!({"repo": "t/all", "rev": "main"}),
             "repo_tree" => json!({"repo": "t/all", "rev": &head}),
             "repo_blob" => json!({"repo": "t/all", "rev": &head, "path": "f0_0.txt"}),

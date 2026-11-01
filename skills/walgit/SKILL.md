@@ -306,10 +306,12 @@ W collab entry --kind <issue|comment|patch|review|merge_result|status> \
   [--base refs/heads/main --head refs/heads/<branch>]   # patch only
   [--auto-fold --fold-threshold 10000]                  # opportunistic fold
 
-# Retire the append-only tail when it grows (D45): fold to the signed snapshot.
-# Over the 64 MiB snapshot cap the fold is refused unless --truncate drops the
-# oldest records and marks the ledger complete:false (--truncate also repairs
-# an already over-cap snapshot with an empty tail).
+# Fold the append-only tail into the signed snapshot (D45). The maintainer does
+# this by itself (D66: maintenance.collab_fold_refs + collab_fold_principal/key),
+# so this is the manual/emergency form — and the only one that can truncate:
+# over the 64 MiB snapshot cap the fold is refused unless --truncate drops the
+# oldest records and marks the ledger complete:false (it also repairs an
+# already over-cap snapshot with an empty tail).
 W collab gc --actor <principal> \
   [--push origin] [--truncate]
 
@@ -466,6 +468,10 @@ The server holds no CI logic: `.walgit/ci.toml` in the tested commit declares ta
 them with signed `ci_claim` entries and publishes signed results into `ci-*` threads
 (`walgit ci validate`, `walgit ci run --once`, `walgit ci status`, `walgit ci log [<run>]`,
 `walgit ci artifacts [<run>] [--out <dir>]`).
+CI's *control plane* is not CLI-only either: `ci_status` over MCP (or `GET …/api/collab/ci`) reads
+the same `run_view`/`collect_runs` aggregation, and claiming/reporting is an ordinary entry
+(`kind: ci_claim` / `ci_result`) through `collab_publish`. Only the runner half — clone, build,
+artifact upload — needs this binary, because bytes never travel over MCP.
 
 ## 8. Known pitfalls
 

@@ -51,6 +51,18 @@ pub fn is_op(kind: &str) -> bool {
 
 pub const OPS: &[OpSpec] = &[
     OpSpec {
+        id: "collab-fold",
+        label: "collab-fold",
+        description: "Fold refs/collab/inbox/* into refs/collab/meta/snapshot and prune exactly the \
+                      refs the new snapshot carries (D66). Needs maintenance.collab_fold_principal \
+                      and maintenance.collab_fold_key: the snapshot is signed, so the fold runs as \
+                      that registered principal. Same operation as the maintainer's unit; \
+                      `walgit collab gc` remains the manual form (and the only one that can also \
+                      truncate deliberately).",
+        params: &[],
+        mutating: true,
+    },
+    OpSpec {
         id: "fsck",
         label: "fsck",
         description: "git fsck --full --strict on this instance's copy (deep object/connectivity check). \
@@ -1393,6 +1405,46 @@ async fn run(
             Ok((
                 format!("pack-{checksum}.rev ({bytes} bytes) published"),
                 serde_json::json!({"pack": checksum, "bytes": bytes}),
+            ))
+        }
+        "collab-fold" => {
+            let signer = crate::collab_fold::Signer::from_config(&state.cfg)
+                .map_err(|e| format!("maintenance.collab_fold_key: {e}"))?
+                .ok_or_else(|| {
+                    "collab-fold needs maintenance.collab_fold_principal and \
+                     maintenance.collab_fold_key (the snapshot is signed; with neither, fold with \
+                     `walgit collab gc`)"
+                        .to_string()
+                })?;
+            let out = crate::collab_fold::fold(state, id, &signer, log)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            let summary = if out.folded == 0 {
+                format!(
+                    "nothing folded ({} blob(s) left in place, snapshot {})",
+                    out.left,
+                    out.snapshot.as_deref().unwrap_or("none")
+                )
+            } else {
+                format!(
+                    "folded {} inbox ref(s) into {} ({}{}), seq {}",
+                    out.folded,
+                    crate::collab_fold::SNAPSHOT_REF,
+                    out.snapshot.as_deref().unwrap_or("new"),
+                    if out.rebuilt { "" } else { ", prune-only" },
+                    out.seq
+                )
+            };
+            Ok((
+                summary,
+                serde_json::json!({
+                    "folded": out.folded,
+                    "left": out.left,
+                    "snapshot": out.snapshot,
+                    "rebuilt": out.rebuilt,
+                    "dropped": out.dropped,
+                    "seq": out.seq,
+                }),
             ))
         }
         "gc" => {

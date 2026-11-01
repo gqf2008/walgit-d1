@@ -516,6 +516,26 @@ pub struct MaintenanceConfig {
     /// each assigned repository's followed refs. 0 = off on this host.
     #[serde(with = "humantime_serde")]
     pub follow_interval: Duration,
+    /// Fold the collab inbox into `refs/collab/meta/snapshot` once a repository
+    /// carries this many `refs/collab/inbox/*` refs (`docs/D1_PROTOCOL.md` §9).
+    /// This is the maintainer's own housekeeping: aggregation reads snapshot ∪
+    /// inbox and every collab lane budgets by **ref count**, so an inflated
+    /// inbox stops the board from aggregating at all — leaving that to an
+    /// operator who remembers `walgit collab gc` is a silent trap. The fold is a
+    /// pure function of the inbox (same inbox ⇒ same snapshot bytes) and it only
+    /// prunes refs whose entries the new snapshot carries, so a reader of
+    /// snapshot ∪ inbox sees the same ledger before and after. 0 = off.
+    pub collab_fold_refs: usize,
+    /// The principal the fold signs its snapshot as. It must be **registered**
+    /// (`refs/collab/meta/principals/<principal>`, or the host registry), and
+    /// `collab_fold_key` must hold exactly its seed — otherwise nothing is
+    /// folded (an unverifiable snapshot would strand every reader).
+    #[serde(default)]
+    pub collab_fold_principal: Option<String>,
+    /// Ed25519 seed of `collab_fold_principal`: 32 bytes as hex, the same file
+    /// `walgit collab join` writes. Host-only (never per-repo settings, D24).
+    #[serde(default)]
+    pub collab_fold_key: Option<PathBuf>,
 }
 
 /// D25: how the local cache is bounded.
@@ -555,6 +575,9 @@ impl Default for MaintenanceConfig {
             gc_interval: Duration::from_hours(24),
             retention_wal: default_retention_wal(),
             follow_interval: Duration::from_secs(30),
+            collab_fold_refs: 5_000,
+            collab_fold_principal: None,
+            collab_fold_key: None,
         }
     }
 }
@@ -1555,6 +1578,25 @@ impl Config {
             !self.mcp.session_ttl.is_zero(),
             "mcp.session_ttl must be > 0 (an idle MCP session is dropped after it)"
         );
+        // D66: the fold signs its snapshot, so the pair is all-or-nothing and
+        // the key must be the seed the registry names. Half a pair would plan a
+        // unit that can only fail.
+        match (
+            &self.maintenance.collab_fold_principal,
+            &self.maintenance.collab_fold_key,
+        ) {
+            (Some(_), Some(key)) => anyhow::ensure!(
+                key.is_file(),
+                "maintenance.collab_fold_key must name a readable file (the 32-byte hex Ed25519 \
+                 seed `walgit collab join` writes); it holds the fold principal's private key"
+            ),
+            (None, None) => {}
+            _ => anyhow::bail!(
+                "maintenance.collab_fold_principal and maintenance.collab_fold_key must be set \
+                 together (the maintainer folds the collab inbox only as a registered principal \
+                 whose seed it holds; with neither, folding stays a manual `walgit collab gc`)"
+            ),
+        }
         // #130 added these socket bounds; #135 pins their floor: `0s` is not
         // "no bound" — reqwest/AWS SDK fail every connect or idle check
         // immediately, so the store looks permanently down (each failure

@@ -148,6 +148,11 @@ pub enum Unit {
     /// Bucket GC due (`maintenance.gc_interval`): reclaim superseded packs older
     /// than `compaction.retention_superseded` (#175).
     Gc(String),
+    /// The collab inbox outgrew `maintenance.collab_fold_refs`: fold it into
+    /// `refs/collab/meta/snapshot` and prune the refs the snapshot carries
+    /// (D66). Aggregation budgets by ref count, so an unfolded inbox is a board
+    /// that silently stops updating.
+    CollabFold(usize),
     /// Nothing to do.
     Idle,
     /// Not this host's repository (placement).
@@ -160,7 +165,7 @@ pub const BACKOFF_AFTER_FAILURES: u32 = 3;
 
 /// Every kind the planner can return (the labels [`unit_kind`] produces), so
 /// backoff bookkeeping can enumerate "which kinds are being skipped".
-pub const UNIT_KINDS: [&str; 8] = [
+pub const UNIT_KINDS: [&str; 9] = [
     "checkpoint",
     "repair",
     "base-rebuild",
@@ -168,6 +173,7 @@ pub const UNIT_KINDS: [&str; 8] = [
     "compact",
     "rev-index",
     "gc",
+    "collab-fold",
     "fsck",
 ];
 
@@ -261,6 +267,7 @@ pub fn unit_kind(unit: &Unit) -> &'static str {
         Unit::RevIndex(_) => "rev-index",
         Unit::Fsck(_) => "fsck",
         Unit::Gc(_) => "gc",
+        Unit::CollabFold(_) => "collab-fold",
         Unit::Idle | Unit::NotAssigned => "",
     }
 }
@@ -572,6 +579,22 @@ async fn next_unit_at(
         };
         if let Some(why) = due {
             return Ok(Unit::Gc(why));
+        }
+    }
+    // Fold the collab inbox (D66). Refs-level, so it runs wherever the repo is
+    // assigned — and the trigger is the inbox's **ref count**, not a clock:
+    // aggregation reads snapshot ∪ inbox under a ref budget, so an inbox that
+    // only grows is a board that silently stops updating. Cheap (one batch blob
+    // read, one CAS publish), which is why it sits below compaction.
+    let fold_refs = cfg.maintenance.collab_fold_refs;
+    if !skip("collab-fold")
+        && fold_refs > 0
+        && cfg.maintenance.collab_fold_principal.is_some()
+        && cfg.maintenance.collab_fold_key.is_some()
+    {
+        let inbox = crate::collab_fold::inbox_refs(&handle);
+        if inbox >= fold_refs {
+            return Ok(Unit::CollabFold(inbox));
         }
     }
     // Lowest priority: the audit itself. Only where the whole pack set is local
@@ -901,6 +924,7 @@ async fn run_pass_inner(
                 Unit::RevIndex(_) => ("rev-index", None, None),
                 Unit::Fsck(_) => ("fsck", None, None),
                 Unit::Gc(_) => ("gc", None, None),
+                Unit::CollabFold(_) => ("collab-fold", None, None),
                 Unit::Idle | Unit::NotAssigned => unreachable!(),
             };
             ran_kinds.push(kind);
@@ -958,6 +982,9 @@ async fn run_pass_inner(
                         run_op(state, &id, "rev-index", params).await
                     }
                     Unit::Gc(_) => run_op(state, &id, "gc", HashMap::new()).await,
+                    Unit::CollabFold(_) => {
+                        run_op(state, &id, "collab-fold", HashMap::new()).await
+                    }
                     Unit::Fsck(why) => {
                         let mut params = HashMap::new();
                         params.insert("connectivity".to_string(), "1".to_string());

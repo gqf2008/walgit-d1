@@ -100,6 +100,16 @@ self-signed host it pins the CA. Git answers a real 401 by erasing the stored
 credential and asking again — that is the intended loop; `git config
 http.https://<host>/.proactiveAuth=auto` sends the token proactively.
 
+## The collab inbox folds itself
+
+Aggregation reads `refs/collab/meta/snapshot` ∪ the unfolded `refs/collab/inbox/*` tail, and the
+lanes budget by **ref count** (`COLLAB_MAX_ENTRIES`). When a host configures
+`maintenance.collab_fold_refs` (and the `collab_fold_principal` / `collab_fold_key` pair the signed
+snapshot needs), its maintainer folds the inbox as an ordinary unit (D66) — you do not run anything,
+and the board keeps aggregating. Nothing changes for a reader: before and after a fold the same
+entries aggregate the same way. An unconfigured host still leaves it to an operator
+(`walgit collab gc`), which is also the manual form for truncating an over-64 MiB ledger.
+
 ## MCP (optional, served by the host)
 
 Every host serves MCP itself at **`<host>/mcp`** — Streamable HTTP, no local
@@ -208,6 +218,11 @@ tested commit's `.walgit/ci.toml` declares tasks (`walgit ci validate`), a
 client runner claims and executes (`walgit ci run`; simultaneous claims are a
 legal race, exactly one result is effective), and `walgit ci status | log
 [<run>] | artifacts [<run>] --out <dir>` read results (sha256-verified).
+**Over MCP the whole control plane is available too**: `ci_status` (the same
+`run_view`/`collect_runs` aggregation as `GET …/api/collab/ci`) to see runs, and
+`collab_publish` with `kind: "ci_claim"` / `kind: "ci_result"` to claim and
+report — an entry either way. Only the runner half (clone, build, artifact
+upload) needs this binary: bytes never travel over MCP.
 
 **Repository reads (`walgit repo …`)** — HTTP, no bucket credentials; host:
 `--url`/`$WALGIT_URL`, token: `--token`/`$WALGIT_TOKEN`. `owners [<owner>]`,

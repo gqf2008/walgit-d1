@@ -14,6 +14,7 @@ pub mod lfs;
 pub mod lfs_upstream;
 pub mod maintain;
 pub mod mcp;
+pub mod collab_fold;
 pub mod metrics;
 pub mod middleware;
 pub mod ops;

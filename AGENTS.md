@@ -878,7 +878,8 @@ decision in §4 — or the PR is; never "fix later".
   caller's `Authorization`/`Cookie`/`Host`/`User-Agent` replayed — so placement (D30's 503),
   freshness (§2.3), `actor == caller` and every response shape are the code that already
   answers a browser, never a second contract to drift from. Read tools are always advertised
-  (`repo_*`, `collab_board/thread/report`, `wal_ls`); **the one write tool is `collab_publish`**,
+  (`repo_*`, `collab_board/thread/report`, `ci_status`, `wal_ls`); **the one write tool is
+  `collab_publish`**,
   which takes an entry the client **already signed** with its own principal key and forwards it
   to `POST /{o}/{r}/api/collab/entries` — the host refuses an `actor` that is not the
   authenticated caller and **holds no key and signs nothing** (signing stays where the identity
@@ -947,6 +948,36 @@ decision in §4 — or the PR is; never "fix later".
   absolute path** (an agent's `mcpServers` entry did, `command: "/Users/…/.local/bin/walgit"`),
   because that is a second owner that no upgrade follows — `command: "walgit"` resolves through
   the one entry.
+
+- **D66** **The collab inbox folds itself; the fold is a maintainer unit, not an operator's chore
+  (2026-11-01, cc-ai-collab-fold-unit).** Every collab lane budgets by **ref count**
+  (`COLLAB_MAX_ENTRIES`, §9.4 of `docs/D1_PROTOCOL.md`), and folding is a pure function of the inbox
+  (`walgit_wal::collab::build_snapshot*` — aggregation over snapshot ∪ inbox is byte-identical to the
+  unfolded ledger, `fold_and_snapshot_plus_tail_are_byte_identical_to_the_unfolded_inbox`). Leaving that
+  to whoever remembers `walgit collab gc` means a busy repository's board stops aggregating *silently*,
+  so the folded state is now the maintainer's own housekeeping: `Unit::CollabFold`, triggered by
+  `maintenance.collab_fold_refs` (default 5 000 inbox refs, 0 = off) instead of a clock, refs-level so it
+  runs wherever the repo is assigned (`crates/walgit-server/src/collab_fold.rs`, op `collab-fold`).
+  **Why it needs a key at all:** the snapshot document is *signed* (`sign_snapshot`) and a snapshot
+  nobody can verify strands every reader — so D45 handed the fold to an operator principal. The
+  maintainer stands in for one only when `maintenance.collab_fold_principal` **and**
+  `maintenance.collab_fold_key` name a registered principal and its seed (host-only config, never
+  per-repo settings, D24); with neither, nothing is planned and the CLI remains the manual form. A key
+  the registry does not name is refused **before** anything is published. The unit differs from the CLI
+  in one deliberate way: it lands the snapshot and prunes the inbox in **one atomic ref transaction**
+  (snapshot CAS baseline + per-ref OID lease + delete), so the two-phase window the CLI has between
+  "push snapshot" and "delete inbox" does not exist; a losing CAS abandons the whole transaction and the
+  next pass re-reads. It prunes only refs the *new* snapshot carries (an unparseable blob stays put, as
+  in the CLI), reuses the baseline snapshot for a prune-only fold, and truncates oldest-first with
+  `complete=false` plus a warning when the ledger is over 64 MiB — an automatic path cannot "refuse to
+  publish" its way back to serviceability. Test: `crates/walgit-server/tests/collab_fold.rs`.
+  *(Amended 2026-11-01, same decision, cc-ai-collab-fold-unit: the **CI control plane** is the same
+  projection. `ci_status` (MCP) → `GET /{o}/{r}/api/collab/ci[?id=]`, which serializes
+  `walgit_wal::ci::collect_runs` — the aggregation `walgit ci status` and the report's CI section
+  already share, so there is no third answer. Claiming and reporting are **entries**
+  (`kind: ci_claim` / `ci_result`) published through `collab_publish`; the runner half — clone, build,
+  artifacts — stays git + the artifact endpoints, because bytes do not travel over MCP. `walgit ci`
+  remains the local runner; nothing about CI is CLI-only any more, and nothing is MCP-only either.)*
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

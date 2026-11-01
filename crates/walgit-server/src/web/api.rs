@@ -239,6 +239,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             .route(&format!("{base}/collab/principal"), post(collab_principal))
             .route(&format!("{base}/collab/report"), get(collab_report))
             .route(&format!("{base}/collab/board"), get(collab_board))
+            .route(&format!("{base}/collab/ci"), get(collab_ci_runs))
             .route(&format!("{base}/collab/threads/{{id}}"), get(collab_thread))
             .route(
                 &format!("{base}/collab/ci-artifacts/{{sha256}}"),
@@ -340,7 +341,7 @@ async fn open(
     })
 }
 
-async fn view(
+pub(crate) async fn view(
     st: &AppState,
     handle: Arc<RepoHandle>,
     need: Need,
@@ -1169,7 +1170,7 @@ pub fn ref_segment_ok(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-'))
 }
 
-async fn git_hash_object(
+pub(crate) async fn git_hash_object(
     local: &walgit_git::LocalRepo,
     content: &[u8],
 ) -> Result<String, ApiError> {
@@ -1200,7 +1201,7 @@ async fn git_hash_object(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-async fn git_pack_object(local: &walgit_git::LocalRepo, oid: &str) -> Result<Vec<u8>, ApiError> {
+pub(crate) async fn git_pack_object(local: &walgit_git::LocalRepo, oid: &str) -> Result<Vec<u8>, ApiError> {
     use tokio::io::AsyncWriteExt;
     let mut child = walgit_git::git_tokio_command()
         .current_dir(local.path())
@@ -1331,7 +1332,7 @@ const COLLAB_SNAPSHOT_MAX_BYTES: usize = walgit_wal::collab::COLLAB_SNAPSHOT_MAX
 /// chunks so neither pipe can fill while the other side waits; a missing or
 /// unreadable oid is simply absent from the map (the aggregation skips
 /// unparsable entries anyway).
-async fn git_cat_file_batch(
+pub(crate) async fn git_cat_file_batch(
     local: &walgit_git::LocalRepo,
     oids: &[String],
     max_bytes: Option<usize>,
@@ -1522,6 +1523,150 @@ async fn publish_collab_ref(
         }
     }
     Ok((oid, result.seq))
+}
+
+/// Publish a multi-ref transaction as `principal`, with the optional new blob
+/// that transaction introduces — the general form of `publish_collab_ref`,
+/// shared with the maintainer's collab fold (D66), which moves
+/// `refs/collab/meta/snapshot` and prunes inbox refs **in one CAS**.
+///
+/// `updates` are `(name, old_oid, new_oid)`; an empty `new_oid` deletes. Every
+/// `old_oid` is a CAS expectation taken from the refs snapshot the caller read,
+/// so a concurrent writer fails this publish instead of being overwritten.
+pub(crate) async fn publish_refs(
+    st: &Arc<AppState>,
+    handle: &Arc<RepoHandle>,
+    r: &Repo,
+    principal_name: &str,
+    updates: &[(String, Option<String>, String)],
+    new_blob: Option<&[u8]>,
+) -> Result<u64, ApiError> {
+    let pack = match new_blob {
+        Some(content) => {
+            let oid = git_hash_object(&r.local, content).await?;
+            let pack_bytes = git_pack_object(&r.local, &oid).await?;
+            let tmp =
+                std::env::temp_dir().join(format!("walgit-publish-{}.pack", uuid::Uuid::new_v4()));
+            tokio::fs::write(&tmp, &pack_bytes)
+                .await
+                .map_err(internal)?;
+            let f = tokio::fs::File::open(&tmp).await.map_err(internal)?;
+            let _prune_guard = handle.prune_guard().await;
+            let pack = r
+                .local
+                .ingest_pack(
+                    f,
+                    walgit_git::IngestOptions {
+                        fsck: st.cfg.wal.fsck_objects,
+                        max_bytes: None,
+                        thin: false,
+                    },
+                )
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| ApiError::Internal("ingest produced no pack".into()))?;
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Some(pack)
+        }
+        None => None,
+    };
+    let txn = walgit_proto::v1::RefTransaction {
+        updates: updates
+            .iter()
+            .map(|(name, old, new)| walgit_proto::v1::RefUpdate {
+                name: name.clone(),
+                old_oid: old.clone().unwrap_or_default(),
+                new_oid: new.clone(),
+                new_symbolic_target: String::new(),
+                new_peeled: String::new(),
+            })
+            .collect(),
+        push_options: Vec::new(),
+        atomic: true,
+    };
+    // The same gate receive-pack applies (D16), and the same one
+    // `publish_collab_ref` applies: one ref, one guard level.
+    let policy = crate::policy::load(&st.store, handle.id())
+        .await
+        .map_err(|e| internal(format!("load policy: {e}")))?;
+    let mut forces = std::collections::HashSet::<String>::new();
+    if policy.has_protect() {
+        for u in &txn.updates {
+            if crate::policy::classify(&u.old_oid, &u.new_oid) == crate::policy::RefOp::Update
+                && !matches!(r.local.is_ancestor(&u.old_oid, &u.new_oid).await, Ok(true))
+            {
+                forces.insert(u.name.clone());
+            }
+        }
+    }
+    let ev = crate::policy::evaluate(&policy, principal_name, &txn, |u| forces.contains(&u.name));
+    if let Some((name, Err(reason))) = ev.per_ref.iter().find(|(_, r)| r.is_err()) {
+        tracing::warn!(repo = %handle.id(), r#ref = name, %reason, "publish_refs: policy denied");
+        return Err(ApiError::Forbidden);
+    }
+    let mut meta = std::collections::HashMap::new();
+    meta.insert("principal".to_string(), principal_name.to_string());
+    meta.insert("agent".to_string(), "walgit-maintain".into());
+    let result = handle
+        .publish_push_synced(pack, ev.publish, meta)
+        .await
+        .map_err(|e| crate::smart::wal_err(&e))?;
+    for (name, res) in &result.per_ref {
+        if let Err(e) = res {
+            return Err(internal(format!("publish {name}: {e}")));
+        }
+    }
+    Ok(result.seq)
+}
+
+impl Repo {
+    /// The local object database this view serves from (`git cat-file`, pack
+    /// building) — the fold and the publishers need it.
+    pub(crate) fn local(&self) -> &walgit_git::LocalRepo {
+        &self.local
+    }
+
+    /// The refs this view read, as `(name, oid)` — the CAS expectations a
+    /// publisher must carry, without a second bucket round trip.
+    pub(crate) fn ref_list(&self) -> Vec<(String, String)> {
+        self.index
+            .by_name
+            .iter()
+            .map(|(name, (sha, _))| (name.clone(), sha.clone()))
+            .collect()
+    }
+
+    /// The public key registered for `principal`, from the repository registry
+    /// overlaid with the host's (`docs/D1_PROTOCOL.md` §4.3/§4.4).
+    pub(crate) async fn principal_key(
+        &self,
+        st: &AppState,
+        principal: &str,
+    ) -> Result<Option<String>, ApiError> {
+        let host = crate::web::v1::host_principals_map(st).await?;
+        if let Some(key) = host.get(principal) {
+            return Ok(Some(key.clone()));
+        }
+        let Some((oid, _)) = self
+            .index
+            .by_name
+            .get(&format!("refs/collab/meta/principals/{principal}"))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let blobs = git_cat_file_batch(&self.local, &[oid], Some(64 * 1024)).await?;
+        let Some(bytes) = blobs.values().next() else {
+            return Ok(None);
+        };
+        let Ok(doc) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return Ok(None);
+        };
+        Ok(doc
+            .get("public_key")
+            .and_then(|k| k.as_str())
+            .map(str::to_string))
+    }
 }
 
 /// First-use self-registration of the authenticated principal's Ed25519 public
@@ -2048,6 +2193,51 @@ async fn collab_ci_artifact_size(
 /// story, i.e. a staleness surface, for a computation that is refs-level plus
 /// one bounded blob fan-out (principle IV: every read revalidates). SWR like
 /// `collab/report`, never immutable.
+/// `GET …/api/collab/ci[?id=<run>]` — the CI projection (`docs/D1_CI_PROTOCOL.md`
+/// §8.3): every run the loaded ledger carries, with its attempts, winner, state
+/// and effective conclusion. The same aggregation core (`walgit_wal::ci`) the
+/// CLI's `walgit ci status` and the report's CI section use, serialized once —
+/// so an MCP client's `ci_status` is this answer, not a second implementation.
+#[derive(serde::Deserialize)]
+struct CiRunsQuery {
+    id: Option<String>,
+}
+
+async fn collab_ci_runs(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((owner, repo_name)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<CiRunsQuery>,
+) -> Result<Response, ApiError> {
+    let st2 = st.clone();
+    run(
+        &st,
+        &headers,
+        &owner,
+        &repo_name,
+        Need::Objects,
+        None,
+        move |r| async move {
+            let state = Box::pin(collab_load(&st2, &r)).await?;
+            let refs: Vec<&EntryRef> = state.entries.iter().collect();
+            let ci = walgit_wal::ci::ci_entries(&refs);
+            let runs: Vec<walgit_wal::ci::RunView> = walgit_wal::ci::collect_runs(
+                &ci,
+                &state.principals,
+                chrono::Utc::now().timestamp(),
+            )
+            .into_values()
+            .filter(|run| q.id.as_deref().is_none_or(|id| id == run.id))
+            .collect();
+            Ok(json_swr_hashed(&serde_json::json!({
+                "repo": r.id.clone(),
+                "runs": runs,
+            })))
+        },
+    )
+    .await
+}
+
 async fn collab_board(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
