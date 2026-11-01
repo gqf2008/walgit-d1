@@ -3,10 +3,9 @@
 walgit is a git smart-HTTP server whose repositories live in an object store:
 hosts are disposable caches, the bucket is the repository. Collaboration
 (issues, PRs, boards) and CI are **inside the repository** — signed entries on
-`refs/collab/*` — and the `walgit` CLI is their primary interface. This file
-teaches an AI agent to discover, read, and write repositories on **this host**
-with plain git and **MCP** (`<host>/mcp`) — the two interfaces that carry the
-work. The `walgit` binary is for the local, privileged acts (keys, fold, host
+`refs/collab/*`. This file teaches an AI agent to discover, read, and write
+repositories on **this host** with plain git and **MCP** (`<host>/mcp`) — the
+two interfaces that carry the work. The `walgit` binary is for the local, privileged acts (keys, fold, host
 operations), never a second way to talk to the host. No interactive steps
 anywhere.
 
