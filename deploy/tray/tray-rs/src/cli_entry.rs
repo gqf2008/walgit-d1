@@ -50,6 +50,8 @@ pub struct Ensured {
     /// 这个入口所在目录本来就在用户的 `PATH` 上。false 表示「入口建好了，
     /// 但新开的 shell 仍解析不到」——那需要用户自己加一行 `PATH`。
     pub on_path: bool,
+    /// 入口是 `WALGIT_CLI_LINK` 显式指定的：失败必须响亮（打包守卫依赖这句）。
+    pub explicit: bool,
 }
 
 impl Ensured {
@@ -58,6 +60,7 @@ impl Ensured {
             entry: None,
             outcome: LinkOutcome::NotCreatable(reason.to_string()),
             on_path: false,
+            explicit: false,
         }
     }
 }
@@ -164,32 +167,55 @@ pub fn candidate_entries() -> Vec<PathBuf> {
     out
 }
 
+/// 打包守卫注入的候选（`WALGIT_CLI_LINK_PRIMARY` / `_FALLBACK`），按序。
+/// 显式注入时不再看 `PATH`，「是否在 PATH 上」只作为报告值。
+pub fn explicit_entries() -> Option<Vec<PathBuf>> {
+    let vars = ["WALGIT_CLI_LINK_PRIMARY", "WALGIT_CLI_LINK_FALLBACK"];
+    let mut out: Vec<PathBuf> = Vec::new();
+    for var in vars {
+        if let Some(value) = std::env::var(var).ok().filter(|v| !v.is_empty()) {
+            let path = PathBuf::from(value);
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 #[cfg(unix)]
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
 
-/// 第一个「在 `PATH` 上且可写」的候选；都不在 `PATH` 上时退到第一个可写的，
-/// 并把 `on_path = false` 报出去。`writable` 是注入的，便于测试。
-pub fn choose_entry(
+/// 候选排序：先「在 `PATH` 上且可写」，再其余可写的（`PATH` 上不可写的跳过）。
+/// `ensure` 按这个顺序逐个尝试——一个候选建不出来（权限、父路径不是目录）
+/// 不代表下一个也不行，旧实现正是在这里丢掉了回退。
+pub fn order_candidates(
     candidates: &[PathBuf],
     path: &[PathBuf],
     writable: &dyn Fn(&Path) -> bool,
-) -> (Option<PathBuf>, bool) {
-    let mut fallback: Option<PathBuf> = None;
+) -> Vec<PathBuf> {
+    let mut on_path: Vec<PathBuf> = Vec::new();
+    let mut off_path: Vec<PathBuf> = Vec::new();
     for candidate in candidates {
         let Some(dir) = candidate.parent() else {
             continue;
         };
         if !writable(dir) {
+            // A path whose parent is not a directory still deserves an attempt:
+            // the failure is what tells the packaging guard the injection worked.
+            off_path.push(candidate.clone());
             continue;
         }
         if dir_on_path(dir, path) {
-            return (Some(candidate.clone()), true);
+            on_path.push(candidate.clone());
+        } else {
+            off_path.push(candidate.clone());
         }
-        fallback.get_or_insert_with(|| candidate.clone());
     }
-    (fallback, false)
+    on_path.extend(off_path);
+    on_path
 }
 
 /// 目录可写（存在且能建文件；不存在时看父目录）。
@@ -237,33 +263,58 @@ pub fn ensure(program_dir: &Path) -> Ensured {
             .ok()
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
-        let (entry, on_path) = match override_entry {
-            Some(entry) => {
-                let on_path = entry
-                    .parent()
-                    .is_some_and(|dir| dir_on_path(dir, &path));
-                (Some(entry), on_path)
-            }
-            None => choose_entry(&candidate_entries(), &path, &dir_writable),
+        let explicit_candidates = explicit_entries();
+        // `WALGIT_CLI_LINK_PRIMARY`/`_FALLBACK` are the packaging guard's
+        // injection point (deploy/tray/macos/test.sh): they replace the
+        // candidate list so a runner's own Homebrew directory cannot decide what
+        // the fixture tests.
+        let candidates = match &override_entry {
+            Some(entry) => vec![entry.clone()],
+            None => explicit_candidates
+                .clone()
+                .unwrap_or_else(candidate_entries),
         };
-        let Some(entry) = entry else {
+        if candidates.is_empty() {
             return Ensured::missing("没有可写且可用的候选入口目录");
-        };
-        // `deb` 把程序本身装在 `/usr/bin/walgit`：那个路径是入口候选，也是程序。
-        // 对它做 heal 会把程序挪开再把软链指向自己。
-        if canonical(&entry) == canonical(&program) {
-            let on_path = entry.parent().is_some_and(|dir| dir_on_path(dir, &path));
-            return Ensured {
-                entry: Some(entry),
-                outcome: LinkOutcome::Linked,
-                on_path,
-            };
         }
-        let outcome = install_one_cli_link(&entry, &program);
-        Ensured {
-            entry: Some(entry),
-            outcome,
-            on_path,
+        let ordered = order_candidates(&candidates, &path, &dir_writable);
+        let mut failure: Option<(PathBuf, String)> = None;
+        for entry in ordered {
+            // `deb` 把程序本身装在 `/usr/bin/walgit`：那个路径是入口候选，也是
+            // 程序。对它做 heal 会把程序挪开再把软链指向自己。
+            if canonical(&entry) == canonical(&program) {
+                let on_path = entry.parent().is_some_and(|dir| dir_on_path(dir, &path));
+                return Ensured {
+                    entry: Some(entry),
+                    outcome: LinkOutcome::Linked,
+                    on_path,
+                    explicit: override_entry.is_some(),
+                };
+            }
+            let on_path = entry.parent().is_some_and(|dir| dir_on_path(dir, &path));
+            match install_one_cli_link(&entry, &program) {
+                LinkOutcome::NotCreatable(e) => failure = Some((entry, e)),
+                // A candidate that is somebody else's file says nothing about the
+                // next one, but we never touch it — stop here rather than write
+                // to a second location the user did not ask for.
+                outcome => {
+                    return Ensured {
+                        entry: Some(entry),
+                        outcome,
+                        on_path,
+                        explicit: override_entry.is_some(),
+                    };
+                }
+            }
+        }
+        match failure {
+            Some((entry, e)) => Ensured {
+                entry: Some(entry),
+                outcome: LinkOutcome::NotCreatable(e),
+                on_path: false,
+                explicit: override_entry.is_some(),
+            },
+            None => Ensured::missing("没有可写且可用的候选入口目录"),
         }
     }
     #[cfg(windows)]
@@ -452,9 +503,14 @@ fn normalise_entry(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 按本平台的分隔符拼 `PATH`（测试不能写死 `:`）。
+    fn join_path(items: &[&str]) -> String {
+        items.join(if cfg!(windows) { ";" } else { ":" })
+    }
+
     #[test]
     fn a_path_dir_is_matched_through_trailing_slashes() {
-        let dirs = split_path("/opt/homebrew/bin:/usr/local/bin/:/usr/bin");
+        let dirs = split_path(&join_path(&["/opt/homebrew/bin", "/usr/local/bin/", "/usr/bin"]));
         assert!(dir_on_path(Path::new("/usr/local/bin"), &dirs));
         assert!(dir_on_path(Path::new("/opt/homebrew/bin/"), &dirs));
         assert!(!dir_on_path(Path::new("/home/u/.local/bin"), &dirs));
@@ -467,25 +523,29 @@ mod tests {
             PathBuf::from("/usr/local/bin/walgit"),
             PathBuf::from("/home/u/.local/bin/walgit"),
         ];
-        let path = split_path("/usr/bin:/bin:/home/u/.local/bin");
+        let path = split_path(&join_path(&["/usr/bin", "/bin", "/home/u/.local/bin"]));
         // /opt/homebrew 不在 PATH 上；/usr/local 不在；~/.local/bin 在。
-        let (entry, on_path) = choose_entry(&candidates, &path, &|_| true);
-        assert_eq!(entry, Some(PathBuf::from("/home/u/.local/bin/walgit")));
-        assert!(on_path);
+        let ordered = order_candidates(&candidates, &path, &|_| true);
+        // 只有 `~/.local/bin` 在 PATH 上 → 它排第一，其余保持候选顺序。
+        assert_eq!(ordered[0], PathBuf::from("/home/u/.local/bin/walgit"));
+        assert_eq!(ordered[1], PathBuf::from("/opt/homebrew/bin/walgit"));
+        assert!(dir_on_path(ordered[0].parent().unwrap(), &path));
     }
 
+    /// 不可写的候选排到后面而不是被丢掉：一次建不出来（权限、父路径不是目录）
+    /// 要落到下一个候选去试——旧实现正是在这里丢掉了回退。
     #[test]
-    fn an_unwritable_candidate_is_skipped_for_one_that_is_writable() {
+    fn an_unwritable_candidate_is_tried_after_a_writable_one() {
         let candidates = vec![
             PathBuf::from("/usr/local/bin/walgit"),
             PathBuf::from("/home/u/.local/bin/walgit"),
         ];
-        let path = split_path("/usr/local/bin:/home/u/.local/bin");
-        let (entry, on_path) = choose_entry(&candidates, &path, &|dir| {
+        let path = split_path(&join_path(&["/usr/local/bin", "/home/u/.local/bin"]));
+        let ordered = order_candidates(&candidates, &path, &|dir| {
             dir != Path::new("/usr/local/bin")
         });
-        assert_eq!(entry, Some(PathBuf::from("/home/u/.local/bin/walgit")));
-        assert!(on_path);
+        assert_eq!(ordered[0], PathBuf::from("/home/u/.local/bin/walgit"));
+        assert_eq!(ordered[1], PathBuf::from("/usr/local/bin/walgit"));
     }
 
     /// 一个都不在 PATH 上时仍然建入口（免得下次启动重复找），但要如实报
@@ -493,31 +553,36 @@ mod tests {
     #[test]
     fn nothing_on_the_path_still_yields_a_fallback_and_says_so() {
         let candidates = vec![PathBuf::from("/home/u/.local/bin/walgit")];
-        let path = split_path("/usr/bin:/bin");
-        let (entry, on_path) = choose_entry(&candidates, &path, &|_| true);
-        assert_eq!(entry, Some(PathBuf::from("/home/u/.local/bin/walgit")));
-        assert!(!on_path);
+        let path = split_path(&join_path(&["/usr/bin", "/bin"]));
+        let ordered = order_candidates(&candidates, &path, &|_| true);
+        assert_eq!(ordered, candidates);
+        assert!(!dir_on_path(ordered[0].parent().unwrap(), &path));
     }
 
+    /// 全不可写时仍然把候选交给建链那一层：显式注入的入口必须响亮地失败，
+    /// 而不是被静默丢掉。
     #[test]
-    fn a_nothing_writable_instance_selects_nothing() {
+    fn nothing_writable_still_reaches_the_install_step() {
         let candidates = vec![PathBuf::from("/usr/local/bin/walgit")];
-        let (entry, on_path) = choose_entry(&candidates, &split_path("/usr/bin"), &|_| false);
-        assert_eq!(entry, None);
-        assert!(!on_path);
+        let path = split_path(&join_path(&["/usr/bin"]));
+        let ordered = order_candidates(&candidates, &path, &|_| false);
+        assert_eq!(ordered, candidates);
     }
 
     #[test]
     fn appending_a_dir_is_idempotent_and_never_double_separates() {
         let sep = if cfg!(windows) { ';' } else { ':' };
+        let _ = sep;
         assert_eq!(
             appended_path("", "/opt/x/bin").as_deref(),
             Some("/opt/x/bin")
         );
         assert_eq!(appended_path("/opt/x/bin", "/opt/x/bin/"), None);
+        assert_eq!(appended_path(&join_path(&["/a", "/b"]), "/b"), None);
+        let current = join_path(&["/a", "/b"]);
         assert_eq!(
-            appended_path("/a:/b", "/c").as_deref(),
-            Some(&format!("/a:/b{sep}/c")[..])
+            appended_path(&current, "/c").as_deref(),
+            Some(&format!("/a{sep}/b{sep}/c")[..])
         );
     }
 }

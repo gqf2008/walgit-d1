@@ -302,7 +302,13 @@ mod macos {
             }
             LinkOutcome::Foreign => log_line("bootstrap: PATH 入口被别人的文件占着,未触碰"),
             LinkOutcome::NotCreatable(e) => {
-                log_line(&format!("bootstrap: CLI 软链未创建: {e}"));
+                // 显式指定的入口失败要响亮（打包守卫按这句话判定）；默认候选
+                // 全不可写只是环境事实，用安静的语气。
+                if ensured.explicit {
+                    log_line(&format!("bootstrap: CLI 软链失败: {e}"));
+                } else {
+                    log_line(&format!("bootstrap: CLI 软链未创建: {e}"));
+                }
             }
         }
     }
