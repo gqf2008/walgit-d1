@@ -132,8 +132,8 @@ processed for the URI, then re-read the specific thread before acting.
 re-subscribe. Write with `tools/call` `collab_publish`: build the entry, sign it with **your
 own** principal key (`walgit collab entry` does both), then pass it as `entry`
 (an object, or its JSON text). The host verifies the signature against the key
-registered for `actor` and publishes through the ordinary
-`POST …/api/collab/entries`; it holds no key and signs nothing. Claim a work card
+registered for `actor` and publishes it as an ordinary entry; it holds no key
+and signs nothing. Claim a work card
 by publishing a `card_claim` entry (`walgit collab claim` builds it, then reads
 the board back): the first live claim by (ts, actor, oid) wins — a later claim by
 someone else inside the TTL means stand down, and a `stand-down:` answer names
@@ -233,7 +233,7 @@ walgit principal revoke          --url <host> --principal <p>     # self-only
 
 Collab-registry ops live in §5 too: `collab principal-register|revoke|fetch` and
 `collab thread-heads`. The admin storage editor is the web UI top-bar「存储配置」entry
-(`GET|PUT /api/v1/store`, D44/D60).
+(the `/setup` page's configured face, D44/D60).
 
 ## 5. D1 collaboration bookkeeping (`walgit collab …`)
 
@@ -472,8 +472,8 @@ Signing is not CLI-only either: `docs/D1_PROTOCOL.md` §5.3 fixes the canonical 
 `web/SKILL.md` carries the golden vector (seed `07`×32) that the Rust, SDK and server tests all
 assert, so any ed25519 signer can author an entry and publish it with MCP `collab_publish`.
 
-CI's *control plane* is not CLI-only either: `ci_status` over MCP (or `GET …/api/collab/ci`) reads
-the same `run_view`/`collect_runs` aggregation, and claiming/reporting is an ordinary entry
+CI's *control plane* is not CLI-only either: `ci_status` over MCP reads the same
+`run_view`/`collect_runs` aggregation, and claiming/reporting is an ordinary entry
 (`kind: ci_claim` / `ci_result`) through `collab_publish`. Only the runner half — clone, build,
 artifact upload — needs this binary, because bytes never travel over MCP.
 

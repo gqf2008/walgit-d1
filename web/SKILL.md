@@ -5,7 +5,10 @@ hosts are disposable caches, the bucket is the repository. Collaboration
 (issues, PRs, boards) and CI are **inside the repository** — signed entries on
 `refs/collab/*` — and the `walgit` CLI is their primary interface. This file
 teaches an AI agent to discover, read, and write repositories on **this host**
-with plain git, the CLI, and HTTP. No interactive steps anywhere.
+with plain git and **MCP** (`<host>/mcp`) — the two interfaces that carry the
+work. The `walgit` binary is for the local, privileged acts (keys, fold, host
+operations), never a second way to talk to the host. No interactive steps
+anywhere.
 
 ## Quick start — identity → roles → worktree → collaboration
 
@@ -68,8 +71,11 @@ walgit collab entry --kind status --id <thread> --parent <oid> --body '{"status"
 
 - **Every problem goes back to the card**: a `comment` with the evidence, or
   `status: blocked` when work halts. The card is the only report channel.
-- Read state with `walgit collab board`, `walgit collab thread <id>`,
-  `walgit collab report --remote origin`. Entries without `--push` stay local.
+- Read state over MCP: `collab_board`, `collab_thread {id}`, `collab_report`
+  — no clone needed, always as fresh as the WAL. (The same three exist as
+  `walgit collab board|thread|report` for a shell or an offline read of the
+  local clone.) An entry written without `--push` stays local; publish it over
+  MCP `collab_publish` or `git push` it to your inbox ref.
 
 ## Install the ops skill (operator guide)
 
@@ -130,18 +136,18 @@ public key: 6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=
 signature:  VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==
 ```
 
-Sign one and publish it with MCP `collab_publish` (`{"repo": "<owner>/<repo>", "entry": {...}}`) — or
-`POST /{owner}/{repo}/api/collab/entries`, or `git push` it to
-`refs/collab/inbox/<your-principal>/<uuid>`. All three end at the same entry oid; the host verifies
-your signature against the key registered for `actor` and refuses an `actor` that is not you.
-Browsers get this for free from the SDK (`repos.collab.post`); Rust callers use
-`walgit_wal::collab::sign_entry`.
+Sign one and publish it with MCP `collab_publish` (`{"repo": "<owner>/<repo>", "entry": {...}}`), or
+`git push` it to `refs/collab/inbox/<your-principal>/<uuid>`. Both end at the same entry oid; the host
+verifies your signature against the key registered for `actor` and refuses an `actor` that is not you.
+`walgit collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
+already have it in the SDK.
 
-## MCP (optional, served by the host)
+## MCP — how an agent talks to this host
 
 Every host serves MCP itself at **`<host>/mcp`** — Streamable HTTP, no local
-process to spawn. Point a client at the URL and give it the same credential you
-give git:
+process to spawn. This is the interface: reads, collab state, CI state and
+writes all go through it. Point a client at the URL and give it the same
+credential you give git:
 
 ```jsonc
 // token mode / a robot: a bearer
@@ -162,17 +168,16 @@ one `application/json` or `text/event-stream` message — send
 with a `Bearer` challenge (never `Basic`: `/mcp` is browser-reachable).
 
 Tools: `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_board`,
-`collab_thread`, `collab_report`, `wal_ls` — the host's own JSON API underneath,
-so freshness and placement are the same as a browser's. A revision argument is
+`collab_thread`, `collab_report`, `ci_status`, `wal_ls` — answered by the host
+itself (the same reads its UI does, so freshness and placement are identical). A revision argument is
 `rev`; `repo_commits` accepts `ref` and `rev` (same meaning, and a CLI-style
 `HEAD~3` resolves). `wal_ls` reads the retained log `from`/`to` (1-based seqs)
 and answers `more` when the window it returned is not the end. The one writing tool is
 `collab_publish`: it takes an entry you have **already signed** with your own
-key (`walgit collab entry` builds and signs one) and hands it to
-`POST /{owner}/{repo}/api/collab/entries`. The host verifies the signature
-against the key registered for `actor` and refuses an `actor` that is not the
-principal the credential authenticates as — it never signs for you and holds no
-key of yours. Destructive operations are not exposed at all; bytes never travel
+key (`walgit collab entry` builds and signs one, or see §5.3 above). The host
+verifies the signature against the key registered for `actor` and refuses an
+`actor` that is not the principal the credential authenticates as — it never
+signs for you and holds no key of yours. Destructive operations are not exposed at all; bytes never travel
 over MCP (clone/fetch/push stay git + bundle-uri).
 
 Resources: `resources/list`, `resources/templates/list`, then
@@ -245,23 +250,18 @@ tested commit's `.walgit/ci.toml` declares tasks (`walgit ci validate`), a
 client runner claims and executes (`walgit ci run`; simultaneous claims are a
 legal race, exactly one result is effective), and `walgit ci status | log
 [<run>] | artifacts [<run>] --out <dir>` read results (sha256-verified).
-**Over MCP the whole control plane is available too**: `ci_status` (the same
-`run_view`/`collect_runs` aggregation as `GET …/api/collab/ci`) to see runs, and
-`collab_publish` with `kind: "ci_claim"` / `kind: "ci_result"` to claim and
+**Over MCP the whole control plane is available too**: `ci_status` to see runs,
+and `collab_publish` with `kind: "ci_claim"` / `kind: "ci_result"` to claim and
 report — an entry either way. Only the runner half (clone, build, artifact
 upload) needs this binary: bytes never travel over MCP.
 
-**Repository reads (`walgit repo …`)** — HTTP, no bucket credentials; host:
-`--url`/`$WALGIT_URL`, token: `--token`/`$WALGIT_TOKEN`. `owners [<owner>]`,
-`refs <o/r> [branches|tags|all|collab]`, `ref <o/r> <full-ref>`,
-`resolve <o/r> <rev>`, `tree <o/r> <rev> [path]`, `blob <o/r> <rev> <path>
-[--raw]`, `commits <o/r> [--ref --n --skip --path]`, `commit <o/r> <sha>`,
-`diff <o/r> <from> <to> [--format]`, `merge-base <o/r> <from> <to>`,
-`blame <o/r> <rev> <path>`, `archive <o/r> <rev> [--out FILE]`,
-`overview <o/r>`, `tasks <o/r> [--follow <id>]`, `ops <o/r>` +
-`op-start <o/r> <op> [--arg k=v]`. Management (bucket-direct, maintainer
-form): `repo create|list|info`, `repo policy get|set|clear`,
-`repo settings show|set|clear|history`.
+**Repository reads (`walgit repo …`)** — the same repositories, for a shell
+script or CI job that is not an MCP client: `repo owners|refs|ref|resolve|tree|
+blob|commits|commit|diff|merge-base|blame|archive|overview|tasks|ops` (host
+`--url`/`$WALGIT_URL`, token `--token`/`$WALGIT_TOKEN`). Prefer the MCP tools
+when you are an agent: they answer identically and need no per-command flags.
+Management (bucket-direct, maintainer form): `repo create|list|info`,
+`repo policy get|set|clear`, `repo settings show|set|clear|history`.
 
 **WAL & maintenance** — `walgit wal head|ls|show|materialize --at-seq` (the
 log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,

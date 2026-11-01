@@ -1183,3 +1183,19 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   (issue #108). Versioning is semantic; milestone `v0.1` is the first release
   target. A release is also a work unit: create a `batch` issue with the release
   checklist.
+
+- **D67** **Agents are told one interface: MCP. The HTTP API stays, undocumented in SKILL.md
+  (2026-11-01, cc-ai-mcp-only-interface).** The host keeps its JSON API (`/{o}/{r}/api/…`) — it is
+  the browser's lane, the SDK's lane, and what `/mcp` projects (D64) — but the agent-facing documents
+  (`web/SKILL.md`, `skills/walgit/SKILL.md`) no longer describe it as a way to *interact*: no
+  endpoint paths, no query recipes, no "POST to …" instructions. An agent reads, writes, watches and
+  reports over `/mcp`; `git` moves bytes; the `walgit` binary is for what a client cannot do from
+  outside — minting an identity, signing an entry when no signer is available, the fold, host
+  operations. Both SKILL.md files therefore state the same thing at their head: *git + MCP are the
+  interfaces, the CLI is for local/privileged acts*. The normative protocol docs (`docs/D1_PROTOCOL.md`,
+  `docs/D1_CI_PROTOCOL.md`), `web/API.md` and the SPA's API page keep documenting the HTTP surface —
+  "undocumented in the agent guide" is a documentation boundary, never a deprecation, and no endpoint
+  may be removed on the strength of this decision: an MCP tool is a projection of an endpoint that
+  must keep working for browsers, edges and scripts. The one CLI group kept in `web/SKILL.md` in
+  fact-shaped form is `walgit repo …`, for a shell or CI job that is not an MCP client, and it is
+  explicitly "same answers, prefer MCP".
