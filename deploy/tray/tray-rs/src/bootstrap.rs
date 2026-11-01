@@ -407,6 +407,21 @@ pub use macos::{bootstrap_deploy, state_dir};
 #[cfg(all(test, unix))]
 pub use crate::cli_entry::{install_one_cli_link, LinkOutcome};
 
+/// 入口建好了但目录不在 `PATH` 上时，把「新开的 shell 仍看不到」说出来。
+#[cfg(not(target_os = "macos"))]
+fn note_off_path(ensured: &crate::cli_entry::Ensured) {
+    if ensured.on_path {
+        return;
+    }
+    crate::log_line(&format!(
+        "bootstrap: 入口已建 ({}),但它不在 PATH 上——新开的 shell 仍看不到 `walgit`",
+        ensured
+            .entry
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |p| p.display().to_string())
+    ));
+}
+
 /// 非 macOS:没有 bundle 迁移语义,但「`walgit` 必须在 `PATH` 上」这条一样适用
 /// (Linux 建软链,Windows 补用户 `PATH`),入口规则见 `cli_entry`。
 #[cfg(not(target_os = "macos"))]
@@ -419,17 +434,10 @@ pub fn bootstrap_deploy() {
     };
     let ensured = crate::cli_entry::ensure(dir);
     match &ensured.outcome {
-        crate::cli_entry::LinkOutcome::Linked | crate::cli_entry::LinkOutcome::PathAdded => {
-            if !ensured.on_path {
-                crate::log_line(&format!(
-                    "bootstrap: 入口已建 ({}),但它不在 PATH 上——新开的 shell 仍看不到 `walgit`",
-                    ensured
-                        .entry
-                        .as_ref()
-                        .map_or_else(|| "-".to_string(), |p| p.display().to_string())
-                ));
-            }
-        }
+        #[cfg(unix)]
+        crate::cli_entry::LinkOutcome::Linked => note_off_path(&ensured),
+        crate::cli_entry::LinkOutcome::PathAdded => note_off_path(&ensured),
+        #[cfg(unix)]
         crate::cli_entry::LinkOutcome::Healed { moved_to, version } => {
             crate::log_line(&format!(
                 "bootstrap: PATH 上是旧副本({}),已移到 {} 并换成软链",
@@ -437,6 +445,7 @@ pub fn bootstrap_deploy() {
                 moved_to.display()
             ));
         }
+        #[cfg(unix)]
         crate::cli_entry::LinkOutcome::Foreign => {
             crate::log_line("bootstrap: PATH 入口被别人的文件占着,未触碰");
         }

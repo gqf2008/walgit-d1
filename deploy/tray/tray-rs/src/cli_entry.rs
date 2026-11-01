@@ -23,13 +23,16 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, PartialEq, Eq)]
 pub enum LinkOutcome {
     /// 指向安装目录程序的软链：新建、更新、或本来就好。
+    #[cfg(unix)]
     Linked,
     /// 被一个 **walgit 副本**占着。已改名挪开（不删）并换成软链。
+    #[cfg(unix)]
     Healed {
         moved_to: PathBuf,
         version: Option<String>,
     },
     /// 不是 walgit 的东西（别人的脚本、别的工具、不是我们建的软链）：不碰。
+    #[cfg(unix)]
     Foreign,
     /// 建不出来（权限）。
     NotCreatable(String),
@@ -82,6 +85,7 @@ pub fn exe_name() -> &'static str {
 /// `PATH` 里的目录：进程自己的 + 登录 shell 的（unix）+ 用户变量
 /// （windows）。托盘由 launchd / 资源管理器拉起，自带的 `PATH` 常常比终端
 /// 里的窄很多；只信自己的会把「终端里有、托盘看不到」误判成没有。
+#[cfg(unix)]
 pub fn path_dirs() -> Vec<PathBuf> {
     let mut dirs = split_path(&std::env::var("PATH").unwrap_or_default());
     #[cfg(unix)]
@@ -145,6 +149,7 @@ fn canonical(path: &Path) -> PathBuf {
 ///   （Intel 默认 PATH），最后才是用户目录。
 /// - Linux：`~/.local/bin`（不需要 root），再 `/usr/local/bin`、`/usr/bin`
 ///   （deb 就装在那里；对同一路径的重复处理是幂等的）。
+#[cfg(unix)]
 pub fn candidate_entries() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "macos")]
@@ -169,6 +174,7 @@ pub fn candidate_entries() -> Vec<PathBuf> {
 
 /// 打包守卫注入的候选（`WALGIT_CLI_LINK_PRIMARY` / `_FALLBACK`），按序。
 /// 显式注入时不再看 `PATH`，「是否在 PATH 上」只作为报告值。
+#[cfg(unix)]
 pub fn explicit_entries() -> Option<Vec<PathBuf>> {
     let vars = ["WALGIT_CLI_LINK_PRIMARY", "WALGIT_CLI_LINK_FALLBACK"];
     let mut out: Vec<PathBuf> = Vec::new();
@@ -191,6 +197,7 @@ fn home() -> PathBuf {
 /// 候选排序：先「在 `PATH` 上且可写」，再其余可写的（`PATH` 上不可写的跳过）。
 /// `ensure` 按这个顺序逐个尝试——一个候选建不出来（权限、父路径不是目录）
 /// 不代表下一个也不行，旧实现正是在这里丢掉了回退。
+#[cfg(unix)]
 pub fn order_candidates(
     candidates: &[PathBuf],
     path: &[PathBuf],
@@ -219,6 +226,7 @@ pub fn order_candidates(
 }
 
 /// 目录可写（存在且能建文件；不存在时看父目录）。
+#[cfg(unix)]
 fn dir_writable(dir: &Path) -> bool {
     match std::fs::metadata(dir) {
         Ok(meta) if meta.is_dir() => std::fs::metadata(dir)
@@ -241,11 +249,6 @@ fn probe_writable(dir: &Path) -> bool {
         let _ = std::fs::remove_file(&probe);
         ok
     }
-}
-
-#[cfg(windows)]
-fn probe_writable(dir: &Path) -> bool {
-    std::fs::create_dir_all(dir).is_ok()
 }
 
 /// 程序目录里的 `walgit` 装好入口，返回它被放在哪。
@@ -518,6 +521,7 @@ mod tests {
         assert!(!dir_on_path(Path::new("/home/u/.local/bin"), &dirs));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_first_candidate_that_is_on_the_path_and_writable_wins() {
         let candidates = vec![
@@ -536,6 +540,7 @@ mod tests {
 
     /// 不可写的候选排到后面而不是被丢掉：一次建不出来（权限、父路径不是目录）
     /// 要落到下一个候选去试——旧实现正是在这里丢掉了回退。
+    #[cfg(unix)]
     #[test]
     fn an_unwritable_candidate_is_tried_after_a_writable_one() {
         let candidates = vec![
@@ -552,6 +557,7 @@ mod tests {
 
     /// 一个都不在 PATH 上时仍然建入口（免得下次启动重复找），但要如实报
     /// `on_path = false`，让日志能说出「新开的 shell 还看不到」。
+    #[cfg(unix)]
     #[test]
     fn nothing_on_the_path_still_yields_a_fallback_and_says_so() {
         let candidates = vec![PathBuf::from("/home/u/.local/bin/walgit")];
@@ -563,6 +569,7 @@ mod tests {
 
     /// 全不可写时仍然把候选交给建链那一层：显式注入的入口必须响亮地失败，
     /// 而不是被静默丢掉。
+    #[cfg(unix)]
     #[test]
     fn nothing_writable_still_reaches_the_install_step() {
         let candidates = vec![PathBuf::from("/usr/local/bin/walgit")];
