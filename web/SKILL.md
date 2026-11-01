@@ -110,6 +110,33 @@ and the board keeps aggregating. Nothing changes for a reader: before and after 
 entries aggregate the same way. An unconfigured host still leaves it to an operator
 (`walgit collab gc`), which is also the manual form for truncating an over-64 MiB ledger.
 
+## Signing an entry without the CLI
+
+Nothing about writing a collab entry needs the `walgit` binary. An entry is JSON with its
+**canonical bytes** signed by an Ed25519 key (`docs/D1_PROTOCOL.md` §5.3 is normative):
+
+1. take the entry object, set `sig` to `""` (the key stays), and drop `refs` when it is null/absent;
+2. serialize with **keys sorted recursively**, no whitespace, arrays in order, strings JSON-escaped;
+   protocol numbers are integers (no floats anywhere in `body` that must verify cross-language);
+3. sign those bytes and store `sig = "ed25519:" + base64(signature)`.
+
+The golden vector — every implementation is pinned to it (`crates/walgit-wal/src/collab.rs`
+`golden_tests`, `web/src/collab-canonical.test.ts`, and the server test
+`collab_sdk_golden_entry_verifies_end_to_end`) — is, for the seed `07` × 32:
+
+```text
+canonical: {"actor":"alice","body":{"title":"golden vector"},"id":"golden","kind":"issue","parent":"","sig":"","ts":1786500000,"version":1}
+public key: 6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=
+signature:  VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==
+```
+
+Sign one and publish it with MCP `collab_publish` (`{"repo": "<owner>/<repo>", "entry": {...}}`) — or
+`POST /{owner}/{repo}/api/collab/entries`, or `git push` it to
+`refs/collab/inbox/<your-principal>/<uuid>`. All three end at the same entry oid; the host verifies
+your signature against the key registered for `actor` and refuses an `actor` that is not you.
+Browsers get this for free from the SDK (`repos.collab.post`); Rust callers use
+`walgit_wal::collab::sign_entry`.
+
 ## MCP (optional, served by the host)
 
 Every host serves MCP itself at **`<host>/mcp`** — Streamable HTTP, no local

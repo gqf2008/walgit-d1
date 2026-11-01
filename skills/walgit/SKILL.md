@@ -468,6 +468,10 @@ The server holds no CI logic: `.walgit/ci.toml` in the tested commit declares ta
 them with signed `ci_claim` entries and publishes signed results into `ci-*` threads
 (`walgit ci validate`, `walgit ci run --once`, `walgit ci status`, `walgit ci log [<run>]`,
 `walgit ci artifacts [<run>] [--out <dir>]`).
+Signing is not CLI-only either: `docs/D1_PROTOCOL.md` §5.3 fixes the canonical bytes and
+`web/SKILL.md` carries the golden vector (seed `07`×32) that the Rust, SDK and server tests all
+assert, so any ed25519 signer can author an entry and publish it with MCP `collab_publish`.
+
 CI's *control plane* is not CLI-only either: `ci_status` over MCP (or `GET …/api/collab/ci`) reads
 the same `run_view`/`collect_runs` aggregation, and claiming/reporting is an ordinary entry
 (`kind: ci_claim` / `ci_result`) through `collab_publish`. Only the runner half — clone, build,
