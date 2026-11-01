@@ -977,6 +977,21 @@ decision in §4 — or the PR is; never "fix later".
   because that is a second owner that no upgrade follows — `command: "walgit"` resolves through
   the one entry.
 
+  *(Amended 2026-11-01, every platform: the entry rule lives in
+  `deploy/tray/tray-rs/src/cli_entry.rs` and runs on **every** tray start, not just macOS. It no
+  longer guesses two fixed paths: it asks where `walgit` must be findable — the process `PATH`
+  **and** the login shell's (`sh -lc`, because a tray launched by launchd/Explorer has a much
+  narrower `PATH` than a terminal) — then picks the first candidate that is both writable and
+  already on that `PATH` (`~/.local/bin` first, then `/opt/homebrew/bin`, `/usr/local/bin`;
+  Linux the same minus Homebrew). Nothing on the `PATH` is writable ⇒ the entry is still created
+  and the log says `on_path = false` with the line the user has to add: walgit edits no shell rc
+  file, anywhere. A candidate that **is** the program (`/usr/bin/walgit` from the `.deb`) is
+  never "healed" — it would be renamed aside and symlinked to itself. Windows has no symlink
+  lane: the equivalent act is appending the install directory to `HKCU\Environment\Path`
+  (`REG_EXPAND_SZ`, idempotent, the same judgement as `deploy/windows/user-path.iss`), because
+  the installer's one-time write cannot heal a PATH that was reset later. Rule stated once, used
+  by all three platforms: after the tray starts, a new shell resolves `walgit`.)*
+
 - **D66** **The collab inbox folds itself; the fold is a maintainer unit, not an operator's chore
   (2026-11-01, cc-ai-collab-fold-unit).** Every collab lane budgets by **ref count**
   (`COLLAB_MAX_ENTRIES`, §9.4 of `docs/D1_PROTOCOL.md`), and folding is a pure function of the inbox

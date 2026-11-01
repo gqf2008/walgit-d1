@@ -91,9 +91,13 @@ macOS 0.5.x/0.6.0 升级到新布局时，新 tray 会临时建立
   Windows/Linux 在安装目录或 `/usr/bin`。程序不再复制到用户状态目录。
 - **状态目录**:`~/.walgit`，只放 `walgit.toml`、`cache/`、
   `server.log`、`walgit.pid`、`.r2-credentials` 等用户状态。macOS 首次
-  启动只初始化缺失的 `walgit.toml`，并优先建 `/usr/local/bin/walgit` 软链
-  指向 App Bundle 内的程序；该位置不可写时回退到 `~/.local/bin/walgit`。
-  显式 `WALGIT_CLI_LINK` 仍是单目标覆盖，失败会明确记录。
+  启动只初始化缺失的 `walgit.toml`。**CLI 入口全平台一致**（`src/cli_entry.rs`）：
+  每次启动都确保新开的 shell 能解析到 `walgit` —— 先看进程与登录 shell 的
+  `PATH`，在「在 PATH 上且可写」的候选里挑一个（`~/.local/bin` → `/opt/homebrew/bin`
+  → `/usr/local/bin`；Linux 同序去掉 Homebrew）建软链；都不在 PATH 上时仍建入口，
+  日志说明还要自己加一行 PATH（walgit 不改任何 shell 配置）。Windows 没有软链车道，
+  等价动作是把安装目录幂等追加进 `HKCU\Environment\Path`。显式 `WALGIT_CLI_LINK`
+  仍是单目标覆盖，失败会明确记录。
 - **CLI 入口只能是软链（D65）**:上面那个路径上若是**手抄的副本**,升级永远
   到不了它——实测线上:一份 10 月 27 日复制的 `~/.local/bin/walgit` 一直在
   跑 `walgit mcp`,而那条子命令早已随发版删除,同一台机器的 `/healthz` 却是

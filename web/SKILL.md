@@ -282,9 +282,12 @@ go through the release pipeline (a pushed `v*` tag fires release.yml); the
 tray detects and installs them. Details: the ops skill (§ Install above) and
 `deploy/tray/README.md`.
 
-**One `walgit` on `PATH`, and it is a symlink.** On macOS the app bundle owns the
-program and the tray keeps `~/.local/bin/walgit` (or `/usr/local/bin/walgit`)
-pointed at it, so an upgrade moves the CLI with the app. A **copy** you made
+**One `walgit` on `PATH`, and it is a symlink.** The installed program is owned
+by the app bundle (macOS), `/usr/bin` (the `.deb`) or `%USERPROFILE%\walgit`
+(Windows), and every tray start makes sure a new shell resolves `walgit`: on Unix
+it links a directory your `PATH` already has (`~/.local/bin`, else
+`/opt/homebrew/bin` / `/usr/local/bin`), on Windows it appends the install
+directory to your user `PATH`. So an upgrade moves the CLI with the app. A **copy** you made
 yourself is a second program file no upgrade can reach: it keeps answering with
 the old build (`walgit --version` shows the old commit, and a subcommand the
 release deleted may still exist), while the host on the port serves the new one.

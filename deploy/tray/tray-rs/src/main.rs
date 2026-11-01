@@ -24,6 +24,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bootstrap;
+mod cli_entry;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
