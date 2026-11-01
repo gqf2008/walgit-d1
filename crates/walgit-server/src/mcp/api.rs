@@ -158,6 +158,23 @@ impl<'a> Call<'a> {
         Self::decode(status, &bytes)
     }
 
+    /// `GET path` → the body as text. One endpoint in the repo API answers a
+    /// document rather than JSON (the *effective* per-repo settings are TOML),
+    /// and a tool that wraps it must not pretend otherwise.
+    pub async fn get_text(&self, path: &str) -> Result<String, ApiError> {
+        let (status, bytes) = self.send(Method::GET, path).await?;
+        if !status.is_success() {
+            return Err(Self::decode(status, &bytes).map_or_else(
+                |e| e,
+                |v| ApiError {
+                    status,
+                    message: v.to_string(),
+                },
+            ));
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// `POST path` with a JSON body. The body is small by construction (a
     /// collab entry, bounded by `COLLAB_ENTRY_MAX_BYTES`), so it never streams.
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value, ApiError> {

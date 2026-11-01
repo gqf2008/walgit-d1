@@ -725,23 +725,31 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
         .iter()
         .filter_map(|t| t["name"].as_str().map(str::to_string))
         .collect();
-    // `collab_publish` needs a signed entry, so this read sweep skips it.
+    // The two writes need a signed entry / a key, so this read sweep skips them.
     assert!(names.iter().any(|n| n == "collab_publish"), "{names:?}");
+    assert!(names.iter().any(|n| n == "collab_register"), "{names:?}");
 
     for name in &names {
         let arguments = match name.as_str() {
-            // The write tool needs a signed entry; it has its own test.
-            "collab_publish" => continue,
+            // The write tools' own tests cover them.
+            "collab_publish" | "collab_register" => continue,
             "repo_list" => json!({}),
             "repo_owners" => json!({"owner": "t"}),
-            "repo_refs" | "collab_board" | "collab_report" | "ci_status" | "wal_ls" => {
+            "repo_refs" | "collab_board" | "collab_report" | "ci_status" | "wal_ls"
+            | "repo_overview" | "repo_tasks" | "repo_ops" | "repo_policy" | "repo_settings" => {
                 json!({"repo": "t/all"})
             }
+
             "repo_resolve" => json!({"repo": "t/all", "rev": "main"}),
             "repo_tree" => json!({"repo": "t/all", "rev": &head}),
-            "repo_blob" => json!({"repo": "t/all", "rev": &head, "path": "f0_0.txt"}),
+            // Same arguments as `repo_blame`: both take a revision and a path.
+            "repo_blob" | "repo_blame" => {
+                json!({"repo": "t/all", "rev": &head, "path": "f0_0.txt"})
+            }
             "repo_commits" => json!({"repo": "t/all", "n": 5}),
-            "repo_diff" => json!({"repo": "t/all", "from": &head, "to": &head}),
+            "repo_commit" => json!({"repo": "t/all", "sha": &head}),
+            // Same arguments as `repo_merge_base`: two revisions.
+            "repo_diff" | "repo_merge_base" => json!({"repo": "t/all", "from": &head, "to": &head}),
             "collab_thread" => json!({"repo": "t/all", "id": "no-such-thread"}),
             other => anyhow::bail!("the tool table advertised `{other}` with no case in this test"),
         };

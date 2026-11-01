@@ -919,6 +919,23 @@ decision in §4 — or the PR is; never "fix later".
   expiring moves no ref but does move the projection (D52's amendment). `/mcp` is a single CORS
   policy, not two: it is in `web/v1.rs::is_cors_api_path` with `Mcp-Session-Id` exposed, and the
   endpoint has no preflight of its own.)*
+  *(Amended 2026-11-01, alignment pass: the surface is **complete over the read API** and
+  audited against it — 23 tools, `web/API.md` §5a is the mapping table, and every endpoint
+  without a tool is listed there with its reason (bytes: `archive` and CI artifacts; a stream:
+  `tasks/{id}`; operator/admin acts: `ops/{op}` start, policy/settings writes, repository
+  create/delete). Added the reads that were missing (`repo_merge_base`, `repo_commit`,
+  `repo_overview`, `repo_blame`, `repo_tasks`, `repo_ops`, `repo_policy`, `repo_settings` —
+  the last answering the *effective* TOML, the one endpoint that is not JSON) and a second
+  write, `collab_register` (the caller's own public key), because an agent with no checkout
+  could not name its key at all. The claim convergence the deleted adapter implemented with a
+  tool is now a documented **three-step recipe** in `INSTRUCTIONS` and both skill files (read
+  the board → publish `card_claim` → re-read and stand down if someone else holds it): the
+  server keeps no lock, the TTL is the lock, and re-adding `collab_claim` would have been a
+  second mechanism. Host validation moved out of rmcp's exact-name matcher into
+  `host_allowed` — `walgit.localhost` (the name `walgit.standalone.toml` advertises) and every
+  `127.x` alias are names that can only mean this machine, RFC 6761 §6.3, and rmcp refused
+  them unless `server.public_url` happened to name the port; a `Host` that is none of the above
+  is a 403 that says which config key fixes it.)*
   The bundled UI teaches the endpoint where an agent arrives: a **MCP box**
   (`web/src/components/McpSetup.tsx`) on every repository's `/collab` page and on the board's
   empty state is **one paragraph with one copy button** — it states the endpoint and the

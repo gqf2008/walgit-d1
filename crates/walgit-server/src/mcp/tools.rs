@@ -123,6 +123,14 @@ pub fn defs() -> Vec<Tool> {
                 }), &json!(["repo"])),
         },
         Tool {
+            name: Kind::RepoCommit.name(),
+            description: "One commit in full: parents, author/committer, message and its diff stat.",
+            schema: schema(&json!({
+                "repo": {"type": "string", "description": REPO_ARG},
+                "sha": {"type": "string", "description": "a full or abbreviated commit id"},
+            }), &json!(["repo", "sha"])),
+        },
+        Tool {
             name: Kind::RepoDiff.name(),
             description: "Diff between two revisions (patch by default).",
                 schema: schema(&json!({
@@ -131,6 +139,58 @@ pub fn defs() -> Vec<Tool> {
                     "to": {"type": "string", "description": "target revision"},
                     "format": {"type": "string", "description": "patch (default) | stat | name-status"},
                 }), &json!(["repo", "from", "to"])),
+        },
+        Tool {
+            name: Kind::RepoMergeBase.name(),
+            description: "The merge base of two revisions (empty `base` when they share no history).",
+            schema: schema(&json!({
+                "repo": {"type": "string", "description": REPO_ARG},
+                "from": {"type": "string", "description": "first revision (branch, tag or sha)"},
+                "to": {"type": "string", "description": "second revision"},
+            }), &json!(["repo", "from", "to"])),
+        },
+        Tool {
+            name: Kind::RepoOverview.name(),
+            description: "One repository at a glance: default branch, tip commit, ref counts, size and \
+                          the maintainer's last units — the page a first look starts from.",
+            schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
+        },
+        Tool {
+            name: Kind::RepoBlame.name(),
+            description: "Per-line blame of one file at one revision (commit, author, time per line).",
+            schema: schema(&json!({
+                "repo": {"type": "string", "description": REPO_ARG},
+                "rev": {"type": "string", "description": "revision"},
+                "path": {"type": "string", "description": "path inside the tree"},
+            }), &json!(["repo", "rev", "path"])),
+        },
+        Tool {
+            name: Kind::RepoTasks.name(),
+            description: "Long-running work of this host for this repository (id, kind, state, last \
+                          packets). A task not listed here is not running on this instance; \
+                          `ops` starts one.",
+            schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
+        },
+        Tool {
+            name: Kind::RepoOps.name(),
+            description: "The maintenance operations this host can start for the repository \
+                          (`fsck`, `gc`, `repair`, `compact`, `rev-index`, `checkpoint`, `collab-fold`, …), \
+                          each with its parameters and whether it mutates. Listing only: starting one is \
+                          an operator act (`walgit repo op-start`), not an agent tool.",
+            schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
+        },
+        Tool {
+            name: Kind::RepoPolicy.name(),
+            description: "The repository's push policy as stored (`docs/POLICY.md`), or `{}` when \
+                          nothing is frozen. Read-only: writing it requires an admin credential.",
+            schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
+        },
+        Tool {
+            name: Kind::RepoSettings.name(),
+            description: "The **effective** per-repo settings (host config ⊕ env ⊕ the repo's own \
+                          SETTINGS entry), restricted to the sections a repository may set \
+                          (`[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`). Read-only.",
+            schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
         },
         Tool {
             name: Kind::CollabBoard.name(),
@@ -182,10 +242,13 @@ pub fn defs() -> Vec<Tool> {
                       `POST /{owner}/{repo}/api/collab/entries`. Build the entry, sign its canonical \
                       bytes with your own principal key (`walgit collab entry` does both, and so does \
                       any ed25519 signer over `walgit_wal::collab::sign_entry`), then hand it here \
-                      verbatim. The host verifies the signature against the key registered for \
-                      `actor`, refuses an `actor` that is not the authenticated caller, and appends \
-                      it to `refs/collab/inbox/<actor>/<uuid>`; nothing is re-signed and no key is \
-                      held here. Rules the board reads: a thread needs an `issue` to be a card; a \
+                      verbatim. The host refuses an `actor` that is not the authenticated caller and \
+                      appends it to `refs/collab/inbox/<actor>/<uuid>`; nothing is re-signed and no \
+                      key is held here. **The signature is not checked on write** — it is verified \
+                      when the ledger is aggregated, so the entry lands even if it does not verify \
+                      (nothing can be retracted). Read the thread back (`collab_thread`) and confirm \
+                      `verified: true` right after publishing; if it is false the key registered for \
+                      `actor` is not the one you signed with. Rules the board reads: a thread needs an `issue` to be a card; a \
                       claim is a `card_claim` entry (then re-read the board to see who won — a \
                       later claim by someone else inside the TTL means stand down); `patch` carries \
                       base/head refs; only verified `approve` reviews count for the merge rule.",
@@ -196,6 +259,19 @@ pub fn defs() -> Vec<Tool> {
                     "description": "the signed entry (an object, or its JSON text): {version, kind, id, actor, ts, parent, refs?, body, sig}",
                 },
             }), &json!(["repo", "entry"])),
+    });
+    out.push(Tool {
+        name: Kind::CollabRegister.name(),
+        description: "Register (or rotate) **your own** principal's public key in this repository: \
+                      `{principal, public_key}` with `principal` = the authenticated caller. \
+                      `walgit collab join` does this for a CLI user; an agent with no checkout uses \
+                      this once, before its first entry, or after rotating its key. The private key \
+                      never travels — only the public half.",
+        schema: schema(&json!({
+            "repo": {"type": "string", "description": REPO_ARG},
+            "principal": {"type": "string", "description": "your own principal (must be the caller)"},
+            "public_key": {"type": "string", "description": "base64 ed25519 public key (32 bytes)"},
+        }), &json!(["repo", "principal", "public_key"])),
     });
     out
 }
@@ -222,17 +298,26 @@ enum Kind {
     RepoTree,
     RepoBlob,
     RepoCommits,
+    RepoCommit,
     RepoDiff,
     CollabBoard,
     CollabThread,
     CollabReport,
     CiStatus,
+    RepoMergeBase,
+    RepoOverview,
+    RepoBlame,
+    RepoTasks,
+    RepoOps,
+    RepoPolicy,
+    RepoSettings,
     WalLs,
     CollabPublish,
+    CollabRegister,
 }
 
 /// Every tool, in advertisement order.
-const ALL: [Kind; 14] = [
+const ALL: [Kind; 23] = [
     Kind::RepoList,
     Kind::RepoOwners,
     Kind::RepoRefs,
@@ -240,19 +325,28 @@ const ALL: [Kind; 14] = [
     Kind::RepoTree,
     Kind::RepoBlob,
     Kind::RepoCommits,
+    Kind::RepoCommit,
     Kind::RepoDiff,
+    Kind::RepoMergeBase,
+    Kind::RepoOverview,
+    Kind::RepoBlame,
+    Kind::RepoTasks,
+    Kind::RepoOps,
+    Kind::RepoPolicy,
+    Kind::RepoSettings,
     Kind::CollabBoard,
     Kind::CollabThread,
     Kind::CollabReport,
     Kind::CiStatus,
     Kind::WalLs,
     Kind::CollabPublish,
+    Kind::CollabRegister,
 ];
 
 impl Kind {
     /// Every tool — the one list the schema table, the dispatch match and the
     /// tests all read.
-    const ALL: [Kind; 14] = ALL;
+    const ALL: [Kind; 23] = ALL;
 
     fn name(self) -> &'static str {
         match self {
@@ -263,13 +357,22 @@ impl Kind {
             Self::RepoTree => "repo_tree",
             Self::RepoBlob => "repo_blob",
             Self::RepoCommits => "repo_commits",
+            Self::RepoCommit => "repo_commit",
             Self::RepoDiff => "repo_diff",
             Self::CollabBoard => "collab_board",
             Self::CollabThread => "collab_thread",
             Self::CollabReport => "collab_report",
             Self::CiStatus => "ci_status",
+            Self::RepoMergeBase => "repo_merge_base",
+            Self::RepoOverview => "repo_overview",
+            Self::RepoBlame => "repo_blame",
+            Self::RepoTasks => "repo_tasks",
+            Self::RepoOps => "repo_ops",
+            Self::RepoPolicy => "repo_policy",
+            Self::RepoSettings => "repo_settings",
             Self::WalLs => "wal_ls",
             Self::CollabPublish => "collab_publish",
+            Self::CollabRegister => "collab_register",
         }
     }
 
@@ -278,7 +381,7 @@ impl Kind {
     /// tool has to be declared besides its dispatch arm.
     #[cfg(test)]
     fn write(self) -> bool {
-        matches!(self, Self::CollabPublish)
+        matches!(self, Self::CollabPublish | Self::CollabRegister)
     }
 
     fn parse(name: &str) -> Option<Self> {
@@ -491,6 +594,17 @@ async fn run(
             ]);
             p(format!("/{}/{}/api/commits{}", enc(&owner), enc(&repo), q)).await
         }
+        Kind::RepoCommit => {
+            let (owner, repo) = repo_arg(args)?;
+            let sha = str_arg(args, "sha").ok_or_else(|| ToolError::invalid("`sha` is required"))?;
+            p(format!(
+                "/{}/{}/api/commit/{}",
+                enc(&owner),
+                enc(&repo),
+                enc(sha)
+            ))
+            .await
+        }
         Kind::RepoDiff => {
             let (owner, repo) = repo_arg(args)?;
             let from = str_arg(args, "from").ok_or_else(|| ToolError::invalid("`from` is required"))?;
@@ -529,6 +643,59 @@ async fn run(
                 path.push_str(&enc(id));
             }
             p(path).await
+        }
+        Kind::RepoMergeBase => {
+            let (owner, repo) = repo_arg(args)?;
+            let from = str_arg(args, "from").ok_or_else(|| ToolError::invalid("`from` is required"))?;
+            let to = str_arg(args, "to").ok_or_else(|| ToolError::invalid("`to` is required"))?;
+            let q = query(&[
+                ("from", Some(from.to_string())),
+                ("to", Some(to.to_string())),
+            ]);
+            p(format!("/{}/{}/api/merge-base{}", enc(&owner), enc(&repo), q)).await
+        }
+        Kind::RepoOverview => {
+            let (owner, repo) = repo_arg(args)?;
+            p(format!("/{}/{}/api/overview", enc(&owner), enc(&repo))).await
+        }
+        Kind::RepoBlame => {
+            let (owner, repo) = repo_arg(args)?;
+            let rev = str_arg(args, "rev").ok_or_else(|| ToolError::invalid("`rev` is required"))?;
+            let path = str_arg(args, "path").ok_or_else(|| ToolError::invalid("`path` is required"))?;
+            p(format!(
+                "/{}/{}/api/blame/{}/{}",
+                enc(&owner),
+                enc(&repo),
+                enc(rev),
+                enc_path(path)
+            ))
+            .await
+        }
+        Kind::RepoTasks => {
+            let (owner, repo) = repo_arg(args)?;
+            p(format!("/{}/{}/api/tasks", enc(&owner), enc(&repo))).await
+        }
+        Kind::RepoOps => {
+            let (owner, repo) = repo_arg(args)?;
+            p(format!("/{}/{}/api/ops", enc(&owner), enc(&repo))).await
+        }
+        Kind::RepoPolicy => {
+            let (owner, repo) = repo_arg(args)?;
+            p(format!("/{}/{}/api/policy", enc(&owner), enc(&repo))).await
+        }
+        Kind::RepoSettings => {
+            let (owner, repo) = repo_arg(args)?;
+            // The effective document is TOML, not JSON: wrap it as one field
+            // instead of letting a JSON decoder decide it is an error.
+            let toml = Call::new(st, headers, principal)
+                .get_text(&format!(
+                    "/{}/{}/api/settings/effective",
+                    enc(&owner),
+                    enc(&repo)
+                ))
+                .await
+                .map_err(ToolError::exec)?;
+            Ok(json!({ "repo": format!("{owner}/{repo}"), "toml": toml }))
         }
         Kind::WalLs => {
             let (owner, repo) = repo_arg(args)?;
@@ -575,6 +742,10 @@ async fn run(
             let (owner, repo) = repo_arg(args)?;
             publish(st, headers, principal, &owner, &repo, args).await
         }
+        Kind::CollabRegister => {
+            let (owner, repo) = repo_arg(args)?;
+            register(st, headers, principal, &owner, &repo, args).await
+        }
     }
 }
 
@@ -615,22 +786,49 @@ async fn publish(
         .map_err(|e| ToolError::Execution(e.message))
 }
 
+/// `collab_register`: name your own principal's public key in this repository.
+///
+/// The same POST the API answers, so the two guards stay on that side — the
+/// credential must be a write credential, and `principal` must be the caller's
+/// own. Only the public half travels; the seed stays with the identity (D58).
+async fn register(
+    st: &Arc<AppState>,
+    headers: &HeaderMap,
+    principal: &str,
+    owner: &str,
+    repo: &str,
+    args: &Value,
+) -> Result<Value, ToolError> {
+    let name = str_arg(args, "principal")
+        .ok_or_else(|| ToolError::invalid("`principal` is required"))?;
+    let public_key = str_arg(args, "public_key")
+        .ok_or_else(|| ToolError::invalid("`public_key` is required"))?;
+    Call::new(st, headers, principal)
+        .post(
+            &format!("/{}/{}/api/collab/principal", enc(owner), enc(repo)),
+            &json!({ "principal": name, "public_key": public_key }),
+        )
+        .await
+        .map_err(|e| ToolError::Execution(e.message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn exactly_one_tool_writes() {
-        // The surface is a projection of a read-mostly API: one endpoint writes,
-        // and it takes an entry the client already signed. Read from the
+    fn only_the_collab_writes_are_write_tier() {
+        // The surface is a projection of a read-mostly API: two endpoints write,
+        // and neither holds anything of yours — one takes an entry the client
+        // already signed, the other takes your own public key. Read from the
         // dispatch table itself — a name-prefix filter would keep passing if a
-        // second write tool were added under a different prefix.
+        // third write tool were added under a different prefix.
         let writing: Vec<&str> = Kind::ALL
             .into_iter()
             .filter(|k| (*k).write())
             .map(Kind::name)
             .collect();
-        assert_eq!(writing, ["collab_publish"]);
+        assert_eq!(writing, ["collab_publish", "collab_register"]);
     }
 
     #[test]

@@ -121,7 +121,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .with_sse_keep_alive(Some(KEEPALIVE))
         .with_legacy_session_mode(true)
         .with_max_request_body_bytes(MAX_BODY_BYTES)
-        .with_allowed_hosts(trusted_hosts(&state.cfg));
+        // Host validation is [`host_allowed`]'s, not rmcp's: the SDK's matcher
+        // takes exact names and would reject `walgit.localhost` (a name that
+        // always resolves to loopback, RFC 6761 §6.3) and every `127.x` alias.
+        .disable_allowed_hosts();
     // Origin is checked by [`serve`] against the server's own allowlist, so the
     // SDK's own origin list stays off (it cannot see `server.cors_origins`'s
     // wildcard entries).
@@ -147,31 +150,69 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// bind) gets rmcp's permissive default instead — pinning it to loopback there
 /// would break every edge-fronted deployment that never set `public_url`.
 /// `[mcp]` and D64 say so; setting `server.public_url` turns the check on.
-fn trusted_hosts(cfg: &walgit_config::Config) -> Vec<String> {
-    let mut hosts: Vec<String> = vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "::1".to_string(),
-    ];
-    let listen = cfg.server.listen;
+/// Whether the request's `Host` names this deployment (DNS-rebinding guard).
+///
+/// Accepted: `localhost`, any `*.localhost` name (RFC 6761 §6.3 — such a name
+/// resolves to loopback by definition, so it cannot be rebound), any loopback
+/// address, the authority `server.public_url` advertises, and the bound listen
+/// IP. A deployment that named nothing (no `public_url`, a wildcard bind) is
+/// permissive, because nothing is being spoofed by a name it never claimed.
+///
+/// The port is ignored on both sides: a `Host` header carries one, the
+/// configured authority may not, and a port alone never survives a rebind.
+fn host_allowed(cfg: &walgit_config::Config, host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        // No `Host`/`:authority` at all (HTTP/1.0, a hand-rolled client): a
+        // browser always sends one, so there is nothing to rebind.
+        return true;
+    };
+    let name = host_name(host);
+    if name.is_empty() {
+        return false;
+    }
+    if name == "localhost" || name.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = name.parse::<std::net::IpAddr>()
+        && is_loopback(ip)
+    {
+        return true;
+    }
     if let Some(public_url) = &cfg.server.public_url
         && let Some(authority) = authority_of(public_url)
+        && host_name(&authority) == name
     {
-        hosts.push(authority);
+        return true;
     }
-    if !listen.ip().is_unspecified() {
-        hosts.push(listen.ip().to_string());
+    let listen = cfg.server.listen;
+    if !listen.ip().is_unspecified() && host_name(&listen.ip().to_string()) == name {
+        return true;
     }
-    hosts.sort();
-    hosts.dedup();
-    if cfg.server.public_url.is_none() && listen.ip().is_unspecified() {
-        // Nothing names this host: an empty list means "any Host" in rmcp.
-        return Vec::new();
-    }
-    hosts
+    cfg.server.public_url.is_none() && listen.ip().is_unspecified()
 }
 
-/// `https://walgit.example.com:8080/x` → `walgit.example.com:8080`.
+/// The host part of a `Host` header or URL authority: no port, no brackets,
+/// lowercased.
+fn host_name(host: &str) -> String {
+    let host = host.trim();
+    let inner = host.strip_prefix('[').map_or(host, |rest| {
+        rest.split_once(']').map_or(rest, |(inside, _)| inside)
+    });
+    let name = if host.starts_with('[') {
+        inner
+    } else {
+        inner.split(':').next().unwrap_or(inner)
+    };
+    name.to_ascii_lowercase()
+}
+
+fn is_loopback(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4().is_some_and(|v4| v4.is_loopback()),
+    }
+}
+
 fn authority_of(url: &str) -> Option<String> {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split('/').next()?;
@@ -200,6 +241,24 @@ async fn serve(
         .map(str::to_string);
     if !origin_allowed(&state, &headers) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    // DNS-rebinding guard. rmcp's own matcher is off (see `router`): it compares
+    // exact names, so `walgit.localhost` — the name `walgit.standalone.toml`
+    // tells people to open — was refused unless `server.public_url` happened to
+    // name it. `host_allowed` accepts every name that can only mean this
+    // machine and, when nothing is advertised, stays permissive like the SDK was.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    if !host_allowed(&state.cfg, host) {
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "this host does not answer to `{}`; set `server.public_url` to the name clients use",
+                host.unwrap_or("")
+            ),
+        )
+            .into_response();
     }
     let principal = match state.auth.require_read(&headers).await {
         Ok(p) => p,
@@ -491,9 +550,16 @@ Rules that cost a wrong call if skipped:
   is checked when entries are aggregated, so one signed with a key that is not
   registered for its `actor` is accepted here and then never counts — publish
   as the principal you actually hold.
-* Claim a card by publishing a `card_claim` entry (`walgit collab claim`), then
-  re-read the board: another agent may hold it. A \"stand-down\" answer means
-  stop, not retry.
+* Register your public key once (`collab_register`, or `walgit collab join`):
+  an entry signed with a key the repository does not name never verifies.
+* Claiming a card is three steps, in this order: read `collab_board` (is it
+  open, and does it already carry a live claim?), publish a `card_claim` entry
+  whose body is `{ttl?, worktree?, branch?, work?, session?}`, then re-read the
+  board. Two agents may publish a claim for the same card — duplicate claims are
+  legal, duplicate *execution* is not — so the board's `owner` after your
+  publish is the verdict: if it names someone else with a live claim, stand
+  down and do not start work. A claim expires on its own (TTL), so a crashed
+  agent does not hold a card forever.
 * Ownership of a card is carried by `status` entries, not comments.
 * Subscriptions are polls (`resources/subscribe`): an update notification says
   `re-read`, never `here is the diff`.";
@@ -510,7 +576,8 @@ mod tests {
         assert!(INSTRUCTIONS.contains("Bytes never travel over MCP"));
         assert!(INSTRUCTIONS.contains("already signed"));
         assert!(INSTRUCTIONS.contains("holds no key"));
-        assert!(INSTRUCTIONS.contains("stand-down"));
+        assert!(INSTRUCTIONS.contains("stand"));
+        assert!(INSTRUCTIONS.contains("collab_register"));
         assert!(INSTRUCTIONS.contains("status"));
     }
 
@@ -532,18 +599,38 @@ mod tests {
     }
 
     #[test]
-    fn trusted_hosts_name_this_deployment_or_nothing() {
+    fn the_host_header_must_name_this_deployment() {
         let mut cfg = walgit_config::Config::default();
-        // Default: loopback bind, no public_url — the set names the host.
-        assert!(trusted_hosts(&cfg).contains(&"127.0.0.1".to_string()));
-        cfg.server.public_url = Some("https://walgit.example.com:8443/x".to_string());
-        assert!(trusted_hosts(&cfg).contains(&"walgit.example.com:8443".to_string()));
-        // A wildcard bind with nothing named: rmcp's "any Host" (documented).
+        // Default: loopback bind, no public_url — every loopback name is this
+        // machine, whatever the port (a `Host` header always carries one).
+        for host in [
+            "localhost",
+            "localhost:8081",
+            "walgit.localhost:8081",
+            "127.0.0.1:8081",
+            "127.0.0.2",
+            "[::1]:8081",
+            "LOCALHOST:8081",
+        ] {
+            assert!(host_allowed(&cfg, Some(host)), "{host} should be allowed");
+        }
+        for host in ["walgit.example.com", "10.0.0.5", "[2001:db8::1]:80", ""] {
+            assert!(!host_allowed(&cfg, Some(host)), "{host} must be refused");
+        }
+        // A name that was never claimed is not trusted either.
+        assert!(!host_allowed(&cfg, Some("walgit.internal:8081")));
+        // Advertise it and it is.
+        cfg.server.public_url = Some("https://walgit.internal:8081/".to_string());
+        assert!(host_allowed(&cfg, Some("walgit.internal")));
+        assert!(host_allowed(&cfg, Some("walgit.internal:8081")));
+        assert!(host_allowed(&cfg, Some("localhost:8081")));
+        // A wildcard bind with nothing named: rmcp's permissive default.
         cfg.server.public_url = None;
         cfg.server.listen = "0.0.0.0:8080".parse().unwrap();
-        assert!(trusted_hosts(&cfg).is_empty(), "nothing is trusted without a public_url or a bound address");
+        assert!(host_allowed(&cfg, Some("anything.example")));
+        // No header at all is not a browser.
+        assert!(host_allowed(&cfg, None));
         assert_eq!(authority_of("https://h/x"), Some("h".to_string()));
         assert_eq!(authority_of("https://"), None);
     }
 }
-

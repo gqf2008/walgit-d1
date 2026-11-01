@@ -944,6 +944,54 @@ upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, 
   `PUT|DELETE …/policy`, `POST …/ops/{op}`. Content moves over git
   (`git-receive-pack`) and LFS, never through JSON.
 
+## 5a. The MCP projection (`/mcp`, D64)
+
+Every endpoint above is also reachable as an MCP tool, because `/mcp` calls this
+same router in-process (`Call::inner()` → `tower::ServiceExt::oneshot`) with the
+caller's own credential. That is a hard requirement, not a convenience: a tool
+answer and an HTTP answer are the same answer, so placement (D30), freshness and
+`actor == caller` cannot drift between the two lanes. `crates/walgit-server/src/mcp/tools.rs`
+writes the endpoint path for each tool; this table is the audit that no read is
+missing and that every omission is a decision.
+
+| Endpoint | Tool |
+|---|---|
+| `GET …/api/refs`, `refs/{kind}` | `repo_refs` (`kind` = head\|branches\|tags\|all\|collab) |
+| `GET …/api/refs/name/{rest}`, `resolve[/{rest}]` | `repo_resolve` |
+| `GET …/api/tree/{rest}` | `repo_tree` |
+| `GET …/api/blob/{rest}` | `repo_blob` |
+| `GET …/api/commits` | `repo_commits` |
+| `GET …/api/commit/{sha}` | `repo_commit` |
+| `GET …/api/diff` | `repo_diff` |
+| `GET …/api/merge-base` | `repo_merge_base` |
+| `GET …/api/blame/{rest}` | `repo_blame` |
+| `GET …/api/overview` | `repo_overview` |
+| `GET …/api/ops` | `repo_ops` (listing only) |
+| `GET …/api/tasks` | `repo_tasks` |
+| `GET …/api/policy` | `repo_policy` |
+| `GET …/api/settings/effective` | `repo_settings` (TOML, wrapped as `{"toml": …}`) |
+| `GET …/api/collab/board` | `collab_board` |
+| `GET …/api/collab/threads/{id}` | `collab_thread` |
+| `GET …/api/collab/report` | `collab_report` |
+| `GET …/api/collab/ci` | `ci_status` |
+| `POST …/api/collab/entries` | `collab_publish` (payload = an entry the client already signed) |
+| `POST …/api/collab/principal` | `collab_register` (the caller's own public key) |
+| retained WAL log (`/{o}/{r}/api/wal`-equivalent reads) | `wal_ls` |
+
+**Not exposed, on purpose:**
+
+| Endpoint | Why |
+|---|---|
+| `GET …/api/archive/{rest}`, `GET\|HEAD …/api/collab/ci-artifacts/{sha256}` | bytes. They are a download lane (Range, ETag); an MCP `tools/call` answers text, and a base64 body would be a second, worse transport. A client that needs them fetches the URL. |
+| `GET …/api/tasks/{id}` | server-sent events: the narration of *this node's* task, resumed by `Last-Event-ID`. A tool call has no stream to resume; poll `repo_tasks`. |
+| `POST …/api/ops/{op}` | starts a maintenance operation. Long, mutating, and an operator decision (D22): listing is an agent question, starting is not. |
+| `PUT\|DELETE …/api/policy`, `…/api/settings*` | admin credential (D24). The reads are tools, the writes are the storage/settings editor's. |
+| `PUT\|DELETE /{o}/{r}[.git]` | creating or deleting a repository is an admin act, not a tool call. |
+
+`AGENTS.md` D67 draws the other half of this boundary: the agent guides
+(`/SKILL.md`, the ops skill) describe git and `/mcp` only — the HTTP surface
+stays documented here, for browsers, the SDK and edges.
+
 ## 6. Minimal conformance checklist
 
 ```

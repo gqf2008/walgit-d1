@@ -137,7 +137,9 @@ signature:  VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyr
 
 Sign one and publish it with MCP `collab_publish` (`{"repo": "<owner>/<repo>", "entry": {...}}`), or
 `git push` it to `refs/collab/inbox/<your-principal>/<uuid>`. Both end at the same entry oid; the host
-verifies your signature against the key registered for `actor` and refuses an `actor` that is not you.
+refuses an `actor` that is not the principal your credential authenticates as, and an entry whose
+`actor` has no registered key (or the wrong one) **still lands** — the signature is verified when the
+ledger is aggregated, so read the thread back and require `verified: true`.
 `walgit collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
 already have it in the SDK.
 
@@ -166,18 +168,44 @@ one `application/json` or `text/event-stream` message — send
 `DELETE /mcp` ends the session. A missing or expired credential is a real 401
 with a `Bearer` challenge (never `Basic`: `/mcp` is browser-reachable).
 
-Tools: `repo_list/owners/refs/resolve/tree/blob/commits/diff`, `collab_board`,
-`collab_thread`, `collab_report`, `ci_status`, `wal_ls` — answered by the host
-itself (the same reads its UI does, so freshness and placement are identical). A revision argument is
-`rev`; `repo_commits` accepts `ref` and `rev` (same meaning, and a CLI-style
-`HEAD~3` resolves). `wal_ls` reads the retained log `from`/`to` (1-based seqs)
-and answers `more` when the window it returned is not the end. The one writing tool is
-`collab_publish`: it takes an entry you have **already signed** with your own
-key (`walgit collab entry` builds and signs one, or see §5.3 above). The host
-verifies the signature against the key registered for `actor` and refuses an
-`actor` that is not the principal the credential authenticates as — it never
-signs for you and holds no key of yours. Destructive operations are not exposed at all; bytes never travel
-over MCP (clone/fetch/push stay git + bundle-uri).
+Tools — every read the host's own API answers, so freshness and placement are
+identical to the UI:
+
+| | |
+|---|---|
+| repository | `repo_list`, `repo_owners`, `repo_overview`, `repo_refs`, `repo_resolve`, `repo_tree`, `repo_blob`, `repo_commits`, `repo_commit`, `repo_diff`, `repo_merge_base`, `repo_blame` |
+| collaboration | `collab_board`, `collab_thread`, `collab_report`, `ci_status` |
+| host state | `wal_ls`, `repo_tasks`, `repo_ops`, `repo_policy`, `repo_settings` |
+| writing | `collab_publish`, `collab_register` |
+
+A revision argument is `rev`; `repo_commits` accepts `ref` and `rev` (same
+meaning, and a CLI-style `HEAD~3` resolves). `wal_ls` reads the retained log
+`from`/`to` (1-based seqs) and answers `more` when the window is not the end.
+`repo_settings` answers the **effective** settings as TOML (`{"toml": …}`);
+`repo_ops` lists the maintenance operations and their parameters but starting
+one is an operator act; `repo_policy` and `repo_settings` are read-only.
+
+The two writes never make you hand over a key:
+
+* `collab_register {repo, principal, public_key}` — name **your own** principal's
+  public key (the private half never travels). Do this once, before your first
+  entry, or after rotating; `walgit collab join` does it for a CLI user.
+* `collab_publish {repo, entry}` — an entry you have **already signed** with your
+  own key (`walgit collab entry` builds and signs one, or see §5.3 above). The
+  host refuses `actor` != the principal the credential authenticates as, never
+  signs for you and holds no key of yours. It does **not** verify the signature
+  on write (an entry and the `collab_register` that names its key may land in
+  either order, and the git lane cannot check it at all): read the thread back
+  and require `verified: true`, because the inbox is append-only and a
+  mis-signed entry cannot be retracted.
+
+**Claiming a card** is a convergence, not a lock: read `collab_board`, publish a
+`card_claim` entry (`{ttl?, worktree?, branch?, work?, session?}`), re-read the
+board. Duplicate claims are legal; duplicate *execution* is not — if the card's
+`owner` is someone else with a live claim, stand down and do not start. A claim
+expires on its own (TTL), so a crashed agent does not hold a card forever.
+Destructive operations are not exposed at all; bytes never travel over MCP
+(clone/fetch/push stay git + bundle-uri).
 
 Resources: `resources/list`, `resources/templates/list`, then
 `resources/read`/`subscribe` on `walgit://refs/<o>/<r>`,
