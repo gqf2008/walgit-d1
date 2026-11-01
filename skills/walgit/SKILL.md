@@ -24,7 +24,12 @@ walgit service restart
 ```
 
 The `walgit` CLI is a symlink to the installed binary (app bundle / install dir); user state lives in
-`~/.walgit/` (`walgit.toml`, `cache/`, `server.log`). Never copy the binary into the state dir.
+`~/.walgit/` (`walgit.toml`, `cache/`, `server.log`). Never copy the binary into the state dir or
+anywhere else on `PATH`: a copy is a second program file no upgrade reaches, so it keeps answering with
+the build it was made from while the host on the port serves a newer one (`walgit --version` versus
+`/healthz`, D65). The tray heals such a copy on its next start — it renames it to `walgit.copy-<ts>`
+and re-points the entry — and leaves a note at `~/.walgit/cli-link-healed.json`. A non-walgit file at
+that path (a wrapper, another tool) is never touched.
 Collaboration keys are not state-dir-wide: they are project-local (see §5).
 On **Windows** there is no symlink: the installer appends the install directory
 (`%LOCALAPPDATA%\Programs\walgit`) to the **user** PATH (HKCU `Environment`) and removes that one

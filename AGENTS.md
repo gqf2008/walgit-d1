@@ -928,6 +928,26 @@ decision in §4 — or the PR is; never "fix later".
   a standard, so the session header and the methods are the spec's job.
   All data-free — the only repo-scoped text is built from the route, never a request.
 
+- **D65** **One program file per install; a `PATH` entry is a symlink, never a copy (2026-11-01,
+  cc-ai-cli-entry-owner).** Program files live where an updater owns them (D51: the macOS app
+  bundle, `/usr/bin` from the `.deb`, `%USERPROFILE%\walgit` from Inno Setup); `~/.walgit` is user
+  state only. The tray's `install_cli_link` (`deploy/tray/tray-rs/src/bootstrap.rs`) therefore
+  creates the terminal entry — `/usr/local/bin/walgit`, falling back to `~/.local/bin/walgit` —
+  as a **symlink into the app bundle** and re-points it on every start, so an app upgrade moves
+  the CLI with it. Until this decision it **refused to touch a regular file** at that path and only
+  logged a line: a hand-copied CLI is a second program file no upgrade can reach, and that is how
+  a v0.5-era copy of `~/.local/bin/walgit` (2026-10-27) kept serving `walgit mcp` — and an
+  MCP surface whose tools had been deleted upstream — weeks after the release that removed them,
+  while the same machine's `/healthz` answered `v0.11.0`. The rule now: a regular file that
+  **answers `--version` as a walgit** (behind a ≥1 MiB size gate, so a wrapper script is never
+  executed) is renamed aside as `walgit.copy-<unix-ts>` — never deleted, it is the user's file —
+  and the symlink takes its place; a note lands at `<state>/cli-link-healed.json` for the UI to
+  report. Anything that is not a walgit binary (a wrapper, another tool, a symlink the user made)
+  is left alone. Corollary, and the other half of the bug: **no configuration may pin a program's
+  absolute path** (an agent's `mcpServers` entry did, `command: "/Users/…/.local/bin/walgit"`),
+  because that is a second owner that no upgrade follows — `command: "walgit"` resolves through
+  the one entry.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

@@ -165,6 +165,16 @@ go through the release pipeline (a pushed `v*` tag fires release.yml); the
 tray detects and installs them. Details: the ops skill (§ Install above) and
 `deploy/tray/README.md`.
 
+**One `walgit` on `PATH`, and it is a symlink.** On macOS the app bundle owns the
+program and the tray keeps `~/.local/bin/walgit` (or `/usr/local/bin/walgit`)
+pointed at it, so an upgrade moves the CLI with the app. A **copy** you made
+yourself is a second program file no upgrade can reach: it keeps answering with
+the old build (`walgit --version` shows the old commit, and a subcommand the
+release deleted may still exist), while the host on the port serves the new one.
+The tray renames such a copy to `walgit.copy-<ts>` and re-links the entry on its
+next start. Do not pin a program's absolute path in a client or agent config —
+write `walgit`, and let `PATH` name the one entry.
+
 ## The CLI
 
 Everything works against a **checkout** of a repository on this host. Global:

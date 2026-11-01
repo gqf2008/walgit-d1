@@ -244,33 +244,143 @@ mod macos {
         (paths, false)
     }
 
-    /// `Ok(true)` = link is now installed (or already correct), `Ok(false)` =
-    /// a user-owned non-symlink occupies the path, `Err` = cannot install.
-    fn install_one_cli_link(link: &Path, target: &Path) -> Result<bool, String> {
+    /// What one CLI entry path ended up as.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum LinkOutcome {
+        /// A symlink to the bundle's program (created, updated, or already right).
+        Linked,
+        /// A **copy** of a walgit binary occupied the path. It was renamed
+        /// aside and replaced by the symlink: a copy on `PATH` is a second
+        /// program file no upgrade can reach, so it drifts silently (found in
+        /// the wild: a hand-copied v0.5-era binary kept serving `walgit mcp`
+        /// long after the subcommand was deleted upstream).
+        Healed {
+            moved_to: PathBuf,
+            version: Option<String>,
+        },
+        /// Not a walgit binary (a wrapper script, another tool, a symlink we
+        /// did not make): never touched, only reported.
+        Foreign,
+        /// The link could not be created (permissions).
+        NotCreatable(String),
+    }
+
+    /// The version a binary answers `--version` with, when it is a walgit and
+    /// answers quickly. The size gate keeps this from *executing* someone's
+    /// wrapper script: a real walgit is ~100 MB, a shim is a few hundred bytes.
+    fn walgit_version_of(path: &Path) -> Option<String> {
+        let size = std::fs::metadata(path).ok()?.len();
+        if size < (1 << 20) {
+            return None;
+        }
+        let out = std::process::Command::new(path)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let first = text.lines().next().unwrap_or_default().trim().to_string();
+        first.contains("walgit").then_some(first)
+    }
+
+    fn symlink_to(link: &Path, target: &Path) -> Result<(), String> {
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        std::os::unix::fs::symlink(target, link)
+            .map_err(|e| format!("symlink {}: {e}", link.display()))?;
+        Ok(())
+    }
+
+    /// Install (or heal) one CLI entry: a symlink into the bundle, never a copy.
+    pub fn install_one_cli_link(link: &Path, target: &Path) -> LinkOutcome {
         match std::fs::symlink_metadata(link) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                if std::fs::read_link(link).ok() == Some(target.to_path_buf()) {
-                    return Ok(true);
+                if std::fs::read_link(link).ok().as_deref() == Some(target) {
+                    return LinkOutcome::Linked;
                 }
-                std::fs::remove_file(link)
-                    .map_err(|e| format!("remove {}: {e}", link.display()))?;
-                std::os::unix::fs::symlink(target, link)
-                    .map_err(|e| format!("symlink {}: {e}", link.display()))?;
-                log_line(&format!("bootstrap: 更新 CLI 软链 {}", link.display()));
-                Ok(true)
+                if let Err(e) = std::fs::remove_file(link).map_err(|e| e.to_string()) {
+                    return LinkOutcome::NotCreatable(e);
+                }
+                match symlink_to(link, target) {
+                    Ok(()) => {
+                        log_line(&format!("bootstrap: 更新 CLI 软链 {}", link.display()));
+                        LinkOutcome::Linked
+                    }
+                    Err(e) => LinkOutcome::NotCreatable(e),
+                }
             }
-            Ok(_) => Ok(false),
-            Err(_) => {
-                if let Some(parent) = link.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
+            Ok(_) => {
+                // A regular file. If it is a walgit binary it is a *copy*, and a
+                // copy is what drifts: rename it aside (never delete — it is the
+                // user's file) and put the symlink in its place.
+                let Some(version) = walgit_version_of(link) else {
+                    log_line(&format!(
+                        "bootstrap: {} 已存在且不是 walgit 程序,不覆盖",
+                        link.display()
+                    ));
+                    return LinkOutcome::Foreign;
+                };
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let mut moved_to = link.with_extension(format!("copy-{stamp}"));
+                if moved_to.exists() {
+                    moved_to = link.with_extension(format!("copy-{stamp}-1"));
                 }
-                std::os::unix::fs::symlink(target, link)
-                    .map_err(|e| format!("symlink {}: {e}", link.display()))?;
-                log_line(&format!("bootstrap: 建 CLI 软链 {}", link.display()));
-                Ok(true)
+                if let Err(e) = std::fs::rename(link, &moved_to).map_err(|e| e.to_string()) {
+                    return LinkOutcome::NotCreatable(e);
+                }
+                if let Err(e) = symlink_to(link, target) {
+                    let _ = std::fs::rename(&moved_to, link);
+                    return LinkOutcome::NotCreatable(e);
+                }
+                log_line(&format!(
+                    "bootstrap: {} 是旧副本({version}),已移到 {} 并换成指向 bundle 的软链",
+                    link.display(),
+                    moved_to.display()
+                ));
+                LinkOutcome::Healed {
+                    moved_to,
+                    version: Some(version),
+                }
+            }
+            Err(_) => match symlink_to(link, target) {
+                Ok(()) => {
+                    log_line(&format!("bootstrap: 建 CLI 软链 {}", link.display()));
+                    LinkOutcome::Linked
+                }
+                Err(e) => LinkOutcome::NotCreatable(e),
+            },
+        }
+    }
+
+    /// Where the "your PATH entry was a copy" note lives, next to the state.
+    /// Written only when a copy was healed; removed the next time the entry is
+    /// simply correct.
+    pub fn healed_marker(state: &Path) -> PathBuf {
+        state.join("cli-link-healed.json")
+    }
+
+    /// Minimal JSON string escaping — this file is a fixed-format note, not a
+    /// serializer worth a dependency for.
+    fn json_string(value: &str) -> String {
+        let mut out = String::with_capacity(value.len() + 2);
+        out.push('"');
+        for c in value.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                c if (c as u32) < 0x20 => out.push(' '),
+                c => out.push(c),
             }
         }
+        out.push('"');
+        out
     }
 
     /// 终端入口指向 App Bundle 内的程序,不制造第二份副本。
@@ -283,15 +393,30 @@ mod macos {
         let (links, explicit) = cli_link_paths();
         let mut last_error: Option<(PathBuf, String)> = None;
         for link in &links {
+            // A healed copy is written down: the tray can tell the user their
+            // `PATH` entry was a second program file, and the marker disappears
+            // on the next start where there is nothing to heal.
+            let heal = healed_marker(state);
             match install_one_cli_link(link, &target) {
-                Ok(true) => return,
-                Ok(false) => {
-                    log_line(&format!(
-                        "bootstrap: {} 已存在且非软链(用户自己的文件),不覆盖",
-                        link.display()
-                    ));
+                LinkOutcome::Linked => {
+                    let _ = std::fs::remove_file(&heal);
+                    return;
                 }
-                Err(e) => {
+                LinkOutcome::Healed { moved_to, version } => {
+                    let note = format!(
+                        "{{\"path\":{},\"moved_to\":{},\"version\":{},\"bundle\":{}}}",
+                        json_string(&link.display().to_string()),
+                        json_string(&moved_to.display().to_string()),
+                        json_string(version.as_deref().unwrap_or("")),
+                        json_string(&target.display().to_string()),
+                    );
+                    if let Err(e) = std::fs::write(&heal, note) {
+                        log_line(&format!("bootstrap: 写 {} 失败: {e}", heal.display()));
+                    }
+                    return;
+                }
+                LinkOutcome::Foreign => return,
+                LinkOutcome::NotCreatable(e) => {
                     if explicit {
                         log_line(&format!("bootstrap: CLI 软链失败: {e}"));
                         return;
@@ -399,7 +524,108 @@ mod macos {
 
 #[cfg(target_os = "macos")]
 pub use macos::{bootstrap_deploy, state_dir};
+/// The CLI-entry rule and its note are exercised by the tests below; the tray
+/// reads the note when it grows a UI for it (`cli-link-healed.json`).
+#[cfg(all(test, target_os = "macos"))]
+pub use macos::{install_one_cli_link, LinkOutcome};
 
 /// 非 macOS:安装器(S)托管布局,没有 bundle 迁移语义。
 #[cfg(not(target_os = "macos"))]
 pub fn bootstrap_deploy() {}
+
+#[cfg(all(test, target_os = "macos"))]
+mod link_tests {
+    use super::{install_one_cli_link, LinkOutcome};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// A stand-in for the bundle's program: small enough to be any file, but
+    /// the tests never run it through the version probe.
+    fn bundle_program(dir: &Path) -> PathBuf {
+        let target = dir.join("bundle-walgit");
+        std::fs::write(&target, b"#!/bin/sh\necho 'walgit v9.9.9'\n").expect("write target");
+        target
+    }
+
+    /// A hand-copied CLI: an executable above the size gate that answers
+    /// `--version` with an older walgit. This is the shape found in the wild —
+    /// a second program file on `PATH` that no upgrade can reach.
+    fn old_copy(path: &Path) {
+        let mut body = String::from("#!/bin/sh\necho 'walgit 0.5.0-old'\n");
+        while body.len() < (1 << 20) + 1 {
+            body.push_str("# padding\n");
+        }
+        std::fs::write(path, body).expect("write copy");
+        let mut perms = std::fs::metadata(path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    #[test]
+    fn a_missing_entry_becomes_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = bundle_program(dir.path());
+        let link = dir.path().join("bin").join("walgit");
+        assert_eq!(install_one_cli_link(&link, &target), LinkOutcome::Linked);
+        assert_eq!(std::fs::read_link(&link).expect("link"), target);
+    }
+
+    #[test]
+    fn a_symlink_bound_elsewhere_is_repointed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = bundle_program(dir.path());
+        let link = dir.path().join("walgit");
+        let stale = dir.path().join("stale-walgit");
+        std::fs::write(&stale, b"#!/bin/sh\n").expect("write stale");
+        std::os::unix::fs::symlink(&stale, &link).expect("symlink");
+        assert_eq!(install_one_cli_link(&link, &target), LinkOutcome::Linked);
+        assert_eq!(std::fs::read_link(&link).expect("link"), target);
+    }
+
+    /// The failure this guards: a copy is not a version of the program, it is a
+    /// second program file, so upgrading the app never touches it. It is moved
+    /// aside (the user's file is never deleted) and the symlink takes its place.
+    #[test]
+    fn a_copy_of_a_walgit_binary_is_moved_aside_and_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = bundle_program(dir.path());
+        let link = dir.path().join("walgit");
+        old_copy(&link);
+        let outcome = install_one_cli_link(&link, &target);
+        let LinkOutcome::Healed { moved_to, version } = outcome else {
+            panic!("expected a heal, got {outcome:?}");
+        };
+        assert_eq!(version.as_deref(), Some("walgit 0.5.0-old"));
+        assert!(
+            moved_to.exists(),
+            "the copy is kept: {}",
+            moved_to.display()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("link"),
+            target,
+            "the entry now points into the bundle"
+        );
+        // Running the heal again is idempotent: a correct symlink, no second copy.
+        assert_eq!(install_one_cli_link(&link, &target), LinkOutcome::Linked);
+    }
+
+    /// Anything that is not a walgit binary is the user's: a wrapper script, a
+    /// second implementation, a symlink they made. Never touched.
+    #[test]
+    fn a_foreign_file_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = bundle_program(dir.path());
+        let link = dir.path().join("walgit");
+        std::fs::write(&link, b"#!/bin/sh\nexec /somewhere/else \"$@\"\n").expect("write wrapper");
+        assert_eq!(install_one_cli_link(&link, &target), LinkOutcome::Foreign);
+        assert_eq!(
+            std::fs::read(&link).expect("read"),
+            b"#!/bin/sh\nexec /somewhere/else \"$@\"\n"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .expect("meta")
+            .file_type()
+            .is_file());
+    }
+}

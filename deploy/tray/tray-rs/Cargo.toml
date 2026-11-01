@@ -41,6 +41,9 @@ libc = "0.2"
 # 点 Dock 图标 → 打开 Web UI(#200)。winit 持有 NSApplication delegate 且不转发
 # `applicationShouldHandleReopen:hasVisibleWindows:`，所以这里往**它的 delegate 类**
 # 上注入这一个方法(它没实现,故不覆盖其行为)。crate 均已在依赖树里(tray-icon/muda)。
+[dev-dependencies]
+tempfile = "3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSApplication"] }
