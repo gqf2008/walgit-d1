@@ -43,6 +43,13 @@ export function CloneSetup({ repo, compact = false }: { repo: string; compact?: 
       <CodeSample code={r.plain_clone} />
       <div className="small strong">{t("clone.ci")}</div>
       <CodeSample code={r.manual_clone} />
+      {r.url_clone && (
+        <>
+          <div className="small strong">{t("clone.urlOnce")}</div>
+          <div className="small muted">{t("clone.urlNote")}</div>
+          <CodeSample code={r.url_clone} />
+        </>
+      )}
       <div className="clone-actions">
         <CopyButton text={() => api.installScript(repo)} label={t("clone.copyInstaller")} />
         <a className="btn btn-small" href={`/services/public/install.sh?repo=${repo}`} download="install.sh">

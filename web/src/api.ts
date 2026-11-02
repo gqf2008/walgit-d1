@@ -219,6 +219,8 @@ export interface SetupRecipes {
   install: string;
   install_url: string;
   manual_clone: string;
+  /** Token in the URL (`https://token:<token>@…`); null when the host needs no credential. */
+  url_clone: string | null;
   plain_clone: string;
   /** Blobless + sparse from the blobless bundle family, fetches on it too (`fetch.bundleURI`). */
   blobless_clone: string;

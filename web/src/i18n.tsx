@@ -627,6 +627,9 @@ const en = {
   "clone.rest": ", stores it in a file only you can read, installs a git credential helper that hands it to git, configures bundle URIs and clones. Idempotent: re-run any time. Needs git ≥ 2.46 and curl.",
   "clone.setupDone": "Already set up",
   "clone.ci": "CI — no helper, the token from the environment",
+  "clone.urlOnce": "One-shot with the token in the URL",
+  "clone.urlNote":
+    "The token travels in the address, so it stays in your shell history and in the new repository's .git/config. Fine for a quick look; afterwards git remote set-url origin with the same URL minus the credentials, or use the installer above, which leaves nothing behind.",
   "clone.copyInstaller": "Copy installer script",
   "clone.download": "Download install.sh",
   "clone.bundles.a": "Initial clones bootstrap from immutable static bundles (bundle-uri); upload-pack only sends the remainder. Every recipe passes ",
@@ -1384,6 +1387,9 @@ const zhCN: Record<I18nKey, string> = {
   "clone.rest": "，存进只有你能读的文件，装一个把 token 递给 git 的凭据助手，配好 bundle URI 再 clone。幂等：随时可重跑。需要 git ≥ 2.46 与 curl。",
   "clone.setupDone": "已配置好",
   "clone.ci": "CI——不用助手，token 来自环境变量",
+  "clone.urlOnce": "把 token 放进地址的一次性克隆",
+  "clone.urlNote":
+    "token 会跟着地址走，因此留在 shell 历史和新仓库的 .git/config 里。临时看一眼用它没问题，之后用 git remote set-url origin 换成去掉凭据的地址；上面的安装器不会留下任何痕迹。",
   "clone.copyInstaller": "复制安装脚本",
   "clone.download": "下载 install.sh",
   "clone.bundles.a": "首次 clone 从不可变的静态 bundle（bundle-uri）引导；upload-pack 只发剩余部分。每条配方都带 ",
@@ -2133,6 +2139,9 @@ const zhTW: Record<I18nKey, string> = {
   "clone.rest": "，存進只有你能讀的檔案，裝一個把 token 遞給 git 的憑證助手，設好 bundle URI 再 clone。冪等：隨時可重跑。需要 git ≥ 2.46 與 curl。",
   "clone.setupDone": "已設定好",
   "clone.ci": "CI——不用助手，token 來自環境變數",
+  "clone.urlOnce": "把 token 放進位址的一次性複製",
+  "clone.urlNote":
+    "token 會跟著位址走，因此留在 shell 歷史和新倉庫的 .git/config 裡。臨時看一眼用它沒問題，之後用 git remote set-url origin 換成去掉憑證的位址；上面的安裝器不會留下任何痕跡。",
   "clone.copyInstaller": "複製安裝指令稿",
   "clone.download": "下載 install.sh",
   "clone.bundles.a": "首次 clone 從不可變的靜態 bundle（bundle-uri）引導；upload-pack 只發剩餘部分。每條配方都帶 ",

@@ -61,6 +61,12 @@ pub struct Recipes {
     pub install_url: String,
     /// One-shot clone with a token in the environment, no helper.
     pub manual_clone: String,
+    /// One-shot clone with the token in the URL (`https://token:<token>@host/owner/repo.git`),
+    /// `None` when the host needs no credential. It is the shape people reach for first and the
+    /// one that leaks — shell history, and the new repository's `.git/config` — so the helper is
+    /// disabled explicitly: a stored credential cannot answer instead, and git has nothing to
+    /// store from the URL.
+    pub url_clone: Option<String>,
     /// Plain clone once the helper is installed (still carries `-c fetch.bundleURI=<list>`: git records
     /// no list URI for an *advertised* bundle-uri clone, and without one every later `git fetch`
     /// skips bundles — fast catch-up through them is the point).
@@ -132,6 +138,14 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
         format!("git -c transfer.bundleURI=true -c fetch.bundleURI={catchup} clone {url}")
     };
     let plain_clone = format!("git clone -c fetch.bundleURI={catchup} {url}");
+    // `token:<token>@` — any username works (the server reads the Basic password as the token),
+    // `token` spells out that the placeholder is not a real account.
+    let url_clone = needs_token(cfg).then(|| {
+        let path = repo.map_or("<owner>/<repo>", |r| r).to_string();
+        format!(
+            "git -c credential.helper= -c transfer.bundleURI=true -c fetch.bundleURI={catchup} clone https://token:<token>@{host}/{path}.git"
+        )
+    });
     let blobless_clone = format!(
         "git clone --filter=blob:none --sparse --bundle-uri={bundle_list}?filter=blob:none -c fetch.bundleURI={catchup}?filter=blob:none {url}"
     );
@@ -141,6 +155,9 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
         ),
         None => String::new(),
     };
+    let url_line = url_clone.as_ref().map_or_else(String::new, |c| {
+        format!("# One-shot with the token in the URL (it stays in your shell history and the new repository's .git/config):\n# {c}\n")
+    });
     let where_from = match (&token_url, needs_token(cfg)) {
         (Some(u), _) => format!("# Tokens: sign in at {u} and create one (the installer asks for it; CI: export WALGIT_TOKEN).\n"),
         (None, true) => "# Tokens: issued by whoever runs this server (the installer asks for it; CI: export WALGIT_TOKEN).\n".to_string(),
@@ -152,14 +169,16 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
              {install}\n\
              \n\
              # Already set up? {plain_clone}\n\
-             # One-shot (CI): {manual_clone}\n"
+             # One-shot (CI): {manual_clone}\n\
+             {url_line}"
         ),
         None => format!(
             "{trust_text}{where_from}# Run once per machine (installs the git credential helper and enables bundle URIs; safe to re-run):\n\
              {install}\n\
              {plain_clone}\n\
              \n\
-             # One-shot (CI): {manual_clone}\n"
+             # One-shot (CI): {manual_clone}\n\
+             {url_line}"
         ),
     };
     Recipes {
@@ -169,6 +188,7 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
         install,
         install_url,
         manual_clone,
+        url_clone,
         plain_clone,
         blobless_clone,
         bundle_list,
@@ -459,6 +479,18 @@ mod tests {
             r.manual_clone
                 .contains("Authorization: Bearer $WALGIT_TOKEN")
         );
+        assert_eq!(
+            r.url_clone.as_deref(),
+            Some(
+                "git -c credential.helper= -c transfer.bundleURI=true -c fetch.bundleURI=https://git.example.com/acme/monorepo.git/bundles/catchup clone https://token:<token>@git.example.com/acme/monorepo.git"
+            ),
+            "the URL form disables the helper so a stored credential cannot answer instead"
+        );
+        assert!(
+            r.setup_text.contains("token:<token>@git.example.com"),
+            "{}",
+            r.setup_text
+        );
         assert!(r.manual_clone.contains("-c fetch.bundleURI=https://git.example.com/acme/monorepo.git/bundles/catchup clone https://git.example.com/acme/monorepo.git"));
         assert_eq!(
             r.plain_clone,
@@ -487,6 +519,7 @@ mod tests {
         let r = recipes(&Config::default(), "http://localhost:8080", None);
         assert!(!r.setup_text.contains("oken"), "{}", r.setup_text);
         assert!(!r.manual_clone.contains("Authorization"));
+        assert!(r.url_clone.is_none(), "no token to put in a URL");
     }
 
     #[test]
