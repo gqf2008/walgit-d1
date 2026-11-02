@@ -69,6 +69,11 @@ configured for.
 
 ## 3. MCP (served by the host — the collaboration interface)
 
+`walgit collab …`、`walgit ci …`、`walgit principal …` 已从 `--help` 隐藏且默认拒绝（D68）：
+协作接口就是 `/mcp`。脚本或应急要跑本地形式时，单次加 `WALGIT_LOCAL_COMMANDS=1`（代码是同一份，
+只是把门关上）。仓库的 HTTP JSON 也只剩 `/{owner}/{repo}/api-browser/…` 一条车道。
+
+
 Every host serves MCP itself at **`<host>/mcp`** (Streamable HTTP, D64) — there is
 no local `walgit mcp` process to spawn. **This is the interface** for reading and
 writing collaboration state: git carries bytes, MCP carries everything else. The
