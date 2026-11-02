@@ -3,6 +3,10 @@
 Context: **the wire contract of the JSON API + SDK** (D15/D20/D26/D27/D68), normative, for UI/SDK/site authors and for
 anyone changing `crates/walgit-server/src/web/*`.
 
+> **Deprecated module (D68, 2026-11-02).** This contract is maintained for the bundled UI and the SDK it
+> ships, and because `/mcp` projects these exact handlers. It is no longer a surface to design for: new
+> agent-facing capability goes into the MCP tools, and this document is not the place to describe it.
+
 > **Agents do not use this document** (D67/D68). The agent-facing interface is MCP at `/mcp`
 > (`web/SKILL.md`); these routes are what `/mcp` projects, and what the bundled UI and the SDK call.
 > Since D68 there is exactly **one** repository HTTP lane — `/{owner}/{repo}/api-browser/…`. The older

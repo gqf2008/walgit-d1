@@ -1,5 +1,14 @@
 //! Read-only JSON API for the web UI (`web/API.md`, v2 contract).
 //!
+//! **Deprecated (D68, 2026-11-02).** This module is not an interface anyone
+//! should build on any more: the agent-facing surface is MCP
+//! (`crate::mcp`, `/mcp`, D64), which is a projection of these handlers, and the
+//! only remaining caller is the bundled UI plus the SDK behind it. It stays
+//! because the SPA reads through it, `/api` is already unserved (one lane:
+//! `api-browser`), and the MCP tools dispatch into exactly these waiters — but
+//! the next major release merges it into the internal lane it has become. New
+//! features belong in the MCP projection and in `web/SKILL.md`, not here.
+//!
 //! Two URL classes: ref-dependent (`refs`, `refs/{branches,tags,all,collab}`,
 //! `refs/name/{rest}`, `resolve`, name-addressed tree/blob/commits/commit)
 //! answered from a

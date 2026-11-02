@@ -85,7 +85,6 @@ async fn cli_full_collab_flow_against_a_real_server() -> TestResult {
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -189,7 +188,6 @@ async fn watch_reports_new_collab_entries_via_callback() -> TestResult {
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -296,7 +294,6 @@ async fn board_projection_is_byte_identical_across_clients_and_moves_with_status
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -466,7 +463,6 @@ async fn board_projection_is_byte_identical_across_clients_and_moves_with_status
     let bad_file = bad_dir.path().join("bad.toml");
     std::fs::write(&bad_file, bad)?;
     let bad_out = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args([
@@ -517,7 +513,6 @@ async fn card_claim_converges_and_ttl_releases_the_card() -> TestResult {
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -532,7 +527,6 @@ async fn card_claim_converges_and_ttl_releases_the_card() -> TestResult {
     };
     let run_code = |args: &[&str]| -> TestResult<(i32, String, String)> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -734,7 +728,6 @@ async fn gc_fold_keeps_aggregation_byte_identical_and_the_tail_stays_live() -> T
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1092,7 +1085,6 @@ async fn a_stale_fold_baseline_loses_the_lease_and_the_crash_resume_prunes_dedup
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1107,7 +1099,6 @@ async fn a_stale_fold_baseline_loses_the_lease_and_the_crash_resume_prunes_dedup
     };
     let run_expect_fail = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1303,7 +1294,6 @@ async fn sha256_repo_fold_preserves_the_thread() -> TestResult {
     let key = key.to_str().unwrap();
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1387,7 +1377,6 @@ async fn entry_auto_fold_folds_the_inbox_past_the_threshold() -> TestResult {
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1484,7 +1473,6 @@ async fn principal_registry_rotation_and_revocation_push_through_receive_pack() 
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1601,7 +1589,6 @@ async fn rotating_the_actor_away_and_back_reverifies_the_entry() -> TestResult {
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1695,7 +1682,6 @@ async fn watch_fetch_prunes_revoked_registry_refs() -> TestResult {
 
     let run = |args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1776,7 +1762,6 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
     let bin = env!("CARGO_BIN_EXE_walgit");
     let run_in = |dir: &Path, args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1842,7 +1827,6 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
     let wt_path = wt.path().to_str().expect("utf-8 path");
     git_in(repo.path(), &["worktree", "add", "-q", wt_path, "-b", "wt"])?;
     let borrowed = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args([
@@ -1912,7 +1896,6 @@ fn collab_join_is_project_local_and_defaults_resolve() -> TestResult {
 
     // Rebinding a bound project to another principal is refused without --force.
     let refused = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args(["collab", "join", "--principal", "bob"])
@@ -1961,7 +1944,6 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
     let bin = env!("CARGO_BIN_EXE_walgit");
     let run_in = |dir: &Path, args: &[&str]| -> TestResult<String> {
         let out = std::process::Command::new(bin)
-            .env("WALGIT_LOCAL_COMMANDS", "1")
             .arg("--config")
             .arg("/dev/null")
             .args(args)
@@ -1983,7 +1965,6 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
 
     // No identity yet: a default write fails with the `collab join` hint.
     let bare = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args([
@@ -2018,7 +1999,6 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
 
     // A missing explicit --key is an error, never a silently generated key.
     let missing = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args([
@@ -2055,7 +2035,6 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
     std::fs::write(&other, "11".repeat(32))?;
     let other_s = other.to_str().expect("utf-8");
     let refused = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args(["collab", "join", "--principal", "carol", "--key", other_s])
@@ -2124,7 +2103,6 @@ fn collab_join_relative_key_and_rotation_guard() -> TestResult {
         &["update-ref", "refs/collab/meta/principals/carol", bad_oid.as_str()],
     )?;
     let malformed = std::process::Command::new(bin)
-        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args(["collab", "join", "--principal", "carol"])

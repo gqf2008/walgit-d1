@@ -1076,12 +1076,15 @@ decision in §4 — or the PR is; never "fix later".
   the SDK's `lanePrefix` now returns `/api-browser` for every lane while `lane` still decides how the
   credential travels. The bundled UI needed no change beyond the segment (`repoApi`), because the
   browser lane is the same handlers.
-  (2) **`walgit collab`, `walgit ci`, `walgit principal` are hidden and refuse.** They are not deleted —
-  they are the same protocol code, and an operator needs them for a script or an emergency — but they
-  are `#[command(hide = true)]` and `dispatch` refuses them unless `WALGIT_LOCAL_COMMANDS=1`; the
-  refusal names the MCP tools that replace them. That way nothing *discovers* a second interface, and
-  the local form still exists for what MCP cannot do from outside (signing with a worktree key, the
-  runner half of CI, `collab gc`'s emergency manual form).
+  (2) **`walgit collab`, `walgit ci`, `walgit principal` are hidden and deprecated.** They are not
+  deleted — they are the same protocol code, and an operator needs them for a script or an
+  emergency — but they are `#[command(hide = true)]` and every run prints one deprecation line on
+  stderr naming the MCP tools that replace them. There is **no switch** (2026-11-02: the
+  `WALGIT_LOCAL_COMMANDS` door was removed): a notice is not a permission, and a migration that
+  depends on an environment variable has not started. They behave exactly as before until the next
+  major release, which deletes them. The `/{o}/{r}/api/…` module is in the same stage — `/api` stays
+  404, `api-browser` is the one lane, and `web/api.rs` is marked deprecated in its own docs because
+  MCP has taken over as the agent interface.
   (3) **What stays**: `/{o}/{r}/api-browser/…` (the UI, the SDK, a script that needs bytes such as
   `archive` and `ci-artifacts`), `/api/v1` (discovery, `me`, owners, the setup wizard and storage
   editor), `/mcp` (the agent interface), git, LFS and the static lanes. The repo **create/delete/admin**

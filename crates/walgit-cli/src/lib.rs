@@ -793,13 +793,6 @@ where
 
 pub fn main() -> Result<()> {
     on_cli_stack(|| {
-        // D68's door is the first thing a local collaboration command meets.
-        // It used to sit in `dispatch`, i.e. *after* clap, so `walgit collab
-        // thread` (one missing argument) answered a parse error and never
-        // reached the refusal — the shape that "looks like it still works".
-        if let Some(name) = local_command_in(std::env::args_os().skip(1)) {
-            ensure_local_command_allowed(name)?;
-        }
         let cli = Cli::parse();
         run(&cli.config, cli.command.unwrap_or(Command::Serve))
     })
@@ -898,61 +891,25 @@ fn is_host_read(command: &Command) -> bool {
     )
 }
 
-/// D68: the collaboration acts belong to MCP. The subcommands stay in the
-/// binary — they are the same protocol code, and an operator needs them for a
-/// script or an emergency — but they are hidden from `--help` and refuse to run
-/// unless this variable is set, so nothing can mistake them for *the*
-/// interface.
-const LOCAL_COMMANDS_ENV: &str = "WALGIT_LOCAL_COMMANDS";
-
-/// The gated subcommand this argv names, decided **before** clap has a say.
+/// D68, in its deprecation stage: the collaboration acts belong to MCP. The
+/// subcommands stay in the binary — they are the same protocol code, and an
+/// operator needs them for a script or an emergency — but they are hidden from
+/// `--help` and every run says once, on stderr, that they are on their way out.
 ///
-/// Only the leading position matters: global flags and their values come first
-/// (`--config x.toml collab ls`), so tokens are walked, the value of a flag
-/// that takes one is skipped, and the first word that is not a flag is the
-/// subcommand the door is about. A word further in (`walgit bundle make ci`)
-/// is an argument, not a subcommand.
-fn local_command_in(
-    args: impl Iterator<Item = std::ffi::OsString>,
-) -> Option<&'static str> {
-    const GATED: [&str; 3] = ["collab", "principal", "ci"];
-    let mut skip_value = false;
-    for arg in args {
-        let text = arg.to_string_lossy();
-        if skip_value {
-            skip_value = false;
-            continue;
-        }
-        if text == "--config" {
-            skip_value = true;
-            continue;
-        }
-        if text.starts_with('-') {
-            continue;
-        }
-        return GATED
-            .iter()
-            .copied()
-            .find(|name| *name == text.as_ref());
-    }
-    None
-}
-
-/// The gate's decision, in one place so it is testable without an environment.
-fn local_command_allowed(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true" | "yes"))
-}
-
-fn ensure_local_command_allowed(name: &str) -> Result<()> {
-    let allowed = local_command_allowed(std::env::var(LOCAL_COMMANDS_ENV).ok().as_deref());
-    anyhow::ensure!(
-        allowed,
-        "`walgit {name}` is not the collaboration interface any more: it is MCP at /mcp \
+/// There is no switch: the notice is not a permission, and a migration that
+/// depends on an environment variable has not started. The next major release
+/// removes the subcommands; until then they behave exactly as before.
+fn note_local_command_deprecated(name: &str) -> String {
+    format!(
+        "walgit {name}: deprecated — the collaboration interface is MCP at /mcp \
          (collab_board / collab_thread / collab_report, collab_publish, ci_status, \
-         resources/subscribe). The local form still works — it is the same code — but only \
-         when a script or an operator asks for it: set {LOCAL_COMMANDS_ENV}=1."
-    );
-    Ok(())
+         resources/subscribe). This local form keeps working until the next major release."
+    )
+}
+
+/// Say it once per run, on stderr, where a script's stdout stays clean.
+fn note_local_command(name: &str) {
+    eprintln!("{}", note_local_command_deprecated(name));
 }
 
 async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf) -> Result<()> {
@@ -979,15 +936,15 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
         Command::Repo { action } => repo::run(action, &cfg).await,
         Command::Wal { action } => wal_cmd::run(action, &cfg).await,
         Command::Collab { action } => {
-            ensure_local_command_allowed("collab")?;
+            note_local_command("collab");
             collab_cmd::run(action).await
         }
         Command::Principal { action } => {
-            ensure_local_command_allowed("principal")?;
+            note_local_command("principal");
             principal_cmd::run(action).await
         }
         Command::Ci { action } => {
-            ensure_local_command_allowed("ci")?;
+            note_local_command("ci");
             ci_cmd::run(action).await
         }
         Command::Mirror {
@@ -1116,51 +1073,23 @@ mod stack_tests {
 
 #[cfg(test)]
 mod local_command_tests {
-    use super::{local_command_allowed, local_command_in};
+    use super::note_local_command_deprecated;
 
-    fn argv(items: &[&str]) -> Vec<std::ffi::OsString> {
-        items.iter().map(std::ffi::OsString::from).collect()
-    }
-
-    /// The door runs before clap, so it must read the *leading* word — and it
-    /// must find it even when the argument that clap would have complained
-    /// about is missing (`walgit collab thread`), which is the shape that used
-    /// to answer a parse error instead of the refusal.
+    /// D68's deprecation stage: the notice says what replaced the subcommand and
+    /// when the subcommand goes — no environment variable, no permission.
     #[test]
-    fn the_door_names_the_leading_subcommand_before_clap_parses() {
-        for (args, want) in [
-            (&["collab"][..], Some("collab")),
-            (&["collab", "thread"][..], Some("collab")),
-            (&["collab", "thread", "card-1"][..], Some("collab")),
-            (&["principal", "register"][..], Some("principal")),
-            (&["ci", "run"][..], Some("ci")),
-            (&["--config", "x.toml", "collab", "ls"][..], Some("collab")),
-            (&["--config=x.toml", "ci", "status"][..], Some("ci")),
-        ] {
-            assert_eq!(local_command_in(argv(args).into_iter()), want, "{args:?}");
-        }
-        for args in [
-            &[][..],
-            &["serve"][..],
-            &["--help"][..],
-            &["--version"][..],
-            &["repo", "refs", "o/r"][..],
-            &["bundle", "make", "ci"][..],
-            &["--config", "collab", "serve"][..],
-        ] {
-            assert_eq!(local_command_in(argv(args).into_iter()), None, "{args:?}");
-        }
-    }
-
-    /// D68: the door opens only for an explicit yes — not for `0`, not for an
-    /// empty variable, not for a near-miss.
-    #[test]
-    fn only_an_explicit_yes_opens_the_local_door() {
-        for yes in ["1", "true", "yes"] {
-            assert!(local_command_allowed(Some(yes)), "{yes:?}");
-        }
-        for no in [None, Some(""), Some("0"), Some("no"), Some("TRUE"), Some("yes ")] {
-            assert!(!local_command_allowed(no), "{no:?}");
+    fn the_notice_names_mcp_and_the_removal() {
+        for name in ["collab", "principal", "ci"] {
+            let notice = note_local_command_deprecated(name);
+            assert!(notice.starts_with(&format!("walgit {name}: ")), "{notice}");
+            assert!(notice.contains("deprecated"), "{notice}");
+            assert!(notice.contains("/mcp"), "{notice}");
+            assert!(notice.contains("collab_publish"), "{notice}");
+            assert!(notice.contains("next major release"), "{notice}");
+            assert!(
+                !notice.contains("WALGIT_LOCAL_COMMANDS"),
+                "the switch is gone: {notice}"
+            );
         }
     }
 

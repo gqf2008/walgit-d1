@@ -69,9 +69,10 @@ configured for.
 
 ## 3. MCP (served by the host — the collaboration interface)
 
-`walgit collab …`、`walgit ci …`、`walgit principal …` 已从 `--help` 隐藏且默认拒绝（D68）：
-协作接口就是 `/mcp`。脚本或应急要跑本地形式时，单次加 `WALGIT_LOCAL_COMMANDS=1`（代码是同一份，
-只是把门关上）。仓库的 HTTP JSON 也只剩 `/{owner}/{repo}/api-browser/…` 一条车道。
+`walgit collab …`、`walgit ci …`、`walgit principal …` 已从 `--help` 隐藏并进入**废弃阶段**（D68）：
+协作接口就是 `/mcp`。它们仍然可用（同一份代码），但每次运行都会在 stderr 打一行废弃提示，告诉你 MCP
+里对应的工具是哪个——**没有开关**，这条提示不是权限门，下一个大版本会删掉它们。仓库的 HTTP JSON 也只剩
+`/{owner}/{repo}/api-browser/…` 一条车道（`/api` 保持 404，`web/api.rs` 本身已标为废弃）。
 
 
 Every host serves MCP itself at **`<host>/mcp`** (Streamable HTTP, D64) — there is
