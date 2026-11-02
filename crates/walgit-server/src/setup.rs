@@ -156,7 +156,9 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
         None => String::new(),
     };
     let url_line = url_clone.as_ref().map_or_else(String::new, |c| {
-        format!("# One-shot with the token in the URL (it stays in your shell history and the new repository's .git/config):\n# {c}\n")
+        format!(
+            "# One-shot with the token in the URL (it stays in your shell history and the new repository's .git/config,\n# and reaches the repository but not the advertised bundle URLs, so git warns and falls back to a normal fetch):\n# {c}\n"
+        )
     });
     let where_from = match (&token_url, needs_token(cfg)) {
         (Some(u), _) => format!("# Tokens: sign in at {u} and create one (the installer asks for it; CI: export WALGIT_TOKEN).\n"),
