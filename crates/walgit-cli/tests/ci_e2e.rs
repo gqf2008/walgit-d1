@@ -136,6 +136,10 @@ fn ci_run(
     env: &[(&str, &str)],
 ) -> TestResult<std::process::Output> {
     let mut cmd = Command::new(bin);
+    // D68: the collaboration subcommands are hidden from `--help` and refused
+    // unless asked for; these suites are exactly the "a script asked for it"
+    // case — they exist to keep the local forms working.
+    cmd.env("WALGIT_LOCAL_COMMANDS", "1");
     cmd.arg("--config")
         .arg("/dev/null")
         .args([
@@ -151,6 +155,7 @@ fn ci_run(
 
 fn run(bin: &str, args: &[&str]) -> TestResult<String> {
     let out = Command::new(bin)
+        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args(args)
@@ -411,6 +416,7 @@ timeout = "60s"
     // The victim claims and is killed mid-run (§6.3: no result, no cleanup,
     // the claim simply expires).
     let mut victim = Command::new(&bin)
+        .env("WALGIT_LOCAL_COMMANDS", "1")
         .arg("--config")
         .arg("/dev/null")
         .args([

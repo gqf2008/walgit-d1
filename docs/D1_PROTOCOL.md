@@ -148,7 +148,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 - `version` 当前恒为 1；`registered_at` 为 unix 秒（信息性）。
 - **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。验证只认**此刻**注册表里的那把 key，因此**轮换与该 key 的丢失都会让此前签名的全部条目在未来聚合中变为 unverified**；唯一恢复路径是用**旧 key 的备份**重新注册旧 key。浏览器写路径因此提供导出备份与导入恢复（SPA 写入口的「备份密钥」/「导入密钥」，后果见 §14 与 `docs/USER_GUIDE.md` §7）。
 - 写路径：轮换可用 CLI `principal-register --push`（对指向 blob 的非 commit ref 用强制
-  refspec `+`）或薄 API `POST …/api/collab/principal`（CAS 旧值更新，§12）；**吊销目前只有
+  refspec `+`）或薄 API `POST …/api-browser/collab/principal`（CAS 旧值更新，§12）；**吊销目前只有
   CLI** `principal-revoke --push`（删除 refspec `:`）——薄 API 尚无删除端点。
 
 ### 4.4 host 注册表（跨仓库身份）
@@ -227,7 +227,7 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 `walgit collab entry` / `collab claim` 在落盘/推送前校验「签名 key 的 public key == 注册表中
 `actor` 的 key」（仓库本地注册表 ∪ host 缓存），不一致即拒绝，并在错误里指出 key 实际归属的
 principal；MCP 的 `collab_publish` 只是这两个子命令产物的传输层（收下**已签名**的条目再交给
-`POST …/api/collab/entries`），走同一条闸，没有旁路；服务端不持任何私钥。`collab gc` 对折叠签名一向如此。
+`POST …/api-browser/collab/entries`），走同一条闸，没有旁路；服务端不持任何私钥。`collab gc` 对折叠签名一向如此。
 
 ### 5.2 kind 与 body 约定
 
@@ -301,7 +301,7 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
 ### 5.5 引用与附件约定
 
 - `related` / `depends_on`：oid 字符串数组（写 CLI：`--related` / `--depends-on`，可多次）。
-  读侧不做存在性写门禁；`GET …/api/collab/threads/{id}` 对每条条目返回
+  读侧不做存在性写门禁；`GET …/api-browser/collab/threads/{id}` 对每条条目返回
   `broken_refs`（引用但不在当前 collab 全集里的 oid），机器可读（仅服务端线程端点计算；
   CLI `thread` 不返回该字段）。
 - `attachments`：数组项 `{filename, sha256, content_b64}`；**单文件 ≤ 64 KiB**（写侧
@@ -760,7 +760,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 - **MCP 面**：宿主自己在内置的 `/mcp`（Streamable HTTP，D64）暴露**宿主自己的 JSON API** 的工具与
   `walgit://` 资源 —— 工具名与宿主 API 一一对应（`repo_*` 读仓库，`collab_board`/`collab_thread`/
   `collab_report` 读聚合，`wal_ls` 读保留日志），唯一的写工具 `collab_publish` 收下客户端**已签名**的条目
-  并转交 `POST …/api/collab/entries`：服务端不签名、不持钥，只做签名校验 + `actor == 调用者`，
+  并转交 `POST …/api-browser/collab/entries`：服务端不签名、不持钥，只做签名校验 + `actor == 调用者`，
   工作卡认领就是发布一条 `card_claim` 后重读看板。资源 `walgit://refs/<o>/<r>`、
   `walgit://wal/<o>/<r>{?from}`、`walgit://collab/board/<o>/<r>`、
   `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
@@ -783,12 +783,12 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 | 端点 | 语义 | 门禁 |
 |---|---|---|
-| `POST /{o}/{r}/api/collab/entries` | 浏览器写路径：条目 blob 打成单对象 pack，经 **同一条 WAL 发布路径** 写 `refs/collab/inbox/<actor>/<uuid>`；`200 → {ref, oid, seq}` | 认证写；`actor == 认证 principal`（auth=none 时匿名例外）；actor refname-safe；条目 ≤ 256 KiB（超限 `400`）；`status=done` 走 §7.5 门禁；`policy.json` 与 receive-pack **同一评估链**；**服务端不验签** |
-| `POST /{o}/{r}/api/collab/principal` | 首次注册/轮换公钥到 `refs/collab/meta/principals/<p>`（CAS 旧值） | `principal == 认证 principal`；policy 同 receive-pack |
-| `GET /{o}/{r}/api/collab/report` | §7.4 报告（含 CI runs） | 读权限；SWR + body-digest ETag，永不 immutable |
-| `GET /{o}/{r}/api/collab/threads/{id}` | 线程有序条目 + 每条的 `verified`、`broken_refs`，含 patch 时附 `{pr, merge}`；未知 id `404` | SWR + body-digest ETag |
-| `GET /{o}/{r}/api/collab/board` | §8 看板（读 HEAD 的 `.walgit/board.toml`）；定义非法 `400` | SWR + body-digest ETag |
-| `GET`/`HEAD /{o}/{r}/api/collab/ci-artifacts/{sha256}` | CI 日志/产物读取（先查 size、后读取、发前验 sha256；`HEAD` 是 CLI 预检） | 同 CI 协议 §8.2 |
+| `POST /{o}/{r}/api-browser/collab/entries` | 浏览器写路径：条目 blob 打成单对象 pack，经 **同一条 WAL 发布路径** 写 `refs/collab/inbox/<actor>/<uuid>`；`200 → {ref, oid, seq}` | 认证写；`actor == 认证 principal`（auth=none 时匿名例外）；actor refname-safe；条目 ≤ 256 KiB（超限 `400`）；`status=done` 走 §7.5 门禁；`policy.json` 与 receive-pack **同一评估链**；**服务端不验签** |
+| `POST /{o}/{r}/api-browser/collab/principal` | 首次注册/轮换公钥到 `refs/collab/meta/principals/<p>`（CAS 旧值） | `principal == 认证 principal`；policy 同 receive-pack |
+| `GET /{o}/{r}/api-browser/collab/report` | §7.4 报告（含 CI runs） | 读权限；SWR + body-digest ETag，永不 immutable |
+| `GET /{o}/{r}/api-browser/collab/threads/{id}` | 线程有序条目 + 每条的 `verified`、`broken_refs`，含 patch 时附 `{pr, merge}`；未知 id `404` | SWR + body-digest ETag |
+| `GET /{o}/{r}/api-browser/collab/board` | §8 看板（读 HEAD 的 `.walgit/board.toml`）；定义非法 `400` | SWR + body-digest ETag |
+| `GET`/`HEAD /{o}/{r}/api-browser/collab/ci-artifacts/{sha256}` | CI 日志/产物读取（先查 size、后读取、发前验 sha256；`HEAD` 是 CLI 预检） | 同 CI 协议 §8.2 |
 | `GET /api/v1/principals`、`PUT`/`DELETE /api/v1/principals/{principal}` | host 注册表（§4.4） | 读需读权限；写 self-only |
 
 预算与缓存：collab 聚合端点受 §9.4 的 20k/64MiB 预算保护，超限 `503` 指向 gc / 离线 CLI；

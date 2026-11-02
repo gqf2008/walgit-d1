@@ -1,3 +1,7 @@
+
+> **车道说明（D68，2026-11-02）**：本文是设计背景与进度记录；文中 repo 级 JSON 路径写作
+> `/{o}/{r}/api/…`，现在只有 `/{o}/{r}/api-browser/…` 这一条车道（`/api` 已 404），
+> 其余语义不变。规范文本见 `docs/D1_PROTOCOL.md`。
 # D1 — 去中心化协作层设计（Decentralized collaboration on walgit）
 
 > 状态：**设计已实现**。当前规范（对象 schema、canonical 签名、验证、聚合、看板、D45 折叠、

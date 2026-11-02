@@ -422,7 +422,7 @@ async fn remote_artifact_fits_cap(
         matches!(endpoint.scheme(), "http" | "https"),
         "remote {remote_url:?} has no walgit artifact size endpoint; refused to fetch {sha256} before a size check"
     );
-    let segments = format!("api/collab/ci-artifacts/{sha256}");
+    let segments = format!("api-browser/collab/ci-artifacts/{sha256}");
     endpoint
         .path_segments_mut()
         .map_err(|()| anyhow::anyhow!("remote URL {remote_url:?} cannot carry a path"))?
@@ -2352,7 +2352,7 @@ command = "cargo test"
         let hits = Arc::new(AtomicUsize::new(0));
         let handler_hits = hits.clone();
         let app = axum::Router::new().route(
-            "/o/r/api/collab/ci-artifacts/{sha256}",
+            "/o/r/api-browser/collab/ci-artifacts/{sha256}",
             axum::routing::head(move || {
                 let hits = handler_hits.clone();
                 async move {
