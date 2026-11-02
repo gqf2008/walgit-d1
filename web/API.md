@@ -986,7 +986,7 @@ that every omission is a decision rather than an oversight.
 | `GET …/api-browser/collab/ci` | `ci_status` |
 | `POST …/api-browser/collab/entries` | `collab_publish` (payload = an entry the client already signed) |
 | `POST …/api-browser/collab/principal` | `collab_register` (the caller's own public key) |
-| *(none — `RepoHandle::read_log` over the WAL, refs-level)* | `wal_ls` (the retained log; it is provenance, not a route) |
+| *(none — `RepoHandle::read_log` over the WAL, refs-level)* | `wal_ls` (the retained log: `from`/`to` echo the requested window, `to` is a bound, `more` = newer entries exist, `folded_through` = the seq a checkpoint folded; it is provenance, not a route) |
 
 **Not exposed, on purpose:**
 

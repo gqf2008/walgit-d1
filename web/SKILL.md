@@ -226,10 +226,15 @@ identical to the UI:
 
 A revision argument is `rev`; `repo_commits` accepts `ref` and `rev` (same
 meaning, and a CLI-style `HEAD~3` resolves). `wal_ls` reads the retained log
-`from`/`to` (1-based seqs) and answers `more` when the window is not the end.
-`repo_settings` answers the **effective** settings as TOML (`{"toml": …}`);
-`repo_ops` lists the maintenance operations and their parameters but starting
-one is an operator act; `repo_policy` and `repo_settings` are read-only.
+by `from`/`to` (1-based seqs): `from` alone reads a page from there, `{repo}`
+alone reads the newest page, and an explicit `to` is a **bound**, not a hint.
+`more` means newer entries exist than the window you asked for; `folded_through`
+is the seq a checkpoint folded, and a window older than what
+`maintenance.retention_wal` kept comes back empty *for that reason* rather than
+silently. `repo_settings` answers the **effective** settings as TOML
+(`{"toml": …}`); `repo_ops` lists the maintenance operations and their
+parameters but starting one is an operator act; `repo_policy` and
+`repo_settings` are read-only.
 
 The two writes never make you hand over a key:
 

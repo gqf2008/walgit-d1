@@ -702,41 +702,15 @@ async fn run(
             let (_, handle) = super::resources::refs_level(st, &owner, &repo)
                 .await
                 .map_err(|e| ToolError::Execution(e.to_string()))?;
-            // One window definition, shared with the `walgit://wal/…` resource:
-            // `from` unset means the newest page, and the span is `WAL_PAGE`.
+            // One window definition, shared with the `walgit://wal/…` resource.
+            // `from` unset (or 0) means the newest page; `to` is a real bound —
+            // answering past it would hand a model log lines it excluded.
             let from = u64_arg(args, "from").unwrap_or(0);
-            let (mut entries, head_seq) = super::resources::wal_page(&handle, from)
+            let to = u64_arg(args, "to");
+            let page = super::resources::wal_page(&handle, from, to)
                 .await
                 .map_err(|e| ToolError::Execution(e.to_string()))?;
-            let first = entries
-                .first()
-                .and_then(|e| e.get("seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(head_seq);
-            let loaded_last = entries
-                .last()
-                .and_then(|e| e.get("seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(first);
-            // An explicit `to` is a bound, not a hint: answering with entries
-            // past it (which is what "the window does not contain `to`, so
-            // ignore it" did) hands a model log lines it excluded by asking.
-            // `to` below the window is therefore an empty page, never a full one.
-            let to = u64_arg(args, "to").map_or(loaded_last, |t| t.min(loaded_last));
-            entries.retain(|e| e.get("seq").and_then(Value::as_u64).unwrap_or(0) <= to);
-            let last = entries
-                .last()
-                .and_then(|e| e.get("seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(to);
-            Ok(json!({
-                "repo": format!("{owner}/{repo}"),
-                "head_seq": head_seq,
-                "from": first,
-                "to": last,
-                "more": last < head_seq,
-                "entries": entries,
-            }))
+            Ok(page.to_json(&format!("{owner}/{repo}")))
         }
         Kind::CollabPublish => {
             let (owner, repo) = repo_arg(args)?;

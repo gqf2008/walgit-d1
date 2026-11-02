@@ -243,6 +243,11 @@ runtime** and never takes the refs phase's lock (D19). `check_fits` refuses to p
   `wal.checkpoint_tail_bytes` fires — the checkpoint is the unit of serving state. Writing one is refs-level work,
   so each `maintain` host checkpoints its own repositories.
 - **Provenance for free**: every push and repack is a log entry; `walgit wal ls|show|materialize --at-seq`.
+- **A checkpoint trims the manifest, never the bucket**: it drops folded segments from `log_segments` (the
+  manifest stays tiny) while the objects live until `maintenance.retention_wal`, so a window below the listed
+  tail is read with **one `LIST log/`** (`log_reader.rs::segments_below`; the segment name carries its first
+  seq, so the listing bounds the candidates) and a segment retention already reclaimed is skipped, not fatal.
+  The un-folded tail keeps the LIST-free fast path.
 - **Never LIST on a hot path**; 404s are free; probe, don't list. Immutable objects get
   `Cache-Control: public, max-age=31536000, immutable` + strong ETag + Range everywhere (D10 static contract).
 
@@ -938,6 +943,12 @@ decision in §4 — or the PR is; never "fix later".
   `127.x` alias are names that can only mean this machine, RFC 6761 §6.3, and rmcp refused
   them unless `server.public_url` happened to name the port; a `Host` that is none of the above
   is a 403 that says which config key fixes it.)*
+  *(Amended 2026-11-02: `wal_ls` and the `walgit://wal` resource answer the window they were asked for —
+  `from`/`to` echo the request, `to` is a bound rather than a hint, `more` means "newer entries exist than
+  this window" (`to < head_seq`), and `folded_through` names the seq a checkpoint folded, so an empty page
+  says *why* it is empty (retention reclaimed those segment objects) instead of reporting a moving window
+  with `more: true` forever. Reproduced on `gqf2008/abb` (head 5748): every window answered `entries: []`
+  because the checkpoint sat at head; the fix is the `log_reader` fallback above.)*
   *(Amended 2026-11-01, D67 tightened: the agent guides present **git + `/mcp` only**. The
   `walgit collab …` forms lost their recipes in `web/SKILL.md` (identity is a seed plus
   `collab_register`, a card is a signed entry plus `collab_publish`, watching is

@@ -558,28 +558,8 @@ pub async fn read(
             })
         }
         Uri::Wal { from, .. } => {
-            let (entries, head_seq) = wal_page(&handle, *from).await?;
-            let first = entries
-                .first()
-                .and_then(|e| e.get("seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(*from);
-            let last = entries
-                .last()
-                .and_then(|e| e.get("seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(first);
-            json!({
-                "repo": format!("{owner}/{repo}"),
-                "head_seq": head_seq,
-                "from": first,
-                "to": last,
-                "entries": entries,
-                // Computed from the page actually returned, not from the
-                // requested `from`: `from = 0` means "the newest page", where
-                // there is by definition nothing newer to page to.
-                "more": head_seq > last,
-            })
+            let page = wal_page(&handle, *from, None).await?;
+            page.to_json(&format!("{owner}/{repo}"))
         }
         // The projection *is* the board body: one build serves the read, the
         // version and every subscriber's next tick (see [`projection`]).
@@ -619,23 +599,78 @@ fn meta(version: &str) -> MetaObject {
     MetaObject(map)
 }
 
-/// The WAL window from `from` (0 = the newest page), bounded by [`WAL_PAGE`].
+/// One window of the WAL: what was asked for, what exists, what came back.
+///
+/// The window is reported **as requested** (clamped to `head_seq`), never
+/// derived from the entries that happened to decode: an empty page must not
+/// look like a window that moved, and `more` answers "are there newer entries"
+/// — the same question a client pages with — not "did this page fill".
+pub struct WalPage {
+    pub repo: String,
+    pub from: u64,
+    pub to: u64,
+    pub head: u64,
+    pub more: bool,
+    pub folded_through: u64,
+    pub entries: Vec<Value>,
+}
+
+impl WalPage {
+    pub fn to_json(&self, repo: &str) -> Value {
+        json!({
+            "repo": if self.repo.is_empty() { repo } else { &self.repo },
+            "head_seq": self.head,
+            "from": self.from,
+            "to": self.to,
+            "entries": self.entries,
+            "more": self.more,
+            // Everything at or below this seq is folded into the checkpoint.
+            // The segments stay readable for `maintenance.retention_wal`, so
+            // this is a hint (an empty page can still be filled by an older
+            // build's data), never a refusal.
+            "folded_through": self.folded_through,
+        })
+    }
+}
+
+/// The WAL window `from..=to` (`from = 0` ⇒ the newest page; `to = None` ⇒
+/// `from + WAL_PAGE - 1`, or `head` for the newest page), bounded by
+/// [`WAL_PAGE`].
 pub async fn wal_page(
     handle: &Arc<walgit_wal::RepoHandle>,
     from: u64,
-) -> Result<(Vec<Value>, u64), ErrorData> {
+    to: Option<u64>,
+) -> Result<WalPage, ErrorData> {
     let head = handle.applied_seq();
-    let start = if from == 0 {
-        head.saturating_sub(WAL_PAGE - 1).max(1)
+    let (start, end) = if from == 0 {
+        let end = to.unwrap_or(head).min(head);
+        (end.saturating_sub(WAL_PAGE - 1).max(1), end)
     } else {
-        from
+        let end = to.unwrap_or_else(|| from.saturating_add(WAL_PAGE - 1));
+        (from, end.min(head))
     };
-    let end = start.saturating_add(WAL_PAGE - 1).min(head);
-    let entries = handle
-        .read_log(start, Some(end))
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("reading the WAL log: {e}"), None))?;
-    Ok((entries.iter().map(entry_json).collect(), head))
+    let entries = if start > end {
+        Vec::new()
+    } else {
+        handle
+            .read_log(start, Some(end))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("reading the WAL log: {e}"), None))?
+    };
+    let folded_through = handle
+        .manifest()
+        .checkpoint
+        .as_ref()
+        .map_or(0, |cp| cp.seq);
+    Ok(WalPage {
+        repo: String::new(),
+        from: start,
+        to: end,
+        head,
+        more: end < head,
+        folded_through,
+        entries: entries.iter().map(entry_json).collect(),
+    })
 }
 
 /// One `LogEntry` as JSON: what moved, who wrote it, and which pack/checkpoint

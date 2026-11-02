@@ -1151,3 +1151,76 @@ async fn wal_ls_honours_an_explicit_to_bound() -> Result<()> {
     assert_eq!(body["to"].as_u64(), Some(0), "{body}");
     Ok(())
 }
+
+/// A production report ("cards have no seq") traced back to this: once a
+/// checkpoint folds the log, `manifest.log_segments` no longer names the folded
+/// segments, and `wal_ls` answered `{entries: [], more: true}` in every window —
+/// so the WAL looked unreadable even though the segment objects were still in
+/// the bucket for `maintenance.retention_wal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wal_ls_reads_a_window_a_checkpoint_folded() -> Result<()> {
+    let server = Server::start().await?;
+    server.put_repo("t", "folded").await?;
+    push_repo(&server, "t", "folded", 3)?;
+
+    // Fold the whole log, exactly as the maintainer's checkpoint unit does.
+    let id = walgit_git::RepoId::new("t", "folded")?;
+    let handle = server
+        .state
+        .registry
+        .open(&id)
+        .await
+        .expect("repo handle");
+    let first = handle
+        .read_log(1, None)
+        .await
+        .expect("log before the fold");
+    let head = handle.manifest().head_seq;
+    let cp = handle.write_checkpoint().await?;
+    assert_eq!(cp.seq, head, "the checkpoint folds the whole log");
+    assert!(
+        handle
+            .manifest()
+            .log_segments
+            .iter()
+            .all(|s| s.first_seq > head),
+        "the fold trims the manifest's segment refs"
+    );
+
+    let sid = initialize(&server).await?;
+    let page = call(
+        &server,
+        &sid,
+        "tools/call",
+        json!({"name": "wal_ls", "arguments": {"repo": "t/folded", "from": 1}}),
+    )
+    .await?;
+    let body: Value = serde_json::from_str(page["content"][0]["text"].as_str().unwrap_or_default())?;
+    assert_eq!(body["folded_through"].as_u64(), Some(head), "{body}");
+    assert_eq!(
+        body["entries"].as_array().map(Vec::len),
+        Some(first.len()),
+        "a folded window is still served: {body}"
+    );
+    // The window is reported as asked for, and `more` is about newer entries.
+    assert_eq!(body["from"].as_u64(), Some(1), "{body}");
+    assert_eq!(body["head_seq"].as_u64(), Some(head), "{body}");
+    assert_eq!(body["more"], json!(false), "{body}");
+
+    // The resource lane is the same window: one definition, two surfaces.
+    let resource = call(
+        &server,
+        &sid,
+        "resources/read",
+        json!({"uri": "walgit://wal/t/folded?from=1"}),
+    )
+    .await?;
+    let text = resource["contents"][0]["text"].as_str().unwrap_or_default();
+    let body: Value = serde_json::from_str(text)?;
+    assert_eq!(
+        body["entries"].as_array().map(Vec::len),
+        Some(first.len()),
+        "the resource agrees with the tool: {body}"
+    );
+    Ok(())
+}

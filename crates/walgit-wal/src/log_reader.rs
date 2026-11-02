@@ -29,27 +29,35 @@ pub(crate) async fn read_log_impl(
         return Ok(Vec::new());
     }
 
-    // Find relevant segments
-    let segments: Vec<&walgit_proto::v1::LogSegmentRef> = manifest
+    // Fast path: the manifest lists the segments covering the window. A
+    // checkpoint folds everything at or below its seq and trims those refs out
+    // of `manifest.log_segments` (the manifest stays tiny), while the segment
+    // objects themselves stay in the bucket for `maintenance.retention_wal`.
+    // So for a window below the listed tail the refs are simply not there any
+    // more — the objects are. Reading them needs one listing of `log/`.
+    let mut keys: Vec<String> = manifest
         .log_segments
         .iter()
         .filter(|s| s.last_seq >= from_seq && s.first_seq <= to)
+        .map(|s| s.key.clone())
         .collect();
+    let listed_from = manifest.log_segments.iter().map(|s| s.first_seq).min();
+    let covered = listed_from.is_some_and(|first| first <= from_seq);
+    if !covered {
+        // Below the listed tail (or nothing listed at all): probe the prefix.
+        // One LIST, only for a window the manifest cannot answer — the hot
+        // path (the un-folded tail) never pays for this.
+        keys.extend(segments_below(handle, to).await?);
+        keys.sort();
+        keys.dedup();
+    }
 
     let mut entries = Vec::new();
-    for seg in &segments {
-        let res = handle.store.get(&seg.key, GetOptions::default()).await?;
-        let bytes = match res {
-            GetResult::Object { meta, body } => {
-                let size = usize::try_from(meta.size).map_err(|_| {
-                    WalError::Corrupt(format!(
-                        "log segment {} size {} does not fit usize",
-                        seg.key, meta.size
-                    ))
-                })?;
-                walgit_store::util::collect(body, size).await?
-            }
-            GetResult::NotModified { .. } => continue,
+    for key in &keys {
+        let Some(bytes) = read_segment(handle, key).await? else {
+            // Reclaimed by retention (or an orphan a CAS loser left): the ref
+            // is gone or the object was never ours to read.
+            continue;
         };
 
         let (seg_entries, _) = walgit_proto::frame::decode_entries(&bytes)
@@ -64,6 +72,61 @@ pub(crate) async fn read_log_impl(
 
     entries.sort_by_key(|e| e.seq);
     Ok(entries)
+}
+
+/// Segment keys the bucket holds under `log/` whose first frame is at or below
+/// `to` — i.e. the ones a folded window can still be read from.
+///
+/// `log/<first_seq>.pb`: the name carries the segment's first seq, so the
+/// window bounds the candidate set without a GET per key.
+async fn segments_below(handle: &RepoHandle, to: u64) -> Result<Vec<String>, WalError> {
+    use futures::StreamExt;
+
+    let mut keys = Vec::new();
+    let mut stream = handle.store.list_keys(walgit_proto::keys::LOG_DIR, None);
+    while let Some(key) = stream.next().await {
+        let key = key?;
+        let Some(name) = key.strip_prefix(walgit_proto::keys::LOG_DIR) else {
+            continue;
+        };
+        let Some(seq_hex) = name.strip_suffix(".pb") else {
+            continue;
+        };
+        let Ok(first_seq) = u64::from_str_radix(seq_hex, 16) else {
+            continue;
+        };
+        // A segment that starts after `to` cannot hold anything in the window;
+        // every other one might (a segment holds many entries, so its start
+        // says nothing about its end). Being generous here costs one GET, and
+        // the entry filter below decides.
+        if first_seq <= to {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// One segment's frames; `None` when the object is gone (retention) or is not
+/// readable as a log segment.
+async fn read_segment(handle: &RepoHandle, key: &str) -> Result<Option<bytes::Bytes>, WalError> {
+    let res = match handle.store.get(key, GetOptions::default()).await {
+        Ok(res) => res,
+        Err(e) if e.is_not_found() => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let bytes = match res {
+        GetResult::Object { meta, body } => {
+            let size = usize::try_from(meta.size).map_err(|_| {
+                WalError::Corrupt(format!(
+                    "log segment {key} size {} does not fit usize",
+                    meta.size
+                ))
+            })?;
+            walgit_store::util::collect(body, size).await?
+        }
+        GetResult::NotModified { .. } => return Ok(None),
+    };
+    Ok(Some(bytes))
 }
 
 /// Ref state **as of** `at`: the newest checkpoint snapshot whose seq is at

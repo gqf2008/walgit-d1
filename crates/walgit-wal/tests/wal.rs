@@ -4299,3 +4299,69 @@ min_commits = 3
     link.heal();
     assert_eq!(handle.read_log(1, None).await.unwrap().len(), 4);
 }
+
+/// A checkpoint folds the log into the ref snapshot and trims
+/// `manifest.log_segments` — but the segment objects stay in the bucket for
+/// `maintenance.retention_wal`, so provenance (`walgit wal ls`, the
+/// `walgit://wal/…` resource, `walgit wal materialize`) must still read them.
+///
+/// Regression: after the first checkpoint every window below the fold came back
+/// empty (`entries: []`, `more: true`) for repos whose checkpoint sat at head —
+/// reported as "cards have no seq" against a production deployment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folded_window_is_still_readable_until_retention() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let registry = Registry::new(store.clone(), Arc::new(make_config(cache.path(), 0)));
+    let id = repo_id("test", "foldedlog");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let work = WorkRepo::new();
+    let mut prev = String::new();
+    for i in 0..3 {
+        let c = work.commit(&format!("c{i}"), &format!("d{i}"));
+        let pack = if prev.is_empty() {
+            work.create_pack()
+        } else {
+            work.create_incremental_pack(&c, &prev)
+        };
+        let ingested = ingest_pack_data(&handle, pack).await.unwrap();
+        handle
+            .publish_push(
+                Some(ingested),
+                make_txn(vec![("refs/heads/main", &prev, &c)]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        prev = c;
+    }
+    let head = handle.manifest().head_seq;
+    assert!(head >= 3, "three pushes, three log entries: head={head}");
+    let before = handle.read_log(1, Some(head)).await.unwrap();
+    assert_eq!(before.len() as u64, head, "every entry is listed before a fold");
+
+    // Fold: the manifest stops naming the segments, the objects remain.
+    let cp = handle.write_checkpoint().await.unwrap();
+    assert_eq!(cp.seq, head, "the checkpoint folds the whole log");
+    let manifest = handle.manifest();
+    assert!(
+        manifest.log_segments.iter().all(|s| s.first_seq > head),
+        "the trimmed manifest names no folded segment: {:?}",
+        manifest.log_segments
+    );
+
+    // The reader must fall back to the bucket, not to the (now empty) listing.
+    let after = handle.read_log(1, Some(head)).await.unwrap();
+    assert_eq!(
+        after.len() as u64,
+        head,
+        "a folded window is still readable: {:?}",
+        after.iter().map(|e| e.seq).collect::<Vec<_>>()
+    );
+    // A narrower window, and one that only touches the tail, still agree.
+    let window = handle.read_log(2, Some(2)).await.unwrap();
+    assert_eq!(window.len(), 1);
+    assert_eq!(window[0].seq, 2);
+    // Beyond `head` there is nothing, and asking must not resurrect entries.
+    assert!(handle.read_log(head + 5, None).await.unwrap().is_empty());
+}
