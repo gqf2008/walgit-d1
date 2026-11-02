@@ -181,6 +181,20 @@ public key: 6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=
 signature:  VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ==
 ```
 
+**What goes into the signed bytes: public facts only** — `actor`, `id`, `kind`, `ts`, `parent`, `refs`,
+`body`. Never a credential, and not a hash of one: an entry is a git object in an append-only log, in a
+repository anonymous readers can clone, and the fold keeps its signed bytes forever — so a secret put
+there is published, and a verifier would need a secret that rotates, which destroys the offline
+verification the signature exists for. Replay needs no defence either: the oid *is* the hash of the
+bytes, so publishing the same signed entry twice is one object counted once, and a `card_claim` goes
+stale by its own signed `ts` + `ttl`. Authorization is decided at write time (`actor == caller`);
+authorship is the signature.
+
+Any Ed25519 signer will do — `openssl pkeyutl -sign -rawin` (OpenSSL ≥ 3.0) reproduces the golden
+signature above byte for byte. A `--key` seed file is the raw 32-byte seed as 64 hex characters
+(`<git-dir>/walgit/keys/<principal>.ed25519`); a PEM is converted by decoding its PKCS#8 DER and
+keeping the last 32 bytes.
+
 Sign one and publish it with MCP `collab_publish` (`{"repo": "<owner>/<repo>", "entry": {...}}`), or
 `git push` it to `refs/collab/inbox/<your-principal>/<uuid>`. Both end at the same entry oid; the host
 refuses an `actor` that is not the principal your credential authenticates as, and an entry whose
