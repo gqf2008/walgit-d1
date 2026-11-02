@@ -202,11 +202,20 @@ async fn a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token
         }];
     })
     .await?;
-    let client = reqwest::Client::new();
+    // The loopback-host canonicalisation (a browser on 127.0.0.1 is redirected to
+    // `walgit.localhost`) would make this test depend on the OS resolver — Windows
+    // does not know `*.localhost`. Connect to the bound address, name the canonical
+    // host, and never follow a redirect.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let port = server.base_url.rsplit(':').next().unwrap_or_default().to_string();
+    let host = format!("walgit.localhost:{port}");
     let nav = |path: &str| {
         client
             .get(format!("{}{path}", server.base_url))
             .header("Accept", "text/html,application/xhtml+xml")
+            .header("Host", host.clone())
             .send()
     };
 
@@ -222,6 +231,7 @@ async fn a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token
         let status = client
             .get(format!("{}{asset}", server.base_url))
             .header("Accept", "*/*")
+            .header("Host", host.clone())
             .send()
             .await?
             .status();
@@ -249,6 +259,7 @@ async fn a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token
     // And the token the prompt collects works.
     let with_token = client
         .get(format!("{}/api/v1/me", server.base_url))
+        .header("Host", host.clone())
         .header("Authorization", "Bearer boss-token")
         .send()
         .await?;
