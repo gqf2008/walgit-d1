@@ -126,8 +126,25 @@ impl<'a> Call<'a> {
             .clone()
     }
 
+    /// The HTTP lane of the JSON API is `/{owner}/{repo}/api-browser/…` (D68:
+    /// the `/{owner}/{repo}/api` lane is not served to anyone any more). Tools
+    /// are written in the obvious `/{owner}/{repo}/api/…` form — the repository
+    /// API's own grammar — and this is the one place that decides which lane
+    /// carries them.
+    fn lane(path: &str) -> String {
+        let mut segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if let Some(lane) = segs.get_mut(2)
+            && *lane == "api"
+        {
+            *lane = "api-browser";
+            return format!("/{}", segs.join("/"));
+        }
+        path.to_string()
+    }
+
     async fn send(&self, method: Method, path: &str) -> Result<(StatusCode, Vec<u8>), ApiError> {
-        let mut builder = Request::builder().method(method).uri(path);
+        let path = Self::lane(path);
+        let mut builder = Request::builder().method(method).uri(&path);
         for (name, value) in &self.headers {
             builder = builder.header(name, value);
         }
@@ -182,9 +199,10 @@ impl<'a> Call<'a> {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: format!("encoding the inner request body failed: {e}"),
         })?;
+        let path = Self::lane(path);
         let mut builder = Request::builder()
             .method(Method::POST)
-            .uri(path)
+            .uri(&path)
             .header(header::CONTENT_TYPE, "application/json");
         for (name, value) in &self.headers {
             builder = builder.header(name, value);

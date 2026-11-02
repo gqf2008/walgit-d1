@@ -77,7 +77,7 @@ async fn merge_base_budget_503() -> TestResult {
     // and no other test in it reads this variable.
     unsafe { std::env::set_var("WALGIT_TEST_MERGE_BASE_BUDGET", "1") };
     let (_big, small) = remote_sibling().await?;
-    expect_503(&small, "/o/r/api/merge-base?from=main&to=topic").await
+    expect_503(&small, "/o/r/api-browser/merge-base?from=main&to=topic").await
 }
 
 #[allow(unsafe_code)] // SAFETY: the set_var below is the process-scoped knob this test controls.
@@ -88,7 +88,7 @@ async fn diff_budget_503() -> TestResult {
     let (_big, small) = remote_sibling().await?;
     expect_503(
         &small,
-        "/o/r/api/diff?from=main&to=topic&format=name-status",
+        "/o/r/api-browser/diff?from=main&to=topic&format=name-status",
     )
     .await
 }
@@ -99,7 +99,7 @@ async fn blame_budget_503() -> TestResult {
     // SAFETY: see merge_base_budget_503.
     unsafe { std::env::set_var("WALGIT_TEST_BLAME_BUDGET", "1") };
     let (_big, small) = remote_sibling().await?;
-    expect_503(&small, "/o/r/api/blame/main/f.txt").await
+    expect_503(&small, "/o/r/api-browser/blame/main/f.txt").await
 }
 
 #[allow(unsafe_code)] // SAFETY: the set_var below is the process-scoped knob this test controls.
@@ -108,5 +108,5 @@ async fn archive_budget_503() -> TestResult {
     // SAFETY: see merge_base_budget_503.
     unsafe { std::env::set_var("WALGIT_TEST_ARCHIVE_BUDGET", "1") };
     let (_big, small) = remote_sibling().await?;
-    expect_503(&small, "/o/r/api/archive/main").await
+    expect_503(&small, "/o/r/api-browser/archive/main").await
 }

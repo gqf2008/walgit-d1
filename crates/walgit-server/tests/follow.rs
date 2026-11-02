@@ -112,7 +112,7 @@ async fn follows_upstream_refs_through_the_wal_fast_forward_only() -> anyhow::Re
         entries[0].pack.is_some(),
         "the delta travels as a pack in the entry"
     );
-    let tasks = step!("tasks", fo.get_text("/o/r/api/tasks", &[]))?;
+    let tasks = step!("tasks", fo.get_text("/o/r/api-browser/tasks", &[]))?;
     assert!(tasks.contains("\"follow\""), "{tasks}");
 
     // Round 2: nothing moved — no entry, no task.
@@ -121,7 +121,7 @@ async fn follows_upstream_refs_through_the_wal_fast_forward_only() -> anyhow::Re
     assert_eq!(h.manifest().head_seq, 1);
     assert_eq!(
         tasks.matches("\"follow\"").count(),
-        step!("tasks again", fo.get_text("/o/r/api/tasks", &[]))?
+        step!("tasks again", fo.get_text("/o/r/api-browser/tasks", &[]))?
             .matches("\"follow\"")
             .count()
     );
@@ -161,7 +161,7 @@ async fn follows_upstream_refs_through_the_wal_fast_forward_only() -> anyhow::Re
     // The Settings tab sees the configuration and this instance's last round.
     let d: serde_json::Value = serde_json::from_str(&step!(
         "describe",
-        fo.get_text("/o/r/api/settings/describe", &[])
+        fo.get_text("/o/r/api-browser/settings/describe", &[])
     )?)?;
     assert_eq!(d["upstream"]["git"], serde_json::json!(up_url));
     assert_eq!(

@@ -3,7 +3,7 @@ import { dirOf, normalizePath, resolveMarkdownTarget, type BlobUrls } from "./ma
 
 // Same shapes the SDK produces (`client.repo(full).urls`).
 const urls: BlobUrls = {
-  raw: (rev, path) => `/gqf2008/ventures/api/blob/${rev}/${path}?raw`,
+  raw: (rev, path) => `/gqf2008/ventures/api-browser/blob/${rev}/${path}?raw`,
   tree: (rev, path = "") => `/gqf2008/ventures/tree/${rev}${path ? "/" + path : ""}`,
   blob: (rev, path) => `/gqf2008/ventures/blob/${rev}/${path}`,
 };
@@ -40,7 +40,7 @@ describe("resolveMarkdownTarget", () => {
 
   it("sends relative images to the raw endpoint", () => {
     expect(resolveMarkdownTarget("pics/a.png", base, "image")).toBe(
-      "/gqf2008/ventures/api/blob/main/content/pics/a.png?raw",
+      "/gqf2008/ventures/api-browser/blob/main/content/pics/a.png?raw",
     );
   });
 
@@ -72,7 +72,7 @@ describe("resolveMarkdownTarget", () => {
     // `urls.raw` already ends in `?raw`; `?raw?size=1` would make the server read
     // a key called `raw?size` and hand back JSON instead of bytes.
     expect(resolveMarkdownTarget("pics/a.png?size=1#frag", base, "image")).toBe(
-      "/gqf2008/ventures/api/blob/main/content/pics/a.png?raw&size=1#frag",
+      "/gqf2008/ventures/api-browser/blob/main/content/pics/a.png?raw&size=1#frag",
     );
   });
 

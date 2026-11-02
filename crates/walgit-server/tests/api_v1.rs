@@ -136,7 +136,7 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     );
 
     // repo summary: SWR + ETag on head
-    let (st, text, hdrs) = req(&server, reqwest::Method::GET, "/o/r/api", &[]).await?;
+    let (st, text, hdrs) = req(&server, reqwest::Method::GET, "/o/r/api-browser", &[]).await?;
     assert_eq!(st, 200, "{text}");
     let ov: Value = serde_json::from_str(&text)?;
     assert_eq!(ov["full_name"], "o/r");
@@ -145,36 +145,36 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     assert_eq!(ov["branches"], 2);
     assert_eq!(ov["tags"], 1);
     assert!(ov["clone_url"].as_str().unwrap().ends_with("/o/r.git"));
-    assert!(ov["api_url"].as_str().unwrap().ends_with("/o/r/api"));
+    assert!(ov["api_url"].as_str().unwrap().ends_with("/o/r/api-browser"));
     assert_eq!(hdr(&hdrs, "etag"), format!("\"{head}\""));
     assert!(hdr(&hdrs, "cache-control").contains("stale-while-revalidate"));
     let (st, _, _) = req(
         &server,
         reqwest::Method::GET,
-        "/o/r/api",
+        "/o/r/api-browser",
         &[("If-None-Match", &format!("\"{head}\""))],
     )
     .await?;
     assert_eq!(st, 304);
     assert_eq!(
-        req(&server, reqwest::Method::GET, "/o/nope/api", &[])
+        req(&server, reqwest::Method::GET, "/o/nope/api-browser", &[])
             .await?
             .0,
         404
     );
 
-    // the repo-scoped read endpoints are the same handlers as /{o}/{r}/api/…
-    let refs = json(&server, "/o/r/api/refs").await?;
+    // the repo-scoped read endpoints are the same handlers as /{o}/{r}/api-browser/…
+    let refs = json(&server, "/o/r/api-browser/refs").await?;
     assert_eq!(refs["head"]["sha"], head);
-    let res = json(&server, "/o/r/api/resolve/feature/x").await?;
+    let res = json(&server, "/o/r/api-browser/resolve/feature/x").await?;
     assert_eq!(res["kind"], "branch");
-    let tree = json(&server, &format!("/o/r/api/tree/{head}")).await?;
+    let tree = json(&server, &format!("/o/r/api-browser/tree/{head}")).await?;
     assert_eq!(tree["entries"][0]["name"], "README.md");
-    let blob = json(&server, &format!("/o/r/api/blob/{head}/README.md")).await?;
+    let blob = json(&server, &format!("/o/r/api-browser/blob/{head}/README.md")).await?;
     assert_eq!(blob["contents"], "# v1\n");
-    let clist = json(&server, &format!("/o/r/api/commits?ref={head}")).await?;
+    let clist = json(&server, &format!("/o/r/api-browser/commits?ref={head}")).await?;
     assert_eq!(clist["commits"][0]["subject"], "initial");
-    let cmt = json(&server, &format!("/o/r/api/commit/{head}")).await?;
+    let cmt = json(&server, &format!("/o/r/api-browser/commit/{head}")).await?;
     assert_eq!(cmt["commit"]["sha"], head);
     // Trailers split off the body (git interpret-trailers rules); body keeps the prose + URL.
     assert_eq!(
@@ -187,11 +187,11 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     );
     assert_eq!(cmt["commit"]["trailers"][1]["value"], "7");
     assert_eq!(cmt["commit"]["trailers"].as_array().unwrap().len(), 3);
-    let tags = json(&server, "/o/r/api/refs/tags").await?;
+    let tags = json(&server, "/o/r/api-browser/refs/tags").await?;
     assert_eq!(tags["refs"][0]["name"], "v1");
-    let tasks = json(&server, "/o/r/api/tasks").await?;
+    let tasks = json(&server, "/o/r/api-browser/tasks").await?;
     assert!(tasks["running"].is_array());
-    let (st, _, _) = req(&server, reqwest::Method::GET, "/o/r/api/overview", &[]).await?;
+    let (st, _, _) = req(&server, reqwest::Method::GET, "/o/r/api-browser/overview", &[]).await?;
     assert_eq!(st, 200);
 
     // browser lane: /{o}/{r}/api-browser/… is the same surface (query preserved)
@@ -210,7 +210,7 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     let (st, _, hdrs) = req(
         &server,
         reqwest::Method::GET,
-        "/o/r/api/refs",
+        "/o/r/api-browser/refs",
         &[("Origin", "https://wiki.docs.example.com")],
     )
     .await?;
@@ -229,7 +229,7 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     let (st, _, hdrs) = req(
         &server,
         reqwest::Method::GET,
-        "/o/r/api/refs",
+        "/o/r/api-browser/refs",
         &[("Origin", "https://evil.example")],
     )
     .await?;
@@ -257,7 +257,7 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     let (st, _, _) = req(
         &server,
         reqwest::Method::DELETE,
-        "/o/r/api/policy",
+        "/o/r/api-browser/policy",
         &[("Origin", "https://evil.example")],
     )
     .await?;
@@ -299,15 +299,15 @@ async fn v1_surface_and_browser_lane() -> TestResult {
     }
 
     // policy + repo admin under the repo prefix
-    let (st, _, _) = req(&server, reqwest::Method::GET, "/o/r/api/policy", &[]).await?;
+    let (st, _, _) = req(&server, reqwest::Method::GET, "/o/r/api-browser/policy", &[]).await?;
     assert_eq!(st, 200);
-    let (st, _, _) = req(&server, reqwest::Method::PUT, "/o/new/api", &[]).await?;
+    let (st, _, _) = req(&server, reqwest::Method::PUT, "/o/new/api-browser", &[]).await?;
     assert!(st.is_success(), "{st}");
     assert_eq!(
         json(&server, "/api/v1/owners/o/repos").await?,
         serde_json::json!(["new", "r"])
     );
-    let (st, _, _) = req(&server, reqwest::Method::DELETE, "/o/new/api", &[]).await?;
+    let (st, _, _) = req(&server, reqwest::Method::DELETE, "/o/new/api-browser", &[]).await?;
     assert!(st.is_success(), "{st}");
     assert_eq!(
         json(&server, "/api/v1/owners/o/repos").await?,
@@ -386,14 +386,14 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     let client = reqwest::Client::new();
     // create via the prefix form
     assert_eq!(
-        client.put(format!("{}/t/pfx/api", server.base_url))
+        client.put(format!("{}/t/pfx/api-browser", server.base_url))
             .send()
             .await?
             .status(),
         201
     );
     let repo_api: serde_json::Value = client
-        .get(format!("{}/t/pfx/api", server.base_url))
+        .get(format!("{}/t/pfx/api-browser", server.base_url))
         .send()
         .await?
         .json()
@@ -409,7 +409,7 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     // settings + policy through the prefix form
     let resp = client
         .put(format!(
-            "{}/t/pfx/api/settings?message=via+prefix",
+            "{}/t/pfx/api-browser/settings?message=via+prefix",
             server.base_url
         ))
         .body("[bundles]\nmin_commits = 7\n")
@@ -425,21 +425,21 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     assert_eq!(settings["revision"], 1);
     assert_eq!(settings["message"], "via prefix");
     let describe: serde_json::Value = client
-        .get(format!("{}/t/pfx/api/settings/describe", server.base_url))
+        .get(format!("{}/t/pfx/api-browser/settings/describe", server.base_url))
         .send()
         .await?
         .json()
         .await?;
     assert_eq!(describe["bundles"]["min_commits"], 7);
     let policy: serde_json::Value = client
-        .get(format!("{}/t/pfx/api/policy", server.base_url))
+        .get(format!("{}/t/pfx/api-browser/policy", server.base_url))
         .send()
         .await?
         .json()
         .await?;
     assert!(policy.is_object());
     let validation: serde_json::Value = client
-        .post(format!("{}/t/pfx/api/policy/validate", server.base_url))
+        .post(format!("{}/t/pfx/api-browser/policy/validate", server.base_url))
         .body("{}")
         .send()
         .await?
@@ -448,7 +448,7 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     assert_eq!(validation["ok"], true);
     // refs etc. (already D15)
     assert_eq!(
-        client.get(format!("{}/t/pfx/api/refs", server.base_url))
+        client.get(format!("{}/t/pfx/api-browser/refs", server.base_url))
             .send()
             .await?
             .status(),
@@ -456,14 +456,14 @@ async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     );
     // delete via the prefix form
     assert_eq!(
-        client.delete(format!("{}/t/pfx/api", server.base_url))
+        client.delete(format!("{}/t/pfx/api-browser", server.base_url))
             .send()
             .await?
             .status(),
         204
     );
     assert_eq!(
-        client.get(format!("{}/t/pfx/api", server.base_url))
+        client.get(format!("{}/t/pfx/api-browser", server.base_url))
             .send()
             .await?
             .status(),
@@ -500,7 +500,7 @@ async fn repository_delete_requires_admin() -> TestResult {
     let admin = [("Authorization", "Bearer admin-token")];
 
     assert_eq!(
-        req(&server, reqwest::Method::PUT, "/secure/delete/api", &writer,)
+        req(&server, reqwest::Method::PUT, "/secure/delete/api-browser", &writer,)
             .await?
             .0,
         201,
@@ -509,7 +509,7 @@ async fn repository_delete_requires_admin() -> TestResult {
 
     for path in [
         "/secure/delete",
-        "/secure/delete/api",
+        "/secure/delete/api-browser",
         "/secure/delete/api-browser",
     ] {
         assert_eq!(
@@ -521,7 +521,7 @@ async fn repository_delete_requires_admin() -> TestResult {
         );
     }
     assert_eq!(
-        req(&server, reqwest::Method::GET, "/secure/delete/api", &writer,)
+        req(&server, reqwest::Method::GET, "/secure/delete/api-browser", &writer,)
             .await?
             .0,
         200,
@@ -532,7 +532,7 @@ async fn repository_delete_requires_admin() -> TestResult {
         req(
             &server,
             reqwest::Method::DELETE,
-            "/secure/delete/api",
+            "/secure/delete/api-browser",
             &admin,
         )
         .await?
@@ -540,7 +540,7 @@ async fn repository_delete_requires_admin() -> TestResult {
         204
     );
     assert_eq!(
-        req(&server, reqwest::Method::GET, "/secure/delete/api", &admin,)
+        req(&server, reqwest::Method::GET, "/secure/delete/api-browser", &admin,)
             .await?
             .0,
         404

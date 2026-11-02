@@ -334,6 +334,11 @@ the control plane — `ci_status`, and `ci_claim`/`ci_result` entries through
 save flags for a script or a CI job, and each one either signs or pushes, i.e.
 acts over git, not over a private API.
 
+**`collab`, `ci` and `principal` are hidden and refuse by default** (D68): they
+do not appear in `--help`, and running one prints where the MCP replacement is
+instead of doing the work. That is the same code behind a closed door — open it
+per invocation for a script or an emergency with `WALGIT_LOCAL_COMMANDS=1`.
+
 **WAL & maintenance** — `walgit wal head|ls|show|materialize --at-seq` (the
 log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,
 `walgit wal rev-index`; `walgit compact [REPO] [--base]`;

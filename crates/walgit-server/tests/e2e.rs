@@ -834,7 +834,7 @@ async fn bundle_uri_clone_fetches_server_bundle() -> TestResult {
     let bundle_list = format!("{}/t/bundled/bundles/list", server.base_url);
     let list_text = reqwest::get(&bundle_list).await?.text().await?;
     let overview: serde_json::Value =
-        reqwest::get(format!("{}/t/bundled/api/overview", server.base_url))
+        reqwest::get(format!("{}/t/bundled/api-browser/overview", server.base_url))
             .await?
             .json()
             .await?;
@@ -1058,11 +1058,11 @@ async fn huge_repo_front_serves_refs_and_bundles_without_packs() -> TestResult {
     let list = reqwest::get(format!("{}/t/huge/bundles/list", small.base_url)).await?;
     assert_eq!(list.status(), 200);
     assert!(list.text().await?.contains("version = 1"));
-    let refs = reqwest::get(format!("{}/t/huge/api/refs", small.base_url)).await?;
+    let refs = reqwest::get(format!("{}/t/huge/api-browser/refs", small.base_url)).await?;
     assert_eq!(refs.status(), 200);
     let refs: serde_json::Value = refs.json().await?;
     assert_eq!(refs["head"]["sha"], head);
-    let resolved = reqwest::get(format!("{}/t/huge/api/resolve/main", small.base_url)).await?;
+    let resolved = reqwest::get(format!("{}/t/huge/api-browser/resolve/main", small.base_url)).await?;
     assert_eq!(resolved.status(), 200);
 
     // Object work is refused with the bundle-uri hint, not a crash/OOM.
@@ -1997,7 +1997,7 @@ async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
         let t = std::time::Instant::now();
         let refs = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            small.get_text("/t/other/api/refs", &[]),
+            small.get_text("/t/other/api-browser/refs", &[]),
         )
         .await;
         let ms = t.elapsed().as_millis();
@@ -2096,7 +2096,7 @@ async fn blocking_work_in_the_install_path_does_not_stall_requests() -> TestResu
         let t = std::time::Instant::now();
         let r = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            small.get_text("/t/other2/api/refs", &[]),
+            small.get_text("/t/other2/api-browser/refs", &[]),
         )
         .await;
         assert!(r.is_ok(), "refs timed out while the install path blocked");
@@ -2211,7 +2211,7 @@ async fn repo_settings_api_roundtrip() -> TestResult {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let url = |srv: &Server, sub: &str| format!("{}/t/cfg/api/settings{sub}", srv.base_url);
+    let url = |srv: &Server, sub: &str| format!("{}/t/cfg/api-browser/settings{sub}", srv.base_url);
 
     // Invalid: forbidden section → 400 with the reason, nothing published.
     let resp = client
@@ -2297,7 +2297,7 @@ async fn settings_describe_validate_and_policy_dry_run() -> TestResult {
     git_in(&src, &["remote", "add", "origin", &server.repo_url("t", "tab")])?;
     git_in(&src, &["push", "-q", "origin", "main"])?;
     git_in(&src, &["push", "-q", "origin", "main:refs/heads/feature"])?;
-    let base = format!("{}/t/tab/api", server.base_url);
+    let base = format!("{}/t/tab/api-browser", server.base_url);
 
     let describe: serde_json::Value = client
         .get(format!("{base}/settings/describe"))
@@ -2887,7 +2887,7 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
         ("/services/public/skill/", 404),
         ("/services/install.sh", 401), // the old path: not an alias, not open
         ("/services/setup.json", 401),
-        ("/t/r/api/refs", 401),
+        ("/t/r/api-browser/refs", 401),
         ("/t/r.git/info/refs?service=git-upload-pack", 401),
         ("/repos.js", 200), // data-free SDK asset stays where it is
     ] {

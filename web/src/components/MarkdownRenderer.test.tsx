@@ -69,7 +69,7 @@ describe("MarkdownRenderer (untrusted entry prose — XSS boundary)", () => {
   // The ventures bug: markdown links are relative to the *file*, not the page.
   it("resolves relative links and images against the given base", () => {
     const urls = {
-      raw: (rev: string, path: string) => `/r/api/blob/${rev}/${path}?raw`,
+      raw: (rev: string, path: string) => `/r/api-browser/blob/${rev}/${path}?raw`,
       tree: (rev: string, path = "") => `/r/tree/${rev}${path ? "/" + path : ""}`,
       blob: (rev: string, path: string) => `/r/blob/${rev}/${path}`,
     };
@@ -83,7 +83,7 @@ describe("MarkdownRenderer (untrusted entry prose — XSS boundary)", () => {
       "/r/blob/main/content/vdev-driver-ip/README.md",
     );
     expect(container.querySelector("img")?.getAttribute("src")).toBe(
-      "/r/api/blob/main/content/pics/a.png?raw",
+      "/r/api-browser/blob/main/content/pics/a.png?raw",
     );
   });
 
@@ -91,7 +91,7 @@ describe("MarkdownRenderer (untrusted entry prose — XSS boundary)", () => {
   // filter has to hold with a `base` too — blob markdown is untrusted input.
   it("still neutralises unsafe URLs when a base is set", () => {
     const urls = {
-      raw: (rev: string, path: string) => `/r/api/blob/${rev}/${path}?raw`,
+      raw: (rev: string, path: string) => `/r/api-browser/blob/${rev}/${path}?raw`,
       tree: (rev: string, path = "") => `/r/tree/${rev}${path ? "/" + path : ""}`,
       blob: (rev: string, path: string) => `/r/blob/${rev}/${path}`,
     };

@@ -151,7 +151,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     let url = |p: &str| format!("{}{p}", server.base_url);
 
     // Bytes reach the client, with the type the viewer needs.
-    let r = c.get(url("/o/r/api/blob/main/bin.dat?raw")).send().await?;
+    let r = c.get(url("/o/r/api-browser/blob/main/bin.dat?raw")).send().await?;
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["content-type"], "application/octet-stream");
     assert_eq!(r.headers()["x-content-type-options"], "nosniff");
@@ -164,7 +164,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     // A single range is what `<video>`/`<audio>` seek with, and what a PDF uses
     // to load partially. "bytes 0-5/15" for a 15-byte README.
     let r = c
-        .get(url("/o/r/api/blob/main/README.md?raw"))
+        .get(url("/o/r/api-browser/blob/main/README.md?raw"))
         .header("range", "bytes=0-5")
         .send()
         .await?;
@@ -174,7 +174,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     assert_eq!(r.text().await?, "# Titl");
 
     // Repository HTML must never run on the app's origin.
-    let r = c.get(url("/o/r/api/blob/main/page.html?raw")).send().await?;
+    let r = c.get(url("/o/r/api-browser/blob/main/page.html?raw")).send().await?;
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
     let csp = r.headers()["content-security-policy"].to_str()?;
@@ -186,7 +186,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
 
     // The JSON lane is unchanged: the viewer still learns it is binary.
     let v: Value = c
-        .get(url("/o/r/api/blob/main/bin.dat"))
+        .get(url("/o/r/api-browser/blob/main/bin.dat"))
         .send()
         .await?
         .json()
@@ -196,7 +196,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
 
     // The JSON lane's 2 MiB cap must not leak into the byte channel: `big.txt`
     // is 2 MiB + 1, which the JSON lane refuses and `?raw` must still serve.
-    let r = c.get(url("/o/r/api/blob/main/big.txt?raw")).send().await?;
+    let r = c.get(url("/o/r/api-browser/blob/main/big.txt?raw")).send().await?;
     assert_eq!(r.status(), 200, "the raw cap is its own budget");
     assert_eq!(r.bytes().await?.len(), 2 * 1024 * 1024 + 1);
 
@@ -206,7 +206,7 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     // this fails if the byte channel is ever compressed — a 7-byte body would
     // pass regardless.
     let r = c
-        .get(url("/o/r/api/blob/main/big.txt?raw"))
+        .get(url("/o/r/api-browser/blob/main/big.txt?raw"))
         .header("accept-encoding", "gzip, br")
         .send()
         .await?;
@@ -219,11 +219,11 @@ async fn raw_serves_bytes_types_ranges_and_inert_html() -> TestResult {
     assert_eq!(r.bytes().await?.len(), 2 * 1024 * 1024 + 1);
 
     // A strong validator, and revalidation is a 304.
-    let r = c.get(url("/o/r/api/blob/main/README.md?raw")).send().await?;
+    let r = c.get(url("/o/r/api-browser/blob/main/README.md?raw")).send().await?;
     let etag = r.headers()["etag"].to_str()?.to_string();
     assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
     let r = c
-        .get(url("/o/r/api/blob/main/README.md?raw"))
+        .get(url("/o/r/api-browser/blob/main/README.md?raw"))
         .header("if-none-match", etag)
         .send()
         .await?;
@@ -251,7 +251,7 @@ async fn conformance(
     );
 
     // refs: O(1) head only, ETag + 304
-    let (st, text, hdrs) = get_h(server, "/o/r/api/refs", &[]).await?;
+    let (st, text, hdrs) = get_h(server, "/o/r/api-browser/refs", &[]).await?;
     assert_eq!(st, 200);
     let refs: Value = serde_json::from_str(&text)?;
     assert_eq!(refs["head"]["name"], "main");
@@ -259,30 +259,30 @@ async fn conformance(
     let etag = hdr(&hdrs, "etag");
     assert_eq!(etag, format!("\"{head}\""));
     assert!(hdr(&hdrs, "cache-control").contains("stale-while-revalidate"));
-    let (st, _, _) = get_h(server, "/o/r/api/refs", &[("If-None-Match", &etag)]).await?;
+    let (st, _, _) = get_h(server, "/o/r/api-browser/refs", &[("If-None-Match", &etag)]).await?;
     assert_eq!(st, 304);
     // ref lists: paged, sorted, filtered
-    let pg = json(server, "/o/r/api/refs/branches?n=1").await?;
+    let pg = json(server, "/o/r/api-browser/refs/branches?n=1").await?;
     assert_eq!(pg["refs"][0]["name"], "feature/x");
     assert_eq!(pg["more"], true);
-    let pg = json(server, "/o/r/api/refs/branches?after=feature/x&n=5").await?;
+    let pg = json(server, "/o/r/api-browser/refs/branches?after=feature/x&n=5").await?;
     assert_eq!(pg["refs"][0]["name"], "main");
     assert_eq!(pg["refs"][0]["sha"], head);
     assert_eq!(pg["more"], false);
-    let pg = json(server, "/o/r/api/refs/branches?q=AIN").await?;
+    let pg = json(server, "/o/r/api-browser/refs/branches?q=AIN").await?;
     assert_eq!(pg["refs"].as_array().unwrap().len(), 1);
-    let pg = json(server, "/o/r/api/refs/branches?prefix=feature").await?;
+    let pg = json(server, "/o/r/api-browser/refs/branches?prefix=feature").await?;
     assert_eq!(pg["refs"][0]["name"], "feature/x");
-    let pg = json(server, "/o/r/api/refs/tags").await?;
+    let pg = json(server, "/o/r/api-browser/refs/tags").await?;
     let tags = pg["refs"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
     let v1 = tags.iter().find(|tag| tag["name"] == "v1.0").unwrap();
     assert_eq!(v1["sha"], v1_peeled, "annotated tag sha must be peeled");
-    assert_eq!(get(server, "/o/r/api/refs/nope").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/refs/nope").await?.0, 404);
     // SSE form
     let (st, body, hdrs) = get_h(
         server,
-        "/o/r/api/refs/tags",
+        "/o/r/api-browser/refs/tags",
         &[("Accept", "text/event-stream")],
     )
     .await?;
@@ -292,7 +292,7 @@ async fn conformance(
 
     // any-namespace refs (D1 collab): full-name listing, namespace filter,
     // exact lookup, pagination, SSE
-    let pg = json(server, "/o/r/api/refs/all").await?;
+    let pg = json(server, "/o/r/api-browser/refs/all").await?;
     let names: Vec<String> = pg["refs"]
         .as_array()
         .unwrap()
@@ -314,27 +314,27 @@ async fn conformance(
         names.windows(2).all(|pair| pair[0] < pair[1]),
         "refs/all must be byte-sorted: {names:?}"
     );
-    let pg = json(server, "/o/r/api/refs/all?prefix=refs/collab").await?;
+    let pg = json(server, "/o/r/api-browser/refs/all?prefix=refs/collab").await?;
     assert_eq!(pg["refs"].as_array().unwrap().len(), 1);
-    let pg = json(server, "/o/r/api/refs/all?n=2").await?;
+    let pg = json(server, "/o/r/api-browser/refs/all?n=2").await?;
     assert_eq!(pg["refs"].as_array().unwrap().len(), 2);
     assert_eq!(pg["more"], true);
-    let pg = json(server, "/o/r/api/refs/collab").await?;
+    let pg = json(server, "/o/r/api-browser/refs/collab").await?;
     assert_eq!(pg["refs"][0]["name"], "refs/collab/inbox/alice/1");
     assert_eq!(pg["refs"][0]["sha"], head);
     assert_eq!(
-        json(server, "/o/r/api/refs/collab?q=INBOX").await?["refs"][0]["name"],
+        json(server, "/o/r/api-browser/refs/collab?q=INBOX").await?["refs"][0]["name"],
         "refs/collab/inbox/alice/1"
     );
-    let row = json(server, "/o/r/api/refs/name/refs/collab/inbox/alice/1").await?;
+    let row = json(server, "/o/r/api-browser/refs/name/refs/collab/inbox/alice/1").await?;
     assert_eq!(row["name"], "refs/collab/inbox/alice/1");
     assert_eq!(row["sha"], head);
-    let row = json(server, "/o/r/api/refs/name/refs/heads/main").await?;
+    let row = json(server, "/o/r/api-browser/refs/name/refs/heads/main").await?;
     assert_eq!(row["sha"], head);
-    assert_eq!(get(server, "/o/r/api/refs/name/refs/nope").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/refs/name/refs/nope").await?.0, 404);
     let (st, body, hdrs) = get_h(
         server,
-        "/o/r/api/refs/collab",
+        "/o/r/api-browser/refs/collab",
         &[("Accept", "text/event-stream")],
     )
     .await?;
@@ -346,7 +346,7 @@ async fn conformance(
     let expected_base = git_in(src, &["merge-base", "main", "feature/x"])?
         .trim()
         .to_string();
-    let mb = json(server, "/o/r/api/merge-base?from=main&to=feature/x").await?;
+    let mb = json(server, "/o/r/api-browser/merge-base?from=main&to=feature/x").await?;
     assert_eq!(
         mb["from"].as_str().unwrap().len(),
         40,
@@ -354,10 +354,10 @@ async fn conformance(
     );
     assert_eq!(mb["to"].as_str().unwrap().len(), 40, "to resolved to a sha");
     assert_eq!(mb["merge_base"], expected_base);
-    let mb = json(server, "/o/r/api/merge-base?from=main&to=main").await?;
+    let mb = json(server, "/o/r/api-browser/merge-base?from=main&to=main").await?;
     assert_eq!(mb["merge_base"], mb["from"], "same revision -> itself");
     assert_eq!(
-        get(server, "/o/r/api/merge-base?from=nope&to=main")
+        get(server, "/o/r/api-browser/merge-base?from=nope&to=main")
             .await?
             .0,
         404
@@ -366,7 +366,7 @@ async fn conformance(
     // diff (D1 review primitive): name-status / stat / patch, local + remote
     let diff = json(
         server,
-        "/o/r/api/diff?from=feature/x&to=main&format=name-status",
+        "/o/r/api-browser/diff?from=feature/x&to=main&format=name-status",
     )
     .await?;
     assert_eq!(diff["format"], "name-status");
@@ -378,7 +378,7 @@ async fn conformance(
             .any(|change| change["status"] == "M" && change["path"] == "src/inner/x.txt"),
         "second on main modified x.txt: {ch:?}"
     );
-    let st = json(server, "/o/r/api/diff?from=feature/x&to=main&format=stat").await?;
+    let st = json(server, "/o/r/api-browser/diff?from=feature/x&to=main&format=stat").await?;
     assert_eq!(st["format"], "stat");
     assert!(
         st["stats"]
@@ -388,21 +388,21 @@ async fn conformance(
             .any(|srow| srow["path"] == "src/inner/x.txt"),
         "stat lists x.txt"
     );
-    let pg = json(server, "/o/r/api/diff?from=feature/x&to=main").await?;
+    let pg = json(server, "/o/r/api-browser/diff?from=feature/x&to=main").await?;
     assert_eq!(pg["format"], "patch", "default format is patch");
     assert!(pg["patch"].as_str().unwrap().contains("diff --git"));
-    let same = json(server, "/o/r/api/diff?from=main&to=main&format=name-status").await?;
+    let same = json(server, "/o/r/api-browser/diff?from=main&to=main&format=name-status").await?;
     assert_eq!(same["changes"].as_array().unwrap().len(), 0);
     assert_eq!(
-        get(server, "/o/r/api/diff?from=main&to=main&format=bogus")
+        get(server, "/o/r/api-browser/diff?from=main&to=main&format=bogus")
             .await?
             .0,
         404
     );
-    assert_eq!(get(server, "/o/r/api/diff?from=nope&to=main").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/diff?from=nope&to=main").await?.0, 404);
 
     // blame (D1 review primitive): porcelain parsed, local + remote agree
-    let bl = json(server, "/o/r/api/blame/main/src/inner/x.txt").await?;
+    let bl = json(server, "/o/r/api-browser/blame/main/src/inner/x.txt").await?;
     assert_eq!(bl["path"], "src/inner/x.txt");
     assert_eq!(bl["sha"].as_str().unwrap().len(), 40);
     let lines = bl["blame"].as_array().unwrap();
@@ -420,18 +420,18 @@ async fn conformance(
             .contains("second on main"),
         "main's line attributed to second on main: {lines:?}"
     );
-    let b2 = json(server, "/o/r/api/blame/feature/x/src/inner/x.txt").await?;
+    let b2 = json(server, "/o/r/api-browser/blame/feature/x/src/inner/x.txt").await?;
     let l2 = &b2["blame"][0];
     assert!(
         l2["summary"].as_str().unwrap().contains("initial"),
         "feature/x's x.txt came from initial: {l2:?}"
     );
-    assert_eq!(get(server, "/o/r/api/blame/main/nope.txt").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/blame/main/nope.txt").await?.0, 404);
     // the rename (src/main.rs -> src/app.rs on feature/x, merged to main):
     // followed on BOTH local and remote (issue #13) — the line keeps its
     // "initial" attribution through the rename, on this instance whichever
     // way it holds the packs.
-    let br = json(server, "/o/r/api/blame/main/src/app.rs").await?;
+    let br = json(server, "/o/r/api-browser/blame/main/src/app.rs").await?;
     let rlines = br["blame"].as_array().unwrap();
     assert_eq!(rlines.len(), 1, "one line: {rlines:?}");
     assert!(
@@ -441,7 +441,7 @@ async fn conformance(
 
     // archive (D1 review primitive): binary download, gzip/zip magic
     let resp = reqwest::Client::new()
-        .get(format!("{}/o/r/api/archive/main", server.base_url))
+        .get(format!("{}/o/r/api-browser/archive/main", server.base_url))
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
@@ -461,7 +461,7 @@ async fn conformance(
     );
     let resp = reqwest::Client::new()
         .get(format!(
-            "{}/o/r/api/archive/main?format=zip",
+            "{}/o/r/api-browser/archive/main?format=zip",
             server.base_url
         ))
         .send()
@@ -477,13 +477,13 @@ async fn conformance(
     let bytes = resp.bytes().await?;
     assert!(bytes.starts_with(b"PK"), "zip magic: {:02x?}", &bytes[..2]);
     assert_eq!(
-        get(server, "/o/r/api/archive/main?format=bogus").await?.0,
+        get(server, "/o/r/api-browser/archive/main?format=bogus").await?.0,
         404
     );
-    assert_eq!(get(server, "/o/r/api/archive/nope").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/archive/nope").await?.0, 404);
 
     // resolve
-    let (st, text, hdrs) = get_h(server, "/o/r/api/resolve/feature/x/dir", &[]).await?;
+    let (st, text, hdrs) = get_h(server, "/o/r/api-browser/resolve/feature/x/dir", &[]).await?;
     assert_eq!(st, 200);
     let row: Value = serde_json::from_str(&text)?;
     assert_eq!(row["ref"], "feature/x");
@@ -491,21 +491,21 @@ async fn conformance(
     assert_eq!(row["path"], "dir");
     assert_eq!(row["kind"], "branch");
     assert_eq!(hdr(&hdrs, "etag"), format!("\"{feature}\""));
-    let row = json(server, "/o/r/api/resolve/v1.0").await?;
+    let row = json(server, "/o/r/api-browser/resolve/v1.0").await?;
     assert_eq!(row["kind"], "tag");
     assert_eq!(row["sha"], v1_peeled);
-    let row = json(server, &format!("/o/r/api/resolve/{}/src", &head[..8])).await?;
+    let row = json(server, &format!("/o/r/api-browser/resolve/{}/src", &head[..8])).await?;
     assert_eq!(row["kind"], "commit");
     assert_eq!(row["sha"], head);
     assert_eq!(row["path"], "src");
-    let row = json(server, "/o/r/api/resolve/").await?;
+    let row = json(server, "/o/r/api-browser/resolve/").await?;
     assert_eq!(row["ref"], "main");
-    let (st, _, ct) = get(server, "/o/r/api/resolve/nope/x").await?;
+    let (st, _, ct) = get(server, "/o/r/api-browser/resolve/nope/x").await?;
     assert_eq!(st, 404);
     assert!(!ct.unwrap_or_default().contains("json"));
 
     // tree root
-    let (st, text, hdrs) = get_h(server, "/o/r/api/tree/main", &[]).await?;
+    let (st, text, hdrs) = get_h(server, "/o/r/api-browser/tree/main", &[]).await?;
     assert_eq!(st, 200);
     let tree: Value = serde_json::from_str(&text)?;
     assert_eq!(tree["ref"], "main");
@@ -542,57 +542,57 @@ async fn conformance(
     assert_eq!(tree["commit"]["sha"].as_str().unwrap().len(), 40);
 
     // longest-ref rule: feature/x + path dir
-    let treev = json(server, "/o/r/api/tree/feature/x/dir").await?;
+    let treev = json(server, "/o/r/api-browser/tree/feature/x/dir").await?;
     assert_eq!(treev["ref"], "feature/x");
     assert_eq!(treev["path"], "dir");
     assert_eq!(treev["entries"][0]["name"], "f.txt");
     // subtree commit = newest commit touching the path
-    let treev = json(server, "/o/r/api/tree/main/src/inner").await?;
+    let treev = json(server, "/o/r/api-browser/tree/main/src/inner").await?;
     assert_eq!(treev["entries"][0]["name"], "x.txt");
     assert_eq!(treev["commit"]["subject"], "second on main");
     // blob path as tree -> 404 plain text
-    let (st, body, ct) = get(server, "/o/r/api/tree/main/README.md").await?;
+    let (st, body, ct) = get(server, "/o/r/api-browser/tree/main/README.md").await?;
     assert_eq!(st, 404);
     assert!(
         !ct.unwrap_or_default().contains("json"),
         "404 must be plain text: {body}"
     );
     // sha as ref -> immutable
-    let (st, text, hdrs) = get_h(server, &format!("/o/r/api/tree/{feature}"), &[]).await?;
+    let (st, text, hdrs) = get_h(server, &format!("/o/r/api-browser/tree/{feature}"), &[]).await?;
     assert_eq!(st, 200);
     let treev: Value = serde_json::from_str(&text)?;
     assert_eq!(treev["ref"], feature);
     assert_eq!(treev["sha"], feature);
     assert!(hdr(&hdrs, "cache-control").contains("immutable"));
     // second hit served from the immutable LRU
-    let (st, text2, _) = get_h(server, &format!("/o/r/api/tree/{feature}"), &[]).await?;
+    let (st, text2, _) = get_h(server, &format!("/o/r/api-browser/tree/{feature}"), &[]).await?;
     assert_eq!(st, 200);
     assert_eq!(text, text2);
 
     // blob
-    let bl = json(server, "/o/r/api/blob/main/README.md").await?;
+    let bl = json(server, "/o/r/api-browser/blob/main/README.md").await?;
     assert_eq!(bl["name"], "README.md");
     assert_eq!(bl["path"], "README.md");
     assert_eq!(bl["contents"], "# Title\n\nhello\n");
-    let (st, raw, ct) = get(server, "/o/r/api/blob/main/README.md?raw").await?;
+    let (st, raw, ct) = get(server, "/o/r/api-browser/blob/main/README.md?raw").await?;
     assert_eq!(st, 200);
     assert!(ct.unwrap_or_default().starts_with("text/plain"));
     assert_eq!(raw, "# Title\n\nhello\n");
-    let bl = json(server, "/o/r/api/blob/main/bin.dat").await?;
+    let bl = json(server, "/o/r/api-browser/blob/main/bin.dat").await?;
     assert_eq!(bl["binary"], true);
     assert!(bl.get("contents").is_none());
-    let bl = json(server, "/o/r/api/blob/main/big.txt").await?;
+    let bl = json(server, "/o/r/api-browser/blob/main/big.txt").await?;
     assert_eq!(bl["too_large"], true);
     assert_eq!(bl["size"], 2 * 1024 * 1024 + 1);
-    assert_eq!(get(server, "/o/r/api/blob/main/nope.txt").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/blob/main/nope.txt").await?.0, 404);
 
     // commits + pagination
-    let cl = json(server, "/o/r/api/commits?ref=main&path=&skip=0").await?;
+    let cl = json(server, "/o/r/api-browser/commits?ref=main&path=&skip=0").await?;
     assert_eq!(cl["ref"], "main");
     assert_eq!(cl["sha"], head);
     let (_, _, hdrs) = get_h(
         server,
-        &format!("/o/r/api/commits?ref={head}&path=&skip=0"),
+        &format!("/o/r/api-browser/commits?ref={head}&path=&skip=0"),
         &[],
     )
     .await?;
@@ -602,14 +602,14 @@ async fn conformance(
     assert_eq!(cl["more"], true);
     assert_eq!(commits[0]["sha"], head);
     assert!(commits[0]["parents"].is_array());
-    let c2 = json(server, "/o/r/api/commits?ref=main&skip=35&n=50").await?;
+    let c2 = json(server, "/o/r/api-browser/commits?ref=main&skip=35&n=50").await?;
     assert_eq!(c2["more"], false);
     let total = 35 + c2["commits"].as_array().unwrap().len();
     let expected: usize = git_in(src, &["rev-list", "--count", "main"])?
         .trim()
         .parse()?;
     assert_eq!(total, expected);
-    let cl = json(server, "/o/r/api/commits?ref=main&path=src/inner/x.txt").await?;
+    let cl = json(server, "/o/r/api-browser/commits?ref=main&path=src/inner/x.txt").await?;
     let subjects: Vec<&str> = cl["commits"]
         .as_array()
         .unwrap()
@@ -621,10 +621,10 @@ async fn conformance(
     assert_eq!(first["body"], "body line");
     assert_eq!(first["parents"], serde_json::json!([]));
     assert!(first["author_date"].as_str().unwrap().contains('T'));
-    assert_eq!(get(server, "/o/r/api/commits?ref=nope").await?.0, 404);
+    assert_eq!(get(server, "/o/r/api-browser/commits?ref=nope").await?.0, 404);
 
     // commit detail: rename + merge (first-parent)
-    let cmt = json(server, &format!("/o/r/api/commit/{feature}")).await?;
+    let cmt = json(server, &format!("/o/r/api-browser/commit/{feature}")).await?;
     assert_eq!(cmt["commit"]["sha"], feature);
     let paths: Vec<&str> = cmt["stats"]
         .as_array()
@@ -638,11 +638,11 @@ async fn conformance(
     );
     assert!(!paths.contains(&"src/main.rs"));
     assert!(cmt["patch"].as_str().unwrap().contains("diff --git a/"));
-    let mg = json(server, &format!("/o/r/api/commit/{head}")).await?;
+    let mg = json(server, &format!("/o/r/api-browser/commit/{head}")).await?;
     // HEAD is a filler empty commit; find the merge commit instead.
     assert_eq!(mg["stats"], serde_json::json!([]));
     let merge = git_in(src, &["rev-parse", "main~40"])?.trim().to_string();
-    let mg = json(server, &format!("/o/r/api/commit/{merge}")).await?;
+    let mg = json(server, &format!("/o/r/api-browser/commit/{merge}")).await?;
     assert_eq!(mg["commit"]["parents"].as_array().unwrap().len(), 2);
     assert!(
         !mg["stats"].as_array().unwrap().is_empty(),
@@ -651,13 +651,13 @@ async fn conformance(
     assert!(mg["patch"].as_str().unwrap().contains("diff --git"));
     assert!(!mg["patch"].as_str().unwrap().contains("diff --cc"));
     // short sha and 404
-    let cmt = json(server, &format!("/o/r/api/commit/{}", &feature[..10])).await?;
+    let cmt = json(server, &format!("/o/r/api-browser/commit/{}", &feature[..10])).await?;
     assert_eq!(cmt["commit"]["sha"], feature);
-    let (_, _, hdrs) = get_h(server, &format!("/o/r/api/commit/{}", &feature[..10]), &[]).await?;
+    let (_, _, hdrs) = get_h(server, &format!("/o/r/api-browser/commit/{}", &feature[..10]), &[]).await?;
     assert_eq!(hdr(&hdrs, "etag"), format!("\"{feature}\""));
-    let (_, _, hdrs) = get_h(server, &format!("/o/r/api/commit/{feature}"), &[]).await?;
+    let (_, _, hdrs) = get_h(server, &format!("/o/r/api-browser/commit/{feature}"), &[]).await?;
     assert!(hdr(&hdrs, "cache-control").contains("immutable"));
-    let (st, _, ct) = get(server, "/o/r/api/commit/deadbeef").await?;
+    let (st, _, ct) = get(server, "/o/r/api-browser/commit/deadbeef").await?;
     assert_eq!(st, 404);
     assert!(!ct.unwrap_or_default().contains("json"));
     Ok(())
@@ -688,7 +688,7 @@ async fn api_md_conformance() -> TestResult {
     conformance(&server, &src, &head, &feature, &v1_peeled).await?;
 
     // unknown repo
-    assert_eq!(get(&server, "/o/nope/api/refs").await?.0, 404);
+    assert_eq!(get(&server, "/o/nope/api-browser/refs").await?.0, 404);
     // page route -> index.html
     let (st, html, ct) = get(&server, "/o/r/tree/main/anything").await?;
     assert_eq!(st, 200);
@@ -712,12 +712,12 @@ async fn api_md_conformance() -> TestResult {
 async fn empty_repo_refs() -> TestResult {
     let server = Server::start().await?;
     server.put_repo("o", "empty").await?;
-    let refs = json(&server, "/o/empty/api/refs").await?;
+    let refs = json(&server, "/o/empty/api-browser/refs").await?;
     assert!(refs["head"].is_null());
-    let p = json(&server, "/o/empty/api/refs/branches").await?;
+    let p = json(&server, "/o/empty/api-browser/refs/branches").await?;
     assert_eq!(p["refs"], serde_json::json!([]));
     assert_eq!(p["more"], false);
-    assert_eq!(get(&server, "/o/empty/api/resolve/").await?.0, 404);
+    assert_eq!(get(&server, "/o/empty/api-browser/resolve/").await?.0, 404);
     Ok(())
 }
 
@@ -745,7 +745,7 @@ async fn remote_objects_conformance() -> TestResult {
 
     // First object request with SSE accept: envelope with task/notice packets and a result.
     let resp = reqwest::Client::new()
-        .get(format!("{}/o/r/api/tree/{head}", small.base_url))
+        .get(format!("{}/o/r/api-browser/tree/{head}", small.base_url))
         .header("Accept", "application/json, text/event-stream")
         .send()
         .await?;
@@ -780,7 +780,7 @@ async fn remote_objects_conformance() -> TestResult {
     // MiB, which broke exactly the 2–32 MiB images/PDFs/audio the channel exists
     // for.
     let resp = reqwest::Client::new()
-        .get(format!("{}/o/r/api/blob/main/big.txt?raw", small.base_url))
+        .get(format!("{}/o/r/api-browser/blob/main/big.txt?raw", small.base_url))
         .send()
         .await?;
     assert_eq!(
@@ -792,7 +792,7 @@ async fn remote_objects_conformance() -> TestResult {
 
     // Second time: served from the immutable cache as plain JSON even with SSE accept.
     let resp = reqwest::Client::new()
-        .get(format!("{}/o/r/api/tree/{head}", small.base_url))
+        .get(format!("{}/o/r/api-browser/tree/{head}", small.base_url))
         .header("Accept", "application/json, text/event-stream")
         .send()
         .await?;
@@ -807,7 +807,7 @@ async fn remote_objects_conformance() -> TestResult {
     );
 
     // Tasks are discoverable: the remote-index task ran here and finished ok.
-    let t = json(&small, "/o/r/api/tasks").await?;
+    let t = json(&small, "/o/r/api-browser/tasks").await?;
     let recent = t["recent"].as_array().unwrap();
     let ri = recent
         .iter()
@@ -818,7 +818,7 @@ async fn remote_objects_conformance() -> TestResult {
     // Attach to the finished task: replay + result.
     let (st, text, h) = get_h(
         &small,
-        &format!("/o/r/api/tasks/{}", ri["id"].as_str().unwrap()),
+        &format!("/o/r/api-browser/tasks/{}", ri["id"].as_str().unwrap()),
         &[("Accept", "text/event-stream")],
     )
     .await?;
@@ -827,7 +827,7 @@ async fn remote_objects_conformance() -> TestResult {
     assert!(text.contains("event: result\n"), "{text}");
 
     // Overview (WAL tab) renders without packs and says so.
-    let o = json(&small, "/o/r/api/overview").await?;
+    let o = json(&small, "/o/r/api-browser/overview").await?;
     assert_eq!(o["local"]["objects"], "remote");
     assert!(
         o["health"]["issues"]
@@ -839,7 +839,7 @@ async fn remote_objects_conformance() -> TestResult {
     Ok(())
 }
 
-/// D15/D27: the repo-scoped API is `/{owner}/{repo}/api/…` (and `…/api-browser/…`);
+/// D15/D27: the repo-scoped API is `/{owner}/{repo}/api-browser/…` (and `…/api-browser/…`);
 /// the pre-D15 `/services/api/{owner}/{repo}/…` shape is gone (no aliases —
 /// AGENTS banner).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -849,7 +849,7 @@ async fn legacy_api_prefix_is_gone() -> TestResult {
     let src = fixture(&server)?;
     let _ = git_in(&src, &["rev-parse", "HEAD"])?;
     for path in ["refs", "resolve/main", "tree/main", "tasks", "overview"] {
-        let (sa, a, _) = get_h(&server, &format!("/o/r/api/{path}"), &[]).await?;
+        let (sa, a, _) = get_h(&server, &format!("/o/r/api-browser/{path}"), &[]).await?;
         assert_eq!(sa, 200, "{path}: {a}");
         let (sb, _, _) = get_h(&server, &format!("/o/r/api-browser/{path}"), &[]).await?;
         assert_eq!(sb, 200, "{path} on the browser lane");
@@ -944,7 +944,7 @@ async fn merge_base_unrelated_histories() -> TestResult {
         &dir,
         &["push", "-q", "--mirror", &server.repo_url("o", "r2")],
     )?;
-    let mb = json(&server, "/o/r2/api/merge-base?from=main&to=other").await?;
+    let mb = json(&server, "/o/r2/api-browser/merge-base?from=main&to=other").await?;
     assert_eq!(mb["merge_base"], Value::Null, "unrelated histories -> null");
     Ok(())
 }
@@ -979,14 +979,14 @@ async fn remote_blame_follows_exact_renames() -> TestResult {
         })
         .await?;
     // Local blame follows the rename (src/main.rs -> src/app.rs) and works.
-    let b = json(&big, "/o/r/api/blame/main/src/app.rs").await?;
+    let b = json(&big, "/o/r/api-browser/blame/main/src/app.rs").await?;
     assert_eq!(b["path"], "src/app.rs");
     assert!(
         !b["blame"].as_array().unwrap().is_empty(),
         "local blame works"
     );
     // Remote follows the same rename and answers identically.
-    let rb = json(&small, "/o/r/api/blame/main/src/app.rs").await?;
+    let rb = json(&small, "/o/r/api-browser/blame/main/src/app.rs").await?;
     assert_eq!(rb, b, "remote blame matches local through the rename");
     Ok(())
 }
@@ -1013,7 +1013,7 @@ async fn remote_blame_rename_boundary_over_tree_budget_is_503() -> TestResult {
     // SAFETY: the knob's only readers in this process are the two blame tests,
     // serialized on BLAME_ENV_LOCK; other env access is the WALGIT_TEST_* norm.
     unsafe { std::env::set_var("WALGIT_TEST_BLAME_TREE_BUDGET", "1") };
-    let (st, body, _) = get(&small, "/o/r/api/blame/main/src/app.rs").await?;
+    let (st, body, _) = get(&small, "/o/r/api-browser/blame/main/src/app.rs").await?;
     // SAFETY: restoring under the same lock, before the guard drops.
     unsafe { std::env::remove_var("WALGIT_TEST_BLAME_TREE_BUDGET") };
     assert_eq!(
@@ -1051,7 +1051,7 @@ async fn remote_merge_base_unrelated_histories_is_null() -> TestResult {
             cfg.cache.max_bytes = bytesize::ByteSize::b(1);
         })
         .await?;
-    let mb = json(&small, "/o/r/api/merge-base?from=main&to=other").await?;
+    let mb = json(&small, "/o/r/api-browser/merge-base?from=main&to=other").await?;
     assert_eq!(mb["merge_base"], Value::Null, "remote unrelated -> null");
     Ok(())
 }
@@ -1090,7 +1090,7 @@ async fn remote_merge_base_deep_fork() -> TestResult {
             cfg.cache.max_bytes = bytesize::ByteSize::b(1);
         })
         .await?;
-    let mb = json(&small, "/o/r/api/merge-base?from=main&to=feature").await?;
+    let mb = json(&small, "/o/r/api-browser/merge-base?from=main&to=feature").await?;
     assert_eq!(
         mb["merge_base"], expected,
         "remote deep fork base matches git"
@@ -1123,7 +1123,7 @@ async fn collab_thin_api_posts_signed_entries() -> TestResult {
         .send()
         .await?;
     assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
-    let url = format!("{}/o/r/api/collab/entries", server.base_url);
+    let url = format!("{}/o/r/api-browser/collab/entries", server.base_url);
 
     let entry = serde_json::json!({
         "version": 1, "kind": "issue", "id": "t1", "actor": "alice",
@@ -1148,7 +1148,7 @@ async fn collab_thin_api_posts_signed_entries() -> TestResult {
     // Visible in the collab namespace listing (authenticated read).
     let (st, text, _) = get_h(
         &server,
-        "/o/r/api/refs/collab",
+        "/o/r/api-browser/refs/collab",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1264,11 +1264,11 @@ async fn admin_surfaces_challenge_anonymous_and_forbid_non_admin() -> TestResult
     // Anonymous (no credential) on both admin surfaces: 401, Bearer-only.
     for (url, body) in [
         (
-            format!("{}/t/adm/api/settings?message=x", server.base_url),
+            format!("{}/t/adm/api-browser/settings?message=x", server.base_url),
             "[bundles]\n".to_string(),
         ),
         (
-            format!("{}/t/adm/api/policy", server.base_url),
+            format!("{}/t/adm/api-browser/policy", server.base_url),
             policy_body.to_string(),
         ),
     ] {
@@ -1288,8 +1288,8 @@ async fn admin_surfaces_challenge_anonymous_and_forbid_non_admin() -> TestResult
 
     // Authenticated non-admin: a real 403 on both.
     for url in [
-        format!("{}/t/adm/api/settings?message=x", server.base_url),
-        format!("{}/t/adm/api/policy", server.base_url),
+        format!("{}/t/adm/api-browser/settings?message=x", server.base_url),
+        format!("{}/t/adm/api-browser/policy", server.base_url),
     ] {
         let resp = client
             .put(&url)
@@ -1302,14 +1302,14 @@ async fn admin_surfaces_challenge_anonymous_and_forbid_non_admin() -> TestResult
 
     // Admin: through.
     let resp = client
-        .put(format!("{}/t/adm/api/settings?message=x", server.base_url))
+        .put(format!("{}/t/adm/api-browser/settings?message=x", server.base_url))
         .bearer_auth("adm")
         .body("[bundles]\n")
         .send()
         .await?;
     assert_eq!(resp.status(), 200, "{}", resp.text().await?);
     let resp = client
-        .put(format!("{}/t/adm/api/policy", server.base_url))
+        .put(format!("{}/t/adm/api-browser/policy", server.base_url))
         .bearer_auth("adm")
         .body(policy_body)
         .send()
@@ -1322,8 +1322,8 @@ async fn admin_surfaces_challenge_anonymous_and_forbid_non_admin() -> TestResult
     Ok(())
 }
 
-/// D1 aggregation read path: after posting entries, `/api/collab/report` and
-/// `/api/collab/threads/{id}` answer with the deterministic aggregation
+/// D1 aggregation read path: after posting entries, `/api-browser/collab/report` and
+/// `/api-browser/collab/threads/{id}` answer with the deterministic aggregation
 /// (thread summaries, ordered entries, PR view + merge rule evaluation).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn collab_report_and_thread_aggregate_entries() -> TestResult {
@@ -1346,7 +1346,7 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
         .send()
         .await?;
     assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
-    let url = format!("{}/o/r/api/collab/entries", server.base_url);
+    let url = format!("{}/o/r/api-browser/collab/entries", server.base_url);
 
     let issue = serde_json::json!({
         "version": 1, "kind": "issue", "id": "t1", "actor": "alice",
@@ -1379,7 +1379,7 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
 
     let (st, text, _) = get_h(
         &server,
-        "/o/r/api/collab/report",
+        "/o/r/api-browser/collab/report",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1400,7 +1400,7 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
 
     let (st, text, _) = get_h(
         &server,
-        "/o/r/api/collab/threads/t1",
+        "/o/r/api-browser/collab/threads/t1",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1425,7 +1425,7 @@ async fn collab_report_and_thread_aggregate_entries() -> TestResult {
     // Unknown thread -> 404.
     let (st, _, _) = get_h(
         &server,
-        "/o/r/api/collab/threads/nope",
+        "/o/r/api-browser/collab/threads/nope",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1469,7 +1469,7 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
 
     // Register alice's key through the thin API.
     let resp = client
-        .post(format!("{}/o/r/api/collab/principal", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/principal", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "principal": "alice", "public_key": public_key }))
         .send()
@@ -1481,7 +1481,7 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
 
     // Posting a registration for someone else -> 403.
     let resp = client
-        .post(format!("{}/o/r/api/collab/principal", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/principal", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "principal": "bob", "public_key": public_key }))
         .send()
@@ -1502,7 +1502,7 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
     };
     entry.sig = sign_entry(&mut entry, &sk);
     let resp = client
-        .post(format!("{}/o/r/api/collab/entries", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/entries", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "entry": serde_json::to_value(&entry)? }))
         .send()
@@ -1512,7 +1512,7 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
     // The report counts it verified; the thread detail marks the entry verified.
     let (st, text, _) = get_h(
         &server,
-        "/o/r/api/collab/report",
+        "/o/r/api-browser/collab/report",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1529,7 +1529,7 @@ async fn collab_principal_registration_and_verified_entries() -> TestResult {
 
     let (st, text, _) = get_h(
         &server,
-        "/o/r/api/collab/threads/t2",
+        "/o/r/api-browser/collab/threads/t2",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1571,7 +1571,7 @@ async fn collab_sdk_golden_entry_verifies_end_to_end() -> TestResult {
     assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
 
     let resp = client
-        .post(format!("{}/o/r/api/collab/principal", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/principal", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "principal": "alice", "public_key": GOLDEN_PUB_B64 }))
         .send()
@@ -1583,7 +1583,7 @@ async fn collab_sdk_golden_entry_verifies_end_to_end() -> TestResult {
     let mut entry: serde_json::Value = serde_json::from_str(GOLDEN_CANONICAL)?;
     entry["sig"] = serde_json::json!(format!("ed25519:{GOLDEN_SIG_B64}"));
     let resp = client
-        .post(format!("{}/o/r/api/collab/entries", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/entries", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "entry": entry }))
         .send()
@@ -1592,7 +1592,7 @@ async fn collab_sdk_golden_entry_verifies_end_to_end() -> TestResult {
 
     let (st, text, _) = get_h(
         &server,
-        "/o/r/api/collab/report",
+        "/o/r/api-browser/collab/report",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1669,7 +1669,7 @@ async fn collab_thin_api_honors_repo_policy() -> TestResult {
         "ts": 1, "parent": "", "body": {}, "sig": ""
     });
     let resp = client
-        .post(format!("{}/o/r/api/collab/entries", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/entries", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "entry": entry }))
         .send()
@@ -1688,7 +1688,7 @@ async fn collab_thin_api_honors_repo_policy() -> TestResult {
         .await?;
     assert_eq!(del.status(), 204);
     let resp = client
-        .post(format!("{}/o/r/api/collab/entries", server.base_url))
+        .post(format!("{}/o/r/api-browser/collab/entries", server.base_url))
         .bearer_auth("alice-token")
         .json(&serde_json::json!({ "entry": entry }))
         .send()
@@ -1697,7 +1697,7 @@ async fn collab_thin_api_honors_repo_policy() -> TestResult {
     Ok(())
 }
 
-/// D1 board (`GET /{o}/{r}/api/collab/board`): the deterministic projection
+/// D1 board (`GET /{o}/{r}/api-browser/collab/board`): the deterministic projection
 /// under the DEFAULT board (the repository defines none), auth like every
 /// repo-scoped read; a thread lands in its effective-status lane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1721,7 +1721,7 @@ async fn collab_board_projects_threads_under_the_default_definition() -> TestRes
         .send()
         .await?;
     assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
-    let url = format!("{}/o/r/api/collab/entries", server.base_url);
+    let url = format!("{}/o/r/api-browser/collab/entries", server.base_url);
     for e in [
         serde_json::json!({
             "version": 1, "kind": "issue", "id": "t1", "actor": "alice",
@@ -1742,12 +1742,12 @@ async fn collab_board_projects_threads_under_the_default_definition() -> TestRes
     }
 
     // No credential -> a real 401 (token mode).
-    let (st, _, _) = get(&server, "/o/r/api/collab/board").await?;
+    let (st, _, _) = get(&server, "/o/r/api-browser/collab/board").await?;
     assert_eq!(st, 401);
 
     let (st, text, headers) = get_h(
         &server,
-        "/o/r/api/collab/board",
+        "/o/r/api-browser/collab/board",
         &[("Authorization", "Bearer alice-token")],
     )
     .await?;
@@ -1827,7 +1827,7 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
 
     let (st, body, headers) = get_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{sha256}"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{sha256}"),
         &[],
     )
     .await?;
@@ -1844,17 +1844,17 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
     let missing = "11".repeat(32);
     let (st, _, _) = get_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{missing}"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{missing}"),
         &[],
     )
     .await?;
     assert_eq!(st, 404);
-    let (st, _, _) = get_h(&server, "/o/r/api/collab/ci-artifacts/not-hex", &[]).await?;
+    let (st, _, _) = get_h(&server, "/o/r/api-browser/collab/ci-artifacts/not-hex", &[]).await?;
     assert_eq!(st, 400, "a malformed address is a bad request");
     let (st, _, _) = get_h(
         &server,
         &format!(
-            "/o/r/api/collab/ci-artifacts/{}",
+            "/o/r/api-browser/collab/ci-artifacts/{}",
             sha256.to_uppercase()
         ),
         &[],
@@ -1863,7 +1863,7 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
     assert_eq!(st, 400, "only lowercase sha256 addresses are canonical");
     let (st, _, _) = get_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{bogus}"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{bogus}"),
         &[],
     )
     .await?;
@@ -1884,7 +1884,7 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
     )?;
     let (st, _, _) = get_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{oversize_sha}"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{oversize_sha}"),
         &[],
     )
     .await?;
@@ -1892,25 +1892,25 @@ async fn collab_ci_artifact_serves_verified_bytes() -> TestResult {
 
     let (st, _) = head_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{sha256}?actor=ci-a"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{sha256}?actor=ci-a"),
     )
     .await?;
     assert_eq!(st, 200, "a fitting exact actor is preflighted");
     let (st, _) = head_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{sha256}?actor=missing"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{sha256}?actor=missing"),
     )
     .await?;
     assert_eq!(st, 404, "the preflight is scoped to the exact actor");
     let (st, _) = head_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{oversize_sha}?actor=ci-a"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{oversize_sha}?actor=ci-a"),
     )
     .await?;
     assert_eq!(st, 413, "the CLI preflight refuses before fetching the body");
     let (st, _) = head_h(
         &server,
-        &format!("/o/r/api/collab/ci-artifacts/{sha256}?actor=bad%2Factor"),
+        &format!("/o/r/api-browser/collab/ci-artifacts/{sha256}?actor=bad%2Factor"),
     )
     .await?;
     assert_eq!(st, 400, "actor is a single ref segment");
@@ -1938,7 +1938,48 @@ async fn collab_snapshot_over_cap_is_rejected_before_body_read() -> TestResult {
         &["push", "-q", &server.repo_url("o", "big"), snapshot_ref],
     )?;
 
-    let (st, _, _) = get_h(&server, "/o/big/api/collab/report", &[]).await?;
+    let (st, _, _) = get_h(&server, "/o/big/api-browser/collab/report", &[]).await?;
     assert_eq!(st, 503, "oversize snapshot is rejected before body materialization");
+    Ok(())
+}
+
+/// D68: the repository JSON API is not a public HTTP lane any more.
+///
+/// Agents reach this data through `/mcp` (which calls these same handlers
+/// in-process); the bundled UI and the SDK use `/{owner}/{repo}/api-browser`.
+/// `/{owner}/{repo}/api` is not a route, so a caller that never moved gets a
+/// plain 404 instead of a second contract that slowly drifts from the MCP
+/// projection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_repository_api_lane_is_not_served() -> TestResult {
+    let server = Server::start().await?;
+
+    // A repository that certainly exists, created through the form that stays.
+    let created = reqwest::Client::new()
+        .put(format!("{}/t/lane", server.base_url))
+        .send()
+        .await?;
+    assert_eq!(created.status(), 201, "create /t/lane");
+
+    for gone in [
+        "/t/lane/api",
+        "/t/lane/api/",
+        "/t/lane/api/refs",
+        "/t/lane/api/collab/board",
+        "/t/lane.git/api/refs",
+    ] {
+        let (status, _, _) = get(&server, gone).await?;
+        assert_eq!(status, 404, "`{gone}` must not be served");
+    }
+
+    for live in ["/t/lane/api-browser", "/t/lane/api-browser/refs"] {
+        let (status, text, _) = get(&server, live).await?;
+        assert_eq!(status, 200, "`{live}` answers: {text}");
+    }
+    // The non-repo lanes are unaffected: discovery, and the page route that
+    // documents the API (`/api` with no repository prefix) is the SPA shell.
+    let (status, _, _) = get(&server, "/api/v1/me").await?;
+    assert_eq!(status, 200, "/api/v1 stays");
+
     Ok(())
 }

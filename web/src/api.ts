@@ -119,8 +119,8 @@ async function authRedirect<T>(p: Promise<T>, opts: { write?: boolean } = {}): P
 }
 
 /** Base of one repository's JSON API. */
-/** D26: a repository's API lives under its own prefix. */
-export const repoApi = (repo: string) => `/${enc(repo)}/api`;
+/** D26/D68: a repository's API lives under its own prefix, on the one HTTP lane. */
+export const repoApi = (repo: string) => `/${enc(repo)}/api-browser`;
 
 const enc = (s: string) => s.split("/").map(encodeURIComponent).join("/");
 

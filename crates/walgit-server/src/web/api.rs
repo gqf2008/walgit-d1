@@ -258,9 +258,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     r.with_state(state)
 }
 
-/// Route prefixes of the repo-scoped JSON API (D27): one per lane, both
+/// Route prefixes of the repo-scoped JSON API (D27, D68): the lane sits
 /// *after* the repository prefix. No lane-first forms, no aliases (banner).
-pub const REPO_API_BASES: [&str; 2] = ["/{owner}/{repo}/api", "/{owner}/{repo}/api-browser"];
+///
+/// One lane, not two: `/{owner}/{repo}/api` is **not served** — agents reach
+/// this data through `/mcp` (which calls these same handlers in-process), the
+/// bundled UI and the SDK through `api-browser`. Keeping the old lane alive
+/// "for compatibility" would leave a second public contract to drift from the
+/// MCP projection, which is exactly what D68 ends.
+pub const REPO_API_BASES: [&str; 1] = ["/{owner}/{repo}/api-browser"];
 fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError::NotFound(msg.into())
 }

@@ -3,9 +3,10 @@
 //! [`crate::web::api::REPO_API_BASES`].
 //!
 //! Lanes (D27) are a segment *after* the repository prefix:
-//! * `/{o}/{r}/api/…` — a bearer token or the same-origin session cookie for the same-origin bundled UI;
-//! * `/{o}/{r}/api-browser/…` — the browser lane for other origins (`credentials:
-//!   "include"`), authenticated by the same session cookie (`SameSite=None`).
+//! * `/{o}/{r}/api-browser/…` — the one repository lane (D68): the bundled UI and
+//!   the SDK, authenticated by the session cookie and/or a bearer token;
+//! * `/{o}/{r}/api/…` — **not served** (D68): agents reach the same data through
+//!   `/mcp`, which calls these handlers in-process.
 //!
 //! Same handlers; lanes differ by credential handling and CORS, never by a
 //! rewrite. Non-repo: `/api/v1` (discovery), `/api/v1/me`, `/api/v1/authenticate`
@@ -300,7 +301,7 @@ pub async fn cors(State(st): State<Arc<AppState>>, req: Request<Body>, next: Nex
 }
 
 /// Where CORS applies (D27): the non-repo `/api*` and `/api-browser*` roots,
-/// the repo lanes `/{o}/{r}/api[-browser](/…)?`, and `/mcp` (D64 — its preflight
+/// the repo lane `/{o}/{r}/api-browser(/…)?`, and `/mcp` (D64 — its preflight
 /// and its response headers are this one policy, not a second copy). Never the
 /// SPA pages, git, auth.
 pub fn is_cors_api_path(path: &str) -> bool {
@@ -312,13 +313,13 @@ pub fn is_cors_api_path(path: &str) -> bool {
         || is_repo_api_path(path)
 }
 
-/// `/{o}/{r}/api[-browser](/…)?` — the repo-scoped lanes (D27).
+/// `/{o}/{r}/api-browser(/…)?` — the repo-scoped lane (D27/D68).
 pub fn is_repo_api_path(path: &str) -> bool {
     let mut it = path.trim_start_matches('/').splitn(4, '/');
     let (Some(o), Some(r), Some(seg)) = (it.next(), it.next(), it.next()) else {
         return false;
     };
-    !o.is_empty() && !r.is_empty() && (seg == "api" || seg == "api-browser")
+    !o.is_empty() && !r.is_empty() && seg == "api-browser"
 }
 
 fn cors_headers(h: &mut HeaderMap, origin: &str) {
@@ -365,7 +366,7 @@ async fn discovery(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         name: "walgit",
         version: 1,
         base: format!("{base_url}{API_V1}"),
-        // D27: non-repo browser lane (popup). Repo JSON is /{o}/{r}/api-browser/*.
+        // D27/D68: non-repo browser lane (popup). Repo JSON is /{o}/{r}/api-browser/* (the only one).
         browser_base: format!("{base_url}{API_BROWSER}/v1"),
         sdk: format!("{base_url}/repos.js"),
         docs: "https://git.example.com/api",
@@ -382,25 +383,26 @@ async fn discovery(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             "GET  /api/v1/authenticate   (also /api-browser/v1/me|authenticate for the browser lane)",
             "GET|PUT /api/v1/store        (admin — redacted storage snapshot / edit the config file, #127)",
             "POST /api/v1/store/test      (admin — probe a candidate without persisting)",
-            "-- repository routes live under the repository (D27): /{owner}/{repo}/api/… (bearer/session) and /{owner}/{repo}/api-browser/… (browser lane) --",
-            "GET|PUT|DELETE /{owner}/{repo}/api",
-            "GET  /{owner}/{repo}/api/refs",
-            "GET  /{owner}/{repo}/api/refs/{branches|tags}?prefix&q&after&n",
-            "GET  /{owner}/{repo}/api/resolve/{rev}[/{path}]",
-            "GET  /{owner}/{repo}/api/tree/{rev}[/{path}]",
-            "GET  /{owner}/{repo}/api/blob/{rev}/{path}[?raw]",
-            "GET  /{owner}/{repo}/api/commits?ref&path&skip&n",
-            "GET  /{owner}/{repo}/api/commit/{sha}",
-            "GET  /{owner}/{repo}/api/commit/{sha}/merge-queue",
-            "GET  /{owner}/{repo}/api/overview",
-            "GET  /{owner}/{repo}/api/tasks[/{id}]",
-            "GET  /{owner}/{repo}/api/ops",
-            "POST /{owner}/{repo}/api/ops/{op}",
-            "GET|PUT|DELETE /{owner}/{repo}/api/policy",
-            "POST /{owner}/{repo}/api/policy/validate | dry-run?last=N",
-            "GET|PUT|DELETE /{owner}/{repo}/api/settings",
-            "GET  /{owner}/{repo}/api/settings/effective | history | describe",
-            "POST /{owner}/{repo}/api/settings/validate",
+            "-- agents: MCP at /mcp (Streamable HTTP) — the interface, and a projection of the routes below (D64/D68) --",
+            "-- repository routes live under the repository (D27), on one HTTP lane: /{owner}/{repo}/api-browser/… (D68) --",
+            "GET|PUT|DELETE /{owner}/{repo}/api-browser",
+            "GET  /{owner}/{repo}/api-browser/refs",
+            "GET  /{owner}/{repo}/api-browser/refs/{branches|tags}?prefix&q&after&n",
+            "GET  /{owner}/{repo}/api-browser/resolve/{rev}[/{path}]",
+            "GET  /{owner}/{repo}/api-browser/tree/{rev}[/{path}]",
+            "GET  /{owner}/{repo}/api-browser/blob/{rev}/{path}[?raw]",
+            "GET  /{owner}/{repo}/api-browser/commits?ref&path&skip&n",
+            "GET  /{owner}/{repo}/api-browser/commit/{sha}",
+            "GET  /{owner}/{repo}/api-browser/commit/{sha}/merge-queue",
+            "GET  /{owner}/{repo}/api-browser/overview",
+            "GET  /{owner}/{repo}/api-browser/tasks[/{id}]",
+            "GET  /{owner}/{repo}/api-browser/ops",
+            "POST /{owner}/{repo}/api-browser/ops/{op}",
+            "GET|PUT|DELETE /{owner}/{repo}/api-browser/policy",
+            "POST /{owner}/{repo}/api-browser/policy/validate | dry-run?last=N",
+            "GET|PUT|DELETE /{owner}/{repo}/api-browser/settings",
+            "GET  /{owner}/{repo}/api-browser/settings/effective | history | describe",
+            "POST /{owner}/{repo}/api-browser/settings/validate",
         ],
     };
     let mut r = axum::Json(body).into_response();
@@ -530,7 +532,7 @@ struct RepoSummary {
     api_url: String,
 }
 
-/// `GET /{owner}/{repo}/api[-browser]` — one cheap, ref-level summary (SWR +
+/// `GET /{owner}/{repo}/api-browser` — one cheap, ref-level summary (SWR +
 /// `ETag` on the head sha). Counts are O(1) from the ref index.
 async fn repo_summary(
     State(st): State<Arc<AppState>>,
@@ -560,7 +562,7 @@ async fn repo_summary(
                     tags: r.index.tags.len(),
                     clone_url: format!("{base_url}/{full}.git"),
                     html_url: format!("{base_url}/{full}"),
-                    api_url: format!("{base_url}/{full}/api"),
+                    api_url: format!("{base_url}/{full}/api-browser"),
                 },
                 Some(&etag),
             ))
@@ -625,10 +627,13 @@ mod tests {
     fn cors_covers_prefix_form_and_v1() {
         assert!(is_cors_api_path("/api/v1/me"));
         assert!(is_cors_api_path("/api-browser/v1/me"));
-        assert!(is_cors_api_path("/acme/monorepo/api"));
-        assert!(is_cors_api_path("/acme/monorepo/api/refs"));
+        assert!(is_cors_api_path("/acme/monorepo/api-browser"));
         assert!(is_cors_api_path("/acme/monorepo/api-browser/refs"));
-        assert!(is_cors_api_path("/o/r/api/settings/effective"));
+        assert!(is_cors_api_path("/o/r/api-browser/settings/effective"));
+        // D68: the retired `/…/api` lane is not a route, so it is not a CORS
+        // surface either — nothing answers it, a preflight included.
+        assert!(!is_cors_api_path("/acme/monorepo/api"));
+        assert!(!is_cors_api_path("/acme/monorepo/api/refs"));
         // `/mcp` uses this one policy for its preflight and its response
         // headers (D64/D23: one implementation, never a second copy).
         assert!(is_cors_api_path("/mcp"));

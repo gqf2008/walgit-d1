@@ -45,12 +45,13 @@ commands="$({
     echo "check-skill-covers-cli: no top-level command extracted from \`$bin --help\`" >&2
     exit 2
 }
-# 13 items are documented today (2 exemptions -> 11 checked); the floor is one
-# below that, so an exemption or two is still fine while a shrunken extraction
-# fails. It is a
-# floor on the *extraction*, never on what the guide may document: a command
-# that disappears from the CLI comes out of this count in the same change.
-min_checked="${WALGIT_MIN_CHECKED:-11}"
+# 10 items are extracted today (2 exemptions -> 8 checked; `collab`, `ci` and
+# `principal` are hidden from `--help` since D68, so they are not in the surface
+# this guard can see). The floor is one below the checked count, so an exemption
+# or two is still fine while a shrunken extraction fails. It is a floor on the
+# *extraction*, never on what the guide may document: a command that disappears
+# from the CLI comes out of this count in the same change.
+min_checked="${WALGIT_MIN_CHECKED:-8}"
 
 missing=0
 checked=0

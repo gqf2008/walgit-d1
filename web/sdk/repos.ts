@@ -638,19 +638,22 @@ export class ReposClient {
   /**
    * Absolute URL of an API path. Repo-scoped paths are **absolute**: everything of
    * a repository under its own prefix, the lane as the segment after it —
-   * `/acme/monorepo/api/refs` (bearer / same-origin session) or
-   * `/acme/monorepo/api-browser/refs` (browser lane: another origin). Non-repo
-   * paths (`me`, `owners`, `authenticate`) live under `/api/v1` resp.
-   * `/api-browser/v1`.
+   * `/acme/monorepo/api-browser/refs`. Non-repo paths (`me`, `owners`,
+   * `authenticate`) live under `/api-browser/v1`.
    */
   url(path: string): string {
     if (path.startsWith("/")) return `${this.base}${path}`;
     return `${this.base}${this.lanePrefix}/v1/${path}`;
   }
 
-  /** `/api` or `/api-browser` — the lane segment (D27). */
-  get lanePrefix(): "/api" | "/api-browser" {
-    return this.lane === "browser" ? "/api-browser" : "/api";
+  /**
+   * Always `/api-browser` (D68). `/{owner}/{repo}/api` is not served any more:
+   * `api-browser` is the one HTTP lane, and it is the *same handlers*, so a
+   * bearer token works there exactly as it did on the old lane. Agents talk to
+   * `/mcp` instead; `lane` still decides how the credential travels.
+   */
+  get lanePrefix(): "/api-browser" {
+    return "/api-browser";
   }
 
   // ---- auth --------------------------------------------------------------------

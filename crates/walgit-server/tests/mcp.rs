@@ -658,7 +658,7 @@ async fn a_write_is_an_entry_the_client_signed_and_the_host_only_forwards() -> R
     assert!(names.contains(&"collab_register"), "{names:?}");
     assert!(!names.contains(&"collab_entry"), "{names:?}");
 
-    // Identity first, over MCP: the tool is `POST …/api/collab/principal`, and
+    // Identity first, over MCP: the tool is `POST …/api-browser/collab/principal`, and
     // the endpoint refuses a principal the credential does not name.
     let other = call_as(
         &server,

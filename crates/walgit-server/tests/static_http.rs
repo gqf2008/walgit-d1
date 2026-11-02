@@ -305,7 +305,7 @@ async fn ref_list_sse_streams_events() -> Result<()> {
     let client = reqwest::Client::new();
     let r = client
         .get(format!(
-            "{}/o/r/api/refs/branches?q=feature&n=10",
+            "{}/o/r/api-browser/refs/branches?q=feature&n=10",
             server.base_url
         ))
         .header("Accept", "text/event-stream")

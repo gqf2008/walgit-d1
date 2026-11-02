@@ -71,7 +71,7 @@ async fn collab_refs(server: &Server, repo: &str) -> Vec<String> {
     let client = reqwest::Client::new();
     let body: Value = client
         .get(format!(
-            "{}/{repo}/api/refs/collab",
+            "{}/{repo}/api-browser/refs/collab",
             server.base_url
         ))
         .header("Authorization", "Bearer worker-s3cret")
@@ -115,7 +115,7 @@ async fn a_fold_prunes_exactly_what_its_snapshot_carries() {
     let (status, _) = http(
         &server,
         "POST",
-        "/t/fold/api/collab/principal",
+        "/t/fold/api-browser/collab/principal",
         Some(json!({"principal": "worker", "public_key": public_key_b64(&key)})),
     )
     .await;
@@ -132,7 +132,7 @@ async fn a_fold_prunes_exactly_what_its_snapshot_carries() {
         let (status, answer) = http(
             &server,
             "POST",
-            "/t/fold/api/collab/entries",
+            "/t/fold/api-browser/collab/entries",
             Some(json!({"entry": e})),
         )
         .await;
@@ -148,7 +148,7 @@ async fn a_fold_prunes_exactly_what_its_snapshot_carries() {
     assert_eq!(inbox_before.len(), 3, "{before:?}");
 
     // The aggregation the fold must not change.
-    let (_, board_before) = http(&server, "GET", "/t/fold/api/collab/board", None).await;
+    let (_, board_before) = http(&server, "GET", "/t/fold/api-browser/collab/board", None).await;
 
     let id = RepoId::new("t", "fold").unwrap();
     let signer = walgit_server::collab_fold::Signer {
@@ -178,7 +178,7 @@ async fn a_fold_prunes_exactly_what_its_snapshot_carries() {
     }
 
     // Reader equality: snapshot ∪ inbox aggregates to the same board.
-    let (_, board_after) = http(&server, "GET", "/t/fold/api/collab/board", None).await;
+    let (_, board_after) = http(&server, "GET", "/t/fold/api-browser/collab/board", None).await;
     assert_eq!(
         board_before["columns"], board_after["columns"],
         "a fold must not change what the board projects\nbefore: {board_before}\nafter: {board_after}"
@@ -217,7 +217,7 @@ async fn a_fold_refuses_a_key_the_registry_does_not_name() {
     let (status, _) = http(
         &server,
         "POST",
-        "/t/refuse/api/collab/principal",
+        "/t/refuse/api-browser/collab/principal",
         Some(json!({"principal": "worker", "public_key": public_key_b64(&registered)})),
     )
     .await;
@@ -225,7 +225,7 @@ async fn a_fold_refuses_a_key_the_registry_does_not_name() {
     let (status, _) = http(
         &server,
         "POST",
-        "/t/refuse/api/collab/entries",
+        "/t/refuse/api-browser/collab/entries",
         Some(json!({"entry": entry(&registered, "worker", "issue", "card-1", json!({}))})),
     )
     .await;

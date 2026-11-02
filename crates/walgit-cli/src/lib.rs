@@ -110,11 +110,20 @@ enum Command {
         action: WalAction,
     },
     /// D1 collaboration layer: deterministic aggregation over `refs/collab/*`.
+    ///
+    /// Hidden and refused by default (D68): the collaboration interface is MCP
+    /// (`/mcp`), and a second surface for the same acts is what D68 ends. The
+    /// command survives for scripts and emergencies behind
+    /// `WALGIT_LOCAL_COMMANDS=1` — the code is the same, only the door moves.
+    #[command(hide = true)]
     Collab {
         #[command(subcommand)]
         action: collab_cmd::CollabAction,
     },
     /// Host-global principal registry (cross-repo identity, issue #76).
+    ///
+    /// Hidden and refused by default (D68) — see [`Command::Collab`].
+    #[command(hide = true)]
     Principal {
         #[command(subcommand)]
         action: principal_cmd::PrincipalAction,
@@ -123,6 +132,11 @@ enum Command {
     /// subscribes to ref updates, claims runs with signed entries, executes the
     /// tested commit's `.walgit/ci.toml` and publishes signed results. The
     /// server holds no CI logic.
+    ///
+    /// Hidden and refused by default (D68) — CI's control plane is MCP
+    /// (`ci_status` + `collab_publish` of `ci_claim`/`ci_result`); the runner
+    /// half is still local, and `WALGIT_LOCAL_COMMANDS=1` is its door.
+    #[command(hide = true)]
     Ci {
         #[command(subcommand)]
         action: ci_cmd::CiAction,
@@ -877,6 +891,30 @@ fn is_host_read(command: &Command) -> bool {
     )
 }
 
+/// D68: the collaboration acts belong to MCP. The subcommands stay in the
+/// binary — they are the same protocol code, and an operator needs them for a
+/// script or an emergency — but they are hidden from `--help` and refuse to run
+/// unless this variable is set, so nothing can mistake them for *the*
+/// interface.
+const LOCAL_COMMANDS_ENV: &str = "WALGIT_LOCAL_COMMANDS";
+
+/// The gate's decision, in one place so it is testable without an environment.
+fn local_command_allowed(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "yes"))
+}
+
+fn ensure_local_command_allowed(name: &str) -> Result<()> {
+    let allowed = local_command_allowed(std::env::var(LOCAL_COMMANDS_ENV).ok().as_deref());
+    anyhow::ensure!(
+        allowed,
+        "`walgit {name}` is not the collaboration interface any more: it is MCP at /mcp \
+         (collab_board / collab_thread / collab_report, collab_publish, ci_status, \
+         resources/subscribe). The local form still works — it is the same code — but only \
+         when a script or an operator asks for it: set {LOCAL_COMMANDS_ENV}=1."
+    );
+    Ok(())
+}
+
 async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf) -> Result<()> {
     let cfg = std::sync::Arc::new(cfg);
     match command {
@@ -900,9 +938,18 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
         Command::Bundle { action } => bundle_cmd::run(action, &cfg).await,
         Command::Repo { action } => repo::run(action, &cfg).await,
         Command::Wal { action } => wal_cmd::run(action, &cfg).await,
-        Command::Collab { action } => collab_cmd::run(action).await,
-        Command::Principal { action } => principal_cmd::run(action).await,
-        Command::Ci { action } => ci_cmd::run(action).await,
+        Command::Collab { action } => {
+            ensure_local_command_allowed("collab")?;
+            collab_cmd::run(action).await
+        }
+        Command::Principal { action } => {
+            ensure_local_command_allowed("principal")?;
+            principal_cmd::run(action).await
+        }
+        Command::Ci { action } => {
+            ensure_local_command_allowed("ci")?;
+            ci_cmd::run(action).await
+        }
         Command::Mirror {
             from,
             to,
@@ -1024,5 +1071,56 @@ mod stack_tests {
     #[should_panic(expected = "worker panic")]
     fn the_cli_stack_runner_propagates_panics() {
         let _ = on_cli_stack(|| panic!("worker panic"));
+    }
+}
+
+#[cfg(test)]
+mod local_command_tests {
+    use super::local_command_allowed;
+
+    /// D68: the door opens only for an explicit yes — not for `0`, not for an
+    /// empty variable, not for a near-miss.
+    #[test]
+    fn only_an_explicit_yes_opens_the_local_door() {
+        for yes in ["1", "true", "yes"] {
+            assert!(local_command_allowed(Some(yes)), "{yes:?}");
+        }
+        for no in [None, Some(""), Some("0"), Some("no"), Some("TRUE"), Some("yes ")] {
+            assert!(!local_command_allowed(no), "{no:?}");
+        }
+    }
+
+    /// The three collaboration groups are the ones that moved to MCP; they must
+    /// not be advertised, and everything else must stay discoverable.
+    #[test]
+    fn the_collaboration_groups_are_hidden_from_help() {
+        use clap::CommandFactory;
+
+        let help = crate::Cli::command().render_help().to_string();
+        let listed: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        for hidden in ["collab", "principal", "ci"] {
+            assert!(
+                !listed.contains(&hidden),
+                "`{hidden}` must not be advertised: {listed:?}"
+            );
+        }
+        for kept in [
+            "serve",
+            "repo",
+            "wal",
+            "token",
+            "config",
+            "service",
+            "bundle",
+            "compact",
+            "import",
+            "mirror",
+        ] {
+            assert!(listed.contains(&kept), "`{kept}` must stay: {listed:?}");
+        }
     }
 }

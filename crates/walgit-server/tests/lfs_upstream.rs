@@ -258,7 +258,7 @@ async fn upstream_is_a_per_repo_setting() -> Result<()> {
         .await?;
     assert!(r["objects"][0]["actions"]["upload"].is_object());
     // D24 setting turns it on for this repo only.
-    let settings_url = format!("{}/o/r/api/settings", server.base_url);
+    let settings_url = format!("{}/o/r/api-browser/settings", server.base_url);
     let r = client
         .put(&settings_url)
         .header("Content-Type", "application/toml")

@@ -170,7 +170,7 @@ fn repo_id(repo: &str) -> Result<walgit_git::RepoId> {
 /// HTTP-backed `repo` reads (issue #61): typed requests against a running
 /// walgit host — `--url`/`$WALGIT_URL`, bearer `--token`/`$WALGIT_TOKEN`.
 /// The server holds the bucket; this process never touches it. Reads map
-/// 1:1 onto the `/{owner}/{repo}/api` surface (D15) and print pretty JSON.
+/// 1:1 onto the `/{owner}/{repo}/api-browser` surface (D15/D68) and print pretty JSON.
 mod http {
     use std::fmt::Write as _;
     use std::io::Write as _;
@@ -213,7 +213,9 @@ mod http {
 
     fn api_path(repo: &str, suffix: &str) -> Result<String> {
         let (owner, name) = parse_repo_id(repo)?;
-        Ok(format!("/{owner}/{name}/api{suffix}"))
+        // D68: one HTTP lane. The CLI is a host operator's shell, not the API —
+        // it rides `api-browser` exactly like the SDK and the bundled UI.
+        Ok(format!("/{owner}/{name}/api-browser{suffix}"))
     }
 
     async fn request(conn: &Conn, url: &str, accept_sse: bool) -> Result<reqwest::Response> {

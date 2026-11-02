@@ -375,7 +375,7 @@ done    : effective 存在                               → Settled(conclusion)
     发带精确 actor 的 `HEAD /…/ci-artifacts/<sha256>?actor=<actor>`；只有 `200` 才执行
     `git fetch`，`413/404` 直接跳过；没有 HTTP size 元数据通道的 remote 在 fetch 前 fail
     closed，避免为了拒绝超限对象而先完整下载。认证使用 Git credential helper 对当前 remote 的 host-scoped 凭据，不转发进程级 token。
-  - HTTP：`GET /{o}/{r}/api/collab/ci-artifacts/<sha256>` → `application/octet-stream` +
+  - HTTP：`GET /{o}/{r}/api-browser/collab/ci-artifacts/<sha256>` → `application/octet-stream` +
     immutable/ETag；地址必须是 64 位小写 hex，服务端先查 size、再读取并验哈希后发字节。
     同地址可能有恶意遮蔽 ref，服务端只在 `ci-artifacts` 前缀范围内遍历候选直到找到哈希正确的
     对象。SDK `repo.ci.artifact(sha256)` → ArrayBuffer。
@@ -391,11 +391,11 @@ done    : effective 存在                               → Settled(conclusion)
 - `walgit-wal::ci` 输出 `run_view` / `collect_runs`（§7，全仓库运行视图）；`walgit ci status`
   （text/markdown/json）与 `walgit collab report` 的 CI 段、SPA 线程时间线的红绿徽标 +
   日志摘要，全部消费同一聚合——多端同源，无第二套语义。
-- **宿主面（D66）**：`GET …/api/collab/ci[?id=<run>]` 直接序列化 `collect_runs`（`{repo, runs}`），
+- **宿主面（D66）**：`GET …/api-browser/collab/ci[?id=<run>]` 直接序列化 `collect_runs`（`{repo, runs}`），
   MCP 的 `ci_status` 就是它的投影。**认领与回报不新增工具**：它们是条目
-  （`kind: ci_claim` / `kind: ci_result`），经 `collab_publish`（或 HTTP `POST …/api/collab/entries`、
+  （`kind: ci_claim` / `kind: ci_result`），经 `collab_publish`（或 HTTP `POST …/api-browser/collab/entries`、
   或直推 `refs/collab/inbox/*`）发布——三条车道同一个 oid。跑活那一半（clone、构建、工件上传）永远
-  在 git + `…/api/collab/ci-artifacts/<sha256>` 上：字节不过 MCP。
+  在 git + `…/api-browser/collab/ci-artifacts/<sha256>` 上：字节不过 MCP。
 - **与看板的边界**（D1 ⑥）：纯 CI 线程（只含 `ci_claim`/`ci_result`）不投影成看板卡片
   ——`build_board` 跳过它们；CI 的展示面就是上面三个，不是工作单元看板。
 - 验签失败 / malformed 条目永远可见（计数为红），不被静默吞掉。
@@ -445,7 +445,7 @@ done    : effective 存在                               → Settled(conclusion)
   （ci.toml `schedule` + V10 + run id 定时变体 + 状态文件 cron 簿记 + e2e 用例
   `a_scheduled_task_fires_on_an_unmoved_ref`）；§8.2 日志/产物存放约定
   （`refs/collab/ci-artifacts/<actor>/<sha256>` 桶内 blob 通道 + V11 + `walgit ci log`/
-  `walgit ci artifacts` + HTTP `GET …/api/collab/ci-artifacts/<sha256>` + SDK
+  `walgit ci artifacts` + HTTP `GET …/api-browser/collab/ci-artifacts/<sha256>` + SDK
   `repo.ci.artifact`，e2e 用例 `artifacts_and_the_full_log_round_trip_through_git_objects`，
   server 集成 `collab_ci_artifact_serves_verified_bytes`）。§4 的 push 唤醒传输
   （`walgit ci run --listen` + HMAC 验签 + delivery 去重）已于 2026-09-16 随 events 桥删除。

@@ -1,7 +1,14 @@
-# The API: repository-prefix lanes, one SDK
+# The API: repository-prefix lane, one SDK, MCP for agents
 
-Context: **the wire contract of the JSON API + SDK** (D15/D20/D26/D27), normative, for UI/SDK/site authors and for
-anyone changing `crates/walgit-server/src/web/*`. Caching rules (§2a), SSE envelope (§2b), tasks (§2c) apply to
+Context: **the wire contract of the JSON API + SDK** (D15/D20/D26/D27/D68), normative, for UI/SDK/site authors and for
+anyone changing `crates/walgit-server/src/web/*`.
+
+> **Agents do not use this document** (D67/D68). The agent-facing interface is MCP at `/mcp`
+> (`web/SKILL.md`); these routes are what `/mcp` projects, and what the bundled UI and the SDK call.
+> Since D68 there is exactly **one** repository HTTP lane — `/{owner}/{repo}/api-browser/…`. The older
+> `/{owner}/{repo}/api/…` lane is **not served** (404): keeping it would be a second public contract to drift
+> from the MCP projection. A bearer token works on `api-browser` exactly as it did on the old lane, so an SDK
+> or script only needs the segment changed. Caching rules (§2a), SSE envelope (§2b), tasks (§2c) apply to
 every endpoint.
 
 The programmatic surface of walgit (D20, the *Bring Your Own Tool*
@@ -11,12 +18,12 @@ of §1) can serve the built UI unchanged; nothing in `web/src` depends on
 walgit internals except the optional `overview`/`ops`/`tasks` endpoints.
 
 ```
-https://git.example.com/{owner}/{repo}/api/…           bearer lane   a bearer token or the same-origin session cookie
-https://git.example.com/{owner}/{repo}/api-browser/…   browser lane  credentials: "include" (other origins; the cross-origin cookie lane)
-https://git.example.com/api/v1                         non-repo      discovery, me, authenticate, owners (+ /api-browser/v1/me|authenticate for the browser lane)
+https://git.example.com/mcp                            agents        MCP over Streamable HTTP (D64/D67/D68) — the agent interface
+https://git.example.com/{owner}/{repo}/api-browser/…    repo JSON     the one repository lane: a bearer token, the session cookie, or both
+https://git.example.com/api/v1                         non-repo      discovery, me, authenticate, owners (+ /api-browser/v1/me|authenticate)
 https://git.example.com/repos.js                       the SDK       window.repos — permanent URL on every host
 ```
-Lanes differ by **credential handling** and CORS (D27): the bearer is a walgit access token (`/_auth/tokens`), a
+The credential is **transport**, not lane (D68): the bearer is a walgit access token (`/_auth/tokens`), a
 static token, or an ID token from the OIDC issuer (`GET /services/setup.json` returns the setup commands). Browser
 calls carry the session cookie (`walgit_session`, minted by `/_auth/login` → the issuer → `/_auth/callback`) with
 `credentials: "include"`. No lane-first forms, no aliases.
@@ -58,7 +65,7 @@ regular file — `/dev/null`/`NUL` instances refuse the save with the 503
 
 | Lane | Path | Who | Credentials |
 |---|---|---|---|
-| **bearer / same-origin** | `/{owner}/{repo}/api/…` (+ `/api/v1/…` for non-repo) | git tooling, CI, agents, scripts, and the bundled same-origin UI | `Authorization: Bearer <token>`, or the same-origin session cookie |
+| **bearer / same-origin** | `/{owner}/{repo}/api-browser/…` (+ `/api/v1/…` for non-repo) | git tooling, CI, agents, scripts, and the bundled same-origin UI | `Authorization: Bearer <token>`, or the same-origin session cookie |
 | **browser** | `/{owner}/{repo}/api-browser/…` (+ `/api-browser/v1/me\|authenticate`) | other allowed origins loading `repos.js` | `fetch(…, {credentials: "include"})`; the session cookie from walgit's own sign-in (`/_auth/login`) |
 
 **The repository prefix comes first on every lane** — it is the only routing key (D26: one edge rule sends
@@ -92,7 +99,7 @@ lane segment (e.g. `/{owner}/{repo}/api2/…`) without infrastructure work.
 | Setup | `/services/setup.json[?repo=owner/name]` — the clone/setup recipes (`setup::Recipes`: `token_url`, `install`, `install_url`, `plain_clone`, `blobless_clone`, `bundle_list`, `manual_clone`, `setup_text`, and `ca_url` + `trust` when the host terminates self-signed TLS itself — D39), `no-cache`; `/services/public/install.sh[?repo=]` — the one-time installer (open lane, AGENTS §1.3) (POSIX sh). The Clone menu and the API page render these, never their own copies. |
 | Auth | `/_auth/login?next=`, `/_auth/callback`, `/_auth/logout`, `/_auth/me`, `/_auth/check` (an `auth_request` target for an edge), `/_auth/tokens` (GET: the token page; POST: mint a walgit access token for the signed-in principal, `{token, principal, write, expires_at}`, same-origin only) — in-app OIDC sign-in + session cookie. Off until `session_secret` + the OAuth client are set. |
 | SDK | `/repos.js` (IIFE, registers `window.repos`) and `/repos.mjs` (ESM), built from `web/sdk/repos.ts` into `web/dist/` by `pnpm run build`; `no-cache` + strong ETag, precompressed. `/SKILL.md` (D42) serves `web/SKILL.md` verbatim (`text/markdown`, open, strong ETag) — the AI-agent guide to using this host; it carries the one-liner that installs the ops skill (D47, `/services/public/skill/*`). These data-free routes are open at the application. |
-| Dev | `vite dev` proxies `/api/`, `/api-browser/`, `/services/api/` and `/{owner}/{repo}/api[-browser]/…` (plus git/bundle paths) to `$WALGIT_URL` (default `http://127.0.0.1:8080`). |
+| Dev | `vite dev` proxies `/api-browser/`, `/api-browser/`, `/services/api/` and `/{owner}/{repo}/api[-browser]/…` (plus git/bundle paths) to `$WALGIT_URL` (default `http://127.0.0.1:8080`). |
 
 Path segments in URLs are `encodeURIComponent`-encoded per segment by the
 client (`enc()` in `api.ts`); `/` between segments is literal. Servers must
@@ -373,7 +380,7 @@ index, URLs. `404` for an unknown repo. Cache: SWR + `ETag: "<head sha>"`.
 removes it (admin permission) — the same handlers as `PUT|DELETE /{owner}/{repo}`.
 `GET|PUT|DELETE …/policy` is the push policy document (`docs/POLICY.md`).
 
-`GET|PUT|DELETE /{o}/{r}/api/settings` (D24, 2026-08-21) is the repository's **settings in the WAL**: a TOML document
+`GET|PUT|DELETE /{o}/{r}/api-browser/settings` (D24, 2026-08-21) is the repository's **settings in the WAL**: a TOML document
 restricted to `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]`, merged over the
 host's config (`effective config`).
 `GET` → `{revision, author, updated_at, message, toml}` (`revision: 0` = none). `PUT` body = the TOML
@@ -386,7 +393,7 @@ at,toml}]}` from the live log (older changes are folded into checkpoints). All `
 Every instance sees a new revision on its next refs-level sync (no extra round trip: the document rides
 inline on `manifest.pb`). CLI: `walgit repo settings show|set|clear|history`.
 
-Settings tab helpers (`/{o}/{r}/api/settings…`, all `no-store`): `GET …/settings/describe` → `{settings, sections,
+Settings tab helpers (`/{o}/{r}/api-browser/settings…`, all `no-store`): `GET …/settings/describe` → `{settings, sections,
 strategies:[{name,kind,base,schedule,schedule_human,next,keep,backfill_max,min_commits,refs}], bundles, maintenance:
 {checkpoints,interval_secs,this_host:{name,serves,maintains,disk,max_pack_bytes,cache_budget_bytes,roles}}, compaction,
 upstream:{git,lfs,token_env:bool,follow:[refs],follow_interval_secs,last_round:{at,outcome: in-sync|published|refused|failed,
@@ -399,7 +406,7 @@ shape for the *would-be* effective config with `ok: true`, or `{ok: false, error
 update when objects are local). SDK: `repo.settings.{get,put,delete,effective,history,describe,validate}`,
 `repo.policy.{validate,dryRun}`.
 
-### `GET /{owner}/{repo}/api/refs`
+### `GET /{owner}/{repo}/api-browser/refs`
 
 ```json
 { "head": { "name": "main", "sha": "807d45a6…" } }
@@ -411,7 +418,7 @@ commit it points at). `"head": null` when HEAD is unborn → the UI shows the
 million refs must answer this as fast as one with three. Fetched once per
 repository visit. Cache: SWR + `ETag: "<head sha>"` → `304`.
 
-### `GET /{owner}/{repo}/api/refs/{branches|tags}?prefix=&q=&after=&n=`
+### `GET /{owner}/{repo}/api-browser/refs/{branches|tags}?prefix=&q=&after=&n=`
 
 One **name-sorted page** of one namespace, for the branch/tag picker.
 
@@ -442,7 +449,7 @@ One **name-sorted page** of one namespace, for the branch/tag picker.
   ref-state version; the picker's typical traffic is the same handful of
   queries repeated.
 
-### `GET /{owner}/{repo}/api/refs/{all|collab}?prefix=&q=&after=&n=`
+### `GET /{owner}/{repo}/api-browser/refs/{all|collab}?prefix=&q=&after=&n=`
 
 Full-name pages for the collaboration layer (D1) and any other tooling that
 namespaces refs: `all` is every ref in the repository, `collab` is the
@@ -462,7 +469,7 @@ a convenience equivalent to `all?prefix=refs/collab`).
   nothing). `[]` when the namespace is empty. Unknown namespace (anything
   other than `branches|tags|all|collab`) → `404`.
 
-### `GET /{owner}/{repo}/api/refs/name/{rest...}`
+### `GET /{owner}/{repo}/api-browser/refs/name/{rest...}`
 
 Exact full-ref lookup by name — the tip of one D1 inbox, a notes ref, any
 ref. `rest` is the full name with slashes (`refs/collab/inbox/alice@example.com/1`).
@@ -475,7 +482,7 @@ ref. `rest` is the full name with slashes (`refs/collab/inbox/alice@example.com/
   does not exist. Cache: SWR + `ETag: "<sha>"` → `304` (the ref's oid is a
   strong version for its value).
 
-### `GET /{owner}/{repo}/api/merge-base?from=&to=`
+### `GET /{owner}/{repo}/api-browser/merge-base?from=&to=`
 
 The merge base of two revisions — the diff base for 3-dot PR comparisons (D1
 review primitive).
@@ -500,7 +507,7 @@ review primitive).
   surface as a `503` ("too far apart (or unrelated)"). Unknown revision →
   `404`. Cache: SWR (depends on ref state, not immutable).
 
-### `GET /{owner}/{repo}/api/diff?from=&to=&format=`
+### `GET /{owner}/{repo}/api-browser/diff?from=&to=&format=`
 
 The tree diff between two revisions — the file list / stat / patch a PR
 review (human or agent) renders. `format` is `patch` (default), `stat` or
@@ -523,7 +530,7 @@ review (human or agent) renders. `format` is `patch` (default), `stat` or
 - Unknown format → `404`; `from == to` → empty changes / empty patch. Cache:
   SWR (ref-state dependent, not immutable).
 
-### `GET /{owner}/{repo}/api/blame/{rev}/{path}`
+### `GET /{owner}/{repo}/api-browser/blame/{rev}/{path}`
 
 Line attribution for one file — who last changed each line — for review
 context and agent lookups. `rev` resolves like `resolve`; `path` is the file.
@@ -553,7 +560,7 @@ context and agent lookups. `rev` resolves like `resolve`; `path` is the file.
   with the packs or a bundle.
 - `blame` of a directory or a missing path → `404`. Cache: SWR.
 
-### `GET /{owner}/{repo}/api/archive/{rev}?format=`
+### `GET /{owner}/{repo}/api-browser/archive/{rev}?format=`
 
 A tree archive at one revision as a binary download — `format=tar.gz`
 (default) or `zip`. The "download this repo" button; small/medium repos get a
@@ -566,7 +573,7 @@ bytes belong anyway).
 - `Content-Type`: `application/gzip` / `application/zip`; `ETag: "<sha>"` +
   SWR. Unknown format or revision → `404`. Never the SSE envelope (binary).
 
-### `GET /{owner}/{repo}/api/resolve/{rest...}`
+### `GET /{owner}/{repo}/api-browser/resolve/{rest...}`
 
 ```json
 { "ref": "feature/x", "sha": "5ed435d9…", "path": "src/main.go", "kind": "branch" }
@@ -577,7 +584,7 @@ commit`. `404` (plain text) if nothing resolves. Cache: SWR + `ETag:
 "<sha>"` → `304`. This is the one request the UI makes per navigation
 that depends on ref state; make it cheap and cache it hard.
 
-### `GET /{owner}/{repo}/api/tree/{ref}/{path}`
+### `GET /{owner}/{repo}/api-browser/tree/{ref}/{path}`
 
 Directory listing (one round trip for the repo home).
 
@@ -609,7 +616,7 @@ Directory listing (one round trip for the repo home).
   (response **immutable**). The UI always sends the sha. `sha` in the
   response is the resolved commit.
 
-### `GET /{owner}/{repo}/api/blob/{ref}/{path}[?raw]`
+### `GET /{owner}/{repo}/api-browser/blob/{ref}/{path}[?raw]`
 
 ```json
 { "ref": "main", "sha": "807d45a6…", "path": "src/main.go", "name": "main.go", "size": 1234, "contents": "package main\n…" }
@@ -641,7 +648,7 @@ Directory listing (one round trip for the repo home).
 - `404` if unknown ref or path. Cache: as tree (`{ref}` sha → immutable;
   name → SWR + ETag). `?raw` follows the same rule.
 
-### `GET /{owner}/{repo}/api/commits?ref=&path=&skip=&n=`
+### `GET /{owner}/{repo}/api-browser/commits?ref=&path=&skip=&n=`
 
 Linear history page.
 
@@ -681,7 +688,7 @@ the message with that block removed. Repo-agnostic; the UI knows a small table o
 (merge-queue CI / people) for grouping and linking. The UI groups the
 list by `commit_date` day and shows `subject` + `author`.
 
-### `GET /{owner}/{repo}/api/commit/{sha}`
+### `GET /{owner}/{repo}/api-browser/commit/{sha}`
 
 ```json
 {
@@ -708,7 +715,7 @@ list by `commit_date` day and shows `subject` + `author`.
   walgit passes `--diff-merges=first-parent`). Do not return a combined
   (`diff --cc`) patch or an empty patch with non-empty `stats`.
 
-### D1 collaboration lane (`/{owner}/{repo}/api/collab/…`) — walgit-specific
+### D1 collaboration lane (`/{owner}/{repo}/api-browser/collab/…`) — walgit-specific
 
 The decentralized collaboration layer (`docs/D1_PROTOCOL.md`) writes to
 `refs/collab/*` (inbox entries + principals registry) and aggregates them
@@ -720,7 +727,7 @@ the folded inbox refs) plus every inbox ref not yet folded — deduped by oid,
 so a fold never changes any answer below. Auth: same as every repo-scoped write
 (write tokens / signed-in principal; `actor == principal` is enforced).
 
-#### `POST /{owner}/{repo}/api/collab/entries`
+#### `POST /{owner}/{repo}/api-browser/collab/entries`
 
 ```json
 { "entry": { "version": 1, "kind": "comment", "id": "t1", "actor": "alice", "ts": 1786500000, "parent": "…", "body": {}, "sig": "ed25519:…" } }
@@ -736,7 +743,7 @@ receive-pack** — a rule protecting or freezing `refs/collab/*` denies the
 browser path too (`403`, the reason is logged server-side). No credential
 → `401`/`403` per lane. Signature verification happens in the aggregation.
 
-#### `POST /{owner}/{repo}/api/collab/principal`
+#### `POST /{owner}/{repo}/api-browser/collab/principal`
 
 ```json
 { "principal": "alice", "public_key": "base64(Ed25519 pub)" }
@@ -749,7 +756,7 @@ loses and retries; the tombstone is a git deletion). `principal ==
 authenticated principal` is enforced, as is `policy.json` (same gate as
 receive-pack). `200` → `{ "ref", "oid", "seq" }`.
 
-#### `GET /{owner}/{repo}/api/collab/report`
+#### `GET /{owner}/{repo}/api-browser/collab/report`
 
 The full observability report (docs/D1_PROTOCOL.md §7.4/§8) — thread summaries, PR status + merge
 rule evaluation, the CI runs section (D1-CI §8.3: pure-CI threads are not
@@ -788,7 +795,7 @@ bug).
 in the actor's own inbox (the D1 inbox model). Merge rules come from
 `refs/collab/meta/rules` when present, else defaults (nothing protected).
 
-#### `GET /{owner}/{repo}/api/collab/threads/{id}`
+#### `GET /{owner}/{repo}/api-browser/collab/threads/{id}`
 
 One thread: parent-ordered entries with per-entry verification, plus the PR
 view + merge evaluation when the thread has a `patch`. `404` for an unknown
@@ -802,7 +809,7 @@ thread id.
 }
 ```
 
-#### `GET /{owner}/{repo}/api/collab/board`
+#### `GET /{owner}/{repo}/api-browser/collab/board`
 
 The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): every thread projected under the declarative
 column rules of `.walgit/board.toml` **at HEAD**. The board is a *pure
@@ -880,7 +887,7 @@ aggregates offline. SWR caching (stale-while-revalidate=60) with a body-digest E
 (conditional requests answer `304`), never
 immutable — collab state changes with every push.
 
-#### `GET /{owner}/{repo}/api/collab/ci-artifacts/{sha256}`
+#### `GET /{owner}/{repo}/api-browser/collab/ci-artifacts/{sha256}`
 
 The D1-CI §8.2 storage convention's HTTP read side (issue #161): a CI run's
 full log and its declared artifacts live as plain git blobs at
@@ -903,7 +910,7 @@ exists and fits the cap, `404` means that actor's object is absent, and `413`
 means it exceeds the cap. The preflight never reads the blob body; remotes
 without this HTTP metadata channel are refused before `git fetch`.
 
-### `GET /{owner}/{repo}/api/overview` — optional, walgit-specific
+### `GET /{owner}/{repo}/api-browser/overview` — optional, walgit-specific
 
 Backs the "WAL" tab. Not needed by Code/Commits pages; a host without a
 WAL should return `404` (the tab then shows the error text). Shape is in
@@ -959,36 +966,36 @@ that every omission is a decision rather than an oversight.
 |---|---|
 | `GET /services/api/owners`, `…/owners/{owner}` | `repo_owners` |
 | *(none — reads the store's repository list directly)* | `repo_list` |
-| `GET …/api/refs`, `refs/{kind}` | `repo_refs` (`kind` = head\|branches\|tags\|all\|collab) |
-| `GET …/api/refs/name/{rest}`, `resolve[/{rest}]` | `repo_resolve` |
-| `GET …/api/tree/{rest}` | `repo_tree` |
-| `GET …/api/blob/{rest}` | `repo_blob` |
-| `GET …/api/commits` | `repo_commits` |
-| `GET …/api/commit/{sha}` | `repo_commit` |
-| `GET …/api/diff` | `repo_diff` |
-| `GET …/api/merge-base` | `repo_merge_base` |
-| `GET …/api/blame/{rest}` | `repo_blame` |
-| `GET …/api/overview` | `repo_overview` |
-| `GET …/api/ops` | `repo_ops` (listing only) |
-| `GET …/api/tasks` | `repo_tasks` |
-| `GET …/api/policy` | `repo_policy` |
-| `GET …/api/settings/effective` | `repo_settings` (TOML, wrapped as `{"toml": …}`) |
-| `GET …/api/collab/board` | `collab_board` |
-| `GET …/api/collab/threads/{id}` | `collab_thread` |
-| `GET …/api/collab/report` | `collab_report` |
-| `GET …/api/collab/ci` | `ci_status` |
-| `POST …/api/collab/entries` | `collab_publish` (payload = an entry the client already signed) |
-| `POST …/api/collab/principal` | `collab_register` (the caller's own public key) |
+| `GET …/api-browser/refs`, `refs/{kind}` | `repo_refs` (`kind` = head\|branches\|tags\|all\|collab) |
+| `GET …/api-browser/refs/name/{rest}`, `resolve[/{rest}]` | `repo_resolve` |
+| `GET …/api-browser/tree/{rest}` | `repo_tree` |
+| `GET …/api-browser/blob/{rest}` | `repo_blob` |
+| `GET …/api-browser/commits` | `repo_commits` |
+| `GET …/api-browser/commit/{sha}` | `repo_commit` |
+| `GET …/api-browser/diff` | `repo_diff` |
+| `GET …/api-browser/merge-base` | `repo_merge_base` |
+| `GET …/api-browser/blame/{rest}` | `repo_blame` |
+| `GET …/api-browser/overview` | `repo_overview` |
+| `GET …/api-browser/ops` | `repo_ops` (listing only) |
+| `GET …/api-browser/tasks` | `repo_tasks` |
+| `GET …/api-browser/policy` | `repo_policy` |
+| `GET …/api-browser/settings/effective` | `repo_settings` (TOML, wrapped as `{"toml": …}`) |
+| `GET …/api-browser/collab/board` | `collab_board` |
+| `GET …/api-browser/collab/threads/{id}` | `collab_thread` |
+| `GET …/api-browser/collab/report` | `collab_report` |
+| `GET …/api-browser/collab/ci` | `ci_status` |
+| `POST …/api-browser/collab/entries` | `collab_publish` (payload = an entry the client already signed) |
+| `POST …/api-browser/collab/principal` | `collab_register` (the caller's own public key) |
 | *(none — `RepoHandle::read_log` over the WAL, refs-level)* | `wal_ls` (the retained log; it is provenance, not a route) |
 
 **Not exposed, on purpose:**
 
 | Endpoint | Why |
 |---|---|
-| `GET …/api/archive/{rest}`, `GET\|HEAD …/api/collab/ci-artifacts/{sha256}` | bytes. They are a download lane (Range, ETag); an MCP `tools/call` answers text, and a base64 body would be a second, worse transport. A client that needs them fetches the URL. |
-| `GET …/api/tasks/{id}` | server-sent events: the narration of *this node's* task, resumed by `Last-Event-ID`. A tool call has no stream to resume; poll `repo_tasks`. |
-| `POST …/api/ops/{op}` | starts a maintenance operation. Long, mutating, and an operator decision (D22): listing is an agent question, starting is not. |
-| `PUT\|DELETE …/api/policy`, `…/api/settings*` | admin credential (D24). The reads are tools, the writes are the storage/settings editor's. |
+| `GET …/api-browser/archive/{rest}`, `GET\|HEAD …/api-browser/collab/ci-artifacts/{sha256}` | bytes. They are a download lane (Range, ETag); an MCP `tools/call` answers text, and a base64 body would be a second, worse transport. A client that needs them fetches the URL. |
+| `GET …/api-browser/tasks/{id}` | server-sent events: the narration of *this node's* task, resumed by `Last-Event-ID`. A tool call has no stream to resume; poll `repo_tasks`. |
+| `POST …/api-browser/ops/{op}` | starts a maintenance operation. Long, mutating, and an operator decision (D22): listing is an agent question, starting is not. |
+| `PUT\|DELETE …/api-browser/policy`, `…/api-browser/settings*` | admin credential (D24). The reads are tools, the writes are the storage/settings editor's. |
 | `PUT\|DELETE /{o}/{r}[.git]` | creating or deleting a repository is an admin act, not a tool call. |
 
 `AGENTS.md` D67 draws the other half of this boundary: the agent guides
@@ -1007,28 +1014,28 @@ GET /o/r/api-browser/refs                           → same handlers (browser l
 OPTIONS /api/v1/… (Origin ∈ cors_origins)       → 204 + Access-Control-Allow-{Origin,Credentials,Methods,Headers}
 GET /api/v1/… (Origin ∉ cors_origins)           → 200, no CORS headers; DELETE/PUT/POST → 403
 GET /repos.js                                   → 200 text/javascript; ETag; no-cache; unauthenticated
-GET /o/r/api/refs                               → 200 {head:{name,sha}|null}; ETag; If-None-Match → 304   (browser lane: /o/r/api-browser/refs)
-GET /o/r/api/refs/branches?n=3                  → 200 {refs:[3],more}; SWR
-GET /o/r/api/refs/branches?q=stab&after=1-x&n=2 → filtered, after cursor
-GET /o/r/api/refs/tags   (Accept: text/event-stream) → event: ref … event: done
-GET /o/r/api/resolve/feature/x/dir              → 200 {ref:"feature/x",sha,path:"dir",kind:"branch"}; SWR+ETag
-GET /o/r/api/resolve/nope/x                     → 404 text/plain
-GET /o/r/api/tree/<sha>                         → 200 {ref,sha,path:"",entries,commit?,readme?}; immutable
-GET /o/r/api/tree/main                          → 200 same shape; SWR + ETag "<sha>"
-GET /o/r/api/tree/<sha>/README.md               → 404 (blob, not tree)
-GET /o/r/api/blob/<sha>/README.md               → 200 {contents}; immutable
-GET /o/r/api/blob/<sha>/README.md?raw           → 200 text/plain; immutable
-GET /o/r/api/commits?ref=<sha>&path=&skip=0     → 200 {ref,sha,commits,more}; immutable
-GET /o/r/api/commit/<sha>                       → 200 {commit,stats,patch}; immutable
-GET /o/r/api/commit/<sha[:8]>                   → 200; SWR + ETag "<full sha>"
-GET /o/r/api/commit/deadbeef                    → 404 text/plain
-POST /o/r/api/collab/entries                    → 200 {ref,oid,seq} | 403 (actor≠principal, or policy denial) | 401 (no credential)
-POST /o/r/api/collab/principal                  → 200 {ref,oid,seq} | 403 (registering another principal, or policy denial)
-GET /o/r/api/collab/report                      → 200 CollabReport; SWR | 503 (namespace past the 20k-ref budget)
-GET /o/r/api/collab/board                       → 200 {columns[{name,cards}]}; SWR | 400 (HEAD `.walgit/board.toml` unparseable) | 503 (budget)
-GET /o/r/api/collab/threads/t1                  → 200 {id,entries,pr?} | 404 unknown thread
+GET /o/r/api-browser/refs                               → 200 {head:{name,sha}|null}; ETag; If-None-Match → 304   (browser lane: /o/r/api-browser/refs)
+GET /o/r/api-browser/refs/branches?n=3                  → 200 {refs:[3],more}; SWR
+GET /o/r/api-browser/refs/branches?q=stab&after=1-x&n=2 → filtered, after cursor
+GET /o/r/api-browser/refs/tags   (Accept: text/event-stream) → event: ref … event: done
+GET /o/r/api-browser/resolve/feature/x/dir              → 200 {ref:"feature/x",sha,path:"dir",kind:"branch"}; SWR+ETag
+GET /o/r/api-browser/resolve/nope/x                     → 404 text/plain
+GET /o/r/api-browser/tree/<sha>                         → 200 {ref,sha,path:"",entries,commit?,readme?}; immutable
+GET /o/r/api-browser/tree/main                          → 200 same shape; SWR + ETag "<sha>"
+GET /o/r/api-browser/tree/<sha>/README.md               → 404 (blob, not tree)
+GET /o/r/api-browser/blob/<sha>/README.md               → 200 {contents}; immutable
+GET /o/r/api-browser/blob/<sha>/README.md?raw           → 200 text/plain; immutable
+GET /o/r/api-browser/commits?ref=<sha>&path=&skip=0     → 200 {ref,sha,commits,more}; immutable
+GET /o/r/api-browser/commit/<sha>                       → 200 {commit,stats,patch}; immutable
+GET /o/r/api-browser/commit/<sha[:8]>                   → 200; SWR + ETag "<full sha>"
+GET /o/r/api-browser/commit/deadbeef                    → 404 text/plain
+POST /o/r/api-browser/collab/entries                    → 200 {ref,oid,seq} | 403 (actor≠principal, or policy denial) | 401 (no credential)
+POST /o/r/api-browser/collab/principal                  → 200 {ref,oid,seq} | 403 (registering another principal, or policy denial)
+GET /o/r/api-browser/collab/report                      → 200 CollabReport; SWR | 503 (namespace past the 20k-ref budget)
+GET /o/r/api-browser/collab/board                       → 200 {columns[{name,cards}]}; SWR | 400 (HEAD `.walgit/board.toml` unparseable) | 503 (budget)
+GET /o/r/api-browser/collab/threads/t1                  → 200 {id,entries,pr?} | 404 unknown thread
 GET /o/r/tree/main/anything                              → 200 index.html
-GET /o/r/settings                                        → 200 index.html  (JSON is /o/r/api/settings)
+GET /o/r/settings                                        → 200 index.html  (JSON is /o/r/api-browser/settings)
 ```
 
 The authentication popup accepts `?origin=<opener-origin>` only for a configured

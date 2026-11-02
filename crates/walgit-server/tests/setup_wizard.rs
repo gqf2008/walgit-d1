@@ -64,7 +64,7 @@ async fn setup_state_serves_only_the_wizard() -> TestResult {
     for path in [
         "/t/x.git/info/refs?service=git-upload-pack",
         "/api/v1/owners",
-        "/t/x/api/refs",
+        "/t/x/api-browser/refs",
     ] {
         let r = client
             .get(format!("{}{}", server.base_url, path))

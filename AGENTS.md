@@ -1052,6 +1052,35 @@ decision in §4 — or the PR is; never "fix later".
   artifacts — stays git + the artifact endpoints, because bytes do not travel over MCP. `walgit ci`
   remains the local runner; nothing about CI is CLI-only any more, and nothing is MCP-only either.)*
 
+- **D68** **One HTTP lane and MCP for agents: both collaboration subcommands and the `/{o}/{r}/api`
+  lane are closed to the outside (2026-11-01, cc-ai-mcp-single-surface).** D67 stopped *describing*
+  the HTTP API to agents; this closes it. Three surfaces move behind one door:
+  (1) **`/{owner}/{repo}/api/…` is not routable any more** — `REPO_API_BASES` has exactly one entry
+  (`/{owner}/{repo}/api-browser`), so the old lane answers a plain 404. The MCP tools keep calling the
+  same handlers: `crates/walgit-server/src/mcp/api.rs::Call::lane` rewrites a tool's natural
+  `/{o}/{r}/api/…` path to `/{o}/{r}/api-browser/…` in the one place that decides it, and the call
+  still goes through `tower::oneshot` on this process's own router — so placement, freshness and
+  `actor == caller` stay the code that already answers a browser (D64). Credential handling was
+  never the lane's job: a bearer token works on `api-browser` exactly as it did on the old lane, and
+  the SDK's `lanePrefix` now returns `/api-browser` for every lane while `lane` still decides how the
+  credential travels. The bundled UI needed no change beyond the segment (`repoApi`), because the
+  browser lane is the same handlers.
+  (2) **`walgit collab`, `walgit ci`, `walgit principal` are hidden and refuse.** They are not deleted —
+  they are the same protocol code, and an operator needs them for a script or an emergency — but they
+  are `#[command(hide = true)]` and `dispatch` refuses them unless `WALGIT_LOCAL_COMMANDS=1`; the
+  refusal names the MCP tools that replace them. That way nothing *discovers* a second interface, and
+  the local form still exists for what MCP cannot do from outside (signing with a worktree key, the
+  runner half of CI, `collab gc`'s emergency manual form).
+  (3) **What stays**: `/{o}/{r}/api-browser/…` (the UI, the SDK, a script that needs bytes such as
+  `archive` and `ci-artifacts`), `/api/v1` (discovery, `me`, owners, the setup wizard and storage
+  editor), `/mcp` (the agent interface), git, LFS and the static lanes. The repo **create/delete/admin**
+  route moved with the lane (`PUT|GET|DELETE /{o}/{r}/api-browser`), since it was mounted per lane.
+  Tests: `crates/walgit-server/tests/web_api.rs::the_repository_api_lane_is_not_served` (five gone
+  paths 404, two live ones 200, `/api/v1` unaffected), `walgit-cli`
+  `local_command_tests::{only_an_explicit_yes_opens_the_local_door, the_collaboration_groups_are_hidden_from_help}`.
+  Amends D15/D20/D26/D27: the lane split keeps its shape, one lane is retired. `web/API.md` states the
+  rule (and that agents use `/mcp`, D67); `docs/D1_CI_PROTOCOL.md` carries the moved paths.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

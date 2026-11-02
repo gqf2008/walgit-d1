@@ -135,7 +135,7 @@ async fn pass_checkpoints_due_repos_refs_level_and_reports_tasks() -> anyhow::Re
         h.local().packs()?.is_empty(),
         "refs-level: no pack downloaded"
     );
-    let tasks = step!("tasks list", maint.get_text("/o/r/api/tasks", &[]))?;
+    let tasks = step!("tasks list", maint.get_text("/o/r/api-browser/tasks", &[]))?;
     assert!(tasks.contains("\"checkpoint\""), "{tasks}");
     assert!(
         tasks.contains("\"trigger\":\"age\"") || tasks.contains("age"),
@@ -441,7 +441,7 @@ async fn fsck_unit_records_missing_objects_and_repair_unit_fetches_them_from_ups
     // With upstream.git (D24 setting) the repair unit is next.
     let client = reqwest::Client::new();
     let r = client
-        .put(format!("{}/o/r/api/settings", server.base_url))
+        .put(format!("{}/o/r/api-browser/settings", server.base_url))
         .header("Content-Type", "application/toml")
         .body(format!(
             "[upstream]\ngit = \"{}\"\n",
@@ -668,7 +668,7 @@ async fn host_excluded_from_serving_a_repo_refuses_object_work_with_503() -> any
     );
     let text = r.text().await?;
     assert!(text.contains("ERR walgit: acme/big is served by"), "{text}");
-    let tasks = step!("tasks", front.get_text("/acme/big/api/tasks", &[]))?;
+    let tasks = step!("tasks", front.get_text("/acme/big/api-browser/tasks", &[]))?;
     assert!(
         !tasks.contains("materialize") && !tasks.contains("remote-index"),
         "no sync started: {tasks}"
@@ -1136,7 +1136,7 @@ async fn weekly_slot_rebuilds_the_base_then_composes_it_on_an_ssd_maintainer() -
         report.compactions,
         1,
         "rebuild unit: {report:?}\ntasks: {}",
-        server.get_text("/o/r/api/tasks", &[]).await?
+        server.get_text("/o/r/api-browser/tasks", &[]).await?
     );
     step!("sync after rebuild", h.sync())?;
     let base2 = h
@@ -1213,7 +1213,7 @@ async fn weekly_slot_rebuilds_the_base_then_composes_it_on_an_ssd_maintainer() -
         report.bundles,
         1,
         "compose unit: {report:?}\ntasks: {}",
-        server.get_text("/o/r/api/tasks", &[]).await?
+        server.get_text("/o/r/api-browser/tasks", &[]).await?
     );
     let list = walgit_bundle::ops::read_list(h.store())
         .await?

@@ -131,7 +131,7 @@ async fn overview_reports_push_and_unknown_repo_is_text_404() -> Result<()> {
 
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{}/o/r/api/overview", server.base_url))
+        .get(format!("{}/o/r/api-browser/overview", server.base_url))
         .send()
         .await?;
     assert_eq!(response.status(), 200);
@@ -143,7 +143,7 @@ async fn overview_reports_push_and_unknown_repo_is_text_404() -> Result<()> {
     assert!(body["compactions"].is_array());
 
     let missing = client
-        .get(format!("{}/no/such/api/overview", server.base_url))
+        .get(format!("{}/no/such/api-browser/overview", server.base_url))
         .send()
         .await?;
     assert_eq!(missing.status(), 404);
@@ -160,7 +160,7 @@ async fn overview_reports_push_and_unknown_repo_is_text_404() -> Result<()> {
 async fn server_header_names_the_instance() -> anyhow::Result<()> {
     let server = harness::Server::start().await?;
     let c = reqwest::Client::new();
-    for path in ["/readyz", "/services/api/owners", "/nope/nope/api/refs"] {
+    for path in ["/readyz", "/services/api/owners", "/nope/nope/api-browser/refs"] {
         let r = c.get(format!("{}{path}", server.base_url)).send().await?;
         let v = r
             .headers()
