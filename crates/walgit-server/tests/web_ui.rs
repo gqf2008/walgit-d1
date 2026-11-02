@@ -183,3 +183,75 @@ async fn server_header_names_the_instance() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// A `token`-mode host that refuses anonymous reads still has to hand a browser
+/// the static shell — otherwise there is no page on which to enter the token
+/// (the door with the handle on the inside, D68). Data lanes stay shut even when
+/// the caller looks like a browser.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token() -> Result<()> {
+    let server = Server::start_with_tweak(|c| {
+        c.server.auth.mode = walgit_config::AuthMode::Token;
+        c.server.auth.anonymous_read = false;
+        c.server.auth.tokens = vec![walgit_config::StaticToken {
+            principal: "boss".into(),
+            token: "boss-token".into(),
+            token_env: None,
+            write: true,
+            admin: true,
+        }];
+    })
+    .await?;
+    let client = reqwest::Client::new();
+    let nav = |path: &str| {
+        client
+            .get(format!("{}{path}", server.base_url))
+            .header("Accept", "text/html,application/xhtml+xml")
+            .send()
+    };
+
+    // The shell: a page navigation, no credential.
+    let index = nav("/").await?;
+    assert_eq!(index.status(), 200, "the shell is the token prompt's page");
+    let html = index.text().await?;
+    assert!(html.contains("id=\"root\""), "served the SPA document");
+    assert_eq!(nav("/repos").await?.status(), 200, "a deep page too");
+
+    // Its assets, whose requests are not `text/html`.
+    for asset in ["/favicon.ico"] {
+        let status = client
+            .get(format!("{}{asset}", server.base_url))
+            .header("Accept", "*/*")
+            .send()
+            .await?
+            .status();
+        assert!(
+            status == 200 || status == 404,
+            "{asset} must not be a 401 (got {status})"
+        );
+    }
+
+    // Data lanes: still 401, browser or not.
+    for path in [
+        "/api/v1/owners",
+        "/api/v1/me",
+        "/api/nowhere/api-browser/refs",
+        "/mcp",
+        "/metrics",
+    ] {
+        assert_eq!(
+            nav(path).await?.status(),
+            401,
+            "{path} answers with data, so a browser gets no shell there"
+        );
+    }
+
+    // And the token the prompt collects works.
+    let with_token = client
+        .get(format!("{}/api/v1/me", server.base_url))
+        .header("Authorization", "Bearer boss-token")
+        .send()
+        .await?;
+    assert_eq!(with_token.status(), 200);
+    Ok(())
+}

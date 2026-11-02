@@ -50,6 +50,16 @@ const en = {
   "collab.noPrs": "No patches.",
 
   // MCP box on the collab pages (D64): the host serves MCP itself at /mcp.
+  "gate.title": "This host needs a token",
+  "gate.lede":
+    "It does not answer anonymous reads. Paste a token from `server.auth.tokens` (or a `wgt_…` access token) — it is kept for this tab only and sent as `Authorization: Bearer`, the same credential git uses.",
+  "gate.label": "Token",
+  "gate.hint": "Ask the host operator for a token; writes also need `write = true`.",
+  "gate.submit": "Use this token",
+  "gate.checking": "Checking…",
+  "gate.bad": "That token was not accepted.",
+  "gate.forbidden": "The token is valid, but this account is not allowed here.",
+  "gate.note": "Nothing is stored on disk: closing the tab forgets it.",
   "mcp.title": "MCP (served by this host)",
   "mcp.brief":
     "This host serves MCP over Streamable HTTP at {endpoint}. Point your MCP client there; this repository exposes {refs} (refs), {wal} (the retained log) and {board} (the collab board) for resources/read and resources/subscribe.",
@@ -798,6 +808,16 @@ const zhCN: Record<I18nKey, string> = {
   "collab.noPrs": "还没有补丁。",
 
   // Collab 页面的 MCP 说明（D64）：托管方自己提供 /mcp。
+  "gate.title": "这台 walgit 需要口令",
+  "gate.lede":
+    "它不允许匿名读取。填入 `server.auth.tokens` 里的 token（或 `wgt_…` 访问令），只用在这个标签页里，作为 `Authorization: Bearer` 发送——和 git 用的是同一个凭据。",
+  "gate.label": "Token",
+  "gate.hint": "向宿主运维要一个 token；写操作还需要 `write = true`。",
+  "gate.submit": "使用这个 token",
+  "gate.checking": "检查中…",
+  "gate.bad": "这个 token 不被接受。",
+  "gate.forbidden": "token 有效，但这个账号在此不被允许。",
+  "gate.note": "不会写入磁盘：关掉标签页就忘掉。",
   "mcp.title": "MCP（由本服务器提供）",
   "mcp.brief":
     "本机通过 Streamable HTTP 在 {endpoint} 提供 MCP。把 MCP 客户端指向它即可：本仓库暴露 {refs}（refs）、{wal}（保留的日志）、{board}（协作看板），都可读、可订阅。",
@@ -1537,6 +1557,16 @@ const zhTW: Record<I18nKey, string> = {
   "collab.noPrs": "還沒有補丁。",
 
   // Collab 頁面的 MCP 說明（D64）：託管方自己提供 /mcp。
+  "gate.title": "這台 walgit 需要口令",
+  "gate.lede":
+    "它不允許匿名讀取。填入 `server.auth.tokens` 裡的 token（或 `wgt_…` 存取令），只用於這個分頁，以 `Authorization: Bearer` 送出——和 git 用的是同一個憑證。",
+  "gate.label": "Token",
+  "gate.hint": "向宿主維運要一個 token；寫入還需要 `write = true`。",
+  "gate.submit": "使用這個 token",
+  "gate.checking": "檢查中…",
+  "gate.bad": "這個 token 不被接受。",
+  "gate.forbidden": "token 有效，但這個帳號在此不被允許。",
+  "gate.note": "不會寫入磁碟：關掉分頁就忘掉。",
   "mcp.title": "MCP（由本伺服器提供）",
   "mcp.brief":
     "本機透過 Streamable HTTP 在 {endpoint} 提供 MCP。把 MCP 客戶端指向它即可：本倉庫暴露 {refs}（refs）、{wal}（保留的日誌）、{board}（協作看板），都可讀、可訂閱。",

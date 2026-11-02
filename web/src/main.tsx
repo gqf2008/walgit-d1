@@ -11,6 +11,7 @@ import { TreePage } from "./pages/TreePage";
 import { CommitsPage } from "./pages/CommitsPage";
 import { track } from "./data";
 import { I18nProvider } from "./i18n";
+import { AuthGate } from "./components/AuthGate";
 import "./styles.css";
 
 // Heavy pages (syntax highlighting / diff rendering / WAL dashboard) are split
@@ -32,30 +33,36 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <I18nProvider>
       <BrowserRouter>
-      <Routes>
-        <Route path="setup" element={<SetupPage />} />
-        <Route element={<Layout />}>
-          <Route index element={<Home />} />
-          <Route path="repos" element={<ReposIndex />} />
-          <Route path="commands" element={<CommandsPage />} />
-          <Route path="api" element={<ApiPage />} />
-          <Route path=":owner" element={<Repos />} />
-          <Route path=":owner/:repo" element={<RepoLayout />}>
-            <Route index element={<TreePage />} />
-            <Route path="tree/*" element={<TreePage />} />
-            <Route path="blob/*" element={<BlobPage />} />
-            <Route path="wal" element={<OverviewPage />} />
-            <Route path="settings" element={<SettingsPage />} />
-            <Route path="commits" element={<CommitsPage />} />
-            <Route path="commits/*" element={<CommitsPage />} />
-            <Route path="commit/:sha" element={<CommitPage />} />
-            <Route path="collab" element={<CollabPage />} />
-            <Route path="collab/board" element={<CollabBoardPage />} />
-            <Route path="collab/guide" element={<CollabGuidePage />} />
-            <Route path="collab/thread/:id" element={<CollabThreadPage />} />
+        <Routes>
+          <Route path="setup" element={<SetupPage />} />
+          <Route
+            element={
+              <AuthGate>
+                <Layout />
+              </AuthGate>
+            }
+          >
+            <Route index element={<Home />} />
+            <Route path="repos" element={<ReposIndex />} />
+            <Route path="commands" element={<CommandsPage />} />
+            <Route path="api" element={<ApiPage />} />
+            <Route path=":owner" element={<Repos />} />
+            <Route path=":owner/:repo" element={<RepoLayout />}>
+              <Route index element={<TreePage />} />
+              <Route path="tree/*" element={<TreePage />} />
+              <Route path="blob/*" element={<BlobPage />} />
+              <Route path="wal" element={<OverviewPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+              <Route path="commits" element={<CommitsPage />} />
+              <Route path="commits/*" element={<CommitsPage />} />
+              <Route path="commit/:sha" element={<CommitPage />} />
+              <Route path="collab" element={<CollabPage />} />
+              <Route path="collab/board" element={<CollabBoardPage />} />
+              <Route path="collab/guide" element={<CollabGuidePage />} />
+              <Route path="collab/thread/:id" element={<CollabThreadPage />} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
+        </Routes>
       </BrowserRouter>
     </I18nProvider>
   </StrictMode>,

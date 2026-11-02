@@ -1095,6 +1095,25 @@ decision in §4 — or the PR is; never "fix later".
   Amends D15/D20/D26/D27: the lane split keeps its shape, one lane is retired. `web/API.md` states the
   rule (and that agents use `/mcp`, D67); `docs/D1_CI_PROTOCOL.md` carries the moved paths.
 
+
+  *(Amended 2026-11-02, cc-ai-shell-for-token-hosts: **a page navigation gets the shell; data lanes
+  never do**.)* Retiring a lane exposed a hole that had nothing to do with lanes: on a `token`-mode
+  host with `anonymous_read = false` a browser could not get *in*. Token mode has no sign-in page
+  (only `oidc` mints a session), the token lives in the page's `sessionStorage`, and the page itself
+  was gated — a door with the handle on the inside. The server now serves the **static shell** to a
+  page navigation and nothing else: `crates/walgit-server/src/web/mod.rs::shell_request` passes a
+  `GET` whose `Accept` looks like a browser (`is_browser`) through the auth gate **unless**
+  `is_data_lane(path)` — `/api/…`, `/services/api/…`, `/_auth/…`, `/mcp`, `/metrics`, any
+  `/{o}/{r}/api…` or `api-browser…` segment, and git smart HTTP — plus the compiled assets
+  (`/_ui/…`, `/favicon.ico`, `/index.html`), whose requests never carry `text/html`. The shell
+  carries no repository data and the page's own reads are the same gated calls as before, so no
+  read path is added: the 401 is merely made *reachable*. `web/src/components/AuthGate.tsx` then
+  asks for the token, keeps it in `sessionStorage` for the tab and switches the SDK to the bearer
+  lane — the credential git uses; a host that allows anonymous reads answers `me` and the gate steps
+  aside. Tests: `crates/walgit-server/tests/web_ui.rs::
+  a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token` and
+  `web/src/auth-gate.test.ts`.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---
