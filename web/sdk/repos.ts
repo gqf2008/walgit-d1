@@ -15,13 +15,14 @@
  *   const repos = createClient({ token: () => idToken });
  *
  * Lanes: an explicit `token` selects the bearer lane (`Authorization: Bearer`) and
- * same-origin pages (the bundled UI) rely on the session cookie — both call
- * `/{owner}/{repo}/api/*`; any other origin (a site listed in `server.cors_origins`)
- * uses the browser lane `/{owner}/{repo}/api-browser/*` with `credentials: "include"` —
- * on a 401 the SDK opens `/api-browser/v1/authenticate` in a popup, waits for it, and
- * retries once. The repository prefix comes first on both lanes (one edge rule routes
- * a whole repository to its host); non-repo calls go to `/api/v1/*` resp.
- * `/api-browser/v1/*`. Never proxied: browser → the walgit host.
+ * every repository read/write goes through the one repository lane
+ * `/{owner}/{repo}/api-browser/*` (D68 — the old `/{owner}/{repo}/api` lane is
+ * gone), with the session cookie for the bundled UI and `credentials: "include"`
+ * for another origin listed in `server.cors_origins`; on a 401 the SDK opens
+ * `/api-browser/v1/authenticate` in a popup, waits for it, and retries once. The
+ * repository prefix comes first (one edge rule routes a whole repository to its
+ * host). Non-repo calls are host-level and go to `/api/v1/*` — never under a
+ * repository prefix. Never proxied: browser → the walgit host.
  *
  * Long answers: endpoints that cannot answer immediately stream the SSE
  * envelope (API.md §2b). The SDK consumes it transparently and surfaces
@@ -638,12 +639,14 @@ export class ReposClient {
   /**
    * Absolute URL of an API path. Repo-scoped paths are **absolute**: everything of
    * a repository under its own prefix, the lane as the segment after it —
-   * `/acme/monorepo/api-browser/refs`. Non-repo paths (`me`, `owners`,
-   * `authenticate`) live under `/api-browser/v1`.
+   * `/acme/monorepo/api-browser/refs`. Non-repo paths (`me`, `owners`, `store`)
+   * live under `/api/v1` — they are host-level, never under a repository prefix;
+   * the only thing the SDK asks of `/api-browser/v1` is the sign-in popup
+   * (`/api-browser/v1/authenticate`), which is CORS-only for that one call.
    */
   url(path: string): string {
     if (path.startsWith("/")) return `${this.base}${path}`;
-    return `${this.base}${this.lanePrefix}/v1/${path}`;
+    return `${this.base}/api/v1/${path}`;
   }
 
   /**
