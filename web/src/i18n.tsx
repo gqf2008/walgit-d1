@@ -630,6 +630,8 @@ const en = {
   "clone.urlOnce": "One-shot with the token in the URL",
   "clone.urlNote":
     "The token travels in the address, so it stays in your shell history and in the new repository's .git/config — fine for a quick look. It also reaches only the repository: the advertised bundles are separate URLs that get no credential, so git warns and falls back to a normal fetch (harmless on a small repository, slow on a big one). Afterwards git remote set-url origin with the same URL minus the credentials; the installer above leaves nothing behind and keeps the bundles.",
+  "clone.urlSelfSigned":
+    "This host presents a self-signed certificate: run the installer above first (it pins the certificate for git) — a bare clone fails TLS verification.",
   "clone.copyInstaller": "Copy installer script",
   "clone.download": "Download install.sh",
   "clone.bundles.a": "Initial clones bootstrap from immutable static bundles (bundle-uri); upload-pack only sends the remainder. Every recipe passes ",
@@ -1390,6 +1392,8 @@ const zhCN: Record<I18nKey, string> = {
   "clone.urlOnce": "把 token 放进地址的一次性克隆",
   "clone.urlNote":
     "token 会跟着地址走，因此留在 shell 历史和新仓库的 .git/config 里——临时看一眼可以。它也只覆盖仓库本身：广告出来的 bundle 是另外的地址，拿不到这份凭据，git 会给出警告并退回普通 fetch（小仓库无所谓，大仓库会慢）。之后用 git remote set-url origin 换成去掉凭据的地址；上面的安装器不留痕迹，也不丢 bundle。",
+  "clone.urlSelfSigned":
+    "这台主机用的是自签名证书：先运行上面的安装器（它会为 git 固定证书）——直接 clone 会因 TLS 校验失败。",
   "clone.copyInstaller": "复制安装脚本",
   "clone.download": "下载 install.sh",
   "clone.bundles.a": "首次 clone 从不可变的静态 bundle（bundle-uri）引导；upload-pack 只发剩余部分。每条配方都带 ",
@@ -2142,6 +2146,8 @@ const zhTW: Record<I18nKey, string> = {
   "clone.urlOnce": "把 token 放進位址的一次性複製",
   "clone.urlNote":
     "token 會跟著位址走，因此留在 shell 歷史和新倉庫的 .git/config 裡——臨時看一眼可以。它也只涵蓋倉庫本身：廣告出來的 bundle 是另外的位址，拿不到這份憑證，git 會給出警告並退回普通 fetch（小倉庫無所謂，大倉庫會慢）。之後用 git remote set-url origin 換成去掉憑證的位址；上面的安裝器不留痕跡，也不丟 bundle。",
+  "clone.urlSelfSigned":
+    "這台主機用的是自簽憑證：先執行上面的安裝程式（它會為 git 固定憑證）——直接 clone 會因 TLS 驗證失敗。",
   "clone.copyInstaller": "複製安裝指令稿",
   "clone.download": "下載 install.sh",
   "clone.bundles.a": "首次 clone 從不可變的靜態 bundle（bundle-uri）引導；upload-pack 只發剩餘部分。每條配方都帶 ",

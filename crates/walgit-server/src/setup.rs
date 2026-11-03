@@ -61,7 +61,7 @@ pub struct Recipes {
     pub install_url: String,
     /// One-shot clone with a token in the environment, no helper.
     pub manual_clone: String,
-    /// One-shot clone with the token in the URL (`https://token:<token>@host/owner/repo.git`),
+    /// One-shot clone with the token in the URL (`<scheme>://token:<token>@host/owner/repo.git`),
     /// `None` when the host needs no credential. It is the shape people reach for first and the
     /// one that leaks — shell history, and the new repository's `.git/config` — so the helper is
     /// disabled explicitly: a stored credential cannot answer instead, and git has nothing to
@@ -141,9 +141,12 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
     // `token:<token>@` — any username works (the server reads the Basic password as the token),
     // `token` spells out that the placeholder is not a real account.
     let url_clone = needs_token(cfg).then(|| {
-        let path = repo.map_or("<owner>/<repo>", |r| r).to_string();
+        // Reuse `url`: it already carries this deployment's scheme (a plain-http
+        // host would fail on a hard-coded `https://`) and the `<owner>/<repo>`
+        // placeholder when the recipes are host-wide.
+        let with_userinfo = url.replacen("://", "://token:<token>@", 1);
         format!(
-            "git -c credential.helper= -c transfer.bundleURI=true -c fetch.bundleURI={catchup} clone https://token:<token>@{host}/{path}.git"
+            "git -c credential.helper= -c transfer.bundleURI=true -c fetch.bundleURI={catchup} clone {with_userinfo}"
         )
     });
     let blobless_clone = format!(
@@ -522,6 +525,20 @@ mod tests {
         assert!(!r.setup_text.contains("oken"), "{}", r.setup_text);
         assert!(!r.manual_clone.contains("Authorization"));
         assert!(r.url_clone.is_none(), "no token to put in a URL");
+    }
+
+    #[test]
+    fn the_url_form_keeps_the_hosts_scheme() {
+        let mut cfg = Config::default();
+        cfg.server.auth.mode = AuthMode::Token;
+        let r = recipes(&cfg, "http://127.0.0.1:8080", Some("acme/monorepo"));
+        assert_eq!(
+            r.url_clone.as_deref(),
+            Some(
+                "git -c credential.helper= -c transfer.bundleURI=true -c fetch.bundleURI=http://127.0.0.1:8080/acme/monorepo.git/bundles/catchup clone http://token:<token>@127.0.0.1:8080/acme/monorepo.git"
+            ),
+            "a plain-http deployment keeps its scheme (only the URL form may not change it)"
+        );
     }
 
     #[test]

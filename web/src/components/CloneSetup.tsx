@@ -47,6 +47,7 @@ export function CloneSetup({ repo, compact = false }: { repo: string; compact?: 
         <>
           <div className="small strong">{t("clone.urlOnce")}</div>
           <div className="small muted">{t("clone.urlNote")}</div>
+          {r.ca_url && <div className="small muted">{t("clone.urlSelfSigned")}</div>}
           <CodeSample code={r.url_clone} />
         </>
       )}
