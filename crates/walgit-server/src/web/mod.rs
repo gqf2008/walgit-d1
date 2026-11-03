@@ -151,8 +151,11 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     // A browser navigating to a page route asks for the shell, not for data:
-    // the shell is static, and the page's own reads are gated below.
-    if shell_request(&req) {
+    // the shell is static, and the page's own reads are gated below. A host
+    // with app-owned sign-in (`oidc`) keeps its redirect to `/_auth/login`: the
+    // shell would replace the one path a browser has to a session, and the gate
+    // offers a token instead.
+    if !st.auth.browser_login_enabled() && shell_request(&req) {
         return next.run(req).await;
     }
     match st.auth.require_read(req.headers()).await {

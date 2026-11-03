@@ -34,7 +34,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       (e: unknown) => {
         if (!alive) return;
         const status = (e as { status?: number }).status;
-        if (status === 401 || status === 403) setNeedsToken(true);
+        if (wantsToken(status)) setNeedsToken(true);
         else setReady(true); // a broken API is not a credential problem
       },
     );

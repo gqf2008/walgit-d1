@@ -1105,9 +1105,11 @@ decision in §4 — or the PR is; never "fix later".
   `GET` whose `Accept` looks like a browser (`is_browser`) through the auth gate **unless**
   `is_data_lane(path)` — `/api/…`, `/services/api/…`, `/_auth/…`, `/mcp`, `/metrics`, any
   `/{o}/{r}/api…` or `api-browser…` segment, and git smart HTTP — plus the compiled assets
-  (`/_ui/…`, `/favicon.ico`, `/index.html`), whose requests never carry `text/html`. The shell
-  carries no repository data and the page's own reads are the same gated calls as before, so no
-  read path is added: the 401 is merely made *reachable*. `web/src/components/AuthGate.tsx` then
+  (`/_ui/…`, `/favicon.ico`, `/index.html`), whose requests never carry `text/html`. A host with
+  app-owned sign-in (`browser_login_enabled()`, i.e. `oidc` with an OAuth client) keeps its
+  redirect to `/_auth/login` instead: the shell would replace the one path a browser has to a
+  session. The shell carries no repository data and the page's own reads are the same gated
+  calls as before, so no read path is added: the 401 is merely made *reachable*. `web/src/components/AuthGate.tsx` then
   asks for the token, keeps it in `sessionStorage` for the tab and switches the SDK to the bearer
   lane — the credential git uses; a host that allows anonymous reads answers `me` and the gate steps
   aside. Tests: `crates/walgit-server/tests/web_ui.rs::

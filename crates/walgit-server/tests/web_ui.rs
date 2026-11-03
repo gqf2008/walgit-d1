@@ -266,3 +266,45 @@ async fn a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token
     assert_eq!(with_token.status(), 200);
     Ok(())
 }
+
+/// The shell bypass is for hosts with **no** browser sign-in. An `oidc` host
+/// keeps its redirect to `/_auth/login`: a stateless shell there would replace
+/// the only path a browser has to a session with a token prompt the gate cannot
+/// satisfy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oidc_host_still_sends_a_page_navigation_to_sign_in() -> Result<()> {
+    let server = Server::start_with_tweak(|c| {
+        c.server.auth.mode = walgit_config::AuthMode::Oidc;
+        c.server.auth.anonymous_read = false;
+        c.server.auth.issuer = "https://login.example.com".into();
+        c.server.auth.allowed_domains = vec!["example.com".into()];
+        c.server.auth.oauth_client_id = Some("client".into());
+        c.server.auth.oauth_client_secret = Some("secret".into());
+        c.server.auth.session_secret = Some("0123456789abcdef0123456789abcdef".into());
+    })
+    .await?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    // Name the canonical host so `canonical_browser_host` (a loopback-host
+    // redirect of its own, 302) does not stand in for the sign-in redirect.
+    let port = server.base_url.rsplit(':').next().unwrap_or_default().to_string();
+    let r = client
+        .get(format!("{}/", server.base_url))
+        .header("Accept", "text/html,application/xhtml+xml")
+        .header("Host", format!("walgit.localhost:{port}"))
+        .send()
+        .await?;
+    assert_eq!(r.status(), 307, "a page navigation goes to sign-in");
+    let loc = r
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        loc.starts_with("/_auth/login?next="),
+        "the redirect must be the sign-in flow, got {loc}"
+    );
+    Ok(())
+}
