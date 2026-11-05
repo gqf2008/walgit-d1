@@ -6,7 +6,7 @@
 //! objects (after delta resolution) sit in a per-pack-set LRU keyed by pack
 //! offset so delta bases are reused across chains.
 //!
-//! This is AGENTS.md §2.4 / AGENTS.md §2.4: "a pack storage layer able to serve directly
+//! This is docs/ARCHITECTURE.md §2.4 / docs/ARCHITECTURE.md §2.4: "a pack storage layer able to serve directly
 //! from GCS by range reads with a local block cache". It is used by the web
 //! API (`Need::Objects` on a too-large repo) which faults the objects a git
 //! command will touch into the local loose store and then runs the command

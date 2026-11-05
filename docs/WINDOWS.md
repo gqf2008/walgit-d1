@@ -148,6 +148,6 @@ default); a symlink-capable volume is only needed for the mount-link case.
   the justfile's `CLI_TESTS`. Making them windows-runnable is a product
   change (`NUL`/`sh` twins), not a test change.
 - Known flaky on both platforms (rerun, not skip): `sim::base_rebuild…`
-  (shared `TEST_ABORT_AFTER`; first-pass rate per AGENTS.md §5's entry — #138
+  (shared `TEST_ABORT_AFTER`; first-pass rate per docs/WORKING_RULES.md's entry — #138
   measured it on windows), `fetch_from_front_…` ~1 in 3 under the
   full e2e suite; both pass alone.

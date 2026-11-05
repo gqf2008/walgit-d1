@@ -76,7 +76,7 @@ regular file — `/dev/null`/`NUL` instances refuse the save with the 503
 `/acme/monorepo*` to its host). Both lanes hit the same handlers; they differ by credential handling and CORS,
 never by a rewrite. There are no other forms: the lane-first `/api/v1/repos/…`, `/api-browser/v1/repos/…` and the
 pre-D15 `/services/api/{owner}/{repo}/…` are gone (prototyping phase — no aliases, AGENTS banner).
-Every request authenticates (§1.3 of AGENTS.md); a missing/expired browser
+Every request authenticates (§1.3 of `docs/ARCHITECTURE.md`); a missing/expired browser
 session answers `401` and the SDK opens **`/api-browser/v1/authenticate`** in a popup —
 walgit's own sign-in (`/_auth/login`) runs before the application page `postMessage`s
 `{type: "repos:authenticated"}` to its opener and closes — then retries once.
@@ -1002,7 +1002,7 @@ that every omission is a decision rather than an oversight.
 | `PUT\|DELETE …/api-browser/policy`, `…/api-browser/settings*` | admin credential (D24). The reads are tools, the writes are the storage/settings editor's. |
 | `PUT\|DELETE /{o}/{r}[.git]` | creating or deleting a repository is an admin act, not a tool call. |
 
-`AGENTS.md` D67 draws the other half of this boundary: the agent guides
+`docs/DECISIONS.md D67 draws the other half of this boundary: the agent guides
 (`/SKILL.md`, the ops skill) describe git and `/mcp` only — the HTTP surface
 stays documented here, for browsers, the SDK and edges.
 

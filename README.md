@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gqf2008/walgit-d1/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/walgit-d1/actions/workflows/ci.yml)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)](README.md#platforms)
-[![Agent-native](https://img.shields.io/badge/agent--native-work%20units%20%26%20protocol-purple)](AGENTS.md#6-agent-collaboration-protocol)
+[![Agent-native](https://img.shields.io/badge/agent--native-work%20units%20%26%20protocol-purple)](docs/D1_PROTOCOL.md)
 
 walgit hosts git repositories with **no database, no leader and no local state that matters**. You run a
 single binary, point it at an S3 or GCS bucket, and you have: smart HTTP (v0/v2) fetch and push, `bundle-uri`
@@ -120,7 +120,7 @@ git fetch origin '+refs/collab/*:refs/collab/*'
   macOS 签名+公证 DMG 由 `deploy/tray/macos/build-dmg.sh` 在 CI 之外构建后上传 Release。
 
 **工程与治理** — 上游没有这些；本分叉按 agent 协作的方式补上：
-issue/PR 模板与批次化流程、`AGENTS.md` 协作协议、CI 分级（fast tier / e2e /
+issue/PR 模板与批次化流程、`AGENTS.md` 协作章程、CI 分级（fast tier / e2e /
 windows fast tier）、CodeQL、Dependabot、`code review` 与发布规范、Windows 开发
 runbook（`docs/WINDOWS.md`）等。
 
@@ -129,7 +129,7 @@ runbook（`docs/WINDOWS.md`）等。
 - `docs/USER_GUIDE.md` — 面向人类的完整使用手册（协作层怎么用）。
 - `docs/D1_PROTOCOL.md` — D1 协作层规范；`docs/D1_COLLAB_DESIGN.md`（设计背景）、`docs/D1_CI_PROTOCOL.md`（CI 子协议）。
 - `docs/BOARD.md`、`docs/POLICY.md` — 看板 / 推送策略。
-- `AGENTS.md` — 架构、所有设计决策、以及 agent 协作协议。
+- `AGENTS.md` — 协作章程（角色、派工、验收、合并）；架构在 `docs/ARCHITECTURE.md`，设计决策在 `docs/DECISIONS.md`。
 - `GOAL.md` — 上游的验收目标（本分叉保持其内核语义不变）。
 
 ### 与上游的关系
@@ -206,7 +206,7 @@ the SSD (`cache.mode = "disk"`), everything else on the small ones, and route by
 **Nothing waits silently.** Anything slow is a *task* with an id, a log and a progress stream — narrated to git on
 sideband 2 (`remote: * …`) and to the browser as SSE.
 
-`AGENTS.md` is the full architecture and operating manual: constraints, the WAL strategies, every design decision
+`docs/ARCHITECTURE.md` is the system manual (constraints, the WAL strategies); `docs/DECISIONS.md` holds every design decision
 with its reasoning, the invariants, and the cost model (round trips to the bucket are the budget).
 
 ## Running it

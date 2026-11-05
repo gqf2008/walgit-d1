@@ -3,7 +3,7 @@ name: Release
 # Tag v* to publish: builds the linux, windows, and signed/notarized macOS
 # installers, generates a changelog from Conventional Commits since the previous
 # tag, and attaches everything to a GitHub Release. Versioning is semantic; the
-# v0.1 milestone is the first target (AGENTS.md §6.4). workflow_dispatch runs
+# v0.1 milestone is the first target (docs/RELEASE.md). workflow_dispatch runs
 # the packaging/signing path without publishing a release.
 
 on:

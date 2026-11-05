@@ -1,7 +1,7 @@
 # repos.js — walgit in two script tags
 
 Context: **user-facing docs for `repos.js`**, for people building on a walgit host from a browser page or
-script. Wire details are `../API.md`; the decision is `AGENTS.md §4 D20`.
+script. Wire details are `../API.md`; the decision is `docs/DECISIONS.md D20`.
 
 Every walgit host serves its SDK at `/repos.js` (and `/repos.mjs`); the examples below use
 `https://git.example.com` for the host. The full wire contract is `../API.md`; the SDK maps all of it.

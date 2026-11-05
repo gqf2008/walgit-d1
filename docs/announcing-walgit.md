@@ -74,8 +74,8 @@ from the bucket itself (S3 presigned or GCS with walgit's bearer). The example c
 nix run github:gqf2008/walgit-d1 -- --config walgit.toml     # or: podman build -f Containerfile .
 ```
 
-The repository is at **github.com/gqf2008/walgit-d1**, MIT licensed. `README.md` is the introduction; `AGENTS.md` is
-the architecture and the list of design decisions with their reasoning; `docs/BUNDLE_URI_DESIGN.md` is the bundle
+The repository is at **github.com/gqf2008/walgit-d1**, MIT licensed. `README.md` is the introduction; `AGENTS.md` is the collaboration charter, `docs/ARCHITECTURE.md` the
+architecture, and `docs/DECISIONS.md` the list of design decisions with their reasoning; `docs/BUNDLE_URI_DESIGN.md` is the bundle
 scheduler's design of record. The numbers we quote — 8-second CI clones, 32 GB of clone bytes with 2.8 MB through
 the server — come from the monorepo it was built for; the simulation suite (crashes, partitions, stale reads,
 lost responses) is how we keep the consistency story honest.

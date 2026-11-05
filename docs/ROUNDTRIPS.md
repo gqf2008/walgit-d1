@@ -8,7 +8,7 @@ scenarios (`crates/walgit-server/tests/sim.rs`), because a sim fix that is corre
 is a regression, not a fix. Read it *before* designing the change, use §5 when writing the commit/PR, and
 keep §2 current. It exists because walgit runs on a tmpfs host instances that own nothing but a bucket: every
 user-visible latency is a sum of sequential GCS requests, and the manifest is a single CAS'd object with a hard
-write-rate cap — so the number and shape of round trips *is* the performance design. Referenced from AGENTS.md
+write-rate cap — so the number and shape of round trips *is* the performance design. Referenced from `docs/ARCHITECTURE.md`
 (read order and §5 working rules) and from the sim harness briefs.
 
 **Correct is necessary, not sufficient.** walgit's only durable primitive is a bucket with ~60–80 ms per

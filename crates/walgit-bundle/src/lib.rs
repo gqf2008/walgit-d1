@@ -1,5 +1,5 @@
 //! bundle-uri: scheduled full/incremental bundle strategies, bundle list.
-//! See AGENTS.md Phase 5 and docs/CONTRACT.md `walgit-bundle`.
+//! See `docs/ARCHITECTURE.md` Phase 5 and `docs/CONTRACT.md` `walgit-bundle`.
 //!
 //! # Architecture
 //!

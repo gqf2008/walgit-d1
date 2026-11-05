@@ -29,7 +29,7 @@ fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-/// Non-repo routes only (AGENTS.md D26). Repo aliases are **not** allowed.
+/// Non-repo routes only (docs/DECISIONS.md D26). Repo aliases are **not** allowed.
 fn allowed_route(path: &str) -> bool {
     let p = path.trim();
     let allow = [

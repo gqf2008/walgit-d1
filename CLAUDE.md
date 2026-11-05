@@ -14,5 +14,5 @@
   scripts/suite-guard.sh 推广到全部 crate，issue #137/#141）。walgit-cli 集成套件
   （ci_e2e/collab_e2e）**仅 ubuntu 跑**——平台缝逐文件注在 justfile CLI_TESTS 上方。
   跑 `just test` 若断言 SPA 资产（api_v1 的 /repos.js）须先 `just web-build`，否则
-  占位 web/dist 造成环境性假红。测试偶发红先查 AGENTS.md §5 known-flaky 名单与
-  §6.3 CI 信号。
+  占位 web/dist 造成环境性假红。测试偶发红先查 docs/WORKING_RULES.md known-flaky 名单与
+  docs/RELEASE.md 的 CI 信号。

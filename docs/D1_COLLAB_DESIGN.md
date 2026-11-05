@@ -14,7 +14,7 @@
 > `threads/{id}`）挂在仓库 API 上，聚合核心与 walgit 共用 `walgit-wal::collab`，
 > 浏览器页面随 Web UI 一起发布，CLI 就是 walgit 二进制。
 >
-> 上游 walgit 用 `AGENTS.md §3` 原则 X（keep walgit small）与 `GOAL.md §4` 把
+> 上游 walgit 用 `docs/ARCHITECTURE.md §3` 原则 X（keep walgit small）与 `GOAL.md §4` 把
 > code review / merge queues / CI / issues 排除在 walgit 之外，要求 **build on this**；
 > **本分叉是有意越出那条范围的**，本层即其增量——见 `README.md`「关于这个仓库」。
 
@@ -355,3 +355,79 @@ ref 通告体积随历史线性增长。解法与 WAL checkpoint 同形：把已
 聚合逐字节一致（这是验收等式）。条目信任始终来自每条自己的签名，不来自快照签名；折叠单元
 是 CLI（`walgit collab gc`），写经 receive-pack，快照先落、收件箱后删，中途崩溃只产生重复、
 不产生丢失。
+
+---
+
+## 附录：GitHub 时代的认领流程（历史，2026-09-16 前）
+
+> 自 `AGENTS.md` §6.1/§6.2 原样搬入（2026-11-05）。协作层已迁到 `refs/collab/*`，
+> 当前规范见 `docs/D1_PROTOCOL.md`；这里保留的是历史形态，不再执行。原 §6 的开头说明：
+> 工作单元带机器可读的生命周期，CI 自报可预期的红噪声，agent 的每次状态变更都是一条签名
+> collab 条目（历史上是 label / comment / PR）；并行拓扑 = 每个 agent 一个注册 principal，
+> 由另一个 principal 评审（见 `web/SKILL.md` §0b）。§6.3（CI 信号）与 §6.4（治理与发布）
+> 已搬到 `docs/RELEASE.md`。
+
+### 6.1 Work-unit lifecycle
+
+A work unit is a **walgit collab thread**; the board (`walgit collab board`, definition `.walgit/board.toml`)
+projects it with **per-field inheritance**: `status` is the newest `status` entry carrying a string `status`
+(a `merge_result {"merged":true}` also lands the card on `merged`), while `owner` / `worktree` / `branch` /
+`work` each come from the newest `status` entry that names that field — later entries inherit what they omit,
+an explicit empty string clears it, and `work` falls back to that entry's `note`. **Exception (§8.4 claims):
+while an open/in-progress card has a live `card_claim` winner, `owner` is the winner's principal and the
+context comes from the winner's own *verified* `status` entries plus the claim body** — a bystander's (or
+forged-actor, unverified) status entry still moves the status column but never the owner fields. Otherwise the
+projection does **not** filter
+by signature: every entry's fields count, while verification feeds the `verified`/`unverified` counts, the merge
+rule (only verified approvals count) and the `done` gate. Filing a thread is the `issue` root; the worker then
+claims it with `walgit collab claim` (§8.4 — or, without claims, a `status` entry naming
+`owner`, adding `worktree`/`branch`/`work` when claimed); an issue-only thread projects as an unowned `open` card.
+Parked work still names its owner (`blocked` / `needs-human`). An owner written in a `comment` does not count —
+only the `status` entry's fields do.
+
+The GitHub label/Project-Status mapping below is the **historical (pre-2026-09-16) shape** of the same
+lifecycle — labels and the GitHub board are no longer written (Issues disabled, Projects off):
+
+| State | Label (historical) | Project Status (historical) | Meaning |
+|---|---|---|---|
+| Backlog | *(none)* | Backlog | filed, not queued |
+| Ready | `ready` | Ready | queued, anyone may claim |
+| In Progress | `in-progress` | In Progress | claimed — a comment names the worktree |
+| In Review | `needs-review` | In Review | a PR exists, waiting for review/CI |
+| Done | *(closed)* | Done | merged/closed |
+| Blocked | `blocked` | (stays put) | waiting on a dependency or external input |
+
+Priority in the old label scheme: `P0` (immediate) / `P1` (this batch) / `P2` (queued) / `P3` (spare);
+kind: `batch` (checklist-driven), `bug`, `enhancement`. In walgit the same information travels in the
+thread title/body (and a batch thread carries the checklist).
+
+### 6.2 Claim protocol (agents) — historical GitHub flow, superseded 2026-09-16
+
+The five steps and `gh` samples below describe the pre-migration GitHub flow; the
+coordination layer is now walgit collab (see the note above). The *state vocabulary*
+(claim → in-progress → needs-review → blocked → done) still names the same lifecycle.
+
+1. **Claim**: pick a `ready` issue → add `in-progress`, remove `ready`, and comment
+   `🔄 [处理中][wt-<worktree>] <one-line plan>`. One issue, one worktree at a time.
+   Never start work on an issue another agent marked in-progress.
+2. **Work**: in a worktree off `main` (`.worktrees/<name>`, branch
+   `worktree-<name>`), following §5 rules and CONTRIBUTING (batches ≥3 similar units,
+   Conventional Commits, one logical change per commit).
+3. **Ship**: open the PR (template: Closes/Relates, Verification, Model Used, reviewer),
+   add `needs-review` to the issue, remove `in-progress`.
+4. **Blocked**: add `blocked` + a comment saying what is missing.
+5. **Done**: the PR merge closes the issue (auto-merge enabled); remove `needs-review`.
+
+`gh` templates (copy-paste, `--repo gqf2008/walgit-d1` implicit):
+
+```bash
+# claim
+gh issue edit <n> --add-label in-progress --remove-label ready
+gh issue comment <n> --body "🔄 [处理中][wt-<name>] <plan>"
+# move to review
+gh issue edit <n> --add-label needs-review --remove-label in-progress
+# check CI for a PR (conclusion per job + failing steps)
+gh pr checks <pr> --repo gqf2008/walgit-d1
+gh run view <run> --repo gqf2008/walgit-d1 --json jobs --jq '.jobs[]|{n:.name,c:.conclusion,f:[.steps[]|select(.conclusion=="failure")|.name]}'
+# releases: push main + the tag to walgit, then `git push github main` + `git push github vX.Y.Z` by hand
+```

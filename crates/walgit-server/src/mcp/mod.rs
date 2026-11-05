@@ -11,7 +11,7 @@
 //!
 //! * **Authentication is HTTP-level, before any JSON-RPC is parsed.** A caller
 //!   without a credential gets a real `401` with `WWW-Authenticate: Bearer`
-//!   (never `Basic` — `/mcp` is browser-reachable, AGENTS.md §1.3), and the
+//!   (never `Basic` — `/mcp` is browser-reachable, docs/ARCHITECTURE.md §1.3), and the
 //!   identity that lands in the handler is the one `Auth::require_read` named.
 //!   The request's own headers are stuffed into a [`Caller`] extension so each
 //!   tool call can replay them on the inner API request it makes

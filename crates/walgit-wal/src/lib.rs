@@ -1,5 +1,5 @@
 //! WAL: index (`manifest.pb`), immutable entries, linearizable publish via CAS,
-//! catch-up/materialize of local repos, ref snapshots. See AGENTS.md §2 and AGENTS.md §2.
+//! catch-up/materialize of local repos, ref snapshots. See docs/ARCHITECTURE.md §2 and docs/ARCHITECTURE.md §2.
 
 mod checkpoint;
 mod error;

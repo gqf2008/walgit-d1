@@ -4,7 +4,7 @@
 ## 关联
 
 walgit collab thread: `<thread-id>`（GitHub 已只做镜像+发布，Issues 关闭；PR 模板仅作历史保留，
-流程见 AGENTS.md 的 "Where this repository lives"）
+流程见 `docs/RELEASE.md`）
 
 ## 变更
 

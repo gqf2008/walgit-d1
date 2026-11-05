@@ -2,7 +2,7 @@
 
 Context: **这是一份决策文档，不是实现。** 读者是决定交付通道走向的维护者、审查 bundle-uri 的 reviewer，
 以及将来若真要实现 selection/静态 pack 路由的工程师。依据是 `upstream/main` 的
-`docs/PACKFILE_URI_DESIGN.md`、`docs/PACKFILE_MIGRATION.md`、`AGENTS.md` D42–D49，以及提交
+`docs/PACKFILE_URI_DESIGN.md`、`docs/PACKFILE_MIGRATION.md`、`docs/DECISIONS.md D42–D49，以及提交
 `60fde9e` / `bf65c01` / `72b5e07` / `4ff4f7a` / `40d0899` / `ff82208` / `d9ed2a6`（2026-09-11/12）。
 本仓库 bundle-uri 的设计之记录仍是 `docs/BUNDLE_URI_DESIGN.md`；成本模型仍是 `docs/ROUNDTRIPS.md`。
 
