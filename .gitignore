@@ -47,3 +47,6 @@ __pycache__/
 
 # legacy ki runtime state in this repo
 .rpi/
+
+# local leader/agent panel state (session id + transcript) — never in the repo
+.agent-panel/
