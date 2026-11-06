@@ -870,7 +870,11 @@ const Runner = struct {
             try gitx.update_ref(self.c.alloc, self.c.io, self.repo, kv.key_ptr.*, kv.value_ptr.*);
             try names.append(kv.key_ptr.*);
         }
-        try gitx.push(self.c.alloc, self.c.io, self.repo, self.remote, .{ .refspecs = names.items });
+        // Log/artifact blobs are the bulk of this push; the size-scaled
+        // bound keeps a 16 MiB artifact from hitting the 120 s ref bound.
+        var payload_bytes: u64 = outcome.log.len;
+        for (outcome.artifacts) |*a| payload_bytes += a.bytes;
+        try gitx.push(self.c.alloc, self.c.io, self.repo, self.remote, .{ .refspecs = names.items, .payload_bytes = payload_bytes });
         var out: util.List(std.json.Value) = .init(self.c.alloc);
         for (outcome.artifacts) |*a| {
             var o = jsonio.new_object();
