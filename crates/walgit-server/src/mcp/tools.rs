@@ -14,7 +14,7 @@
 //!
 //! **Nothing is signed here.** The one write tool takes an entry the caller has
 //! already signed and forwards it, so this process never holds a collaborator's
-//! key (D64); the entry arrives exactly as `walgit collab entry` would push it.
+//! key (D64); the entry arrives exactly as `wgl collab entry` would push it.
 
 use std::sync::Arc;
 
@@ -240,7 +240,7 @@ pub fn defs() -> Vec<Tool> {
         name: Kind::CollabPublish.name(),
         description: "Publish one **already signed** collab entry — the MCP face of \
                       `POST /{owner}/{repo}/api/collab/entries`. Build the entry, sign its canonical \
-                      bytes with your own principal key (`walgit collab entry` does both, and so does \
+                      bytes with your own principal key (`wgl collab entry` does both, and so does \
                       any ed25519 signer over `walgit_wal::collab::sign_entry`), then hand it here \
                       verbatim. The host refuses an `actor` that is not the authenticated caller and \
                       appends it to `refs/collab/inbox/<actor>/<uuid>`; nothing is re-signed and no \
@@ -264,7 +264,7 @@ pub fn defs() -> Vec<Tool> {
         name: Kind::CollabRegister.name(),
         description: "Register (or rotate) **your own** principal's public key in this repository: \
                       `{principal, public_key}` with `principal` = the authenticated caller. \
-                      `walgit collab join` does this for a CLI user; an agent with no checkout uses \
+                      `wgl collab join` does this for a CLI user; an agent with no checkout uses \
                       this once, before its first entry, or after rotating its key. The private key \
                       never travels — only the public half.",
         schema: schema(&json!({

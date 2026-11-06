@@ -3,7 +3,7 @@
 > 状态：**规范**（normative）。本文是批次 issue #31 的设计文档：触发 / 认领 / 结果三类对象的
 > schema、运行状态机、竞争收敛规则、TTL 重认领、去重、失败重试、产物引用与秘密边界，
 > 全部写成可实现的规范。可执行形式：`crates/walgit-wal/src/ci.rs`（聚合核心）与
-> `crates/walgit-cli/src/ci_cmd.rs`（`wgl ci validate|run|status`），测试即其黄金用例
+> `wgl/src/cmd_ci.zig` / `wgl/src/d1/ci.zig`（`wgl ci validate|run|status`），测试即其黄金用例
 > （与 `docs/POLICY.md` 同一纪律）。
 >
 > 与 walgit 的关系：**服务端零 CI 执行**——没有 runner、没有调度、没有秘密。walgit 只提供两样
@@ -391,6 +391,9 @@ done    : effective 存在                               → Settled(conclusion)
 - `walgit-wal::ci` 输出 `run_view` / `collect_runs`（§7，全仓库运行视图）；`wgl ci status`
   （text/markdown/json）与 `wgl collab report` 的 CI 段、SPA 线程时间线的红绿徽标 +
   日志摘要，全部消费同一聚合——多端同源，无第二套语义。
+  `wgl ci status --format json` 与旧 Rust CLI 的输出**语义等价**：同样携带 `{now, runs}`
+  与 `run_view` 字段；键序与缩进不承诺逐字节一致，消费者解析 JSON，不做字节比较
+  （D69 的逐字节一致性只覆盖 `collab board`/`thread` 聚合）。
 - **宿主面（D66）**：`GET …/api-browser/collab/ci[?id=<run>]` 直接序列化 `collect_runs`（`{repo, runs}`），
   MCP 的 `ci_status` 就是它的投影。**认领与回报不新增工具**：它们是条目
   （`kind: ci_claim` / `kind: ci_result`），经 `collab_publish`（或 HTTP `POST …/api-browser/collab/entries`、

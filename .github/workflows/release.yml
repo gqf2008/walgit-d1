@@ -103,8 +103,8 @@ jobs:
               tar -czf "wgl-dist/wgl-${arch}-linux.tar.gz" -C wgl/zig-out/bin wgl
             done
             (cd wgl && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows-gnu)
-            cp wgl/zig-out/bin/wgl.exe wgl-dist/wgl-x86_64-windows.exe
-            (cd wgl-dist && zip -q wgl-x86_64-windows.zip wgl-x86_64-windows.exe && rm wgl-x86_64-windows.exe)
+            cp wgl/zig-out/bin/wgl.exe wgl-dist/wgl.exe
+            (cd wgl-dist && zip -q wgl-x86_64-windows.zip wgl.exe && rm wgl.exe)
           else
             (cd wgl && zig build -Doptimize=ReleaseSafe)
             cp wgl/zig-out/bin/wgl.exe target/release/wgl.exe
@@ -278,12 +278,19 @@ jobs:
           mkdir -p wgl-dist
           for arch in aarch64 x86_64; do
             security unlock-keychain -p "$CODESIGN_KEYCHAIN_PASSWORD" "$CODESIGN_KEYCHAIN"
+            # The distributed archive carries the executable as plain `wgl`
+            # (the documented install command puts it on PATH unchanged).
+            stage="wgl-dist/wgl-$arch-macos"
+            rm -rf "$stage"
+            mkdir -p "$stage"
+            cp "wgl/wgl-$arch" "$stage/wgl"
             codesign --force --options runtime --timestamp \
-              --keychain "$CODESIGN_KEYCHAIN" --sign "$WALGIT_IDENTITY" "wgl/wgl-$arch"
-            codesign --verify --strict --verbose=2 "wgl/wgl-$arch"
+              --keychain "$CODESIGN_KEYCHAIN" --sign "$WALGIT_IDENTITY" "$stage/wgl"
+            codesign --verify --strict --verbose=2 "$stage/wgl"
             # A bare binary cannot be stapled; the ticket binds to the zip's
             # contents and Gatekeeper checks it online at first launch.
-            (cd wgl && zip -q "../wgl-dist/wgl-$arch-macos.zip" "wgl-$arch")
+            (cd "$stage" && zip -q "../wgl-$arch-macos.zip" wgl)
+            rm -rf "$stage"
           done
           for arch in aarch64 x86_64; do
             attempt=1

@@ -32,7 +32,7 @@
 //!   refs-level seq every `mcp.subscribe_interval` and sends
 //!   `notifications/resources/updated` when it moves. No request is held open
 //!   between changes: the seq read *is* a conditional `manifest.pb` GET, the
-//!   same observation lane `git ls-remote` and `walgit collab watch` use. A
+//!   same observation lane `git ls-remote` and `wgl collab watch` use. A
 //!   watched repository that disappears sends `notifications/resources/list_changed`
 //!   (the one thing that capability means) and ends the subscription.
 //!
@@ -547,12 +547,12 @@ Rules that cost a wrong call if skipped:
   (`https://<host>/<owner>/<repo>.git`); this endpoint only reads and writes
   metadata.
 * `collab_publish` takes an entry you have already signed with your own key
-  (`walgit collab entry` builds and signs one) and refuses `actor` != the
+  (`wgl collab entry` builds and signs one) and refuses `actor` != the
   authenticated caller; it never signs for you and holds no key. The signature
   is checked when entries are aggregated, so one signed with a key that is not
   registered for its `actor` is accepted here and then never counts — publish
   as the principal you actually hold.
-* Register your public key once (`collab_register`, or `walgit collab join`):
+* Register your public key once (`collab_register`, or `wgl collab join`):
   an entry signed with a key the repository does not name never verifies.
 * Claiming a card is three steps, in this order: read `collab_board` (is it
   open, and does it already carry a live claim?), publish a `card_claim` entry
