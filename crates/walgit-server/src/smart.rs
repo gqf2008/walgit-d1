@@ -546,13 +546,19 @@ async fn upload_pack_v2(
                 let guard = match handle.sync().await {
                     Ok(g) => g,
                     Err(e) => {
-                        tracing::warn!(error = ?e, "upload_pack v2 sync failed");
+                        tracing::warn!(
+                            error = %crate::error::redact_url_queries(&format!("{e:?}")),
+                            "upload_pack v2 sync failed"
+                        );
                         return;
                     }
                 };
                 // guard is held until the task ends (after streaming completes).
                 if let Err(e) = run_fetch(&handle, engine, req, writer, None).await {
-                    tracing::warn!(error = ?e, "upload_pack v2 fetch failed");
+                    tracing::warn!(
+                        error = %crate::error::redact_url_queries(&format!("{e:?}")),
+                        "upload_pack v2 fetch failed"
+                    );
                 }
                 drop(guard);
             });
@@ -872,7 +878,9 @@ async fn narrated_fetch(
             match bundles_svc.list(&route_id).await {
                 Ok(Some(l)) if !l.bundles.is_empty() => bundle_narration(&l, &req.haves),
                 Ok(_) => vec!["bundle-uri: no bundles published yet — this clone's history comes through upload-pack".into()],
-                Err(e) => vec![format!("bundle-uri: list unavailable ({e})")],
+                Err(e) => vec![crate::error::redact_url_queries(&format!(
+                    "bundle-uri: list unavailable ({e})"
+                ))],
             }
         } else {
             Vec::new()
@@ -924,8 +932,12 @@ async fn narrated_fetch(
                         human(*bytes),
                         human(if *max == 0 { cache_max } else { *max })
                     ),
-                    e => format!("walgit: sync failed: {e}"),
+                    e => sideband_failure_message(e, "fetch"),
                 };
+                // The sideband is already open (HTTP 200): classify the cause
+                // in the sentence, and never quote a presigned URL (a store
+                // transport error does).
+                let msg = crate::error::redact_url_queries(&msg);
                 // git dies on the first band-3 packet: send the whole
                 // message (with its fix) in one.
                 let _ = writer.write_all(&sideband_pkt(3, &msg)).await;
@@ -949,7 +961,10 @@ async fn narrated_fetch(
         )
         .await;
         if let Err(e) = run_fetch(&handle, engine, req, writer, None).await {
-            tracing::warn!(error = ?e, "narrated upload_pack v2 fetch failed");
+            tracing::warn!(
+                error = %crate::error::redact_url_queries(&format!("{e:?}")),
+                "narrated upload_pack v2 fetch failed"
+            );
         }
         drop(guard);
     });
@@ -1073,7 +1088,10 @@ async fn upload_pack_v0(
         let guard = match handle.sync().await {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!(error = ?e, "upload_pack v0 sync failed");
+                tracing::warn!(
+                    error = %crate::error::redact_url_queries(&e.to_string()),
+                    "upload_pack v0 sync failed"
+                );
                 return;
             }
         };
@@ -1083,7 +1101,10 @@ async fn upload_pack_v0(
             .upload_pack_raw(walgit_git::pkt::Protocol::V0, reader, writer)
             .await
         {
-            tracing::warn!(error = ?e, "upload_pack v0 failed");
+            tracing::warn!(
+                error = %crate::error::redact_url_queries(&format!("{e:?}")),
+                "upload_pack v0 failed"
+            );
         }
         drop(guard);
     });
@@ -1342,9 +1363,12 @@ pub async fn receive_pack(
         let guard = match sync_narrated(&handle, &mut writer, t0).await {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!(repo = %repo, error = %e, "receive-pack: sync failed");
-                let report =
-                    refusal_report(&caps, &txn, &format!("walgit: sync failed: {e}")).await;
+                // The 200 stream is already open (side-band-64k was
+                // advertised), so a transient failure cannot be a 503 here:
+                // say so on the sideband and let the client retry the push.
+                let msg = sideband_failure_message(&e, "push");
+                tracing::warn!(repo = %repo, error = %msg, "receive-pack: sync failed");
+                let report = refusal_report(&caps, &txn, &msg).await;
                 let _ = writer.write_all(&report).await;
                 let _ = writer.flush().await;
                 return;
@@ -1546,7 +1570,10 @@ async fn receive_pack_process(
                 .collect::<Vec<_>>(),
         ),
         Err(e) => {
-            tracing::error!(error = ?e, "receive-pack publish failed");
+            tracing::error!(
+                error = %crate::error::redact_url_queries(&e.to_string()),
+                "receive-pack publish failed"
+            );
             // A store that went away mid-publish is transient: answer 503 so
             // the client retries, not the 500 that got the incident's pushes
             // stuck (cc-ai-store-503).
@@ -2093,8 +2120,56 @@ fn git_err(e: &walgit_git::GitError) -> ApiError {
 pub(crate) fn wal_err(e: &walgit_wal::WalError) -> ApiError {
     ApiError::from(e)
 }
+
+/// The sentence a fetch/push sideband carries when sync fails *after* the HTTP
+/// status is already committed (200). Transient failures say "service
+/// unavailable — retry", non-transient ones keep the sync-failed wording, and
+/// the store's own text is redacted (it may quote a presigned URL).
+pub(crate) fn sideband_failure_message(e: &walgit_wal::WalError, verb: &str) -> String {
+    let err = crate::error::redact_url_queries(&e.to_string());
+    if e.is_retryable() {
+        format!("walgit: service unavailable — retry the {verb}: {err}")
+    } else {
+        format!("walgit: sync failed: {err}")
+    }
+}
 fn bundle_err(e: &walgit_bundle::BundleError) -> ApiError {
-    ApiError::Internal(format!("bundle: {e}"))
+    ApiError::from(e)
+}
+
+#[cfg(test)]
+mod sideband_tests {
+    use super::sideband_failure_message;
+
+    /// The band-2/band-3 sentence is client-visible (`remote: …`): it must name
+    /// the transient class AND never carry the presigned URL a store error
+    /// quotes (cc-ai-store-503 review, finding 3).
+    #[test]
+    fn failure_message_classifies_and_redacts_a_signed_url() {
+        let signed = "https://acct.r2.cloudflarestorage.com/b/repos/o/r/manifest.pb\
+                      ?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+                      &X-Amz-Credential=AKIAEXAMPLE%2F20261107\
+                      &X-Amz-Signature=deadbeef\
+                      &x-id=GetObject";
+        let e = walgit_wal::WalError::Store(walgit_store::StoreError::retryable(anyhow::anyhow!(
+            "s3 get http: error sending request for url ({signed})"
+        )));
+        let msg = sideband_failure_message(&e, "fetch");
+        assert!(msg.contains("service unavailable"), "{msg}");
+        assert!(msg.contains("retry the fetch"), "{msg}");
+        assert!(!msg.contains("X-Amz-"), "leaked signing params: {msg}");
+        assert!(!msg.contains("x-id="), "leaked request params: {msg}");
+        assert!(
+            msg.contains("https://acct.r2.cloudflarestorage.com/b/repos/o/r/manifest.pb"),
+            "scheme+host+path must survive: {msg}"
+        );
+
+        let e =
+            walgit_wal::WalError::Store(walgit_store::StoreError::other(anyhow::anyhow!("denied")));
+        let msg = sideband_failure_message(&e, "push");
+        assert!(msg.contains("sync failed"), "{msg}");
+        assert!(!msg.contains("service unavailable"), "{msg}");
+    }
 }
 
 #[cfg(test)]

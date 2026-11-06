@@ -975,6 +975,158 @@ async fn transient_store_failures_are_503_on_git_and_mcp_reads() -> Result<()> {
         .as_str()
         .unwrap_or_default();
     assert!(text.contains("service unavailable"), "{body}");
-    assert!(text.contains("503"), "the status must travel with it: {body}");
+    assert!(
+        text.contains("503"),
+        "the status must travel with it: {body}"
+    );
+    Ok(())
+}
+
+/// A policy read can fail on `policy.json` alone (the repo handle is warm and
+/// the manifest read succeeds): `policy::store_err` must classify it as 503,
+/// which is what `repo_policy` forwards (review finding 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repo_policy_classifies_a_policy_store_outage() -> Result<()> {
+    let (server, link) = Server::start_with_link(MemoryStore::shared(), |_| {}).await?;
+    server.put_repo("t", "pol").await?;
+    push_repo(&server, "t", "pol", 1)?;
+    link.set(FaultPlan {
+        p_err_before: 1.0,
+        only_keys: Some(vec!["policy.json".into()]),
+        ..Default::default()
+    });
+
+    let sid = initialize(&server).await?;
+    let (status, _, body) = post(
+        &server,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "repo_policy", "arguments": {"repo": "t/pol"}},
+        }),
+        Some(&sid),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["isError"], json!(true), "{body}");
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("service unavailable"), "{body}");
+    assert!(text.contains("503"), "{body}");
+    Ok(())
+}
+
+/// Every other MCP read surface (tools and resources) reports the same
+/// transient classification when the bucket is unreachable (review findings
+/// 1 and 2): `repo_settings`, `repo_refs`, `wal_ls`, `resources/list` and
+/// `resources/read`, including the WAL resource that reads pack entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn store_outage_classifies_every_mcp_read_surface() -> Result<()> {
+    let mem = MemoryStore::shared();
+    let (seed, _) = Server::start_with_link(mem.clone(), |_| {}).await?;
+    seed.put_repo("t", "surfaces").await?;
+    push_repo(&seed, "t", "surfaces", 1)?;
+
+    let (cold, cold_link) = Server::start_with_link(mem, |_| {}).await?;
+    cold_link.set(manifest_outage());
+    let sid = initialize(&cold).await?;
+
+    for (tool, arguments) in [
+        (
+            "repo_refs",
+            json!({"repo": "t/surfaces", "kind": "branches"}),
+        ),
+        ("repo_settings", json!({"repo": "t/surfaces"})),
+        ("repo_policy", json!({"repo": "t/surfaces"})),
+        ("wal_ls", json!({"repo": "t/surfaces"})),
+    ] {
+        let (status, _, body) = post(
+            &cold,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments},
+            }),
+            Some(&sid),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{tool}: {body}");
+        assert_eq!(body["result"]["isError"], json!(true), "{tool}: {body}");
+        let text = body["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("service unavailable"), "{tool}: {body}");
+        assert!(text.contains("503"), "{tool}: {body}");
+        assert!(!text.contains("X-Amz-"), "{tool}: {body}");
+    }
+
+    // `resources/list` reads the repository index directly; a failure is a
+    // JSON-RPC error whose sentence keeps the classification.
+    let (status, _, body) = post(
+        &cold,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "resources/list"}),
+        Some(&sid),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("service unavailable"), "{body}");
+    assert!(msg.contains("503"), "{body}");
+
+    // The WAL resource shares `refs_level` + `wal_page`.
+    let (status, _, body) = post(
+        &cold,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": {"uri": "walgit://wal/t/surfaces"},
+        }),
+        Some(&sid),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("service unavailable"), "{body}");
+    assert!(msg.contains("503"), "{body}");
+    assert!(!msg.contains("X-Amz-"), "{body}");
+    Ok(())
+}
+
+/// A push failure that lands after the 200 stream opened (side-band-64k) is a
+/// sideband refusal, not a 503 — and its sentence still says "retry" and
+/// carries no signed URL (review finding 4). The fault is keyed to the
+/// publish's log write so advertisement and the post-open sync stay healthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_that_loses_the_store_is_a_retryable_sideband_refusal() -> Result<()> {
+    let (server, link) = Server::start_with_link(MemoryStore::shared(), |_| {}).await?;
+    server.put_repo("t", "push-outage").await?;
+    let src = push_repo(&server, "t", "push-outage", 1)?;
+
+    std::fs::write(src.dir.join("next.txt"), b"next\n")?;
+    git_in(&src.dir, &["add", "."])?;
+    git_in(&src.dir, &["commit", "-q", "-m", "next"])?;
+
+    link.set(FaultPlan {
+        p_err_before: 1.0,
+        only_keys: Some(vec!["log/".into()]),
+        ..Default::default()
+    });
+
+    let out = std::process::Command::new("git")
+        .current_dir(&src.dir)
+        .args(["push", "origin", "main"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "push must fail: {stderr}");
+    assert!(stderr.contains("remote:"), "no remote message: {stderr}");
+    assert!(
+        stderr.to_lowercase().contains("service unavailable"),
+        "the sideband sentence must keep the transient classification: {stderr}"
+    );
+    assert!(!stderr.contains("X-Amz-"), "leaked signed URL: {stderr}");
     Ok(())
 }

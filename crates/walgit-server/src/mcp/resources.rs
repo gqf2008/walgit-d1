@@ -140,11 +140,13 @@ fn percent_decode(s: &str) -> String {
 /// repositories — a page, bounded by [`LIST_MAX_REPOS`]. The page count travels
 /// in `_meta` so a client knows an index exists beyond what it was handed.
 pub async fn list(st: &Arc<AppState>, principal: &str) -> Result<Vec<Resource>, ErrorData> {
-    let mut repos = st
-        .registry
-        .list()
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("listing repositories: {e}"), None))?;
+    let mut repos = st.registry.list().await.map_err(|e| {
+        let api = crate::error::ApiError::from(&e);
+        ErrorData::internal_error(
+            format!("listing repositories: {}", api.message_with_status()),
+            None,
+        )
+    })?;
     repos.sort_by_key(std::string::ToString::to_string);
     let total = repos.len();
     repos.truncate(LIST_MAX_REPOS);
@@ -260,21 +262,16 @@ async fn refs_level_poll(
         // envelope: classify the same way the HTTP lanes do (a transient store
         // failure says "service unavailable", and `message()` redacts the
         // presigned URL) instead of a bare `internal_error`.
-        other => PollError::Other(ErrorData::internal_error(
-            crate::error::ApiError::from(&other).message(),
-            None,
-        )),
+        other => PollError::Other(wal_error_data(&other)),
     })?;
     // `read_log` (the WAL resource) and the manifest read both need the refs
     // phase; taking the guard here and dropping it immediately keeps the seq
     // consistent with the guard's own sync without holding it across I/O.
     {
-        let _guard = handle.sync_refs().await.map_err(|e| {
-            PollError::Other(ErrorData::internal_error(
-                crate::error::ApiError::from(&e).message(),
-                None,
-            ))
-        })?;
+        let _guard = handle
+            .sync_refs()
+            .await
+            .map_err(|e| PollError::Other(wal_error_data(&e)))?;
     }
     Ok((handle.applied_seq(), handle))
 }
@@ -406,10 +403,15 @@ pub async fn wal_page(
     let entries = if start > end {
         Vec::new()
     } else {
-        handle
-            .read_log(start, Some(end))
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("reading the WAL log: {e}"), None))?
+        handle.read_log(start, Some(end)).await.map_err(|e| {
+            // The WAL resource (`walgit://wal/…`) and `wal_ls` read pack
+            // entries from the store: classify and redact like the rest.
+            let api = crate::error::ApiError::from(&e);
+            ErrorData::internal_error(
+                format!("reading the WAL log: {}", api.message_with_status()),
+                None,
+            )
+        })?
     };
     let folded_through = handle
         .manifest()
@@ -481,6 +483,16 @@ pub(super) fn entry_json(e: &walgit_proto::v1::LogEntry) -> Value {
 /// (it is the one that names the fix).
 pub fn api_err(e: &ApiError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
+}
+
+/// A WAL/store failure as a JSON-RPC error: the HTTP classification is
+/// preserved in the sentence (`… (503)`), and `ApiError::message()` already
+/// redacts a presigned URL's query string.
+fn wal_error_data(e: &walgit_wal::WalError) -> ErrorData {
+    ErrorData::internal_error(
+        crate::error::ApiError::from(e).message_with_status(),
+        None,
+    )
 }
 
 #[cfg(test)]

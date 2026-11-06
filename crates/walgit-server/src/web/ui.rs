@@ -1325,7 +1325,7 @@ async fn checkpoint_info(
         Ok(GetResult::Object { meta, body }) => {
             let bytes = walgit_store::util::collect(body, usize::try_from(meta.size).unwrap_or(usize::MAX))
                 .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                .map_err(ApiError::from)?;
             let checkpoint = Checkpoint::decode(bytes.as_ref())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             (
@@ -1341,7 +1341,7 @@ async fn checkpoint_info(
         Ok(GetResult::NotModified { .. }) | Err(walgit_store::StoreError::NotFound { .. }) => {
             (0, String::new(), String::new())
         }
-        Err(error) => return Err(ApiError::Internal(error.to_string())),
+        Err(error) => return Err(ApiError::from(error)),
     };
     Ok(Some(BundleInfo {
         sha: reference.key.clone(),
@@ -1369,7 +1369,7 @@ async fn bundle_infos(
         .bundles
         .list(id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::from(&e))?;
     let Some(list) = list else {
         return Ok(Vec::new());
     };
@@ -1389,7 +1389,7 @@ async fn bundle_infos(
             state.cfg.bundles.signed_url_ttl,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::from(&e))?;
         out.push(BundleInfo {
             sha: bundle.id.clone(),
             size: bundle.size,

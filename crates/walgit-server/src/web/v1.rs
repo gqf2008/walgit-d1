@@ -113,19 +113,14 @@ async fn host_principals_read(st: &AppState) -> Result<HashMap<String, String>, 
     let mut map = HashMap::new();
     let mut stream = st.store.list_keys(HOST_PRINCIPALS, None);
     while let Some(item) = stream.next().await {
-        let key = item.map_err(|e| ApiError::Internal(e.to_string()))?;
+        let key = item.map_err(ApiError::from)?;
         let Some(principal) = key.strip_prefix(HOST_PRINCIPALS) else {
             continue;
         };
         if principal.is_empty() || principal.contains('/') {
             continue;
         }
-        let Some((_, bytes)) = st
-            .store
-            .get_bytes(&key)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-        else {
+        let Some((_, bytes)) = st.store.get_bytes(&key).await.map_err(ApiError::from)? else {
             continue;
         };
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -180,7 +175,7 @@ async fn host_principal_put(
     st.store
         .put_bytes(&host_principal_key(&principal), content, PutMode::Overwrite)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
     // 写失效(issue #104):注册/轮换立即生效,不等 TTL。
     st.caches.host_principals.invalidate(&());
     Ok(json_swr(
@@ -209,7 +204,7 @@ async fn host_principal_delete(
     st.store
         .delete(&host_principal_key(&principal), None)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
     // 写失效(issue #104):吊销立即生效,不等 TTL。
     st.caches.host_principals.invalidate(&());
     Ok(StatusCode::NO_CONTENT.into_response())

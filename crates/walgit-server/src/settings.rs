@@ -45,9 +45,7 @@ pub async fn http_get(
         .await
         .map_err(ApiError::from)?;
     let h = open(st, route).await?;
-    h.sync_refs()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    h.sync_refs().await.map_err(|e| crate::smart::wal_err(&e))?;
     let body = match h.settings() {
         None => json!({"revision": 0, "toml": "", "author": "", "updated_at": null, "message": ""}),
         Some(s) => {
@@ -73,9 +71,7 @@ pub async fn http_effective(
         .await
         .map_err(ApiError::from)?;
     let h = open(st, route).await?;
-    h.sync_refs()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    h.sync_refs().await.map_err(|e| crate::smart::wal_err(&e))?;
     let text = h
         .effective_config()
         .public_settings_toml()
@@ -105,14 +101,12 @@ pub async fn http_history(
         .await
         .map_err(ApiError::from)?;
     let h = open(st, route).await?;
-    h.sync_refs()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    h.sync_refs().await.map_err(|e| crate::smart::wal_err(&e))?;
     let m = h.manifest();
     let entries = h
         .read_log(m.min_seq.max(1), None)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| crate::smart::wal_err(&e))?;
     let items: Vec<serde_json::Value> = entries
         .iter()
         .filter(|e| e.kind() == walgit_proto::v1::EntryKind::Settings)
@@ -182,7 +176,7 @@ async fn publish(
             Ok((StatusCode::OK, axum::Json(json!({"revision": revision}))).into_response())
         }
         Err(walgit_wal::WalError::Invalid(why)) => Err(ApiError::BadRequest(why)),
-        Err(e) => Err(ApiError::Internal(e.to_string())),
+        Err(e) => Err(ApiError::from(&e)),
     }
 }
 
@@ -269,9 +263,7 @@ pub async fn http_describe(
         .await
         .map_err(ApiError::from)?;
     let h = open(st, route).await?;
-    h.sync_refs()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    h.sync_refs().await.map_err(|e| crate::smart::wal_err(&e))?;
     let settings = h.settings();
     let effective = h.effective_config();
     Ok((
@@ -512,9 +504,7 @@ pub async fn http_policy_dry_run(
         .await
         .map_err(ApiError::from)?;
     let h = open(st, route).await?;
-    h.sync_refs()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    h.sync_refs().await.map_err(|e| crate::smart::wal_err(&e))?;
     let last: usize = query
         .split('&')
         .filter_map(|kv| kv.split_once('='))
@@ -526,7 +516,7 @@ pub async fn http_policy_dry_run(
     let policy = if bytes.iter().all(u8::is_ascii_whitespace) {
         crate::policy::load(&st.store, &route.id)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from)?
     } else {
         crate::policy::parse_document(&bytes).map_err(|e| ApiError::BadRequest(e.to_string()))?
     };
@@ -534,7 +524,7 @@ pub async fn http_policy_dry_run(
     let entries = h
         .read_log(m.min_seq.max(1), None)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| crate::smart::wal_err(&e))?;
     let pushes: Vec<(&walgit_proto::v1::LogEntry, &walgit_proto::v1::RefTransaction)> = entries
         .iter()
         .rev()

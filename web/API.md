@@ -135,6 +135,13 @@ decode each segment.
   lane (`info/refs`, receive/upload-pack) and to `/mcp` tools, which forward
   this router's answer unchanged. Non-retryable store errors keep the existing
   `500` and carry no `Retry-After`; `4xx` semantics are untouched.
+- **Push has a status boundary**: once a push negotiates `side-band-64k` (the
+  normal case) the receive-pack response is committed as `200` when streaming
+  starts. A transient failure *after* that point cannot become a `503`: it is
+  reported on the sideband as `remote: walgit: service unavailable — retry the
+  push: …` and git exits non-zero. Treat that sentence (not the HTTP status) as
+  the retry signal; the `503 + Retry-After` contract above applies only while
+  the request is still at advertisement/sync, before the stream opens.
 - **Signed URLs never reach the client**: a store error may quote the presigned
   URL it failed to fetch, whose query string carries `X-Amz-Credential` /
   `X-Amz-Signature` / `x-id=…`. The response body (and the `remote: …` line a

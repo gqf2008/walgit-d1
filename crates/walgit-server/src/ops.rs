@@ -199,7 +199,7 @@ pub async fn start(
                     task.finish_ok(summary, Some(value));
                 }
                 Err(e) => {
-                    task.finish_err(500, e);
+                    task.finish_err(500, crate::error::redact_url_queries(&e));
                 }
             }
         }

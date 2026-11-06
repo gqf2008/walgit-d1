@@ -428,11 +428,9 @@ async fn run(
                 .map_err(|e| {
                     // Same shape as `ToolError::exec`: sentence + status, so a
                     // transient store failure reads as `… (503)` here too.
-                    let api = crate::error::ApiError::from(&e);
                     ToolError::Execution(format!(
-                        "listing repositories: {} ({})",
-                        api.message(),
-                        api.status().as_u16()
+                        "listing repositories: {}",
+                        crate::error::ApiError::from(&e).message_with_status()
                     ))
                 })?;
             repos.sort_by_key(std::string::ToString::to_string);

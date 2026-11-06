@@ -825,6 +825,9 @@ fn store_err(e: StoreError) -> ApiError {
     match e {
         StoreError::InvalidArgument(msg) => ApiError::BadRequest(msg),
         StoreError::NotFound { key } => ApiError::NotFound(key),
+        // A transient store failure on a policy read is the same 503 class as
+        // every other lane (cc-ai-store-503); the tool `repo_policy` reads it.
+        e if e.is_retryable() => ApiError::ServiceUnavailable(format!("store: {e}")),
         e => ApiError::Internal(format!("store: {e}")),
     }
 }
@@ -832,6 +835,30 @@ fn store_err(e: StoreError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_err_classifies_retryable_store_failures() {
+        use walgit_store::StoreError;
+        assert_eq!(
+            store_err(StoreError::retryable(anyhow::anyhow!("io"))).status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            store_err(StoreError::other(anyhow::anyhow!("denied"))).status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            store_err(StoreError::InvalidArgument("bad".into())).status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            store_err(StoreError::NotFound {
+                key: "policy.json".into()
+            })
+            .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+    }
 
     fn upd(name: &str, old: &str, new: &str) -> RefUpdate {
         RefUpdate {

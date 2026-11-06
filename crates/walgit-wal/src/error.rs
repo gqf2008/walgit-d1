@@ -63,7 +63,9 @@ impl WalError {
     /// clients treat the failure as permanent, which is exactly what an outage
     /// of the bucket must not do. The same applies to the coordination loop's
     /// terminal `RetriesExhausted`, and to the WAL's own retry budget /
-    /// reclaim-race refusals, whose Display already says "retry".
+    /// reclaim-race refusals, whose Display already says "retry". A
+    /// `CommitUnknown` (the CAS may have landed, the answer was lost) is also a
+    /// retry: the client must not read the missing evidence as a rejection.
     pub fn is_retryable(&self) -> bool {
         match self {
             // The store error wrapped directly, or one level deeper inside the
@@ -71,7 +73,8 @@ impl WalError {
             WalError::Store(e) | WalError::Coord(CoordError::Store(e)) => e.is_retryable(),
             WalError::Coord(CoordError::RetriesExhausted { .. })
             | WalError::Retry { .. }
-            | WalError::Reclaiming(_) => true,
+            | WalError::Reclaiming(_)
+            | WalError::CommitUnknown(_) => true,
             _ => false,
         }
     }
