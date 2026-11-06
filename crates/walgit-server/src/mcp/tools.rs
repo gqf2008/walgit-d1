@@ -63,7 +63,7 @@ const REPO_ARG: &str = "repository as \"<owner>/<repo>\"";
 /// table and the dispatch table cannot disagree about what a tool is called —
 /// in either direction (a name here with no dispatch arm, or the reverse).
 pub fn defs() -> Vec<Tool> {
-    let mut out = vec![
+    let out = vec![
         Tool {
             name: Kind::RepoList.name(),
             description: "List the repositories on this host.",
@@ -264,7 +264,7 @@ const ALL: [Kind; 17] = [
 impl Kind {
     /// Every tool — the one list the schema table, the dispatch match and the
     /// tests all read.
-    const ALL: [Kind; 23] = ALL;
+    const ALL: [Kind; 17] = ALL;
 
     fn name(self) -> &'static str {
         match self {
