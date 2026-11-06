@@ -1233,6 +1233,13 @@ fn pollLoop(s: *Server) void {
 }
 
 fn pollTick(s: *Server) void {
+    // No subscribers: an idle stdio server must not fetch the remote every
+    // tick. A subscription added right after this check is covered next tick.
+    s.subs_mutex.lockUncancelable(s.c.io);
+    const idle = s.subs.items.len == 0;
+    s.subs_mutex.unlock(s.c.io);
+    if (idle) return;
+
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
