@@ -24,9 +24,9 @@ Reading order: `GOAL.md` (what we want) → `docs/ARCHITECTURE.md` (what the sys
 | Build (`<BUILD_CMD>`) | `cargo build --workspace --all-targets`; SPA `just web-build` |
 | Check (`<CHECK_CMD>`) | `just warnings`, `just clippy`; SPA `pnpm run build` (oxlint `--deny-warnings` + tsc) |
 | Test (`<TEST_CMD>`) | `just test`; SPA `just web-test` |
-| Integration (`<INTEGRATION_CMD>`) | `just test-cli`, `just e2e`, `just sim`; everything at once is `just ci` |
+| Integration (`<INTEGRATION_CMD>`) | `just wgl-e2e`, `just e2e`, `just sim`; everything at once is `just ci` |
 | Review (`<REVIEW_CMD/流程>`) | leader review + a verified `approve` from a principal other than the author (`merge_rule_eval`) |
-| Rhythm (`<TICK_INTERVAL>`) | no timers: `walgit collab watch --once` under a supervisor or a timer (D55) |
+| Rhythm (`<TICK_INTERVAL>`) | no timers: `wgl collab watch --once` under a supervisor or a timer (D55) |
 | Decision model (`<DECISION_MODEL>`) | none — deterministic gates are commands, judgment calls are the leader's |
 | Tracker (`<TRACKER>`) | the D1 collaboration layer: `refs/collab/*`, read and written over `/mcp` (`docs/D1_PROTOCOL.md`) |
 
@@ -54,7 +54,7 @@ Reading order: `GOAL.md` (what we want) → `docs/ARCHITECTURE.md` (what the sys
 - **Does not spawn sub-agents**, does not push to `main`, does not merge.
 
 The set of surviving worktrees is the team's physical roster: retiring a principal is
-`walgit collab principal-revoke`, never `git worktree remove` (D62).
+`wgl collab principal-revoke`, never `git worktree remove` (D62).
 
 ## 2. Delivery flow
 
@@ -81,7 +81,8 @@ from the entries.
 just warnings      # zero rustc warnings
 just clippy        # -D warnings
 just test          # fast tier: lib/bins, wildcard crates, server integration
-just test-cli      # walgit-cli suites (ubuntu-only)
+just wgl-test      # the wgl client's zig unit/golden tests
+just wgl-e2e       # the wgl transport e2e (register→push→aggregate→claim→fold)
 just e2e           # smart HTTP against real git
 just sim           # fault-injected cluster over one truth store
 just web-test      # SPA unit tests; plus `pnpm run build` for oxlint + tsc
@@ -104,7 +105,7 @@ Blocking, on top of the commands:
 
 ## 4. Rhythm
 
-There is no scheduler. The leader advances the board by reading it — `walgit collab watch` under a
+There is no scheduler. The leader advances the board by reading it — `wgl collab watch` under a
 supervisor, or `--once` under a timer — and by dispatching what is unowned. Instance state is local
 and disposable; durable truth is `refs/collab/*`. A held, long-polling "wait until something
 changes" request is not an option: refs-level polling is the observation surface (D55). If a pass
@@ -125,7 +126,7 @@ finds nothing new, report status; do not re-dispatch the same card.
 
 The tracker is the D1 collaboration layer (`refs/collab/*`), not GitHub: the mirror's Issues, Wiki,
 Projects and Discussions are disabled (D46). Read and write it over `/mcp` (`collab_board`,
-`collab_thread`, `collab_publish`, …); `walgit collab …` is the scripting form of the same lanes.
+`collab_thread`, `collab_publish`, …); `wgl collab …` is the scripting form of the same lanes (D69).
 
 Cross-team or cross-repository work is a card too: background, expected result, acceptance,
 owner/team, deadline and links in the body; state changes as `status` entries with a note. Releases

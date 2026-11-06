@@ -135,36 +135,36 @@ git clone -c transfer.bundleURI=true http://host/<owner>/<repo>.git
 ### 6.2 CLI 视角
 ```bash
 # 首次注册身份（每仓库一次）
-walgit collab principal-register --repo <checkout> --principal <you> --key <keyfile> --push origin
+wgl collab principal-register --repo <checkout> --principal <you> --key <keyfile> --push origin
 
 # 开 issue（线程 id 自定义）
-walgit collab entry --repo <checkout> --kind issue --id pr-1 --actor <you> \
+wgl collab entry --repo <checkout> --kind issue --id pr-1 --actor <you> \
   --body '{"title":"功能 A"}' --key <keyfile> --push origin
 
 # 挂 PR（base/head 分支）
-walgit collab entry --repo <checkout> --kind patch --id pr-1 --actor <you> \
+wgl collab entry --repo <checkout> --kind patch --id pr-1 --actor <you> \
   --base refs/heads/main --head refs/heads/feature/a \
   --body '{"title":"实现 A"}' --key <keyfile> --push origin
 
 # 评审 / 状态 / 关闭
-walgit collab entry --repo <checkout> --kind review --id pr-1 --actor <you> \
+wgl collab entry --repo <checkout> --kind review --id pr-1 --actor <you> \
   --body '{"decision":"approve"}' --key <keyfile> --push origin
-walgit collab entry --repo <checkout> --kind status --id pr-1 --actor <you> \
+wgl collab entry --repo <checkout> --kind status --id pr-1 --actor <you> \
   --body '{"status":"done"}' --key <keyfile> --push origin
 ```
 
 ### 6.3 查看
 ```bash
-walgit collab thread <id> --repo <checkout>     # 线程时间线（JSON）
-walgit collab pr <id> --repo <checkout>          # PR 聚合 + merge 判定
-walgit collab report --repo <checkout> --format markdown   # 全局观测
-walgit collab board --repo <checkout> --format text        # 看板
+wgl collab thread <id> --repo <checkout>     # 线程时间线（JSON）
+wgl collab pr <id> --repo <checkout>          # PR 聚合 + merge 判定
+wgl collab report --repo <checkout> --format markdown   # 全局观测
+wgl collab board --repo <checkout> --format text        # 看板
 ```
 
 ### 6.4 收件箱折叠（GC，D45）
 协作条目只增不删，长期会撑大 ref 广播与服务端聚合预算。任一持有身份的主体可定期折叠：
 ```bash
-walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
+wgl collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
 ```
 它把当前 `refs/collab/inbox/*` 全部条目原样收进签名快照 `refs/collab/meta/snapshot` 并删除已折叠的 ref。
 读侧一律按「快照 ∪ 未折叠尾巴」聚合，折叠前后任何视图（thread/pr/report/board，CLI 与服务端）**字节一致**；
@@ -176,15 +176,15 @@ walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
 
 ## 7. 身份与密钥
 
-- **repo 级身份**：`walgit collab principal-register` 写 `refs/collab/meta/principals/<p>`。
+- **repo 级身份**：`wgl collab principal-register` 写 `refs/collab/meta/principals/<p>`。
 - **host 级身份（跨仓库）**：一次注册、各处可验：
   ```bash
-  walgit principal register --url http://host:8081 --principal <you> --key <keyfile> --token <token>
-  walgit principal list --url http://host:8081
-  walgit principal rotate --url ... --principal <you> --key <newkey> --token ...
-  walgit principal revoke --url ... --principal <you> --token ...
+  wgl principal register --url http://host:8081 --principal <you> --key <keyfile> --token <token>
+  wgl principal list --url http://host:8081
+  wgl principal rotate --url ... --principal <you> --key <newkey> --token ...
+  wgl principal revoke --url ... --principal <you> --token ...
   # 在仓库 B 离线可验：把 host registry 拉进本地缓存
-  walgit collab principal-fetch --repo <checkout>
+  wgl collab principal-fetch --repo <checkout>
   ```
 - 密钥是 **32 字节 hex** 的 Ed25519 种子；妥善保管，谁持有谁就是该身份。
 - **浏览器身份（SPA 写路径）**：同一浏览器首次发条目时自注册一把 WebCrypto Ed25519 key（存 localStorage，键名 `walgit.collab.keypair.v1`）。
@@ -195,7 +195,7 @@ walgit collab gc --repo <checkout> --actor <you> --key <keyfile> --push origin
     localStorage.setItem("walgit.collab.keypair.v1", `粘贴 walgit-collab-key-<principal>.json 的内容`)
     ```
   - 注意注册表是「当前 key 唯一」语义：repo 本地 `refs/collab/meta/principals/*` 永远覆盖 host 注册表，
-    因此 `walgit principal rotate` 只影响以 host 注册表为有效来源的身份；反之 repo 本地轮换（CLI `collab principal-register`）
+    因此 `wgl principal rotate` 只影响以 host 注册表为有效来源的身份；反之 repo 本地轮换（CLI `collab principal-register`）
     对所有读者生效。两者都会让旧 key 的历史条目失去 verified。
 
 ---
@@ -222,10 +222,10 @@ artifacts = ["out.bin"]    # 可选：任务结束后收集的产物（相对路
 ```
 运行 runner（任意机器）：
 ```bash
-walgit ci validate --repo <checkout>
-walgit ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile> --once
-walgit ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile>   # 常驻：轮询 loop
-walgit ci status --repo <checkout>
+wgl ci validate --repo <checkout>
+wgl ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile> --once
+wgl ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile>   # 常驻：轮询 loop
+wgl ci status --repo <checkout>
 walgit ci log --repo <checkout> [<run-id>]              # 打印该 run 所存日志（超限时告警）
 walgit ci artifacts --repo <checkout> [<run-id>] --out out/  # 逐个 sha256 校验下载产物
 ```
@@ -332,7 +332,7 @@ walgit wal show <owner>/<repo> <seq>
 - **entry**：`refs/collab/inbox/<principal>/<uuid>` 指向的签名 JSON 对象
 - **thread**：相同 `id` 的条目集合；序见 `docs/D1_PROTOCOL.md` §6.2（排序键 `(ts, actor, oid)`，`parent` 只决定就绪）
 - **board**：线程集合按 `.walgit/board.toml` 列定义的投影
-- **runner**：`walgit ci run` 的客户端算力
+- **runner**：`wgl ci run` 的客户端算力
 
 ---
 

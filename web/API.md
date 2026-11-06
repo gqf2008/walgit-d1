@@ -724,9 +724,9 @@ list by `commit_date` day and shows `subject` + `author`.
 The decentralized collaboration layer (`docs/D1_PROTOCOL.md`) writes to
 `refs/collab/*` (inbox entries + principals registry) and aggregates them
 deterministically; these endpoints back the Collab tab and mirror what the
-`walgit collab` CLI computes locally. Since D45 (issue #160) the aggregation
+`wgl collab` CLI computes locally. Since D45 (issue #160) the aggregation
 input is **snapshot ∪ inbox tail**: a signed fold at
-`refs/collab/meta/snapshot` (written by `walgit collab gc`, which then deletes
+`refs/collab/meta/snapshot` (written by `wgl collab gc`, which then deletes
 the folded inbox refs) plus every inbox ref not yet folded — deduped by oid,
 so a fold never changes any answer below. Auth: same as every repo-scoped write
 (write tokens / signed-in principal; `actor == principal` is enforced).
@@ -765,7 +765,7 @@ receive-pack). `200` → `{ "ref", "oid", "seq" }`.
 The full observability report (docs/D1_PROTOCOL.md §7.4/§8) — thread summaries, PR status + merge
 rule evaluation, the CI runs section (D1-CI §8.3: pure-CI threads are not
 board cards but are projected here by the same aggregation as
-`walgit ci status`), verification health, per-actor/per-kind activity. Shape
+`wgl ci status`), verification health, per-actor/per-kind activity. Shape
 is `walgit-wal::collab::Report`:
 
 ```json
@@ -820,7 +820,7 @@ column rules of `.walgit/board.toml` **at HEAD**. The board is a *pure
 function of the collab refs and the definition* — `build_board` in
 `walgit-wal::collab` — and there is no board state anywhere: moving a card is
 an ordinary signed `status` entry (POST to `…/collab/entries` above) and the
-columns re-derive. The SPA board page and `walgit collab board` render from
+columns re-derive. The SPA board page and `wgl collab board` render from
 this same shape; the CLI's `--format json` writes these exact bytes, which is
 what the cross-client acceptance test asserts.
 
@@ -886,7 +886,7 @@ All three read endpoints answer from the synced WAL view (`Need::Objects`): entr
 blobs are read locally when packs fit, faulted through the remote reader
 otherwise (one batched fault, one `git cat-file --batch` — never one read or
 one process per entry). The namespace is budgeted at 20 000 refs per request:
-past it the answer is a `503` pointing at the `walgit collab` CLI, which
+past it the answer is a `503` pointing at the `wgl collab` CLI, which
 aggregates offline. SWR caching (stale-while-revalidate=60) with a body-digest ETag
 (conditional requests answer `304`), never
 immutable — collab state changes with every push.
@@ -896,7 +896,7 @@ immutable — collab state changes with every push.
 The D1-CI §8.2 storage convention's HTTP read side (issue #161): a CI run's
 full log and its declared artifacts live as plain git blobs at
 `refs/collab/ci-artifacts/<actor>/<sha256>`, pushed through receive-pack by
-the runner (the CLI side is `walgit ci log` / `walgit ci artifacts`; the SDK
+the runner (the CLI side is `wgl ci log` / `wgl ci artifacts`; the SDK
 side is `repo.ci.artifact(sha256)`). `200` → the exact bytes as
 `application/octet-stream`, `Cache-Control: immutable` + ETag = the quoted
 sha256 (content-addressed: the bytes behind an address never change). The

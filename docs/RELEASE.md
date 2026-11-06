@@ -6,7 +6,7 @@
 ## Where this repository lives
 
 - **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
-  board are signed entries in the D1 collaboration layer (`refs/collab/*`, `walgit collab ...`), not GitHub.
+  board are signed entries in the D1 collaboration layer (`refs/collab/*`, `wgl collab ...`), not GitHub.
 - **GitHub is the release pipeline** — `github = gqf2008/walgit-d1`. **Releases go through GitHub Actions, and
   their refs get there by hand**: after `main` and the tag are on walgit, `git push github main` and
   `git push github vX.Y.Z` — nothing else carries them, and pushing the tag is what fires
@@ -61,7 +61,7 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   (`git push github main`, D57).
 - Design decisions and Q&A: historically GitHub **Discussions** (Announcements/General/
   Ideas/Polls/Q&A/Show and tell); discussions are disabled on the mirror now — put the "why"
-  in the walgit collab thread (`comment` entries) instead.
+  in the wgl collab thread (`comment` entries) instead.
 - Vulnerabilities: private reporting (SECURITY.md) + Dependabot security updates +
   CodeQL scanning on PRs (results in the Security tab).
 - Releases: tag `v*` triggers `release.yml` (builds the linux `.deb`, the Windows

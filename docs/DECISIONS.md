@@ -791,3 +791,40 @@
   aside. Tests: `crates/walgit-server/tests/web_ui.rs::
   a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token` and
   `web/src/auth-gate.test.ts`.
+
+- **D69** **The collaboration command families move to the standalone `wgl`
+  client (Zig); walgit's CLI carries them no more (2026-11-06, cc-ai-wgl-zig).**
+  D68 hid `walgit collab` / `walgit ci` / `walgit principal` behind a deprecation
+  notice and scheduled them for deletion at the next major release. This is that
+  deletion, with the replacement landing first: the whole command surface now
+  lives in **`wgl/`**, a standalone Zig module (zig pinned `0.17.0`) that speaks
+  the same D1 protocol over the same lanes — reads aggregate the local
+  `refs/collab/*` offline (§3.2), writes are local refs pushed over
+  receive-pack, and the host registry commands talk to `/api/v1/principals`.
+  The server keeps everything it had: the MCP collab tools, the thin API, the
+  browser collaboration surface, the fold maintainer unit (D66) — nothing on
+  the wire changed, and the canonical form is the same contract (wgl pins the
+  §5.3.1 golden vectors).
+  - **Byte-compat is the acceptance, and it holds**: `wgl collab board
+    --format json` and `--format hash` are byte-identical to the retired Rust
+    CLI on the same refs, thread output included; the transport e2e
+    (`scripts/wgl-e2e.sh`, the lane the retired suites owned) ends by
+    cross-checking the board hash between wgl and the Rust aggregation on the
+    folded state. The D45 fold equality (§9) holds across the boundary: wgl's
+    gc folds, and the pre/post-fold hashes are identical.
+  - **What moved**: `collab_cmd.rs`, `ci_cmd.rs` (the local CI runner —
+    validate/run/status/log/artifacts, the §8.1 worktree sandbox, the cron
+    sweep with D1-CI §4.3 due-slot coalescing), `principal_cmd.rs`, and their
+    integration suites (`collab_e2e.rs`, `ci_e2e.rs`) — replaced by wgl's unit
+    tests (golden vectors, §16 anchors ported from `walgit-wal::collab`) and
+    `scripts/wgl-e2e.sh` (lanes `just wgl-test` / `just wgl-e2e`; the
+    suite-guard anchors them). `proc_group.rs` went with the runner; the
+    server's maintainer keeps its own kill paths.
+  - **What stayed**: `walgit-wal`'s collab/ci aggregation libraries (the MCP
+    face and the thin API still serve them — one aggregation, every client),
+    the host registry, and every server-side surface from D64/D66/D68.
+  - Agent-facing notes: the tracker's scripting lane is now `wgl collab …`
+    (§6 of the charter updated in the same change); the exit contract of
+    `wgl collab claim` is unchanged (0 won / 2 stand-down / 1 error). Amends
+    D68's "next major release" schedule (done early, replacement first) and
+    D62's retire-a-principal pointer (`wgl collab principal-revoke`).

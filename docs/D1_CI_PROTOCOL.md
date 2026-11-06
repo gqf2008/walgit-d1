@@ -3,7 +3,7 @@
 > 状态：**规范**（normative）。本文是批次 issue #31 的设计文档：触发 / 认领 / 结果三类对象的
 > schema、运行状态机、竞争收敛规则、TTL 重认领、去重、失败重试、产物引用与秘密边界，
 > 全部写成可实现的规范。可执行形式：`crates/walgit-wal/src/ci.rs`（聚合核心）与
-> `crates/walgit-cli/src/ci_cmd.rs`（`walgit ci validate|run|status`），测试即其黄金用例
+> `crates/walgit-cli/src/ci_cmd.rs`（`wgl ci validate|run|status`），测试即其黄金用例
 > （与 `docs/POLICY.md` 同一纪律）。
 >
 > 与 walgit 的关系：**服务端零 CI 执行**——没有 runner、没有调度、没有秘密。walgit 只提供两样
@@ -17,7 +17,7 @@
 > **给人类的说明（呈现层，非规范）**：不想读协议的工程师看两处即可——① 产品内模型讲解页
 > 「了解 D1 协作」（SPA：仓库页 → 协作 → 「了解 D1 协作」，路由 `/{owner}/{repo}/collab/guide`；
 > 三张图用本仓库真实数据渲染）；② 同页底部的「看起来像 bug——其实不是」四卡与三个
-> `walgit collab` 命令（故障手册）。演示数据可用 `scripts/seed-collab-demo.sh` 复现。
+> `wgl collab` 命令（故障手册）。演示数据可用 `scripts/seed-collab-demo.sh` 复现。
 
 ## 1. 定位与不变式
 
@@ -41,8 +41,8 @@
 - **runner 是一个普通 principal**（docs/D1_PROTOCOL.md §4）：一份 token（git 认证）+ 一对 Ed25519 密钥
   + 一个 principal（惯例前缀 `ci-` 或 `svc-`，如 `ci-runner-1`；语法与校验同 D1）。
   首次使用自注册进 `refs/collab/meta/principals/<principal>`——**只建不改**：receive-pack
-  拒绝对非 commit ref 的非 force 更新，所以 `walgit ci run` 仅在该 ref 不存在时创建；
-  轮换密钥是显式的 `walgit collab principal-register`，不是 runner 的副作用。
+  拒绝对非 commit ref 的非 force 更新，所以 `wgl ci run` 仅在该 ref 不存在时创建；
+  轮换密钥是显式的 `wgl collab principal-register`，不是 runner 的副作用。
 - 写路径与人类/agent 完全同构：签名条目 → 自己的收件箱 ref → receive-pack。仓库若用
   `policy.json` 保护 `refs/collab/*`（docs/D1_PROTOCOL.md §12/§14），CI 条目同样受其约束——CI 没有特权路径。
 - 同一仓库可以并存任意多个 runner；同一 principal 也可以有多个 runner 进程（认领以
@@ -70,7 +70,7 @@ schedule  = "0 0 2 * * *"                  # 可选：6/7 字段 UTC cron 或 @h
 artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的产物相对路径（§8.2）
 ```
 
-### 3.1 校验规则（normative，`walgit ci validate` 逐条实现）
+### 3.1 校验规则（normative，`wgl ci validate` 逐条实现）
 
 | # | 规则 | 违反 = 校验失败 |
 |---|---|---|
@@ -108,7 +108,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
    （一个往返，无 pack），与本地状态文件对比得"变化过的 ref"。对离线一段时间后回来的
    runner，对比自然**合并（coalesce）**为"处理当前 tip"——中间的多次推送折叠成最后一次。
    正确性不依赖推送，只依赖事实。
-2. **push 唤醒（曾存在，2026-09-16 随 events 桥移除）**：`walgit ci run --listen <addr>` 的
+2. **push 唤醒（曾存在，2026-09-16 随 events 桥移除）**：`wgl ci run --listen <addr>` 的
    唤醒端点（HMAC 验签 + `X-Walgit-Delivery` 去重）随 events 桥一并删除。今天只有 refs 级
    轮询一条传输——轮询间隔就是最坏情况的触发延迟；触发仍以 `ls-remote` 的 tip diff 为准。
 
@@ -141,7 +141,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
   `cat-file`/`ls-tree`，cron 检查不随全仓 ref 数产生子进程风暴。真正到槽位时才读取该 tip
   的 `ci.toml` 并执行。
 - **`--once` 即 cron 友好形态**：一次 pass = ref 触发 + 定时扫描；外部调度器（systemd
-  timer、crontab、平台 cron）以 `walgit ci run --once` 周期唤起即可，常驻 runner 则在
+  timer、crontab、平台 cron）以 `wgl ci run --once` 周期唤起即可，常驻 runner 则在
   每个轮询间隔顺带完成扫描。
 
 ## 5. 运行（run）与运行标识
@@ -157,7 +157,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
   `fnv1a64` 为 64 位 FNV-1a；`hex16` 为其大端 64 位值的 16 个小写 hex 字符。短、URL
   安全、确定性、无碰撞现实风险（2^32 次运行才到生日界）；可读字段（task/ref/commit）
   在条目 body 里。run id 就是协作线程 id（docs/D1_PROTOCOL.md §5 `id`），claim 与 result 因此落在同一
-  线程，`walgit collab thread <run_id>` 直接可看。
+  线程，`wgl collab thread <run_id>` 直接可看。
 - **定时运行的 id 变体（§4.3，issue #161）**：槽位 `S` 触发的运行把槽位混进标识——
 
   ```
@@ -188,7 +188,7 @@ artifacts = ["target/dist/app.tar.gz"]     # 可选：任务结束后收集的�
   "commit": "cb38da1…",
   "ttl": 300,
   "attempt": 1,
-  "runner": "walgit ci/0.1"
+  "runner": "wgl ci/0.1"
 }
 ```
 
@@ -368,8 +368,8 @@ done    : effective 存在                               → Settled(conclusion)
     日志 blob 只在捕获非空时上传，空捕获的 `log_sha256` 为 sha256(空串) 且不推 ref。
   - 拉取：**按需**，绝不在每个 watcher 的 `git fetch refs/collab/*` 里带上 16 MiB blob——
     常规 collab fetch 收窄到 `inbox/* + meta/*`，产物命名空间单独 fetch。
-  - CLI：`walgit ci log [--repo .] [--remote origin] [run]` 打印所存日志（`log_truncated=true`
-    时明确告警；取不到 blob 时退回 `log_summary`）；`walgit ci artifacts [--out <dir>] [run]`
+  - CLI：`wgl ci log [--repo .] [--remote origin] [run]` 打印所存日志（`log_truncated=true`
+    时明确告警；取不到 blob 时退回 `log_summary`）；`wgl ci artifacts [--out <dir>] [run]`
     逐个 sha256 校验并以 `create_new` 落盘（拒绝覆盖、拒绝跟随已有 symlink），重复 basename
     跳过；`name` 只取基名（永不写出 `--out` 之外）。fresh clone 先对 http(s) walgit remote
     发带精确 actor 的 `HEAD /…/ci-artifacts/<sha256>?actor=<actor>`；只有 `200` 才执行
@@ -388,8 +388,8 @@ done    : effective 存在                               → Settled(conclusion)
 
 ### 8.3 展示（读侧）
 
-- `walgit-wal::ci` 输出 `run_view` / `collect_runs`（§7，全仓库运行视图）；`walgit ci status`
-  （text/markdown/json）与 `walgit collab report` 的 CI 段、SPA 线程时间线的红绿徽标 +
+- `walgit-wal::ci` 输出 `run_view` / `collect_runs`（§7，全仓库运行视图）；`wgl ci status`
+  （text/markdown/json）与 `wgl collab report` 的 CI 段、SPA 线程时间线的红绿徽标 +
   日志摘要，全部消费同一聚合——多端同源，无第二套语义。
 - **宿主面（D66）**：`GET …/api-browser/collab/ci[?id=<run>]` 直接序列化 `collect_runs`（`{repo, runs}`），
   MCP 的 `ci_status` 就是它的投影。**认领与回报不新增工具**：它们是条目
@@ -437,16 +437,16 @@ done    : effective 存在                               → Settled(conclusion)
 
 ## 12. 本批次落地范围与开放项
 
-- **已实现**：§3（`walgit ci validate`）、§5–§9（`walgit ci run`，轮询传输）、§7/§8.3
-  （`walgit-wal::ci` + `walgit ci status` + `collab report` CI 段 + SPA 线程徽标）、
+- **已实现**：§3（`wgl ci validate`）、§5–§9（`wgl ci run`，轮询传输）、§7/§8.3
+  （`walgit-wal::ci` + `wgl ci status` + `collab report` CI 段 + SPA 线程徽标）、
   e2e（`crates/walgit-cli/tests/ci_e2e.rs`：端到端验签回放、双 runner 竞争收敛、
   kill 后 TTL 重认领、秘密边界负向、超时结论）。
 - **issue #161 落地**：§11 读侧 size cap（`CI_BODY_MAX_BYTES`）；§4.3 cron 定时触发
   （ci.toml `schedule` + V10 + run id 定时变体 + 状态文件 cron 簿记 + e2e 用例
   `a_scheduled_task_fires_on_an_unmoved_ref`）；§8.2 日志/产物存放约定
-  （`refs/collab/ci-artifacts/<actor>/<sha256>` 桶内 blob 通道 + V11 + `walgit ci log`/
-  `walgit ci artifacts` + HTTP `GET …/api-browser/collab/ci-artifacts/<sha256>` + SDK
+  （`refs/collab/ci-artifacts/<actor>/<sha256>` 桶内 blob 通道 + V11 + `wgl ci log`/
+  `wgl ci artifacts` + HTTP `GET …/api-browser/collab/ci-artifacts/<sha256>` + SDK
   `repo.ci.artifact`，e2e 用例 `artifacts_and_the_full_log_round_trip_through_git_objects`，
   server 集成 `collab_ci_artifact_serves_verified_bytes`）。§4 的 push 唤醒传输
-  （`walgit ci run --listen` + HMAC 验签 + delivery 去重）已于 2026-09-16 随 events 桥删除。
+  （`wgl ci run --listen` + HMAC 验签 + delivery 去重）已于 2026-09-16 随 events 桥删除。
 - **开放项**：无（issue #161 范围已全部落地）。
