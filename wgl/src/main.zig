@@ -21,15 +21,26 @@ const usage =
     \\
 ;
 
+/// The module version — keep in step with build.zig.zon.
+pub const version = "0.1.0";
+
 pub fn main(init: std.process.Init) !u8 {
     var arena_state = std.heap.ArenaAllocator.init(init.gpa);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
 
     var argv: util.List([]const u8) = util.List([]const u8).init(alloc);
-    var it = init.minimal.args.iterate();
+    // iterateAllocator is the documented cross-platform path (Windows stores
+    // the command line as wide chars and cannot iterate it in place).
+    var it = init.minimal.args.iterateAllocator(alloc) catch return 2;
     _ = it.next(); // argv[0]
     while (it.next()) |arg| try argv.append(arg);
+    if (argv.items.len >= 1 and (std.mem.eql(u8, argv.items[0], "--version") or std.mem.eql(u8, argv.items[0], "-V"))) {
+        var buf: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "wgl {s} (walgit D1 collaboration client, zig)\n", .{version}) catch "wgl\n";
+        std.debug.print("{s}", .{line});
+        return 0;
+    }
     if (argv.items.len < 2) {
         std.debug.print("{s}", .{usage});
         return 2;

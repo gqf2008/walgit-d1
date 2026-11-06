@@ -10,6 +10,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        // identity.zig's POSIX mode fallback goes through std.c (Io.File has
+        // no chmod lane); musl targets link it statically, the others use the
+        // system C runtime. The module flag covers the exe and the tests.
+        .link_libc = true,
     });
 
     const exe = b.addExecutable(.{ .name = "wgl", .root_module = exe_mod });

@@ -1032,15 +1032,18 @@ const Runner = struct {
         env_map.put("WALGIT_CI_ATTEMPT", std.fmt.allocPrint(self.c.alloc, "{d}", .{attempt}) catch "1") catch {};
         env_map.put("WALGIT_CI_ACTOR", self.actor) catch {};
 
-        var child = std.process.spawn(self.c.io, .{
+        var spawn_opts: std.process.SpawnOptions = .{
             .argv = shell,
             .cwd = .{ .path = dir },
             .environ_map = &env_map,
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
-            .pgid = 0, // own process group: the timeout kills the whole tree
-        }) catch return fail(millis() - started, "spawn failed");
+        };
+        // Own process group (POSIX): the timeout kills the whole tree. The
+        // Windows field is a job-handle slot, so it stays unset there.
+        if (@import("builtin").os.tag != .windows) spawn_opts.pgid = 0;
+        var child = std.process.spawn(self.c.io, spawn_opts) catch return fail(millis() - started, "spawn failed");
 
         // Drain both pipes into one capped tail while the child runs.
         const Drain = struct {
