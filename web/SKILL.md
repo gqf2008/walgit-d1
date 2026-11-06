@@ -353,10 +353,11 @@ the control plane — `ci_status`, and `ci_claim`/`ci_result` entries through
 save flags for a script or a CI job, and each one either signs or pushes, i.e.
 acts over git, not over a private API.
 
-**`collab`, `ci` and `principal` are hidden and deprecated** (D68): they do not
-appear in `--help`, and running one prints one line on stderr naming the MCP
-tool that replaces it, then does the work as before. There is no switch — the
-notice is not a permission — and the next major release deletes them.
+**D69 superseded D68's deprecation stage**: the `collab` / `ci` / `principal`
+command families are gone from the `walgit` binary entirely — they live in the
+standalone **`wgl`** client now (a separate Zig binary; `wgl --help` is its
+guide, and its operator manual is the `wgl` skill). The walgit binary answers
+only host lanes.
 
 **WAL & maintenance** — `walgit wal head|ls|show|materialize --at-seq` (the
 log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,
