@@ -5805,7 +5805,6 @@ dependencies = [
  "bytesize",
  "chrono",
  "clap",
- "ed25519-dalek",
  "futures",
  "gix-hash",
  "hex",
