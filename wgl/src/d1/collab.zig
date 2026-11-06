@@ -153,8 +153,12 @@ pub fn pr_view(alloc: std.mem.Allocator, entries: []const EntryRef, principals: 
         const verified = r.is_verified(alloc, principals);
         if (std.mem.eql(u8, e.kind, "patch")) {
             if (e.refs) |rs| {
-                if (base == null) base = rs.base;
-                if (head == null) head = rs.head;
+                // The Rust aggregation runs `rs.base.clone().or(base)` /
+                // `rs.head.clone().or(head)`: a later non-empty patch ref
+                // overwrites an earlier one; an absent field keeps the prior
+                // value. Identity with the multi-patch (retargeted-PR) view.
+                if (rs.base) |b| base = b;
+                if (rs.head) |h| head = h;
             }
             if (verified and !contains_str(authors.items, e.actor)) {
                 try authors.append(e.actor);
@@ -1420,6 +1424,45 @@ test "board is deterministic and claim convergence works" {
             }
         }
     }
+}
+
+test "patch refs: the last non-empty base and head win (Rust or semantics)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const alice = kp(11);
+    const principals = principals_of(arena, &.{
+        .{ .name = "alice", .seed = 11 },
+    });
+
+    const patch = struct {
+        fn make(a: std.mem.Allocator, sk: entry_mod.SigningKey, parent: []const u8, ts: i64, base: ?[]const u8, head: ?[]const u8) EntryRef {
+            var e = Entry{
+                .version = 1,
+                .kind = "patch",
+                .id = "pr-retarget",
+                .actor = "alice",
+                .ts = ts,
+                .parent = parent,
+                .refs = .{ .base = base, .head = head },
+                .body = body1(a, "message", "change"),
+                .sig = "",
+            };
+            entry_mod.sign_entry(a, &e, sk);
+            return .{ .oid = oid_of(a, &e), .principal = "alice", .entry = e };
+        }
+    }.make;
+
+    const issue = signed_entry(arena, alice, "pr-retarget", "issue", "alice", "", 1, body1(arena, "title", "t"));
+    const first = patch(arena, alice, issue.oid, 2, "refs/heads/first", "feat/first");
+    const second = patch(arena, alice, first.oid, 3, "refs/heads/second", "feat/second");
+    // An absent field keeps the prior value; a present one overwrites.
+    const third = patch(arena, alice, second.oid, 4, null, "feat/third");
+
+    const view = try pr_view(arena, &.{ issue, first, second, third }, principals);
+    try testing.expectEqualStrings("refs/heads/second", view.base.?);
+    try testing.expectEqualStrings("feat/third", view.head.?);
 }
 
 test "merge rules count distinct non-author human approvals" {

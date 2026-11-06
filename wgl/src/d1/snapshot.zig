@@ -75,8 +75,11 @@ pub const Snapshot = struct {
         jsonio.put_raw(&out, "]");
         if (!self.complete) {
             jsonio.put_raw(&out, ",\"complete\":false");
+        }
+        if (self.dropped_entries != 0) {
+            var dropped_buf: [32]u8 = undefined;
             jsonio.put_raw(&out, ",\"dropped_entries\":");
-            jsonio.put_raw(&out, std.fmt.bufPrint(&buf, "{d}", .{self.dropped_entries}) catch unreachable);
+            jsonio.put_raw(&out, std.fmt.bufPrint(&dropped_buf, "{d}", .{self.dropped_entries}) catch unreachable);
         }
         jsonio.put_raw(&out, ",\"sig\":");
         jsonio.write_string(&out, self.sig);
@@ -167,11 +170,18 @@ pub fn snapshot_canonical(alloc: std.mem.Allocator, snap: *const Snapshot) []u8 
     var out = jsonio.Out.init(alloc);
     jsonio.put_raw(&out, "{\"actor\":");
     jsonio.write_string(&out, snap.actor);
-    jsonio.put_raw(&out, ",\"complete\":");
-    jsonio.put_raw(&out, if (snap.complete) "true" else "false");
-    jsonio.put_raw(&out, ",\"dropped_entries\":");
+    // serde's skip_serializing_if rules govern the signed bytes: `complete`
+    // is absent when true and `dropped_entries` is absent when zero. Rust's
+    // fold signs through serde_json::to_value, so the defaults must not be
+    // materialized here or its snapshots fail verification.
     var buf: [32]u8 = undefined;
-    jsonio.put_raw(&out, std.fmt.bufPrint(&buf, "{d}", .{snap.dropped_entries}) catch unreachable);
+    if (!snap.complete) {
+        jsonio.put_raw(&out, ",\"complete\":false");
+    }
+    if (snap.dropped_entries != 0) {
+        jsonio.put_raw(&out, ",\"dropped_entries\":");
+        jsonio.put_raw(&out, std.fmt.bufPrint(&buf, "{d}", .{snap.dropped_entries}) catch unreachable);
+    }
     jsonio.put_raw(&out, ",\"entries\":[");
     for (snap.entries, 0..) |r, i| {
         if (i > 0) jsonio.put_raw(&out, ",");
@@ -341,4 +351,93 @@ test "records with lying oids or unparseable bytes are skipped" {
     const garbage = SnapshotRecord{ .oid = git_blob_oid(arena, "not json", .sha1), .principal = "alice", .json = "not json" };
     try std.testing.expect(garbage.entry_ref(arena, .sha1) == null);
     try std.testing.expect(garbage.entry_ref(arena, .sha1) == null);
+}
+
+/// The cross-language golden vector: canonical bytes under the §5.3 sorted
+/// contract with serde's `skip_serializing_if` defaults omitted, and the
+/// Ed25519 signature a fixed seed produces over exactly those bytes. Any
+/// change to the canonical shape (for example materializing `complete:true`)
+/// breaks Rust `collab gc` / server `collab_fold` snapshots on this reader.
+const GOLDEN_COMPLETE_CANONICAL =
+    "{\"actor\":\"alice\",\"entries\":[{\"json\":\"{}\",\"oid\":\"aa\",\"principal\":\"alice\"}],\"kind\":\"collab_snapshot\",\"sig\":\"\",\"ts\":42,\"version\":1}";
+const GOLDEN_COMPLETE_SIG_B64 = "AEO9uTJu1IPQA5hTWdkXz+inmOz/CHFczdJCKmaxI5bAGie/fD2e73jkdpqt51pOWjD3tT6/ghtNmxwSBJSzCw==";
+const GOLDEN_TRUNCATED_CANONICAL =
+    "{\"actor\":\"alice\",\"complete\":false,\"dropped_entries\":7,\"entries\":[{\"json\":\"{}\",\"oid\":\"aa\",\"principal\":\"alice\"}],\"kind\":\"collab_snapshot\",\"sig\":\"\",\"ts\":43,\"version\":1}";
+const GOLDEN_TRUNCATED_SIG_B64 = "Fd3nl3X/hdi92CQAo8OYziLoeLa90OHJxBKmReV7seT6By503ofIBH05eLcs9+81SAaWDfeAwjlDe1yD+VQcAg==";
+
+test "snapshot canonical and signature match the serde golden vector" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const key = SigningKey.generateDeterministic(@splat(9)) catch unreachable;
+    const recs: [1]SnapshotRecord = .{.{ .oid = "aa", .principal = "alice", .json = "{}" }};
+
+    var snap = Snapshot{
+        .version = 1,
+        .kind = "collab_snapshot",
+        .actor = "alice",
+        .ts = 42,
+        .entries = &recs,
+        .complete = true,
+        .dropped_entries = 0,
+        .sig = "",
+    };
+    try std.testing.expectEqualStrings(GOLDEN_COMPLETE_CANONICAL, snapshot_canonical(arena, &snap));
+    sign_snapshot(arena, &snap, key);
+    try std.testing.expectEqualStrings("ed25519:" ++ GOLDEN_COMPLETE_SIG_B64, snap.sig);
+    const pk = entry_mod.public_key_b64(arena, key);
+    try verify_snapshot(arena, &snap, pk);
+    // The wire form omits the defaults too.
+    const wire = snap.to_json(arena);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"complete\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"dropped_entries\"") == null);
+    try std.testing.expectEqualStrings(GOLDEN_COMPLETE_CANONICAL, snapshot_canonical(arena, &snap));
+}
+
+test "truncated snapshot canonical covers complete and dropped_entries" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const key = SigningKey.generateDeterministic(@splat(9)) catch unreachable;
+    const pk = entry_mod.public_key_b64(arena, key);
+    const recs: [1]SnapshotRecord = .{.{ .oid = "aa", .principal = "alice", .json = "{}" }};
+
+    var trunc = Snapshot{
+        .version = 1,
+        .kind = "collab_snapshot",
+        .actor = "alice",
+        .ts = 43,
+        .entries = &recs,
+        .complete = false,
+        .dropped_entries = 7,
+        .sig = "",
+    };
+    try std.testing.expectEqualStrings(GOLDEN_TRUNCATED_CANONICAL, snapshot_canonical(arena, &trunc));
+    sign_snapshot(arena, &trunc, key);
+    try std.testing.expectEqualStrings("ed25519:" ++ GOLDEN_TRUNCATED_SIG_B64, trunc.sig);
+    try verify_snapshot(arena, &trunc, pk);
+    // The signed bytes cover both marker fields when they are present.
+    try std.testing.expect(std.mem.indexOf(u8, snapshot_canonical(arena, &trunc), "\"complete\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot_canonical(arena, &trunc), "\"dropped_entries\":7") != null);
+
+    // complete=false with dropped_entries=0 keeps only `complete` — serde
+    // skips a zero count independently of the completeness flag.
+    var empty_drop = Snapshot{
+        .version = 1,
+        .kind = "collab_snapshot",
+        .actor = "alice",
+        .ts = 44,
+        .entries = &recs,
+        .complete = false,
+        .dropped_entries = 0,
+        .sig = "",
+    };
+    const canonical = snapshot_canonical(arena, &empty_drop);
+    try std.testing.expect(std.mem.indexOf(u8, canonical, "\"complete\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical, "\"dropped_entries\"") == null);
+    const wire = empty_drop.to_json(arena);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"complete\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"dropped_entries\"") == null);
+    sign_snapshot(arena, &empty_drop, key);
+    try verify_snapshot(arena, &empty_drop, pk);
 }
