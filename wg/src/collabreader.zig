@@ -207,13 +207,13 @@ pub const Reader = struct {
         if (try self.snapshot_blob()) |snap| {
             if (snap.bytes.len > entry_mod.COLLAB_SNAPSHOT_MAX_BYTES) {
                 std.debug.print(
-                    "wgl: {s} is {d} MiB, over the {d} MiB read cap; run `wgl collab gc --truncate` in a clone that still holds it\n",
+                    "wg: {s} is {d} MiB, over the {d} MiB read cap; run `wg collab gc --truncate` in a clone that still holds it\n",
                     .{ entry_mod.SNAPSHOT_REF, snap.bytes.len / (1024 * 1024), entry_mod.COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024) },
                 );
                 return error.SnapshotOverCap;
             }
             const parsed = snapshot_mod.parse_snapshot(arena, snap.bytes) catch |e| {
-                std.debug.print("wgl: {s}: snapshot document rejected ({t}) — fail closed, not silently skipped\n", .{ entry_mod.SNAPSHOT_REF, e });
+                std.debug.print("wg: {s}: snapshot document rejected ({t}) — fail closed, not silently skipped\n", .{ entry_mod.SNAPSHOT_REF, e });
                 return error.BadSnapshot;
             };
             for (parsed.entries) |*rec| {
@@ -291,14 +291,14 @@ pub fn ensure_actor_key_binding(
         if (signing_key_matches_registered(key, pk)) return;
         const owner = key_owners(arena, io, repo, principals, key);
         std.debug.print(
-            \\wgl: cannot sign as actor {s} with the key at {s}: {s}, and {s} is registered with a different public key — verification uses only the key registered for an entry's own actor, so this signature does not verify until {s} is rotated to this key; the log is append-only, so the entry cannot be deleted or edited. Use the key registered for {s}, sign as the actor this key belongs to, or rotate {s} to this key on purpose: `wgl collab principal-register --principal {s} --key <keyfile> --push origin`.
+            \\wg: cannot sign as actor {s} with the key at {s}: {s}, and {s} is registered with a different public key — verification uses only the key registered for an entry's own actor, so this signature does not verify until {s} is rotated to this key; the log is append-only, so the entry cannot be deleted or edited. Use the key registered for {s}, sign as the actor this key belongs to, or rotate {s} to this key on purpose: `wg collab principal-register --principal {s} --key <keyfile> --push origin`.
             \\
         , .{ actor, key_path, owner, actor, actor, actor, actor, actor });
         return error.ActorKeyMismatch;
     }
     const owner = key_owners(arena, io, repo, principals, key);
     std.debug.print(
-        \\wgl: cannot sign as actor {s} with the key at {s}: {s}, and this repository has no collab key registered for {s}, so the signature cannot be checked here (this is a local view, not proof that {s} is unregistered elsewhere). If {s} is registered on the host, run `wgl collab principal-fetch` to cache the host registry under refs/walgit/principals/* — writes then verify against the host-registered key. Otherwise register the seed you already hold: `wgl join --principal {s} --key <registered seed> --push origin` — `--key` is required, because join without it generates a fresh random seed, and a repo-local registration overrides the host registry, silently shadowing {s}'s host identity (whose past entries then turn unverified). In a fresh clone, fetch the collab refs first (`git fetch <remote> '+refs/collab/*:refs/collab/*'`) so an existing registration is visible
+        \\wg: cannot sign as actor {s} with the key at {s}: {s}, and this repository has no collab key registered for {s}, so the signature cannot be checked here (this is a local view, not proof that {s} is unregistered elsewhere). If {s} is registered on the host, run `wg collab principal-fetch` to cache the host registry under refs/walgit/principals/* — writes then verify against the host-registered key. Otherwise register the seed you already hold: `wg join --principal {s} --key <registered seed> --push origin` — `--key` is required, because join without it generates a fresh random seed, and a repo-local registration overrides the host registry, silently shadowing {s}'s host identity (whose past entries then turn unverified). In a fresh clone, fetch the collab refs first (`git fetch <remote> '+refs/collab/*:refs/collab/*'`) so an existing registration is visible
         \\
     , .{ actor, key_path, owner, actor, actor, actor, actor, actor });
     return error.ActorUnregistered;

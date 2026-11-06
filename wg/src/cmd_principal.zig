@@ -1,4 +1,4 @@
-//! `wgl principal` — the host-global principal registry commands (§4.4):
+//! `wg principal` — the host-global principal registry commands (§4.4):
 //! register / rotate / list / revoke against `/api/v1/principals`. HTTP
 //! only, no bucket access. Ported from the retired Rust principal commands.
 
@@ -14,7 +14,7 @@ const Ctx = @import("cmd_collab.zig").Ctx;
 
 fn bearer_required(c: *Ctx, token: ?[]const u8) ![]const u8 {
     return c.token_opt(token) orelse {
-        std.debug.print("wgl: no bearer token: pass --token or set WALGIT_TOKEN\n", .{});
+        std.debug.print("wg: no bearer token: pass --token or set WALGIT_TOKEN\n", .{});
         return error.NoToken;
     };
 }
@@ -36,7 +36,7 @@ pub fn run(c: *Ctx, action: []const u8, p: *args.Parsed) !u8 {
         try headers.append(.{ .name = "authorization", .value = try std.fmt.allocPrint(c.alloc, "Bearer {s}", .{token}) });
         const resp = try httpc.request(c.alloc, c.io, .PUT, full_url, payload, headers.items);
         if (resp.status / 100 != 2) {
-            std.debug.print("wgl: PUT {s} -> {d}: {s}\n", .{ full_url, resp.status, resp.body });
+            std.debug.print("wg: PUT {s} -> {d}: {s}\n", .{ full_url, resp.status, resp.body });
             return error.HttpFailed;
         }
         const verb: []const u8 = if (std.mem.eql(u8, action, "rotate")) "rotated" else "registered";
@@ -54,7 +54,7 @@ pub fn run(c: *Ctx, action: []const u8, p: *args.Parsed) !u8 {
         }
         const resp = try httpc.request(c.alloc, c.io, .GET, full_url, null, headers.items);
         if (resp.status / 100 != 2) {
-            std.debug.print("wgl: GET {s} -> {d}: {s}\n", .{ full_url, resp.status, resp.body });
+            std.debug.print("wg: GET {s} -> {d}: {s}\n", .{ full_url, resp.status, resp.body });
             return error.HttpFailed;
         }
         c.stdout(resp.body);
@@ -72,13 +72,13 @@ pub fn run(c: *Ctx, action: []const u8, p: *args.Parsed) !u8 {
         try headers.append(.{ .name = "authorization", .value = try std.fmt.allocPrint(c.alloc, "Bearer {s}", .{token}) });
         const resp = try httpc.request(c.alloc, c.io, .DELETE, full_url, null, headers.items);
         if (resp.status / 100 != 2) {
-            std.debug.print("wgl: DELETE {s} -> {d}: {s}\n", .{ full_url, resp.status, resp.body });
+            std.debug.print("wg: DELETE {s} -> {d}: {s}\n", .{ full_url, resp.status, resp.body });
             return error.HttpFailed;
         }
         c.stdout_line(try std.fmt.allocPrint(c.alloc, "revoked {s} at {s}", .{ principal, url }));
         return 0;
     }
-    std.debug.print("wgl: unknown principal action \"{s}\" (register|rotate|list|revoke)\n", .{action});
+    std.debug.print("wg: unknown principal action \"{s}\" (register|rotate|list|revoke)\n", .{action});
     return error.UnknownAction;
 }
 

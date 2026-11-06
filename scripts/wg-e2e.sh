@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wgl e2e (D69): the collaboration client loop against real git transport —
+# wg e2e (D69): the collaboration client loop against real git transport —
 # the lane the retired Rust collaboration integration suites owned. Two
 # clones push through receive-pack to a bare origin, a second principal
 # aggregates and verifies, the claim race converges (§8.4: exactly one
@@ -8,18 +8,18 @@
 # against the Rust aggregation — the two implementations must agree.
 #
 # POSIX sh + git only. `zig` builds the client when no binary is supplied
-# via WGL_BIN; WALGIT_BIN (or a target/debug/walgit from this checkout) opts
+# via WG_BIN; WALGIT_BIN (or a target/debug/walgit from this checkout) opts
 # into the cross-implementation check.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 root="$(pwd)"
-wgl_bin="${WGL_BIN:-$root/wgl/zig-out/bin/wgl}"
-if [ ! -x "$wgl_bin" ]; then
-    echo "wgl-e2e: building the client (zig build)"
-    (cd wgl && zig build)
+wg_bin="${WG_BIN:-$root/wg/zig-out/bin/wg}"
+if [ ! -x "$wg_bin" ]; then
+    echo "wg-e2e: building the client (zig build)"
+    (cd wg && zig build)
 fi
-W="$wgl_bin"
+W="$wg_bin"
 
 rust_bin="${WALGIT_BIN:-}"
 rust_explicit=""
@@ -48,7 +48,7 @@ git -C "$a" commit -q --allow-empty -m init && git -C "$a" push -q origin main
 git -C "$b" pull -q origin main
 
 step() { echo "== $*"; }
-fail() { echo "wgl-e2e: $*" >&2; exit 1; }
+fail() { echo "wg-e2e: $*" >&2; exit 1; }
 
 # A reference binary only counts when it still has the collab family. After
 # D69 a branch-built `walgit` exits 2 here; that must skip the cross-check,
@@ -58,9 +58,9 @@ if [ -n "$have_rust" ]; then
     if "$rust_bin" --config /dev/null collab board --repo "$root" --format hash >/dev/null 2>&1; then
         :
     elif [ -n "$rust_explicit" ]; then
-        fail "WALGIT_BIN=$rust_bin does not support the collab commands (D69 moved them to wgl); it cannot serve as the cross-implementation reference"
+        fail "WALGIT_BIN=$rust_bin does not support the collab commands (D69 moved them to wg); it cannot serve as the cross-implementation reference"
     else
-        echo "wgl-e2e: $rust_bin has no collab commands (a D69+ walgit build); skipping the cross-implementation check"
+        echo "wg-e2e: $rust_bin has no collab commands (a D69+ walgit build); skipping the cross-implementation check"
         have_rust=""
     fi
 fi
@@ -123,7 +123,7 @@ step "watch --once reports the snapshot move"
 watch_out="$( cd "$b" && "$W" collab watch --once 2>/dev/null | grep -c snapshot || true )"
 [ "${watch_out:-0}" -ge 1 ] || fail "watch did not surface the snapshot event"
 
-step "wgl ci validate parses a ci.toml"
+step "wg ci validate parses a ci.toml"
 mkdir -p "$a/.walgit"
 printf 'version = 1\n\n[[task]]\nname = "test"\ncommand = "true"\n' > "$a/.walgit/ci.toml"
 ( cd "$a" && "$W" ci validate >/dev/null ) || fail "ci validate"
@@ -209,7 +209,7 @@ after_count="$(grep -c 'notifications/resources/updated' "$out" || true)"
 [ "$before" = "$after_count" ] || fail "a write after unsubscribe still notified ($before -> $after_count)"
 
 exec 9>&-
-wait "$mcp_pid" || fail "wgl mcp did not exit 0 on stdin EOF"
+wait "$mcp_pid" || fail "wg mcp did not exit 0 on stdin EOF"
 grep -q '"id":1' "$out" || fail "initialize did not answer"
 echo "   mcp: 2 TTL updates, cap enforced, unsubscribe quiet, EOF exit 0"
 # The write path over MCP: refusals first (a foreign actor and an
@@ -232,7 +232,7 @@ srv_out="$tmp/srv-write.json"
     printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collab_publish","arguments":{"entry":'"$golden"'}}}'
     printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"collab_thread","arguments":{"id":"golden","fresh":false}}}'
 } | ( cd "$m_a" && "$W" mcp --repo . --remote origin ) >"$srv_out" 2>"$tmp/srv-write.err" \
-    || fail "wgl mcp write round trip failed"
+    || fail "wg mcp write round trip failed"
 python3 - "$srv_out" <<'PYW'
 import json, sys
 msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
@@ -259,7 +259,7 @@ mcp_register="$tmp/mcp-register.json"
     printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"collab_register","arguments":{"force":true}}}'
     printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collab_register","arguments":{}}}'
 } | ( cd "$m_a" && "$W" mcp --repo . --remote origin ) >"$mcp_register" 2>"$tmp/mcp-register.err" \
-    || fail "wgl mcp collab_register round trip failed"
+    || fail "wg mcp collab_register round trip failed"
 python3 - "$mcp_register" <<'PYR'
 import json, sys
 msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
@@ -276,7 +276,7 @@ git clone -q "$m_origin" "$tmp/mcp-noident"
 noident="$tmp/mcp-noident.json"
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"collab_register","arguments":{}}}' \
     | ( cd "$tmp/mcp-noident" && "$W" mcp --repo . --remote origin ) >"$noident" 2>/dev/null \
-    || fail "wgl mcp without an identity crashed"
+    || fail "wg mcp without an identity crashed"
 python3 - "$noident" <<'PYI'
 import json, sys
 msg = next(iter(map(json.loads, open(sys.argv[1]))))
@@ -323,7 +323,7 @@ print(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "resources/read",
                   "params": {"uri": "walgit://collab/thread/cc%2Dmcp%2Dcard"}}))
 PYD
 ( cd "$m_a" && "$W" mcp --repo . --remote origin ) < "$tmp/mcp-done.ndjson" >"$done_out" 2>"$tmp/mcp-done.err" \
-    || fail "wgl mcp done-gate round trip failed"
+    || fail "wg mcp done-gate round trip failed"
 python3 - "$done_out" "$done_oid" <<'PYD'
 import json, sys
 msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
@@ -356,7 +356,7 @@ print(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}))
 PYB
 big_out="$tmp/mcp-big.json"
 ( cd "$m_a" && "$W" mcp --repo . --remote origin ) < "$tmp/mcp-big.ndjson" >"$big_out" 2>"$tmp/mcp-big.err" \
-    || fail "wgl mcp did not survive an overlong line"
+    || fail "wg mcp did not survive an overlong line"
 python3 - "$big_out" <<'PYT'
 import json, sys
 msgs = [m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)]
@@ -444,13 +444,13 @@ step "cross-implementation: the Rust aggregation must agree on the board hash"
 if [ -n "$have_rust" ]; then
     rust_hash="$( "$rust_bin" --config /dev/null collab board --repo "$b" --format hash 2>/dev/null )" \
         || fail "the reference $rust_bin failed the collab board cross-check"
-    [ "$rust_hash" = "$after" ] || fail "wgl and walgit disagree on the board hash: $after vs ${rust_hash:-<none>}"
-    echo "   wgl == walgit: $after"
+    [ "$rust_hash" = "$after" ] || fail "wg and walgit disagree on the board hash: $after vs ${rust_hash:-<none>}"
+    echo "   wg == walgit: $after"
 else
     echo "   (no reference walgit binary with collab commands; skipping the cross-check)"
 fi
 
-step "real server (optional): wgl mcp == the host's own aggregation"
+step "real server (optional): wg mcp == the host's own aggregation"
 explicit_server="${WALGIT_SERVER_BIN:-}"
 server_bin="$explicit_server"
 if [ -z "$server_bin" ]; then
@@ -534,7 +534,7 @@ EOF
         printf '%s\n' '{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"walgit://collab/board"}}'
         printf '%s\n' '{"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"walgit://collab/thread/cc-srv-card"}}'
     } | ( cd "$srv" && "$W" mcp --repo . --remote origin ) >"$mcp_json" 2>"$tmp/srv-mcp.err" \
-        || fail "wgl mcp against the real server"
+        || fail "wg mcp against the real server"
 
     if python3 - "$base" "$mcp_json" 2>"$tmp/compare.err" <<'PYEOF'
 import json, re, sys, urllib.request
@@ -561,7 +561,7 @@ assert tool(3) == thread, "collab_thread differs from GET /collab/threads/<id>"
 assert tool(4) == report, "collab_report differs from GET /collab/report"
 assert tool(5) == ci, "ci_status differs from GET /collab/ci"
 
-# Resources: the same bodies (the host adds its WAL `seq`, which wgl has no
+# Resources: the same bodies (the host adds its WAL `seq`, which wg has no
 # source for) and the host's version grammar.
 def resource(i):
     c = msgs[i]["result"]["contents"][0]
@@ -578,13 +578,13 @@ assert tbody == server_thread, "resource thread body differs"
 assert re.fullmatch(r"b:[0-9a-f]{16}", bv), f"board version is not the witness grammar: {bv}"
 tip = next(c["last_oid"] for col in board["columns"] for c in col["cards"] if c["id"] == "cc-srv-card")
 assert tv == "h:" + tip, f"thread version {tv} != its tip {tip}"
-print(f"   server == wgl mcp: board/thread/report/ci + resources (board {bv}, thread {tv})")
+print(f"   server == wg mcp: board/thread/report/ci + resources (board {bv}, thread {tv})")
 PYEOF
     then
         :
     elif [ -n "$explicit_server" ]; then
         cat "$tmp/compare.err" >&2 || true
-        fail "the walgit-server under test ($server_bin) disagrees with wgl mcp"
+        fail "the walgit-server under test ($server_bin) disagrees with wg mcp"
     else
         echo "   (the auto-detected walgit-server is older than a compared endpoint — explicit skip; set WALGIT_SERVER_BIN to the build under test)"
     fi
@@ -594,4 +594,4 @@ PYEOF
     server_pid=""
 fi
 
-echo "wgl-e2e: ok"
+echo "wg-e2e: ok"

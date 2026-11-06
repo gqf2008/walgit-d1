@@ -9,19 +9,19 @@
 
 | 参数 | 值 |
 | --- | --- |
-| 项目名 `<PROJECT>` | walgit — 对象桶为唯一事实源的 Git 宿主（Rust workspace + React SPA + 独立 Zig 客户端 `wgl/`） |
+| 项目名 `<PROJECT>` | walgit — 对象桶为唯一事实源的 Git 宿主（Rust workspace + React SPA + 独立 Zig 客户端 `wg/`） |
 | 仓库根 `<REPO_ROOT>` | 本检出根目录 |
 | 主分支 `<MAIN_BRANCH>` | `main` |
 | 成员 worktree 根 `<WORKTREE_ROOT>` | `.worktrees/<unit>`（worktree 是身份，永不删除——见 CHARTER D62） |
 | 成员分支前缀 `<BRANCH_PREFIX>` | `feat/<thread>`（每卡一分支，成员 worktree 内创建） |
-| 构建命令 `<BUILD_CMD>` | `cargo build --workspace --all-targets`；SPA `just web-build`；wgl 客户端 `cd wgl && zig build`（zig 0.17.0） |
+| 构建命令 `<BUILD_CMD>` | `cargo build --workspace --all-targets`；SPA `just web-build`；wg 客户端 `cd wg && zig build`（zig 0.17.0） |
 | 检查命令 `<CHECK_CMD>` | `just warnings`（零 rustc 警告）、`just clippy`（`-D warnings`）；SPA `pnpm run build`（oxlint `--deny-warnings` + tsc） |
-| 测试命令 `<TEST_CMD>` | `just test`（lib/bins + 通配 crate + server 集成 + `wgl-test`）；SPA `just web-test` |
-| 集成测试 `<INTEGRATION_CMD>` | `just wgl-e2e`（wgl 传输端到端）、`just e2e`（smart HTTP 对真 git）、`just sim`（故障注入集群）；全跑 `just ci` |
+| 测试命令 `<TEST_CMD>` | `just test`（lib/bins + 通配 crate + server 集成 + `wg-test`）；SPA `just web-test` |
+| 集成测试 `<INTEGRATION_CMD>` | `just wg-e2e`（wg 传输端到端）、`just e2e`（smart HTTP 对真 git）、`just sim`（故障注入集群）；全跑 `just ci` |
 | 评审方式 `<REVIEW_CMD/流程>` | Leader 审查 + **另一位 principal** 的 verified `approve`（`merge_rule_eval`，CHARTER §2/§7） |
-| 定时推进间隔 `<TICK_INTERVAL>` | 无定时器（D55）：`wgl collab watch --once` 挂监督者或外部 timer |
+| 定时推进间隔 `<TICK_INTERVAL>` | 无定时器（D55）：`wg collab watch --once` 挂监督者或外部 timer |
 | 决策辅助模型 `<DECISION_MODEL>` | `Jev`（`jev-decision` 技能；仅用于 §6 列出的重大非确定性判断，确定性门禁永远是命令） |
-| 跨团队 tracker `<TRACKER>` | 本仓 D1 协作层：`refs/collab/*` 卡片（经 `wgl mcp`（stdio）或 `wgl collab`）；镜像的 GitHub Issues 已停用（D46）——§7 的 tracker 流程以 D1 卡片执行 |
+| 跨团队 tracker `<TRACKER>` | 本仓 D1 协作层：`refs/collab/*` 卡片（经 `wg mcp`（stdio）或 `wg collab`）；镜像的 GitHub Issues 已停用（D46）——§7 的 tracker 流程以 D1 卡片执行 |
 
 ## 1. 角色
 
@@ -42,9 +42,9 @@
 - 以**子代理**形式工作，每个成员拥有独立的 git worktree 与分支。
 - worktree 位于 `<WORKTREE_ROOT>/<unit>`，不得放在项目目录之外；分支命名
   `<BRANCH_PREFIX><unit>`。worktree 是协作身份，**永不删除**（退休 principal
-  用 `wgl collab principal-revoke`，CHARTER D62）。
+  用 `wg collab principal-revoke`，CHARTER D62）。
 - 只在自身 worktree 内工作，不直接修改主工作区或其他成员的工作区；**先 claim
-  再动手**（`wgl collab claim`，退出 2 = stand down 不得开工——CHARTER §8.4）。
+  再动手**（`wg collab claim`，退出 2 = stand down 不得开工——CHARTER §8.4）。
 - 完成后必须提交，并在最终报告给出：分支名、commit SHA、改动摘要、
   运行的命令与结果、风险或未验证项；每个问题都以签名 comment/status 写回卡片。
 - 成员不得再派生下级子代理，避免任务失控；不 push main、不合并。
@@ -70,8 +70,8 @@
 ```bash
 just warnings        # 零 rustc 警告
 just clippy          # -D warnings
-just test            # 快速层（含 wgl-test）
-just wgl-e2e         # wgl 传输端到端
+just test            # 快速层（含 wg-test）
+just wg-e2e          # wg 传输端到端
 just e2e             # smart HTTP 对真实 git
 just sim             # 故障注入集群
 just web-test        # SPA 改动时；另跑 just web-build
@@ -90,7 +90,7 @@ just web-test        # SPA 改动时；另跑 just web-build
 
 ## 4. 推进节奏
 
-- 本仓**无定时器**（D55）：Leader 以读板推进——`wgl collab watch --once` 挂在
+- 本仓**无定时器**（D55）：Leader 以读板推进——`wg collab watch --once` 挂在
   监督者或外部 timer 下；若一轮无新进展，只汇报状态，不重复派发相同任务。
 
 ## 5. 沟通与权限
@@ -139,9 +139,9 @@ just web-test        # SPA 改动时；另跑 just web-build
   2. 成员在独立 worktree 开发；提交信息引用卡片线程 id。
   3. 方案/接口变更、延期与风险在卡片留痕；需人类拍板的写 `needs-human`。
   4. 验收标准满足、卡片 `status: closed`（带 `merge_result`）后，分支才算交付。
-- **工具**：`wgl mcp`（stdio：`collab_board` / `collab_thread` /
+- **工具**：`wg mcp`（stdio：`collab_board` / `collab_thread` /
   `collab_report` / `ci_status` / `collab_publish` / `collab_register` 与
-  `walgit://collab/*` 资源）或 `wgl collab`，两者是同一事实源的两种车道。
+  `walgit://collab/*` 资源）或 `wg collab`，两者是同一事实源的两种车道。
   宿主 `/mcp` 只保留仓库读工具（`repo_*`、`wal_ls`），协作面不再在那里（D70）。
 - **安全**：卡片与条目中不得粘贴密钥、令牌、用户隐私；日志与配置必须脱敏。
 

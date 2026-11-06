@@ -1,35 +1,35 @@
 ---
-name: wgl
-description: "Drive the D1 collaboration layer of a walgit host from the command line or over MCP: issues/status/reviews/patches/board/claims over refs/collab/*, the host-global principal registry, and the decentralized CI runner. Use when the user wants to file or move cards, claim work, review/approve, fold the inbox (gc), watch for collab events, register a principal or key, run .walgit/ci.toml tasks, or expose the collaboration surface to an MCP client — commands wgl collab …, wgl principal …, wgl ci …, wgl mcp (D69/D70)."
+name: wg
+description: "Drive the D1 collaboration layer of a walgit host from the command line or over MCP: issues/status/reviews/patches/board/claims over refs/collab/*, the host-global principal registry, and the decentralized CI runner. Use when the user wants to file or move cards, claim work, review/approve, fold the inbox (gc), watch for collab events, register a principal or key, run .walgit/ci.toml tasks, or expose the collaboration surface to an MCP client — commands wg collab …, wg principal …, wg ci …, wg mcp (D69/D70)."
 metadata:
   requires:
-    bins: ["git", "wgl"]
+    bins: ["git", "wg"]
   platform: "macOS / Linux / Windows"
 ---
 
-# wgl — the D1 collaboration client
+# wg — the D1 collaboration client
 
 ## 0. Install (prebuilt binaries)
 
-Each release ships the `wgl` client for every supported platform. The asset
+Each release ships the `wg` client for every supported platform. The asset
 names carry no version, so `releases/latest/download` is stable:
 
 ```sh
 # Linux (static musl; x86_64 or aarch64)
-curl -fsSL https://github.com/gqf2008/walgit-d1/releases/latest/download/wgl-x86_64-linux.tar.gz | tar -xz -C ~/.local/bin wgl
+curl -fsSL https://github.com/gqf2008/walgit-d1/releases/latest/download/wg-x86_64-linux.tar.gz | tar -xz -C ~/.local/bin wg
 
 # macOS (aarch64 or x86_64) — signed and notarized by Apple; Gatekeeper
 # checks the notarization ticket online on first launch.
-curl -fsSL -o wgl-macos.zip https://github.com/gqf2008/walgit-d1/releases/latest/download/wgl-aarch64-macos.zip && unzip -o wgl-macos.zip -d ~/.local/bin
+curl -fsSL -o wg-macos.zip https://github.com/gqf2008/walgit-d1/releases/latest/download/wg-aarch64-macos.zip && unzip -o wg-macos.zip -d ~/.local/bin
 
-# Windows (x86_64): unzip wgl-x86_64-windows.zip and put wgl.exe on PATH
+# Windows (x86_64): unzip wg-x86_64-windows.zip and put wg.exe on PATH
 ```
 
 The distro packages (`.deb`, the Windows installer, the macOS DMG) also carry
-`wgl` next to `walgit` — installing the host's package is enough.
-Every asset lives at <https://github.com/gqf2008/walgit-d1/releases/latest>; `wgl --version` names the build.
+`wg` next to `walgit` — installing the host's package is enough.
+Every asset lives at <https://github.com/gqf2008/walgit-d1/releases/latest>; `wg --version` names the build.
 
-`wgl` is the standalone client for walgit's D1 collaboration layer
+`wg` is the standalone client for walgit's D1 collaboration layer
 (`docs/D1_PROTOCOL.md`). The server hosts `refs/collab/*` like any ref;
 **every command below reads those refs locally and verifies Ed25519
 signatures offline** — writes are local refs pushed over plain git
@@ -43,12 +43,12 @@ takes a file path, never the key material.
 
 ```bash
 git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'
-wgl collab ls                        # thread ids
-wgl collab thread <id>               # chain-ordered entries + per-entry verification (JSON)
-wgl collab thread-heads              # thread id -> tip oid
-wgl collab pr <id>                   # PR view + merge-rule verdict (JSON)
-wgl collab board                     # the work-unit board (text|markdown|json|hash)
-wgl collab report                    # threads, PRs, verification health, CI runs (text|markdown|html)
+wg collab ls                        # thread ids
+wg collab thread <id>               # chain-ordered entries + per-entry verification (JSON)
+wg collab thread-heads              # thread id -> tip oid
+wg collab pr <id>                   # PR view + merge-rule verdict (JSON)
+wg collab board                     # the work-unit board (text|markdown|json|hash)
+wg collab report                    # threads, PRs, verification health, CI runs (text|markdown|html)
 ```
 
 The board definition is `.walgit/board.toml` at HEAD (`--board <file>`
@@ -58,14 +58,14 @@ entry; the projection re-derives the columns.
 ## 2. Write (local ref + push)
 
 ```bash
-wgl collab join --principal alice --push origin     # create this worktree's identity + register
-wgl collab entry --kind issue --id cc-topic --actor alice \
+wg collab join --principal alice --push origin     # create this worktree's identity + register
+wg collab entry --kind issue --id cc-topic --actor alice \
     --body '{"title":"the card"}' --push origin     # prints "<ref> <oid>"; chain --parent <oid>
-wgl collab entry --kind status --id cc-topic --parent <oid> \
+wg collab entry --kind status --id cc-topic --parent <oid> \
     --body '{"status":"in-progress","worktree":"wt","branch":"feat/x"}' --push origin
-wgl collab principal-register --principal alice --key <keyfile> --push origin   # rotate (destructive)
-wgl collab principal-revoke  --principal alice --push origin                     # tombstone
-wgl collab gc --actor alice --push origin            # fold the inbox into the signed snapshot (§9)
+wg collab principal-register --principal alice --key <keyfile> --push origin   # rotate (destructive)
+wg collab principal-revoke  --principal alice --push origin                     # tombstone
+wg collab gc --actor alice --push origin            # fold the inbox into the signed snapshot (§9)
 ```
 
 Write-side gates the server does not have: `status=done` needs the thread at
@@ -76,7 +76,7 @@ append-only log. `--auto-fold` opportunistically folds past a threshold.
 ## 3. Claim a card (§8.4 — read → publish → re-read)
 
 ```bash
-wgl collab claim --id <card> --worktree wt-x --branch feat/x --work 'plan' [--ttl 300]
+wg collab claim --id <card> --worktree wt-x --branch feat/x --work 'plan' [--ttl 300]
 echo $?   # 0 = you hold it, start work; 2 = stand down (another live claim), do NOT start; 1 = error
 ```
 
@@ -87,7 +87,7 @@ session.
 ## 4. Watch (pull-only, §11.1)
 
 ```bash
-wgl collab watch --remote origin --interval 10 [--once] [--exec '<cmd>']
+wg collab watch --remote origin --interval 10 [--once] [--exec '<cmd>']
 ```
 
 Each new/changed ref runs `--exec` once with the raw entry JSON on stdin and
@@ -98,10 +98,10 @@ failing `--exec` ends the watcher without advancing the state file
 ## 5. Principal registry (host-global, §4.4)
 
 ```bash
-wgl principal register|rotate --url http://host:8081 --principal alice --key <file> --token "$WALGIT_TOKEN"
-wgl principal list            --url http://host:8081
-wgl principal revoke          --url http://host:8081 --principal alice --token ...
-wgl collab principal-fetch [--remote origin]        # cache the host registry under refs/walgit/principals/*
+wg principal register|rotate --url http://host:8081 --principal alice --key <file> --token "$WALGIT_TOKEN"
+wg principal list            --url http://host:8081
+wg principal revoke          --url http://host:8081 --principal alice --token ...
+wg collab principal-fetch [--remote origin]        # cache the host registry under refs/walgit/principals/*
 ```
 
 Repo-local registrations (`refs/collab/meta/principals/*`) always override
@@ -110,11 +110,11 @@ the host registry.
 ## 6. CI runner (`docs/D1_CI_PROTOCOL.md`)
 
 ```bash
-wgl ci validate                       # .walgit/ci.toml shape-check (V1–V11)
-wgl ci run --actor ci-runner --key <file> [--once] [--interval 15] [--task <name>]
-wgl ci status [--format text|markdown|json]
-wgl ci log [--run ci-…]               # the retained log blob, fetched on demand
-wgl ci artifacts --out dir [--run …]  # sha256-verified downloads
+wg ci validate                       # .walgit/ci.toml shape-check (V1–V11)
+wg ci run --actor ci-runner --key <file> [--once] [--interval 15] [--task <name>]
+wg ci status [--format text|markdown|json]
+wg ci log [--run ci-…]               # the retained log blob, fetched on demand
+wg ci artifacts --out dir [--run …]  # sha256-verified downloads
 ```
 
 The runner polls ref tips, claims runs with signed `ci_claim` entries
@@ -126,13 +126,13 @@ that references them, and publishes a signed `ci_result`.
 ## 7. MCP (stdio) — the collaboration surface for agents (D70)
 
 The host's `/mcp` no longer carries the D1 tools or `walgit://collab/*`
-resources; `wgl mcp` serves them over **stdio JSON-RPC** against a checkout's
+resources; `wg mcp` serves them over **stdio JSON-RPC** against a checkout's
 own `refs/collab/*` (D70). stdout carries one JSON-RPC message per line and
 nothing else; logs go to stderr; stdin EOF exits 0. Requests are handled
 serially (one worktree = one agent lane = one process).
 
 ```sh
-wgl mcp --repo <checkout> [--remote origin] \
+wg mcp --repo <checkout> [--remote origin] \
         [--no-fetch] [--subscribe-interval 5] [--max-subscriptions 32]
 ```
 
@@ -142,7 +142,7 @@ wgl mcp --repo <checkout> [--remote origin] \
 unprompted. A tool that ran and failed answers `isError: true` with a readable
 message (a bad request is JSON-RPC `-32602`); a failed fetch or push is a tool
 error, never a process exit. The MCP read fetch and a ref push are bounded at
-two minutes: a timed-out transfer is that same tool error. Other wgl commands
+two minutes: a timed-out transfer is that same tool error. Other wg commands
 that push large blobs (`collab gc`'s snapshot, CI logs/artifacts) scale the
 bound with the payload size (`gitx.pushTimeoutSeconds`: 120 s plus 1 s per
 64 KiB), so a slow uplink does not turn a large fold into a failure.
@@ -159,7 +159,7 @@ bound with the payload size (`gitx.pushTimeoutSeconds`: 120 s plus 1 s per
 | `collab_register` | `force?` | `{ref, oid}` |
 
 **Freshness.** Every read fetches `refs/collab/{inbox,meta}` first
-(`git fetch --prune`, the same lane `wgl collab claim` step 1 uses) and **fails
+(`git fetch --prune`, the same lane `wg collab claim` step 1 uses) and **fails
 closed** if it cannot: a stale board is how two workers duplicate a card.
 Pass `fresh:false` to read the cached refs; the result's `_meta` carries
 `fresh` and `fetched_at` (the last successful fetch, absent if none). Those
@@ -170,11 +170,11 @@ process stays offline).
 **Caller.** The principal is `<git-dir>/walgit/identity` — one per worktree
 (D58/D59/D62). `collab_publish` refuses an entry whose `actor` is not that
 principal; `collab_register` refuses when there is no identity. It also has
-the `wgl collab join` rotation guard: if the registry names a *different* key
+the `wg collab join` rotation guard: if the registry names a *different* key
 for this principal, it refuses unless `force:true` — rotating makes every past
 entry by that principal unverified, and the log is append-only. Prefer an
-explicit `wgl collab principal-register` for a real rotation. `wgl mcp`
-never signs for you and holds no key: build and sign with `wgl collab entry`
+explicit `wg collab principal-register` for a real rotation. `wg mcp`
+never signs for you and holds no key: build and sign with `wg collab entry`
 (or any ed25519 signer over the canonical bytes, `docs/D1_PROTOCOL.md` §5.3).
 
 `collab_publish` parses the entry the way the server's write path does
@@ -182,9 +182,9 @@ never signs for you and holds no key: build and sign with `wgl collab entry`
 `version` in `u32` range, unknown fields ignored) and additionally requires an
 `ed25519:` + 64-byte signature and the caller's own `actor`. For
 `status=done` it fetches and applies the §7.5 gate (needs-review + a verified
-non-author approve) — the same rule as `wgl collab entry`. When `entry` is the
+non-author approve) — the same rule as `wg collab entry`. When `entry` is the
 JSON **text**, those exact bytes become the blob, so the returned `oid` equals
-the one `wgl collab entry` wrote (no duplicate entry, and references to the
+the one `wg collab entry` wrote (no duplicate entry, and references to the
 CLI's oid stay valid); an object argument is serialized compactly. It does
 **not** verify the signature on
 write (an entry and the key registration may land in either order, and the git
@@ -216,7 +216,7 @@ tick is `--subscribe-interval` (>= 1 s, default 5 s).
 **Verification and host-only keys.** `verified` (and therefore the `done`
 gate) is computed from this checkout's `refs/walgit/principals/*` cache plus
 `refs/collab/meta/principals/*`. A key registered only in the *host* registry
-is invisible here until `wgl collab principal-fetch`; if a verdict disagrees
+is invisible here until `wg collab principal-fetch`; if a verdict disagrees
 with the host's aggregation, run that first.
 
 ### Error contract
@@ -235,7 +235,7 @@ with the host's aggregation, run that first.
 
 ## Failure handbook
 
-- **"no project identity … run `wgl collab join`"** — the checkout has no
+- **"no project identity … run `wg collab join`"** — the checkout has no
   per-worktree identity yet.
 - **"cannot sign as actor …"** — the key is not the one registered for that
   actor; sign as the right principal or rotate deliberately.

@@ -154,7 +154,7 @@
   `refs/collab/meta/principals/*` 始终优先；本地没有的 principal 回落 host
   registry，一次注册对主机上所有仓库生效。读侧经 TTL 缓存（60 s，写即失效，
   issue #104）——collab report/thread/board 每请求只付一次命中成本。
-  CLI 侧 `wgl collab principal-fetch` 把 host registry 拉成本地副本：
+  CLI 侧 `wg collab principal-fetch` 把 host registry 拉成本地副本：
   当 approve reviewer 的 key 仅在 host registry 时，CLI 的 transition 门禁
   本地比对更严，须先 fetch 再判（否则合法流转被误拒）。
 - **读可以直连桶（可选强化）**：bundle 走 presigned URL、静态对象走 S3 读——有凭据即可；
@@ -178,7 +178,7 @@
 ## 7. Agent 协议
 
 1. **触发**：对 `refs/collab/*` 做 refs 级轮询（便宜，O(1)，无 pack；`(repo, seq, ref)` 去重、
-   at-least-once、可回放）；`wgl collab watch` 把它变成事件循环。
+   at-least-once、可回放）；`wg collab watch` 把它变成事件循环。
 2. **行动**：构造签名条目（review / patch / comment / status）→ push 自己的收件箱。
    幂等：条目按 **oid**（内容寻址）去重，重复/重投递无害；事件按 seq 去重。
 3. **上下文**：walgit API（tree/blob/commits/resolve）+ blobless bundle（全量上下文、字节走桶）。
@@ -275,7 +275,7 @@
 > - **端点**：`GET /{o}/{r}/api/collab/board`（定义读 HEAD 的
 >   `.walgit/board.toml`，remote 仓经 remote reader fault；缺失 = 内置默认板
 >   open/merged/closed/other，非法 = 400；SWR，永不 immutable）。
-> - **CLI**：`wgl collab board --format text|markdown|json`（`--board`
+> - **CLI**：`wg collab board --format text|markdown|json`（`--board`
 >   预览未提交的定义；`json` 输出与端点字节一致，e2e 断言）。
 > - **SPA**：`/{o}/{r}/collab/board` 只读页（列 + 卡 + SSE 实时刷新）；
 >   移动卡片 = 薄 API 的一条签名 `status` 条目（parent = 卡 `last_oid`）。
@@ -305,16 +305,16 @@
    与 `POST …/collab/principal`：服务端把条目对象打进 pack 走 WAL publish；
    同一 WAL 发布路径，无第二套写语义）。
 2. Web UI 先行还是 CLI 先行？（建议 CLI + 最小 Web 视图先跑通协议）——**已定（issue #14）**：
-   CLI 先行，`wgl collab ls|thread|pr|entry|principal-register|principal-revoke`
+   CLI 先行，`wg collab ls|thread|pr|entry|principal-register|principal-revoke`
    已实现（读走本地 git 的 collab refs + 验签聚合；写走构造/签名 + 本地写 ref +
    `--push` 经 receive-pack），并有真实 walgit 实例的 e2e（`crates/walgit-cli/tests/
    collab_e2e.rs`：注册 → 建 issue → 链式评论 → approve → 新克隆聚合验签）。
 
-   ③ agent 运行时（issue #16）：`wgl collab watch` 已实现——常驻/`--once`
+   ③ agent 运行时（issue #16）：`wg collab watch` 已实现——常驻/`--once`
    拉取 `refs/collab/*`，状态文件（`<gitdir>/collab-watch.json`）对比增量，每条
    新条目通过 `--exec` 回调（stdin 传条目 JSON，env 给 kind/thread/actor/verified）；
    agent 的“大脑”是外部命令，walgit 只做 notify+sync。
-    ④ dashboard（issue #19）：`wgl collab report --format text|markdown|html` 已实现——只读观测渲染端（无状态、无写权限），全局聚合线程/PR/验签健康/agent 活动，html 为自包含单文件。
+    ④ dashboard（issue #19）：`wg collab report --format text|markdown|html` 已实现——只读观测渲染端（无状态、无写权限），全局聚合线程/PR/验签健康/agent 活动，html 为自包含单文件。
    **交互式 Web UI（issue #26）**：`/{o}/{r}/collab` 页（线程列表 + 总量健康 +
    PR 合并评估 + by-actor/by-kind）与 `/{o}/{r}/collab/thread/{id}` 页（条目时间线、
    验签徽标、PR/评审面板、浏览器写框）已实现——薄 API 直写 + 浏览器 Ed25519 密钥。
@@ -325,7 +325,7 @@
    ⑤ CI 子协议（issue #31）：`docs/D1_CI_PROTOCOL.md`（规范）——触发 = ref 事实
    （refs 级轮询）、`ci_claim`/`ci_result` 签名条目、
    确定性竞争收敛 + TTL 重认领、产物引用 + 哈希、秘密只在客户端 env；落地为
-   `walgit-wal/src/ci.rs`（聚合核心）与 `wgl ci validate|run|status`。服务端零 CI
+   `walgit-wal/src/ci.rs`（聚合核心）与 `wg ci validate|run|status`。服务端零 CI
    **执行**（没有 runner / 调度 / 秘密），聚合只在 report runs 投影里跑。
 3. 聚合视图的只读缓存放哪（是否复用 walgit 的 render cache `cache/api/v1/*.json`）？
    **不复用（issue #30 决定）**。render cache 的契约是"答案按内容寻址、不可变"
@@ -353,7 +353,7 @@
 ref 通告体积随历史线性增长。解法与 WAL checkpoint 同形：把已折叠条目收进一个 CAS 移动的
 快照 ref（`refs/collab/meta/snapshot`），读侧 = 快照 ∪ 未折叠尾部，按 oid 去重——折叠前后
 聚合逐字节一致（这是验收等式）。条目信任始终来自每条自己的签名，不来自快照签名；折叠单元
-是 CLI（`wgl collab gc`），写经 receive-pack，快照先落、收件箱后删，中途崩溃只产生重复、
+是 CLI（`wg collab gc`），写经 receive-pack，快照先落、收件箱后删，中途崩溃只产生重复、
 不产生丢失。
 
 ---
@@ -369,7 +369,7 @@ ref 通告体积随历史线性增长。解法与 WAL checkpoint 同形：把已
 
 ### 6.1 Work-unit lifecycle
 
-A work unit is a **D1 collab thread**; the board (`wgl collab board`, definition `.walgit/board.toml`)
+A work unit is a **D1 collab thread**; the board (`wg collab board`, definition `.walgit/board.toml`)
 projects it with **per-field inheritance**: `status` is the newest `status` entry carrying a string `status`
 (a `merge_result {"merged":true}` also lands the card on `merged`), while `owner` / `worktree` / `branch` /
 `work` each come from the newest `status` entry that names that field — later entries inherit what they omit,
@@ -380,7 +380,7 @@ forged-actor, unverified) status entry still moves the status column but never t
 projection does **not** filter
 by signature: every entry's fields count, while verification feeds the `verified`/`unverified` counts, the merge
 rule (only verified approvals count) and the `done` gate. Filing a thread is the `issue` root; the worker then
-claims it with `wgl collab claim` (§8.4 — or, without claims, a `status` entry naming
+claims it with `wg collab claim` (§8.4 — or, without claims, a `status` entry naming
 `owner`, adding `worktree`/`branch`/`work` when claimed); an issue-only thread projects as an unowned `open` card.
 Parked work still names its owner (`blocked` / `needs-human`). An owner written in a `comment` does not count —
 only the `status` entry's fields do.
@@ -404,7 +404,7 @@ thread title/body (and a batch thread carries the checklist).
 ### 6.2 Claim protocol (agents) — historical GitHub flow, superseded 2026-09-16
 
 The five steps and `gh` samples below describe the pre-migration GitHub flow; the
-coordination layer is now the D1 collab layer (see the note above; the client command is `wgl collab`, D69). The *state vocabulary*
+coordination layer is now the D1 collab layer (see the note above; the client command is `wg collab`, D69). The *state vocabulary*
 (claim → in-progress → needs-review → blocked → done) still names the same lifecycle.
 
 1. **Claim**: pick a `ready` issue → add `in-progress`, remove `ready`, and comment

@@ -21,9 +21,9 @@
 >
 > | 实现面 | 位置 |
 > |---|---|
-> | 聚合核心（entry/canonical/verify/thread/pr/merge/report/board/snapshot） | `crates/walgit-wal/src/collab.rs`（Rust，服务端聚合）；`wgl/src/d1/`（Zig，独立客户端，同一契约） |
-> | 协作客户端 CLI（读、写、watch、gc、claim） | `wgl/`（`wgl collab …`，D69 独立 Zig 客户端） |
-> | host 注册表客户端 | `wgl/`（`wgl principal …`） |
+> | 聚合核心（entry/canonical/verify/thread/pr/merge/report/board/snapshot） | `crates/walgit-wal/src/collab.rs`（Rust，服务端聚合）；`wg/src/d1/`（Zig，独立客户端，同一契约） |
+> | 协作客户端 CLI（读、写、watch、gc、claim） | `wg/`（`wg collab …`，D69 独立 Zig 客户端） |
+> | host 注册表客户端 | `wg/`（`wg principal …`） |
 > | 薄 API 写路径 + 服务端聚合 | `crates/walgit-server/src/web/api.rs`（`collab_*`、`collab_load`） |
 > | host 注册表服务端 | `crates/walgit-server/src/web/v1.rs`（`/api/v1/principals`） |
 > | SDK（canonical / 签名 / post） | `web/sdk/repos.ts` |
@@ -86,7 +86,7 @@
 
 ### 3.1 段名规则（refname-safe segment，normative）
 
-principal 与 entry-seg 必须满足（客户端 `ref_segment` 与薄 API `ref_segment_ok` 同一规则；wgl 复现同一规则）：
+principal 与 entry-seg 必须满足（客户端 `ref_segment` 与薄 API `ref_segment_ok` 同一规则；wg 复现同一规则）：
 
 1. 非空，UTF-8 字节长 ≤ 255；
 2. 首字符为 ASCII 字母或数字；
@@ -109,7 +109,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 ### 3.2 读取面
 
 - CLI 读命令只读**本地** git 的 `refs/collab/*`，不发 API 请求。默认 `git clone` 只取
-  `refs/heads/*`，因此新克隆要先显式取协作 refs（或跑一次 `wgl collab watch --once`）：
+  `refs/heads/*`，因此新克隆要先显式取协作 refs（或跑一次 `wg collab watch --once`）：
   `git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'`。
 - 服务端从 WAL 索引（`Need::Objects`）读取同一命名空间；条目 blob 够小则本地读，否则经 remote
   reader 一次批量 fault + 一次 `git cat-file --batch`（绝不每条目一进程）。见 §12 预算。
@@ -121,7 +121,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
 - **私钥文件**：32 字节 Ed25519 种子的 hex 文本（64 个 hex 字符，可带尾随换行）；CLI 的
   `--key` 参数是**文件路径**，不是内容（传内容会在报错里把私钥回显到终端）。
 - **存储位置（约定，非协议）**：私钥属于**项目**、按 **worktree** 区分，不属于共享目录。
-  `wgl collab join --principal <p>` 把 seed 写到 `<git-dir>/walgit/keys/<p>.ed25519`
+  `wg collab join --principal <p>` 把 seed 写到 `<git-dir>/walgit/keys/<p>.ed25519`
   （`0600`），身份指针写到 `<git-dir>/walgit/identity`，并注册公钥。**一个 worktree 一把身份**
   （主 checkout 也是其中一个 worktree）：同一 clone 的 main 与各 worktree 是不同协作者，因而一个
   项目可跑多个不同 principal 的子代理（D59）。该目录永不被跟踪、`git clean -fdx` 也删不掉；每个
@@ -147,7 +147,7 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
   registry ref（见 §14 威胁模型）。没有 policy 的仓库（allow-all）= 任何人可注册任何人。
 - `version` 当前恒为 1；`registered_at` 为 unix 秒（信息性）。
 - **轮换** = 用新 key 重新注册（覆盖该 ref）；**吊销** = 删除该 ref（tombstone）。验证只认**此刻**注册表里的那把 key，因此**轮换与该 key 的丢失都会让此前签名的全部条目在未来聚合中变为 unverified**；唯一恢复路径是用**旧 key 的备份**重新注册旧 key。浏览器写路径因此提供导出备份与导入恢复（SPA 写入口的「备份密钥」/「导入密钥」，后果见 §14 与 `docs/USER_GUIDE.md` §7）。
-- 写路径：轮换可用 wgl `principal-register --push`（对指向 blob 的非 commit ref 用强制
+- 写路径：轮换可用 wg `principal-register --push`（对指向 blob 的非 commit ref 用强制
   refspec `+`）或薄 API `POST …/api-browser/collab/principal`（CAS 旧值更新，§12）；**吊销目前只有
   CLI** `principal-revoke --push`（删除 refspec `:`）——薄 API 尚无删除端点。
 
@@ -160,8 +160,8 @@ CLI 用 16 随机字节 hex，SDK 用 `crypto.randomUUID()`，薄 API 用 UUIDv4
   **self-only**（认证 principal == 路径 principal；auth `none` 的 loopback 例外）。PUT 为覆盖写
   （注册/轮换同形），DELETE 即吊销。响应缓存 60s，写后立即失效（issue #104）。
 - 存储键 `host/principals/<principal>`；内容与 §4.3 同形。
-- CLI：`wgl principal register|rotate|list|revoke --url <host> [--token]`（HTTP-only）。
-- `wgl collab principal-fetch` 把 host 注册表拉成本地 `refs/walgit/principals/*` 缓存，
+- CLI：`wg principal register|rotate|list|revoke --url <host> [--token]`（HTTP-only）。
+- `wg collab principal-fetch` 把 host 注册表拉成本地 `refs/walgit/principals/*` 缓存，
   并**清除 host 已不再列出的缓存 principal**（吊销在副本上立即结束）。
 - **优先级：仓库本地 `refs/collab/meta/principals/*` 永远覆盖 host 注册表**（CLI 与 server 同
   规则：先本地 `or_insert`，host 只填空缺）。repo 本地缺 key 时才回落 host。
@@ -224,7 +224,7 @@ JSON，薄 API 写紧凑 JSON——**格式不是协议**，签名不覆盖存�
 **写侧身份闸**：`sig` 必须用 `actor` 自己注册的 key 签。`actor` 与 key 解耦写出的条目在
 `actor` 被轮换到这把 key 之前验签不通过；日志 append-only，条目无法删改（轮换到该 key 会让
 它重新 verified，但轮换是破坏性的：`actor` 过去用旧 key 签的条目全部变为 unverified）。因此
-`wgl collab entry` / `collab claim` 在落盘/推送前校验「签名 key 的 public key == 注册表中
+`wg collab entry` / `collab claim` 在落盘/推送前校验「签名 key 的 public key == 注册表中
 `actor` 的 key」（仓库本地注册表 ∪ host 缓存），不一致即拒绝，并在错误里指出 key 实际归属的
 principal；MCP 的 `collab_publish` 只是这两个子命令产物的传输层（收下**已签名**的条目再交给
 `POST …/api-browser/collab/entries`），走同一条闸，没有旁路；服务端不持任何私钥。`collab gc` 对折叠签名一向如此。
@@ -449,7 +449,7 @@ unverified 永远可见：读侧对验签失败/收件箱不符的条目只降�
    actor 不是线程内任一 verified `patch` 的 actor（禁止自审，与 §7.3 同一权威规则）。
 
 否则写入被拒（CLI 非零退出并给机器可读理由；薄 API `400`）。CLI 在缺 verified approve 时
-提示先 `wgl collab principal-fetch`（approve 者的 key 可能只在 host 注册表）。
+提示先 `wg collab principal-fetch`（approve 者的 key 可能只在 host 注册表）。
 
 **边界（必须知道）**：门禁在**写路径**（CLI + 薄 API），不在聚合。裸
 `git push`/其它客户端追加的 `done` 不会被读侧拒绝——读侧只按签名与投影规则处理；门禁是协作
@@ -521,7 +521,7 @@ unverified = false      # 可选：true = 只收至少含 1 条 unverified 条�
   因此输出是全序、字节确定。
 - **纯 CI 线程（全部条目为 `ci_claim`/`ci_result`）不是看板卡片**，跳过；同样跳过的还有
   **仅含 `card_claim` 的线程**（没有卡可认领，§8.4）。其展示面是
-  report.runs / `wgl ci status` / SPA 线程徽标（CI 协议 §8.3）。
+  report.runs / `wg ci status` / SPA 线程徽标（CI 协议 §8.3）。
 
 ### 8.4 工作卡认领收敛（`card_claim`，2026-10-20 design-card-claim）
 
@@ -551,7 +551,7 @@ issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已�
   `ts` 是条目自己的签名字段。过期 claim 不参与：TTL 到期即自愈，任何客户端可发布新 claim
   重新竞争；旧 claim 留在日志里解释"上一次为什么没有结果"。没有 lease renew / 僵尸清理。
 
-- **客户端流程是硬规则**（`wgl collab claim` 实现）：
+- **客户端流程是硬规则**（`wg collab claim` 实现）：
 
   ```text
   read（fetch refs/collab/*）→ 无 live winner ? publish claim : stand down（退出码 2）
@@ -590,10 +590,10 @@ issue 时线程分叉，`(ts, actor, oid)` 只能事后排序——挡不住已�
   `claimed` = 有 live winner；`stale` = 有过认领但都已过期（任何人可再认领）；
   `pending` = 只有未验签/malformed 认领。
 
-- **终态与门禁**：`wgl collab claim` 只接受有效状态为 `open`/`in-progress` 的卡（与投影的
+- **终态与门禁**：`wg collab claim` 只接受有效状态为 `open`/`in-progress` 的卡（与投影的
   认领生效区间是同一个判断，退出码 1）——`needs-review` 及其后的状态（含 `blocked`/
   `needs-human`/终态）不能被认领，因为认领在那里本就不产生 owner。发布与重读之间卡被关闭的，
-  重读时同样拒绝。`wgl collab gc` 照常折叠 claim 条目（D45），折叠前后聚合一致。
+  重读时同样拒绝。`wg collab gc` 照常折叠 claim 条目（D45），折叠前后聚合一致。
 
 ## 9. 折叠：快照 ∪ 尾部（D45）
 
@@ -650,7 +650,7 @@ checkpoint 同形：读侧 = 最新快照 + 其后增量尾。
 验证的」快照发出去，让所有读者以为折叠者作恶。**折叠有两个执行者，同一套算法**：
 maintainer 的 `collab-fold` 单元（D66，`maintenance.collab_fold_refs` 触发，
 `maintenance.collab_fold_principal` + `…_key` 提供身份；一次 CAS 事务里同时落快照并剪收件箱，
-见 §9.3 注）与手工 CLI `wgl collab gc`（下面的分步算法、`--truncate` 超限修复）。默认应当是
+见 §9.3 注）与手工 CLI `wg collab gc`（下面的分步算法、`--truncate` 超限修复）。默认应当是
 **自动折叠**：聚合按 ref 数记账（§9.4），inbox 只增不减会让看板静默停摆——把折叠挂在「操作者记得
 跑命令」上是陷阱。
 
@@ -690,7 +690,7 @@ maintainer 的 `collab-fold` 单元（D66，`maintenance.collab_fold_refs` 触�
 ### 9.4 限额与成本
 
 - 服务端单请求 `COLLAB_MAX_ENTRIES = 20000`：计数 = **未折叠**的 inbox ref + principals ref
-  （快照与 rules 是单例不计）；超限 `503`，提示 `wgl collab gc` 或离线 CLI 聚合。
+  （快照与 rules 是单例不计）；超限 `503`，提示 `wg collab gc` 或离线 CLI 聚合。
 - 快照 blob 上限 `COLLAB_SNAPSHOT_MAX_BYTES = 64 MiB`：remote 与 local/mounted 路径都在
   物化 body 前拒绝，超限 `503`。
 - 折叠把 N 条 ref 收成 1 条 ref + 1 个有界 blob；fetch 该命名空间的客户端会拉快照字节
@@ -700,7 +700,7 @@ maintainer 的 `collab-fold` 单元（D66，`maintenance.collab_fold_refs` 触�
   `--truncate` 写入带 `complete=false` 的裁剪快照，服务端立即恢复可读。CLI 的本地 `load`
   对超限快照 fail-closed 并提示 `--truncate`——快照字节是折叠历史的唯一载体，**不要先删 ref**
   （需要导出时用 `walgit wal materialize --at-seq` 或仍持有快照的克隆）。
-- **机会式折叠**：`wgl collab entry --push --auto-fold` 在本地未折叠 ref 达到
+- **机会式折叠**：`wg collab entry --push --auto-fold` 在本地未折叠 ref 达到
   `--fold-threshold`（默认 10000，服务端预算的一半）时顺带跑一次 gc；折叠失败只是警告，
   条目已发布。有活跃写入者时，20k 悬崖不会无人处理。
 
@@ -714,14 +714,14 @@ TTL、秘密边界、日志/产物存放（`refs/collab/ci-artifacts/<actor>/<sh
 `docs/D1_CI_PROTOCOL.md` 为准**，本文不复制。与 D1 的接口只有三条：
 
 1. 条目仍走 §5 的 schema/canonical/签名与 §7.1 的集合语义；
-2. 纯 CI 线程不进 report.threads / 看板，只出现在 report.runs 与 `wgl ci status`；
+2. 纯 CI 线程不进 report.threads / 看板，只出现在 report.runs 与 `wg ci status`；
 3. 产物命名空间**不在** `collab watch` 的 fetch 范围内（按需拉取，避免每个 watcher 背 16 MiB blob）。
 
 ## 11. 观察通道（pull-only）
 
 D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次语义只在 pull 车道成立。
 
-### 11.1 `wgl collab watch`
+### 11.1 `wg collab watch`
 
 每轮（默认 `--interval 10` 秒，`--once` 单轮）：
 
@@ -761,10 +761,10 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   API** 的仓库读面 —— `repo_*` 与 `wal_ls`，资源 `walgit://refs/<o>/<r>`、
   `walgit://wal/<o>/<r>{?from}`；订阅是服务端 refs 级轮询、best-effort（同 D52，不是持久推送）。
   协作面（`collab_board`/`collab_thread`/`collab_report`/`ci_status`/`collab_publish`/
-  `collab_register` 与 `walgit://collab/*`）在独立的 **`wgl mcp`**（stdio JSON-RPC），
+  `collab_register` 与 `walgit://collab/*`）在独立的 **`wg mcp`**（stdio JSON-RPC），
   聚合的是 checkout 自己的 `refs/collab/*`：读前默认 `git fetch --prune`（失败即 fail
   closed），写是把客户端**已签名**条目 push 成收件箱 ref。字节不过 MCP（clone/fetch/push 仍走
-  git/bundle-uri）。表见 §12.1；实现 `crates/walgit-server/src/mcp/` 与 `wgl/src/cmd_mcp.zig`。
+  git/bundle-uri）。表见 §12.1；实现 `crates/walgit-server/src/mcp/` 与 `wg/src/cmd_mcp.zig`。
 
 ### 11.3 去重与幂等（汇总）
 
@@ -794,9 +794,9 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 三个聚合读端点一律 **SWR + 响应体 sha256 ETag、永不 immutable**（同一 body 的重复请求 304；
 `report` 含 `now` 相关的 CI 运行态，跨 TTL 边界 body 变化即回 200）。
 
-### 12.1 agent MCP 面（`wgl mcp`，stdio，D70）
+### 12.1 agent MCP 面（`wg mcp`，stdio，D70）
 
-`wgl mcp --repo <checkout> [--remote origin] [--no-fetch] [--subscribe-interval 5]
+`wg mcp --repo <checkout> [--remote origin] [--no-fetch] [--subscribe-interval 5]
 [--max-subscriptions 32]`。stdout 只有一行一条的 JSON-RPC；日志走 stderr；stdin EOF 退出。
 请求串行处理；订阅由进程内轮询线程负责（best-effort），无订阅时不做 refs 工作。MCP 读面的
 `git fetch` 有 120 秒上界；写面的 ref push 同样 120 秒：超时与其他传输失败一样是工具错误，
@@ -811,7 +811,7 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | `collab_thread {id}` | §6/§7.2：`{id, entries:[{oid, principal, verified, entry, broken_refs}], pr}` | 同上 |
 | `collab_report` | §7.4 报告（含 CI runs） | 同上 |
 | `ci_status {id?}` | CI 协议 §8.3：`{repo, runs}` | 同上 |
-| `collab_publish {entry}` | 客户端**已签名**条目 → `refs/collab/inbox/<actor>/<uuid>`（git push） | 与写路径同源的 serde 解析（必填/类型/`refs` 形状/`version` 范围；未知字段忽略）+ `ed25519:`+64 字节 + `actor == <git-dir>/walgit/identity`；`entry` 是 JSON 文本时按**原字节**写 blob（oid 与 `wgl collab entry` 一致，不产生重复条目）；`status=done` 先 fetch 再走 §7.5 门禁；**写侧不验签** |
+| `collab_publish {entry}` | 客户端**已签名**条目 → `refs/collab/inbox/<actor>/<uuid>`（git push） | 与写路径同源的 serde 解析（必填/类型/`refs` 形状/`version` 范围；未知字段忽略）+ `ed25519:`+64 字节 + `actor == <git-dir>/walgit/identity`；`entry` 是 JSON 文本时按**原字节**写 blob（oid 与 `wg collab entry` 一致，不产生重复条目）；`status=done` 先 fetch 再走 §7.5 门禁；**写侧不验签** |
 | `collab_register {force?}` | 本 worktree 身份公钥 → `refs/collab/meta/principals/<p>` 并 push | identity 缺失即拒绝；已注册的 key 与本次不同且 `force != true` 即拒绝（§4.3 RotationGuard，防止历史条目变 unverified） |
 | `walgit://collab/board` | 看板 JSON | 读前 fetch；`_meta.version = b:<witness>[:claim:<expires_at>]` |
 | `walgit://collab/thread/<id>` | 线程 JSON（`<id>` 做 `%XX` 解码） | 读前 fetch；`_meta.version = h:<tip>`；本地 body 无 WAL `seq`（主机 body 有） |
@@ -875,18 +875,18 @@ body。`resources/subscribe` 的初始版本与随后每次轮询都走同一 fe
 | `walgit-wal/src/collab.rs::golden_tests` + `web/src/collab-canonical.test.ts` + `crates/walgit-server/tests/web_api.rs::collab_sdk_golden_entry_verifies_end_to_end` | 跨语言金标向量：SDK/WebCrypto 与 Rust 覆盖同一 canonical 字节串（含 `"sig":""`），且浏览器式条目经薄 API 聚合 verified |
 | `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好；完整性标记 round-trip（`snapshot_completeness_marker_round_trips`） |
 | `…::transition_tests` | `done` 门禁（needs-review + verified approve，且排除 patch 作者）；先 thread() 后判定；card prose 抽取；merge 去重/非作者（`merge_rule_counts_distinct_non_author_approvers` / `pr_view_collects_verified_patch_authors_only` / `done_gate_rejects_self_approval_by_the_patch_author`） |
-| `wgl/` 的 Zig 测试（`zig build test`） | 金标向量（§5.3.1 第三实现）；canonicalize 紧凑键序；签名/验签/篡改；thread 链序（含递减 `ts` 全量解析）；看板确定性；card_claim 收敛（胜者/过期/pending）；merge 只计非 `svc-` 非作者；report 投影排序；done 门禁；快照 round-trip；EntrySet 去重与属主偏好；`wgl mcp` 的 tools/list 面、board/thread/report/ci 输出形状、Rust `DefaultHasher` 版本串、fresh 策略、publish/register 拒绝路径 |
-| `scripts/wgl-e2e.sh`（`just wgl-e2e`，D69 起） | 真实 git 传输全流程（注册→issue→链式条目→approve→第二克隆聚合验签→合并门禁放行→两 principal 认领竞争恰一执行、败者退出码 2→gc 折叠前后看板哈希一致→watch 快照事件→ci validate）；`wgl mcp` 的 fail-closed、订阅（claim TTL 到期唤醒、`--max-subscriptions`、unsubscribe、EOF）；有仍带 `collab` 的参考二进制时跨实现核对看板哈希（D69 后的二进制显式跳过）；`WALGIT_SERVER_BIN` 可探测到时用 memory store 起真服务器，逐端点做 `wgl mcp` ↔ `api-browser/collab/*` 的解析后 JSON 相等比较（探测不到显式跳过） |
+| `wg/` 的 Zig 测试（`zig build test`） | 金标向量（§5.3.1 第三实现）；canonicalize 紧凑键序；签名/验签/篡改；thread 链序（含递减 `ts` 全量解析）；看板确定性；card_claim 收敛（胜者/过期/pending）；merge 只计非 `svc-` 非作者；report 投影排序；done 门禁；快照 round-trip；EntrySet 去重与属主偏好；`wg mcp` 的 tools/list 面、board/thread/report/ci 输出形状、Rust `DefaultHasher` 版本串、fresh 策略、publish/register 拒绝路径 |
+| `scripts/wg-e2e.sh`（`just wg-e2e`，D69 起） | 真实 git 传输全流程（注册→issue→链式条目→approve→第二克隆聚合验签→合并门禁放行→两 principal 认领竞争恰一执行、败者退出码 2→gc 折叠前后看板哈希一致→watch 快照事件→ci validate）；`wg mcp` 的 fail-closed、订阅（claim TTL 到期唤醒、`--max-subscriptions`、unsubscribe、EOF）；有仍带 `collab` 的参考二进制时跨实现核对看板哈希（D69 后的二进制显式跳过）；`WALGIT_SERVER_BIN` 可探测到时用 memory store 起真服务器，逐端点做 `wg mcp` ↔ `api-browser/collab/*` 的解析后 JSON 相等比较（探测不到显式跳过） |
 | `crates/walgit-server/tests/web_api.rs` (`collab_*`) | 薄 API 签名条目（服务端不验签、聚合验）；report/thread 聚合；注册+verified；薄 API 遵守 policy；默认板投影；CI 产物按哈希供字节；超大快照物化前拒绝 |
 | `crates/walgit-server/src/policy.rs` 测试 + `crates/walgit-server/tests/policy_inbox.rs` | `{principal}` 段捕获与单规则收件箱隔离（`collab_inbox_shards_with_one_principal_relative_rule`，bypass 只放行被捕获的 owner）；token 模式按 actor 分片的字面规则版 |
 | `web/src/collab-text.test.ts` + Rust `card_prose_is_the_thread_page_field_walk` | 跨语言 prose 抽取同表（看板卡片与线程页不漂移） |
 
-## 附录 A：客户端命令与最小工作流（wgl，D69）
+## 附录 A：客户端命令与最小工作流（wg，D69）
 
 读（本地 refs，验签离线）：
 
 ```sh
-W="wgl"
+W="wg"
 $W collab ls [--repo .]                 # 线程 id 列表
 $W collab thread <id> [--repo .]        # 链序 + 每条的 oid/principal/verified，JSON
 $W collab thread-heads [--repo .]       # thread id -> 链头 oid
@@ -912,8 +912,8 @@ $W collab claim --id <thread> [--ttl 300] [--push origin] \
    [--worktree wt-x --branch feat/x --work '…'] [--format text|json]
 ```
 
-host 注册表：`wgl principal register|rotate|list|revoke --url <host> [--principal p] [--key f]`。
-CI：`wgl ci validate|run|status|log|artifacts`（`docs/D1_CI_PROTOCOL.md`）。
+host 注册表：`wg principal register|rotate|list|revoke --url <host> [--principal p] [--key f]`。
+CI：`wg ci validate|run|status|log|artifacts`（`docs/D1_CI_PROTOCOL.md`）。
 
 标准工作单元流程（与 `CONTRIBUTING.md` / `RULE_开发流程规范` 对齐）：issue → **开工前
 `collab claim`（§8.4；退出码非 0 不得开工）** → `status: in-progress`（带 owner/worktree/

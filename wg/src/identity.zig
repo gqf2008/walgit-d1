@@ -17,7 +17,7 @@ pub const SegmentError = error{NotRefnameSafe};
 /// The §3.1 segment rule with the CLI's error message.
 pub fn ref_segment(label: []const u8, s: []const u8) SegmentError!void {
     if (entry_mod.ref_segment_ok(s)) return;
-    std.debug.print("wgl: collab.{s}: \"{s}\" is not a refname-safe segment ([A-Za-z0-9._@-]+)\n", .{ label, s });
+    std.debug.print("wg: collab.{s}: \"{s}\" is not a refname-safe segment ([A-Za-z0-9._@-]+)\n", .{ label, s });
     return error.NotRefnameSafe;
 }
 
@@ -118,7 +118,7 @@ pub fn resolve_identity(alloc: std.mem.Allocator, io: Io, repo: []const u8, prin
         if (identity) |id| break :blk id.principal;
         const id_path = std.fs.path.join(alloc, &.{ dir, "identity" }) catch return error.OutOfMemory;
         std.debug.print(
-            "wgl: no --principal and no project identity at {s}; run `wgl join --principal <name>` first\n",
+            "wg: no --principal and no project identity at {s}; run `wg join --principal <name>` first\n",
             .{id_path},
         );
         return error.NoIdentity;

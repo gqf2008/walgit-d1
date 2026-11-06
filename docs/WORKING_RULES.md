@@ -50,7 +50,7 @@
 - Web: pnpm + Vite, `pnpm run build` must pass oxlint/tsc. Config: `walgit.example.toml` documents every key;
   change it with the code.
 - Test tiers: `just test` (fast, < 1 min: lib/bins, the wildcard crates, the server integration set),
-  `just wgl-test` + `just wgl-e2e` (the wgl client lanes, D69), `just e2e`, `just sim`, `just warnings`, `just clippy` (the
+  `just wg-test` + `just wg-e2e` (the wg client lanes, D69), `just e2e`, `just sim`, `just warnings`, `just clippy` (the
   `[workspace.lints]` set, `-D warnings`), `just ci` = all of them; `just spec` / `just spec-fragments` / `just spec-full`
   run the bounded TLA+/TLC contract checks in `docs/spec/` (not part of `just ci`; CI runs the
   four-model fragment subset in its own bounded job); the **simulation
@@ -60,8 +60,8 @@
   and the server integration suites and the wildcard crates on both — one list per lane in the
   justfile (`SERVER_TESTS`, `WILDCARD_TEST_PKGS`; issues #137/#141). The **walgit-cli suites
   (`CLI_TESTS`) ran on ubuntu only** — retired by D69: the collaboration command
-  families moved to the standalone wgl client, whose lanes are `wgl-test` (zig
-  unit/golden) and `wgl-e2e` (transport end-to-end; cross-checks the board hash
+  families moved to the standalone wg client, whose lanes are `wg-test` (zig
+  unit/golden) and `wg-e2e` (transport end-to-end; cross-checks the board hash
   against the Rust aggregation when a walgit binary is present). The old seam
   arguments live at the justfile
   (issue #141). `scripts/suite-guard.sh` (a CI step) asserts every `crates/*/tests/*.rs` is in a lane

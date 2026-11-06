@@ -105,7 +105,7 @@ pub fn render_report_html(alloc: std.mem.Allocator, r: *const collab.Report, unp
     var out: util.List(u8) = .init(alloc);
     w(
         &out,
-        "<!doctype html><html><head><meta charset=utf-8><title>wgl collab</title><style>body{{font-family:system-ui;margin:2rem;color:#111}}table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:.3rem .6rem;text-align:left}}</style></head><body><h1>collab report</h1><p>{d} threads, {d} PRs, {d}/{d} entries verified</p>{s}<h2>threads</h2><table><tr><th>title</th><th>entries</th><th>verified</th><th>kinds</th><th>last</th></tr>{s}</table><h2>PRs</h2><table><tr><th>title</th><th>status</th><th>approvals</th><th>merge</th></tr>{s}</table></body></html>",
+        "<!doctype html><html><head><meta charset=utf-8><title>wg collab</title><style>body{{font-family:system-ui;margin:2rem;color:#111}}table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:.3rem .6rem;text-align:left}}</style></head><body><h1>collab report</h1><p>{d} threads, {d} PRs, {d}/{d} entries verified</p>{s}<h2>threads</h2><table><tr><th>title</th><th>entries</th><th>verified</th><th>kinds</th><th>last</th></tr>{s}</table><h2>PRs</h2><table><tr><th>title</th><th>status</th><th>approvals</th><th>merge</th></tr>{s}</table></body></html>",
         .{ r.threads.len, r.prs.len, r.verified_entries, r.total_entries, unpushed_html, rows.items, prs.items },
     );
     return out.to_owned_slice() catch @panic("oom");

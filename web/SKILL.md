@@ -31,19 +31,19 @@ chmod 600 "$(git -C "$checkout" rev-parse --git-dir)/walgit/keys/<principal>.ed2
 # 2. register the public key. `join` writes this worktree's seed + identity
 #    pointer and publishes the key in one step (D70: collaboration needs a
 #    checkout now — the host /mcp no longer carries the collab tools):
-wgl collab join --repo "$checkout" --principal "<proj>-worker-1" --push origin
+wg collab join --repo "$checkout" --principal "<proj>-worker-1" --push origin
 ```
 
 - The public half is base64 of the ed25519 verifying key
   (docs/D1_PROTOCOL.md §4 — §5.3 is the *canonical bytes*, not the key). The
   seed file is 64 hex characters (32 bytes, trailing newline optional).
-- An agent that already has an identity can re-publish it over `wgl mcp
+- An agent that already has an identity can re-publish it over `wg mcp
   --repo "$checkout"` with `collab_register` (optional `force`). The key push
   goes over git, so `policy.json` for `refs/collab/meta/principals/*` is the
   write gate; a rejected push is a hard stop (the name must be refname-safe).
   A different key already registered for the principal is refused unless
   `force:true` — rotation makes every past entry unverified.
-- `wgl collab join` is idempotent for the same principal; `--force` rebinds or
+- `wg collab join` is idempotent for the same principal; `--force` rebinds or
   rotates (rotation is destructive: every past entry by that principal turns
   unverified).
 - One worktree = one identity = one agent. Never share a key; never put key
@@ -72,7 +72,7 @@ git -C "$checkout" worktree add .worktrees/wt-<thread> -b feat/<thread> main
 
 - The worktree **is** where the identity lives, so it is never deleted (D62):
   merged **branches** may be pruned; worktrees stay. Retiring a principal is
-  `wgl collab principal-revoke`, never `git worktree remove`.
+  `wg collab principal-revoke`, never `git worktree remove`.
 
 ### 4. Collaborate — card → claim → patch → review → merge
 
@@ -84,10 +84,10 @@ publish*, and publishing is one call. `parent` is the thread head you just read
 {"version":1,"kind":"issue","id":"<thread>","actor":"<you>","ts":<now>,"parent":"",
  "body":{"title":"…","body":"acceptance: <commands>"},"sig":"ed25519:…"}
 
-# over stdio (`wgl mcp --repo "$checkout"`):
+# over stdio (`wg mcp --repo "$checkout"`):
 tools/call collab_publish {"entry": <the object>}
 # or with a checkout, one command builds + signs + pushes:
-wgl collab entry --kind <kind> --id <thread> --actor <you> --body '<json>' --push origin
+wg collab entry --kind <kind> --id <thread> --actor <you> --body '<json>' --push origin
 ```
 
 The same call carries every step of a card's life — only `kind` and `body`
@@ -121,7 +121,7 @@ at the same entry oid.
 
 - **Every problem goes back to the card**: a `comment` with the evidence, or
   `status: blocked` when work halts. The card is the only report channel.
-- Read state over `wgl mcp` (stdio, in a checkout): `collab_board`,
+- Read state over `wg mcp` (stdio, in a checkout): `collab_board`,
   `collab_thread {id}`, `collab_report`, `ci_status`; every read fetches
   `refs/collab/*` first unless you pass `fresh:false`. Publishing is the one
   write tool (`collab_publish`), or `git push` to your inbox ref; both end at
@@ -164,7 +164,7 @@ lanes budget by **ref count** (`COLLAB_MAX_ENTRIES`). When a host configures
 snapshot needs), its maintainer folds the inbox as an ordinary unit (D66) — you do not run anything,
 and the board keeps aggregating. Nothing changes for a reader: before and after a fold the same
 entries aggregate the same way. An unconfigured host still leaves it to an operator
-(`wgl collab gc`), which is also the manual form for truncating an over-64 MiB ledger.
+(`wg collab gc`), which is also the manual form for truncating an over-64 MiB ledger.
 
 ## Signing an entry without the CLI
 
@@ -200,15 +200,15 @@ signature above byte for byte. A `--key` seed file is the raw 32-byte seed as 64
 (`<git-dir>/walgit/keys/<principal>.ed25519`); a PEM is converted by decoding its PKCS#8 DER and
 keeping the last 32 bytes.
 
-Sign one and publish it with `wgl mcp` `collab_publish` (`{"entry": {...}}`), or `git push` it to
+Sign one and publish it with `wg mcp` `collab_publish` (`{"entry": {...}}`), or `git push` it to
 `refs/collab/inbox/<your-principal>/<uuid>`. Both end at the same entry oid; the local check refuses an
 `actor` that is not this worktree identity, and an entry whose
 `actor` has no registered key (or the wrong one) **still lands** — the signature is verified when the
 ledger is aggregated, so read the thread back and require `verified: true`.
-`wgl collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
+`wg collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
 already have it in the SDK.
 
-## MCP — repository reads on the host, collaboration through `wgl mcp`
+## MCP — repository reads on the host, collaboration through `wg mcp`
 
 There are **two** MCP surfaces since D70, split by what each side can read.
 
@@ -267,14 +267,14 @@ re-read. Subscriptions are server-side polling of a refs-level read,
 best-effort and per-instance (D52): after a restart, read once and keep the
 version as your cursor.
 
-### `wgl mcp` — the collaboration surface (stdio)
+### `wg mcp` — the collaboration surface (stdio)
 
 The D1 tools and `walgit://collab/*` resources are **not** on `/mcp` any more.
 They read the checkout's own `refs/collab/*` and write through git, so they are
 served by the standalone client in a checkout:
 
 ```sh
-wgl mcp --repo <checkout> [--remote origin]   # stdio JSON-RPC; stdout is only JSON-RPC
+wg mcp --repo <checkout> [--remote origin]   # stdio JSON-RPC; stdout is only JSON-RPC
 ```
 
 Tools: `collab_board`, `collab_thread {id}`, `collab_report`, `ci_status
@@ -283,7 +283,7 @@ Tools: `collab_board`, `collab_thread {id}`, `collab_report`, `ci_status
 refused without force, D70/§4.3).
 
 * **Freshness is built in**: every read fetches `refs/collab/{inbox,meta}`
-  first (`git fetch --prune`, the same lane `wgl collab claim` uses) and
+  first (`git fetch --prune`, the same lane `wg collab claim` uses) and
   **fails closed** if the remote is unreachable. Pass `fresh:false` (per call)
   to read the cached refs; `--no-fetch` is process-wide and cannot be
   overridden by `fresh:true`. `_meta.fetched_at` says when they were last
@@ -293,7 +293,7 @@ refused without force, D70/§4.3).
   (D58/D59/D62). `collab_register` refuses when there is no identity, and
   refuses a silent rotation (see above); `collab_publish` refuses an entry
   whose `actor` is not that principal. When `entry` is JSON text its exact
-  bytes are the blob, so the oid equals the one `wgl collab entry` produced.
+  bytes are the blob, so the oid equals the one `wg collab entry` produced.
   It never signs for you and holds no key. The signature is **not verified on
   write** — every entry is verified when the ledger is aggregated, so read the
   thread back and require `verified: true`; a mis-signed entry is already in an
@@ -301,7 +301,7 @@ refused without force, D70/§4.3).
 * **`collab_publish` is a structural check plus the `done` gate**: `kind`,
   `id`, `actor` and an `ed25519:` 64-byte signature must be present, and
   `status=done` is checked locally (fetch first) with the same rule as
-  `wgl collab entry` and the thin API. A raw `git push` bypasses all of it —
+  `wg collab entry` and the thin API. A raw `git push` bypasses all of it —
   these checks are discipline, not a security boundary
   (`docs/D1_PROTOCOL.md` §7.5/§14).
 * **Resources**: `walgit://collab/board` and
@@ -315,7 +315,7 @@ refused without force, D70/§4.3).
 `card_claim` entry (`{ttl?, worktree?, branch?, work?, session?}`), re-read the
 board. Duplicate claims are legal; duplicate *execution* is not — the verdict is
 the **claim oid**: if the card's live winner (`card.claim.oid`) is not the exact
-claim you published, stand down and do not start. `wgl collab claim` performs
+claim you published, stand down and do not start. `wg collab claim` performs
 this read → publish → re-read loop and exits 2 on stand-down. A claim expires on
 its own (TTL), so a crashed agent does not hold a card forever.
 Destructive operations are not exposed at all; bytes never travel over MCP
@@ -344,7 +344,7 @@ write `walgit`, and let `PATH` name the one entry.
 ## Host operations
 
 The `walgit` binary is the machine's own tool: it runs the host, edits its
-configuration, and holds the keys. It is not the agent lane (that is git + `wgl mcp` for collaboration and the host `/mcp` for repository reads)
+configuration, and holds the keys. It is not the agent lane (that is git + `wg mcp` for collaboration and the host `/mcp` for repository reads)
 and not a second way to talk to this host. Global:
 `--config` (default `~/.walgit/walgit.toml`, env `WALGIT_CONFIG`); in zsh wrap
 it in a shell function, never `W="walgit …"; $W …`. `walgit serve` runs the
@@ -364,19 +364,19 @@ out. It cannot mint or revoke `wgt_…` access tokens: those come from
 
 **Not the agent lane, and documented by `--help` rather than here:**
 `walgit repo …` (a shell front for the same reads the MCP tools answer),
-`wgl collab …` (`entry`/`claim`/`watch`/`gc` — the scripting forms of the
+`wg collab …` (`entry`/`claim`/`watch`/`gc` — the scripting forms of the
 lanes above; `join`/`principal-register`/`principal-revoke` are the operator
-forms of identity; `gc` is the manual fold, D66) and `wgl ci …` (the CI
+forms of identity; `gc` is the manual fold, D66) and `wg ci …` (the CI
 *runner*: `.walgit/ci.toml` declares tasks, a client claims and executes them;
 the control plane — `ci_status`, and `ci_claim`/`ci_result` entries through
-`collab_publish` — is `wgl mcp`). None of them adds a way to talk to this host; they
+`collab_publish` — is `wg mcp`). None of them adds a way to talk to this host; they
 save flags for a script or a CI job, and each one either signs or pushes, i.e.
 acts over git, not over a private API.
 
 **D69 superseded D68's deprecation stage**: the `collab` / `ci` / `principal`
 command families are gone from the `walgit` binary entirely — they live in the
-standalone **`wgl`** client now (a separate Zig binary; `wgl --help` is its
-guide, and its operator manual is the `wgl` skill). The walgit binary answers
+standalone **`wg`** client now (a separate Zig binary; `wg --help` is its
+guide, and its operator manual is the `wg` skill). The walgit binary answers
 only host lanes.
 
 **WAL & maintenance** — `walgit wal head|ls|show|materialize --at-seq` (the
@@ -384,22 +384,22 @@ log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,
 `walgit wal rev-index`; `walgit compact [REPO] [--base]`;
 `walgit bundle run|plan|compose|rm`; `walgit import --from <url> <repo>`;
 `walgit mirror --from <src> --to <dst> --dir <buffer>`;
-`wgl principal register|rotate|list|revoke` (host-global registry, one
+`wg principal register|rotate|list|revoke` (host-global registry, one
 registration verifies in every repo of that host).
 
 ## Downloads
 
-Every release publishes the platform packages and the standalone **`wgl`**
+Every release publishes the platform packages and the standalone **`wg`**
 collaboration client at <https://github.com/gqf2008/walgit-d1/releases/latest>:
 
 | what | asset |
 |---|---|
-| linux | `walgit_<version>_amd64.deb` (installs `walgit`, `walgit-server`, `walgit-tray`, `wgl`) |
-| windows | `walgit-setup-<version>.exe` (installs `wgl.exe` next to `walgit.exe`) |
-| macOS | `walgit-<version>-<arch>.dmg` — signed + notarized (`wgl` inside) |
-| wgl only | `wgl-x86_64-linux.tar.gz`, `wgl-aarch64-linux.tar.gz`, `wgl-x86_64-windows.zip`, `wgl-aarch64-macos.zip`, `wgl-x86_64-macos.zip` |
+| linux | `walgit_<version>_amd64.deb` (installs `walgit`, `walgit-server`, `walgit-tray`, `wg`) |
+| windows | `walgit-setup-<version>.exe` (installs `wg.exe` next to `walgit.exe`) |
+| macOS | `walgit-<version>-<arch>.dmg` — signed + notarized (`wg` inside) |
+| wg only | `wg-x86_64-linux.tar.gz`, `wg-aarch64-linux.tar.gz`, `wg-x86_64-windows.zip`, `wg-aarch64-macos.zip`, `wg-x86_64-macos.zip` |
 
-The `wgl` asset names carry no version, so
+The `wg` asset names carry no version, so
 `releases/latest/download/<asset>` is a stable link.
 
 ## Agent collaboration standard (normative)
@@ -412,9 +412,9 @@ re-derives the same view from the refs.
 ### 0. Identity — one principal, one key, per worktree
 
 The seed lives at `<git-dir>/walgit/keys/<name>.ed25519` (0600) and the public
-half is registered by `wgl collab join` or `wgl mcp` `collab_register`
+half is registered by `wg collab join` or `wg mcp` `collab_register`
 (§1 of the quick start); the registry ref is `refs/collab/meta/principals/<name>`. The operator shortcut that
-does both locally is `wgl collab join --repo "$checkout" --principal <name>
+does both locally is `wg collab join --repo "$checkout" --principal <name>
 --push origin` (it also writes `<git-dir>/walgit/identity`, the file the CLI
 reads when you do not pass `--key`). **One worktree carries one identity** —
 the main checkout and each linked worktree are distinct collaborators; that is
@@ -435,8 +435,8 @@ Retire a principal with `collab principal-revoke` — a signed registry act,
    (`git for-each-ref refs/collab/meta/principals` after a fetch) for the
    `<proj>-<role>-N` convention; keep this worktree's existing identity if it
    names a registered principal, else take the next free index for the role.
-2. Ensure the identity (seed + `wgl collab join`), then read the state over
-   `wgl mcp`: `collab_board` (its read fetches `refs/collab/*` first; or run
+2. Ensure the identity (seed + `wg collab join`), then read the state over
+   `wg mcp`: `collab_board` (its read fetches `refs/collab/*` first; or run
    `git fetch origin '+refs/collab/*:refs/collab/*'` yourself and read the
    refs directly).
 
@@ -445,7 +445,7 @@ Retire a principal with `collab principal-revoke` — a signed registry act,
 **N active agents = N principals = N cards = N worktrees.** One owner per
 card: claim before work — publish a `card_claim` entry (`{ttl?, worktree,
 branch, work, session?}`, TTL default 300 s), then re-read `collab_board` over
-`wgl mcp`: if
+`wg mcp`: if
 another principal's live claim is the owner, stand down and do not start. Two
 claims on one card are legal; two executions are not. TTL expiry is the
 self-healing release, so a dead agent never holds a card forever. The leader is the reviewer, and it signs as a **different principal**
@@ -461,7 +461,7 @@ serialize units that touch the same files/schema.
 The server never pushes (D46/D55); the lane is a **subscription plus a
 re-read**. Subscribe to the resources that cover a project — on the host
 `/mcp`: `walgit://refs/<owner>/<repo>` (every git action and inbox write); in
-`wgl mcp`: `walgit://collab/board` (the whole projection), or
+`wg mcp`: `walgit://collab/board` (the whole projection), or
 `walgit://collab/thread/<id>` when one card is all you follow (its version is
 that card's tip, so unrelated writes do not wake you) — then on
 `notifications/resources/updated` read the resource, compare `_meta.version`
@@ -472,7 +472,7 @@ reconnect read once and keep the version as the cursor. Three traps: ignore
 events your own writes caused (compare the head entry's `actor`), never do the
 work inside the event handler (park it and spawn a worker), and only ever act
 on entries that verify. An agent that has no MCP client can instead tail the
-refs with `git ls-remote` (or `wgl collab watch --repo … --exec <hook>`,
+refs with `git ls-remote` (or `wg collab watch --repo … --exec <hook>`,
 the scripting form: one hook run per new inbox ref).
 
 ### 0d. Autonomous delivery — one console per project (D59/D62)
@@ -565,7 +565,7 @@ worktrees intact.
   push the branch to this host, attach as a `patch` entry whose
   `refs: {base:"refs/heads/main", head:"refs/heads/feat/<thread>"}` pins it; CI,
   if declared, runs on the branch tip. The diff is what reviewers read.
-- **§3 Thread protocol**: read before write (`wgl mcp` `collab_thread`; append with the
+- **§3 Thread protocol**: read before write (`wg mcp` `collab_thread`; append with the
   latest oid as `parent`); state moves through kinds, not prose (`status`,
   `review`, `merge_result`, `comment`); treat unverified entries as untrusted;
   replay the parent chain before you trust a view.
@@ -576,7 +576,7 @@ worktrees intact.
   `merge_result` + `closed`; the thread is the audit trail — keep it.
 - **§6 CI (optional)**: `.walgit/ci.toml` in the tested commit; a runner
   claims with a `ci_claim` entry and reports with a `ci_result` entry (both
-  through `wgl mcp` `collab_publish`), then `ci_status` shows the runs. Only executing the
+  through `wg mcp` `collab_publish`), then `ci_status` shows the runs. Only executing the
   task needs a local process.
 - **§7 Discipline**: no out-of-band collaboration, no silent stalls, the
   board is the status report; if it is not an entry, it did not happen.

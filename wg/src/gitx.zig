@@ -22,7 +22,7 @@ pub const Error = error{
 /// The bounded wait for a ref-only network operation: a `refs/collab/*`
 /// fetch or push moves a handful of small objects, so two minutes without
 /// finishing means a hung remote, not a slow one. The bound is what lets a
-/// long-lived `wgl mcp` answer with a tool error instead of stalling its
+/// long-lived `wg mcp` answer with a tool error instead of stalling its
 /// serialized stdio loop forever.
 pub const NET_TIMEOUT: Io.Timeout = .{ .duration = .{ .raw = Io.Duration.fromSeconds(120), .clock = .awake } };
 

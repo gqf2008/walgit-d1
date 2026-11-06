@@ -1,6 +1,6 @@
 ---
 name: walgit
-description: "Operate a walgit host (object-store-backed Git server) and point at the D1 collaboration client (issues/PRs/reviews/board live in refs/collab/*, driven by the standalone wgl binary). Use when the user mentions walgit, a local/self-hosted git host, pushing to/cloning from a walgit host, walgit issues/PRs/reviews/board, walgit service lifecycle, or listening to walgit events — commands walgit service start|stop|status|restart; collaboration commands are wgl collab / wgl principal / wgl ci (D69)."
+description: "Operate a walgit host (object-store-backed Git server) and point at the D1 collaboration client (issues/PRs/reviews/board live in refs/collab/*, driven by the standalone wg binary). Use when the user mentions walgit, a local/self-hosted git host, pushing to/cloning from a walgit host, walgit issues/PRs/reviews/board, walgit service lifecycle, or listening to walgit events — commands walgit service start|stop|status|restart; collaboration commands are wg collab / wg principal / wg ci (D69)."
 metadata:
   requires:
     bins: ["screen"]
@@ -18,9 +18,9 @@ this skill is the *operator* guide.
 
 Release assets for every platform live at <https://github.com/gqf2008/walgit-d1/releases/latest>: the linux `.deb`,
 the Windows installer (`walgit-setup-*.exe`), the signed-and-notarized macOS
-DMG (`walgit-<version>-<arch>.dmg`), and the standalone **`wgl`** collaboration
-client (`wgl-<arch>-<os>.tar.gz|zip`; the macOS zips are signed and notarized).
-The packages install `wgl` next to `walgit`; `wgl --version` names the build.
+DMG (`walgit-<version>-<arch>.dmg`), and the standalone **`wg`** collaboration
+client (`wg-<arch>-<os>.tar.gz|zip`; the macOS zips are signed and notarized).
+The packages install `wg` next to `walgit`; `wg --version` names the build.
 
 ## 1. Service lifecycle (start with this)
 
@@ -78,8 +78,8 @@ configured for.
 ## 3. MCP — two surfaces (D70)
 
 Since D69 the `collab` / `ci` / `principal` command families live in the
-standalone **`wgl`** client. Since D70 the collaboration MCP face moved with
-them: the host serves **repository and WAL reads**, and `wgl mcp` serves
+standalone **`wg`** client. Since D70 the collaboration MCP face moved with
+them: the host serves **repository and WAL reads**, and `wg mcp` serves
 **collaboration**, over a checkout's own `refs/collab/*`.
 
 ### 3a. Host MCP (`<host>/mcp`) — read-only repository state
@@ -106,12 +106,12 @@ repository-wide lane) and `walgit://wal/<owner>/<repo>?from=<seq>`, with
  "params":{"uri":"walgit://refs/acme/repo"}}
 ```
 
-### 3b. Collaboration MCP (`wgl mcp`, stdio)
+### 3b. Collaboration MCP (`wg mcp`, stdio)
 
 The D1 tools/resources are **not** on `/mcp` any more. In a checkout:
 
 ```sh
-wgl mcp --repo <checkout> [--remote origin] \
+wg mcp --repo <checkout> [--remote origin] \
         [--no-fetch] [--subscribe-interval 5] [--max-subscriptions 32]
 ```
 
@@ -120,11 +120,11 @@ go to stderr, stdin EOF exits 0. Tools: `collab_board`, `collab_thread {id}`,
 `collab_report`, `ci_status {id?}`, the one write tool `collab_publish {entry}`,
 and `collab_register` (optional `force`; this worktree identity's public key —
 a different existing registration is refused without force, the same §4.3
-rotation guard `wgl collab join` applies).
+rotation guard `wg collab join` applies).
 Resources: `walgit://collab/board` and `walgit://collab/thread/<id>`.
 
 **Every read fetches `refs/collab/{inbox,meta}` first** (`git fetch --prune`,
-the same lane `wgl collab claim` step 1 uses) and fails closed if that fails;
+the same lane `wg collab claim` step 1 uses) and fails closed if that fails;
 `fresh:false` reads cached refs; process-level `--no-fetch` is a hard gate
 (no per-call `fresh:true` re-enables the network). `_meta.fetched_at` records
 the last successful fetch (it never enters the body).
@@ -144,13 +144,13 @@ verifies, so read the thread back and require `verified: true`. A raw
 `git push` bypasses all local checks: these are discipline, not a security
 boundary; `policy.json` on receive-pack is the write gate. Claiming is still
 read board → publish a **root** `card_claim` → re-read board (the verdict is the
-claim's oid; `wgl collab claim` does this and exits 2 on stand-down).
+claim's oid; `wg collab claim` does this and exits 2 on stand-down).
 
-For unattended work, run one `wgl mcp` process per agent/worktree (one identity
+For unattended work, run one `wg mcp` process per agent/worktree (one identity
 per process), subscribe `walgit://collab/board` (and the thread URIs you own),
 read once at startup, and keep builds/tests/`git push` outside the tool call.
-The full contract is `skills/wgl/SKILL.md` §7 and `web/SKILL.md`
-("`wgl mcp` — the collaboration surface"); the protocol is
+The full contract is `skills/wg/SKILL.md` §7 and `web/SKILL.md`
+("`wg mcp` — the collaboration surface"); the protocol is
 `docs/D1_PROTOCOL.md` §12.1.
 
 ## 4. What this host stores (read from config, never hardcode)
@@ -224,19 +224,19 @@ walgit mirror --from <src-url> --to <dst-url> --dir <bare-buffer> [--ref r] [--o
 walgit repo create [--object-format sha1|sha256] <owner/name>   # + repo list / repo info <r>
 walgit repo policy get|set|clear <owner/name>               # push policy (writes are admin)
 walgit repo settings show|set|clear|history <owner/name>    # per-repo TOML (D24)
-wgl principal register|rotate --url <host> --principal <p> --key <file>
-wgl principal list            --url <host>                     # self-only
-wgl principal revoke          --url <host> --principal <p>     # self-only
+wg principal register|rotate --url <host> --principal <p> --key <file>
+wg principal list            --url <host>                     # self-only
+wg principal revoke          --url <host> --principal <p>     # self-only
 ```
 
 Collab-registry ops live in §5 too: `collab principal-register|revoke|fetch` and
 `collab thread-heads`. The admin storage editor is the web UI top-bar「存储配置」entry
 (the `/setup` page's configured face, D44/D60).
 
-## 5. D1 collaboration bookkeeping (`wgl collab …`)
+## 5. D1 collaboration bookkeeping (`wg collab …`)
 
 Issues, PRs, reviews, status and the board are **append-only signed entries** in `refs/collab/*`; the
-Web UI, `wgl collab` views and the board are deterministic projections. Work done without entries
+Web UI, `wg collab` views and the board are deterministic projections. Work done without entries
 leaves no collaboration record. In a hurry: `/SKILL.md` now opens with a runnable
 **Quick start** (identity → roles → worktree → card → claim → patch → review → merge)
 that covers the everyday path in ~60 lines; this section is the operator detail. The everyday subset is rendered with copy buttons at
@@ -253,7 +253,7 @@ or otherwise): the board and audit can then no longer distinguish implementer, r
 and merger. See `/SKILL.md` §0b for the full topology and copyable checklist.
 
 ```bash
-wgl collab join --repo <checkout> --principal <principal> --push origin
+wg collab join --repo <checkout> --principal <principal> --push origin
 ```
 
 `collab join` is project-local and **per-worktree**: it generates the 32-byte Ed25519 seed
@@ -434,12 +434,12 @@ what genuinely needs the human; a decidable judgment is made and recorded, not p
 
 The event source is the **WAL** (`PUSH` / `REF_UPDATE` / `COMPACT` / `CHECKPOINT` / `SETTINGS`, strictly
 increasing `seq`, replayable). The server does not push: the events bridge, `[events]` config,
-`roles = ["events"]`, `events/cursor.json`, `POST /_events/notify` and `wgl ci run --listen` were
+`roles = ["events"]`, `events/cursor.json`, `POST /_events/notify` and `wg ci run --listen` were
 removed (D46). Pick the cheapest lane and keep your own cursor:
 
 - **Ref tips only** — poll `git ls-remote <remote>` and diff snapshots; CI runners trigger this way
-  (`wgl ci run --repo . --remote origin --actor <principal> --key <keyfile> [--once]`).
-- **Collab entries** — `wgl collab watch --remote origin --interval 10 --exec <cmd>`: each new/changed
+  (`wg ci run --repo . --remote origin --actor <principal> --key <keyfile> [--once]`).
+- **Collab entries** — `wg collab watch --remote origin --interval 10 --exec <cmd>`: each new/changed
   entry's JSON goes to the handler's stdin; state file `<gitdir>/collab-watch.json`; `--once` for cron;
   after a D45 `collab gc` the folded snapshot is reported as `kind=snapshot`.
 - **Full WAL stream** — `walgit wal ls <owner/repo> --from <seq> [--to <seq>]` enumerates retained
@@ -464,15 +464,15 @@ long work in the hook, unverified input) and a copyable hook are in the host gui
 
 The server holds no CI logic: `.walgit/ci.toml` in the tested commit declares tasks; a runner claims
 them with signed `ci_claim` entries and publishes signed results into `ci-*` threads
-(`wgl ci validate`, `wgl ci run --once`, `wgl ci status`, `wgl ci log [<run>]`,
-`wgl ci artifacts [<run>] [--out <dir>]`).
+(`wg ci validate`, `wg ci run --once`, `wg ci status`, `wg ci log [<run>]`,
+`wg ci artifacts [<run>] [--out <dir>]`).
 Signing is not CLI-only either: `docs/D1_PROTOCOL.md` §5.3 fixes the canonical bytes and
 `web/SKILL.md` carries the golden vector (seed `07`×32) that the Rust, SDK and server tests all
-assert, so any ed25519 signer can author an entry and publish it with `wgl mcp` `collab_publish`.
+assert, so any ed25519 signer can author an entry and publish it with `wg mcp` `collab_publish`.
 
-CI's *control plane* is not CLI-only either: `ci_status` over `wgl mcp` reads the same
+CI's *control plane* is not CLI-only either: `ci_status` over `wg mcp` reads the same
 `run_view`/`collect_runs` aggregation, and claiming/reporting is an ordinary entry
-(`kind: ci_claim` / `ci_result`) through `wgl mcp` `collab_publish`. Only the runner half — clone, build,
+(`kind: ci_claim` / `ci_result`) through `wg mcp` `collab_publish`. Only the runner half — clone, build,
 artifact upload — needs this binary, because bytes never travel over MCP.
 
 ## 8. Known pitfalls

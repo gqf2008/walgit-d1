@@ -891,3 +891,23 @@
   **Supersedes** D69's sentence that "the server keeps … the MCP collab tools"
   and D64's D1 tool/resource list; the rest of D69 stands. D64's auth, transport
   and subscription rules still govern the remaining host surface.
+
+- **D71** **The collaboration client is renamed `wgl` → `wg`; this supersedes the
+  name in D69/D70, not their decisions — the command surface, protocol and
+  behaviour are unchanged (2026-11-06, cc-ai-wg-rename).** The standalone Zig
+  client is the same binary and the same contract under a shorter name. The
+  project directory is `wg/` (`build.zig.zon` `.name = .wg` with the refreshed
+  `.fingerprint`, `build.zig` `.name = "wg"`), the transport e2e is
+  `scripts/wg-e2e.sh`, the justfile lanes are `just wg-test` / `just wg-e2e`
+  (the suite-guard anchors moved with them), and the release assets are
+  `wg-<arch>-<os>.tar.gz|zip` (build dir `wg-dist/`, artifact names
+  `wg-binaries*`; the mac zips still contain plain `wg` / `wg.exe`, signed and
+  notarized as before). Deployment scripts read `WG_BIN`; the old `WGL_BIN`
+  spelling is deleted with the rest of the old name (pre-1.0: no aliases). The
+  commands are the same — `wg collab …`, `wg principal …`, `wg ci …`,
+  `wg mcp` — and the entry schema, `refs/collab/*` layout, signatures, exit
+  codes, MCP tool/resource shapes and error-prefix discipline (`wg: `) do not
+  change. The operator skill moves to `skills/wg/SKILL.md` (`name: wg`). The
+  rename lands before the first release that would have carried `wgl`, so no
+  published asset or persisted identifier is broken; `WALGIT_*` variables,
+  `.walgit/` paths and `refs/walgit/*` keep the product name.

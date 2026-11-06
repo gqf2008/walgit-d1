@@ -1,4 +1,4 @@
-//! `wgl ci` — the decentralized CI protocol runner (D1_CI_PROTOCOL §3–§9),
+//! `wg ci` — the decentralized CI protocol runner (D1_CI_PROTOCOL §3–§9),
 //! ported from the retired `walgit ci` family. walgit runs no CI: a runner
 //! is a credentialed client that polls ref tips, claims a run with a signed
 //! `ci_claim`, executes the tested commit's `.walgit/ci.toml` in a detached
@@ -58,7 +58,7 @@ pub fn dispatch(c: *Ctx, action: []const u8, rest: []const []const u8) u8 {
     if (eq(action, "status")) return ci_status(c, &p) catch 1;
     if (eq(action, "log")) return ci_log(c, &p) catch 1;
     if (eq(action, "artifacts")) return ci_artifacts(c, &p) catch 1;
-    std.debug.print("wgl: unknown ci action \"{s}\" (validate|run|status|log|artifacts)\n", .{action});
+    std.debug.print("wg: unknown ci action \"{s}\" (validate|run|status|log|artifacts)\n", .{action});
     return 2;
 }
 
@@ -71,14 +71,14 @@ fn ci_validate(c: *Ctx, p: *args.Parsed) !u8 {
     const path = p.opt("file") orelse try std.fs.path.join(c.alloc, &.{ repo, ".walgit", "ci.toml" });
     var d = std.Io.Dir.cwd();
     const raw = d.readFileAlloc(c.io, path, c.alloc, .limited(ciconfig.FILE_MAX_BYTES + 1)) catch {
-        std.debug.print("wgl: read {s} failed\n", .{path});
+        std.debug.print("wg: read {s} failed\n", .{path});
         return error.ReadFailed;
     };
     const resolved = ciconfig.parse_and_validate(c.alloc, raw) catch |err| {
         if (err == error.Invalid) {
-            std.debug.print("wgl: {s}: {s}\n", .{ path, ciconfig.validation_msg });
+            std.debug.print("wg: {s}: {s}\n", .{ path, ciconfig.validation_msg });
         } else {
-            std.debug.print("wgl: {s}: {t}\n", .{ path, err });
+            std.debug.print("wg: {s}: {t}\n", .{ path, err });
         }
         return error.InvalidConfig;
     };
@@ -132,7 +132,7 @@ fn ci_status(c: *Ctx, p: *args.Parsed) !u8 {
         buf.append_slice(try std.fmt.allocPrint(c.alloc, "ci status: {d} run(s)\n", .{runs.len})) catch @panic("oom");
         buf.append_slice(render.ci_runs_text(c.alloc, runs)) catch @panic("oom");
     } else {
-        std.debug.print("wgl: unknown ci status format {s} (text|markdown|json)\n", .{format});
+        std.debug.print("wg: unknown ci status format {s} (text|markdown|json)\n", .{format});
         return error.BadFormat;
     }
     c.stdout(buf.items);
@@ -150,7 +150,7 @@ fn runs_json(c: *Ctx, now: i64, runs: []const ci.RunEntry) ![]u8 {
     return runs_json_with(c.alloc, now, runs);
 }
 
-/// The allocator-parameterised form: `wgl mcp` calls it with a per-request
+/// The allocator-parameterised form: `wg mcp` calls it with a per-request
 /// arena so a long-lived server does not leak one run table per call.
 pub fn runs_json_with(alloc: std.mem.Allocator, now: i64, runs: []const ci.RunEntry) ![]u8 {
     var out: util.List(u8) = .init(alloc);
@@ -322,7 +322,7 @@ fn quoted(alloc: std.mem.Allocator, s: []const u8) []u8 {
 
 fn latest_effective_result(c: *Ctx, repo: []const u8, remote: []const u8, run_id: ?[]const u8) !struct { id: []const u8, result: ci.CiResult } {
     gitx.fetch_collab(c.alloc, c.io, repo, remote) catch |err| {
-        std.debug.print("wgl: fetch collab refs failed ({t}); reading local state\n", .{err});
+        std.debug.print("wg: fetch collab refs failed ({t}); reading local state\n", .{err});
     };
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const loaded = try reader.load(c.alloc);
@@ -335,7 +335,7 @@ fn latest_effective_result(c: *Ctx, repo: []const u8, remote: []const u8, run_id
             if (std.mem.eql(u8, kv.id, id)) view = &kv.view;
         }
         if (view == null) {
-            std.debug.print("wgl: run {s} not found\n", .{id});
+            std.debug.print("wg: run {s} not found\n", .{id});
             return error.RunNotFound;
         }
     } else {
@@ -345,13 +345,13 @@ fn latest_effective_result(c: *Ctx, repo: []const u8, remote: []const u8, run_id
         }
         view = best;
         if (view == null) {
-            std.debug.print("wgl: no runs yet\n", .{});
+            std.debug.print("wg: no runs yet\n", .{});
             return error.NoRuns;
         }
     }
     const v = view.?;
     if (v.attempts.len == 0 or v.attempts[v.attempts.len - 1].effective == null) {
-        std.debug.print("wgl: run {s} has no effective result\n", .{v.id});
+        std.debug.print("wg: run {s} has no effective result\n", .{v.id});
         return error.NoEffectiveResult;
     }
     return .{ .id = v.id, .result = v.attempts[v.attempts.len - 1].effective.? };
@@ -380,22 +380,22 @@ fn fetch_ci_object(c: *Ctx, repo: []const u8, remote: []const u8, actor: []const
 fn remote_artifact_fits_cap(c: *Ctx, repo: []const u8, remote: []const u8, actor: []const u8, sha: []const u8) !bool {
     const remote_url = try gitx.remote_url(c.alloc, c.io, repo, remote);
     if (std.mem.indexOf(u8, remote_url, "://") == null) {
-        std.debug.print("wgl: remote \"{s}\" has no walgit artifact size endpoint; refused to fetch {s} before a size check\n", .{ remote_url, sha });
+        std.debug.print("wg: remote \"{s}\" has no walgit artifact size endpoint; refused to fetch {s} before a size check\n", .{ remote_url, sha });
         return error.NoHttpRemote;
     }
     const status = httpc.artifact_head(c.alloc, c.io, c.env, repo, remote_url, actor, sha) catch |err| {
-        std.debug.print("wgl: HEAD artifact size: {t}\n", .{err});
+        std.debug.print("wg: HEAD artifact size: {t}\n", .{err});
         return err;
     };
     return switch (status) {
         200 => true,
         404 => false,
         413 => blk: {
-            std.debug.print("wgl: artifact {s}: object exceeds the {d}-byte cap; skipped before fetch\n", .{ sha, ci.CI_ARTIFACT_MAX_BYTES });
+            std.debug.print("wg: artifact {s}: object exceeds the {d}-byte cap; skipped before fetch\n", .{ sha, ci.CI_ARTIFACT_MAX_BYTES });
             break :blk false;
         },
         else => blk: {
-            std.debug.print("wgl: HEAD artifact size: unexpected HTTP {d}\n", .{status});
+            std.debug.print("wg: HEAD artifact size: unexpected HTTP {d}\n", .{status});
             break :blk error.HttpFailed;
         },
     };
@@ -407,13 +407,13 @@ fn read_ci_object_local(c: *Ctx, repo: []const u8, sha: []const u8) !?[]u8 {
         if (!std.mem.endsWith(u8, tip.name, sha)) continue;
         const size = (try gitx.cat_size(c.alloc, c.io, repo, tip.oid)) orelse continue;
         if (size > ci.CI_ARTIFACT_MAX_BYTES) {
-            std.debug.print("wgl: artifact {s}: object {s} exceeds the {d}-byte cap; ignored\n", .{ sha, tip.oid, ci.CI_ARTIFACT_MAX_BYTES });
+            std.debug.print("wg: artifact {s}: object {s} exceeds the {d}-byte cap; ignored\n", .{ sha, tip.oid, ci.CI_ARTIFACT_MAX_BYTES });
             continue;
         }
         const bytes = try gitx.cat_blob(c.alloc, c.io, repo, tip.oid);
         const actual = sha256_hex(c.alloc, bytes);
         if (!std.mem.eql(u8, actual, sha)) {
-            std.debug.print("wgl: artifact {s}: object {s} hashes to {s}; ignored\n", .{ sha, tip.oid, actual });
+            std.debug.print("wg: artifact {s}: object {s} hashes to {s}; ignored\n", .{ sha, tip.oid, actual });
             continue;
         }
         return bytes;
@@ -433,12 +433,12 @@ fn ci_log(c: *Ctx, p: *args.Parsed) !u8 {
         return 0;
     }
     if (result.log_truncated) {
-        std.debug.print("wgl: run {s}: stored log exceeds the retention cap; showing the retained tail\n", .{picked.id});
+        std.debug.print("wg: run {s}: stored log exceeds the retention cap; showing the retained tail\n", .{picked.id});
     }
     if (try fetch_ci_object(c, repo, remote, result.actor, result.log_sha256)) |bytes| {
         c.stdout(bytes);
     } else {
-        std.debug.print("wgl: run {s}: log object {s} not published; the stored summary follows\n", .{ picked.id, result.log_sha256 });
+        std.debug.print("wg: run {s}: log object {s} not published; the stored summary follows\n", .{ picked.id, result.log_sha256 });
         c.stdout(result.log_summary);
     }
     return 0;
@@ -451,12 +451,12 @@ fn ci_artifacts(c: *Ctx, p: *args.Parsed) !u8 {
     const picked = try latest_effective_result(c, repo, remote, p.opt("run"));
     const result = &picked.result;
     if (result.artifacts.len == 0) {
-        c.stdout_line(try std.fmt.allocPrint(c.alloc, "wgl: run {s} declares no artifacts", .{picked.id}));
+        c.stdout_line(try std.fmt.allocPrint(c.alloc, "wg: run {s} declares no artifacts", .{picked.id}));
         return 0;
     }
     var d = std.Io.Dir.cwd();
     if (d.createDirPathOpen(c.io, out_dir, .{})) |_| {} else |err| {
-        std.debug.print("wgl: create {s}: {t}\n", .{ out_dir, err });
+        std.debug.print("wg: create {s}: {t}\n", .{ out_dir, err });
         return error.CreateDirFailed;
     }
     var names: util.List([]const u8) = .init(c.alloc);
@@ -465,7 +465,7 @@ fn ci_artifacts(c: *Ctx, p: *args.Parsed) !u8 {
         // never write outside --out.
         const fname = std.fs.path.basename(a.name);
         if (fname.len == 0) {
-            std.debug.print("wgl: {s}: unusable name, skipped\n", .{a.name});
+            std.debug.print("wg: {s}: unusable name, skipped\n", .{a.name});
             continue;
         }
         var dup = false;
@@ -473,27 +473,27 @@ fn ci_artifacts(c: *Ctx, p: *args.Parsed) !u8 {
             if (std.mem.eql(u8, n, fname)) dup = true;
         }
         if (dup) {
-            std.debug.print("wgl: {s}: duplicate artifact name, skipped\n", .{fname});
+            std.debug.print("wg: {s}: duplicate artifact name, skipped\n", .{fname});
             continue;
         }
         try names.append(fname);
         const bytes = (try fetch_ci_object(c, repo, remote, result.actor, a.sha256)) orelse {
             if (a.url) |u| {
-                c.stdout_line(try std.fmt.allocPrint(c.alloc, "wgl: {s}: external artifact, see {s}", .{ fname, u }));
+                c.stdout_line(try std.fmt.allocPrint(c.alloc, "wg: {s}: external artifact, see {s}", .{ fname, u }));
             } else {
-                std.debug.print("wgl: {s}: object {s} not published, skipped\n", .{ fname, a.sha256 });
+                std.debug.print("wg: {s}: object {s} not published, skipped\n", .{ fname, a.sha256 });
             }
             continue;
         };
         const dest = try std.fs.path.join(c.alloc, &.{ out_dir, fname });
         // create_new: refusing to overwrite or follow an existing path.
         const f = d.createFile(c.io, dest, .{ .exclusive = true }) catch {
-            std.debug.print("wgl: create {s} failed (refusing to overwrite)\n", .{dest});
+            std.debug.print("wg: create {s} failed (refusing to overwrite)\n", .{dest});
             continue;
         };
         f.writeStreamingAll(c.io, bytes) catch {};
         f.close(c.io);
-        c.stdout_line(try std.fmt.allocPrint(c.alloc, "wgl: {s} ({d} bytes, sha256 verified) -> {s}", .{ fname, a.bytes, dest }));
+        c.stdout_line(try std.fmt.allocPrint(c.alloc, "wg: {s} ({d} bytes, sha256 verified) -> {s}", .{ fname, a.bytes, dest }));
     }
     return 0;
 }
@@ -567,7 +567,7 @@ const Runner = struct {
     /// sweep (§4.3). Returns the process exit code contribution.
     fn run_pass(self: *const Runner, ttl_override: ?u64) !i32 {
         gitx.fetch_collab(self.c.alloc, self.c.io, self.repo, self.remote) catch |err| {
-            std.debug.print("wgl: fetching collab refs failed ({t}); continuing with local state\n", .{err});
+            std.debug.print("wg: fetching collab refs failed ({t}); continuing with local state\n", .{err});
         };
         var state = read_runner_state(self.c, self.state_file);
         var exit: i32 = 0;
@@ -616,7 +616,7 @@ const Runner = struct {
                 if (std.mem.eql(u8, seen, tip.oid) and !state.schedule_migration.contains(tip.name)) continue;
             }
             const outcome = self.process_ref(tip.name, ttl_override) catch |err| {
-                std.debug.print("wgl: {s}: {t}\n", .{ tip.name, err });
+                std.debug.print("wg: {s}: {t}\n", .{ tip.name, err });
                 exit = 1;
                 continue;
             };
@@ -664,7 +664,7 @@ const Runner = struct {
             if (!std.mem.eql(u8, seen, tip_oid)) continue;
             const expr = state.schedules.get(key) orelse continue;
             const swept = self.cron_sweep_one(ref_name, tip_oid, task_name, expr, &state, ttl_override, now, &exit) catch |err| {
-                std.debug.print("wgl: {s}: cron sweep: {t}\n", .{ ref_name, err });
+                std.debug.print("wg: {s}: cron sweep: {t}\n", .{ ref_name, err });
                 exit = 1;
                 continue;
             };
@@ -720,13 +720,13 @@ const Runner = struct {
                 const ttl = ttl_override orelse cfg.claim_ttl_secs;
                 const id = try ci.scheduled_run_id(self.c.alloc, task_name, ref_name, tip, slot);
                 const short = if (tip.len > 8) tip[0..8] else tip;
-                std.debug.print("wgl: {s} @ {s} task {s}: schedule fired (slot {d}), run {s}\n", .{ ref_name, short, task_name, slot, id });
+                std.debug.print("wg: {s} @ {s} task {s}: schedule fired (slot {d}), run {s}\n", .{ ref_name, short, task_name, slot, id });
                 const outcome = try self.process_task(task, ref_name, tip, ttl, id);
                 switch (outcome) {
                     .settled => |conclusion| {
                         try state.cron.put(key, slot);
                         if (conclusion != .success) {
-                            std.debug.print("wgl: {s} @ {s} task {s}: settled {s}\n", .{ ref_name, short, task_name, conclusion.as_str() });
+                            std.debug.print("wg: {s} @ {s} task {s}: settled {s}\n", .{ ref_name, short, task_name, conclusion.as_str() });
                             exit.* = 1;
                         }
                         return true;
@@ -743,12 +743,12 @@ const Runner = struct {
         const commit = try gitx.fetch_commit(self.c.alloc, self.c.io, self.repo, self.remote, ref_name);
         const short = if (commit.len > 8) commit[0..8] else commit;
         const raw = (try gitx.read_commit_file(self.c.alloc, self.c.io, self.repo, commit, ".walgit/ci.toml")) orelse {
-            std.debug.print("wgl: {s} @ {s}: no .walgit/ci.toml\n", .{ ref_name, short });
+            std.debug.print("wg: {s} @ {s}: no .walgit/ci.toml\n", .{ ref_name, short });
             return .{ .terminal = true, .failed = false, .schedules = &.{} };
         };
         const cfg = ciconfig.parse_and_validate(self.c.alloc, raw) catch |err| {
             const msg = if (err == error.Invalid) ciconfig.validation_msg else "";
-            std.debug.print("wgl: {s} @ {s}: invalid .walgit/ci.toml, skipping: {s}\n", .{ ref_name, short, msg });
+            std.debug.print("wg: {s} @ {s}: invalid .walgit/ci.toml, skipping: {s}\n", .{ ref_name, short, msg });
             return .{ .terminal = true, .failed = true, .schedules = &.{} };
         };
         var schedules: util.List(ScheduleEntry) = util.List(ScheduleEntry).init(self.c.alloc);
@@ -767,7 +767,7 @@ const Runner = struct {
             switch (outcome) {
                 .settled => |conclusion| {
                     if (conclusion != .success) {
-                        std.debug.print("wgl: {s} @ {s} task {s}: settled {s}\n", .{ ref_name, short, t.name, conclusion.as_str() });
+                        std.debug.print("wg: {s} @ {s} task {s}: settled {s}\n", .{ ref_name, short, t.name, conclusion.as_str() });
                         any_failed = true;
                     }
                 },
@@ -789,7 +789,7 @@ const Runner = struct {
             switch (decision) {
                 .settled => |s| return .{ .settled = s.conclusion },
                 .stand_down => |s| {
-                    std.debug.print("wgl: run {s} task {s}: held by {s}, standing down\n", .{ id, task.name, s.holder });
+                    std.debug.print("wg: run {s} task {s}: held by {s}, standing down\n", .{ id, task.name, s.holder });
                     return .deferred;
                 },
                 .@"resume" => |r| {
@@ -816,7 +816,7 @@ const Runner = struct {
                             }
                         },
                         .stand_down => |s| {
-                            std.debug.print("wgl: run {s} task {s}: lost the claim race, held by {s}\n", .{ id, task.name, s.holder });
+                            std.debug.print("wg: run {s} task {s}: lost the claim race, held by {s}\n", .{ id, task.name, s.holder });
                             return .deferred;
                         },
                         else => return .deferred,
@@ -837,13 +837,13 @@ const Runner = struct {
         if (self.upload_run_objects(&outcome)) |a| {
             artifacts = a;
         } else |err| {
-            std.debug.print("wgl: run {s}: object upload failed ({t}); publishing without them\n", .{ id, err });
+            std.debug.print("wg: run {s}: object upload failed ({t}); publishing without them\n", .{ id, err });
         }
         try self.publish_result(id, task, ref_name, commit, attempt, claim_oid, &outcome, artifacts);
         if (outcome.conclusion != .@"error") return true;
         error_reclaims.* += 1;
         if (error_reclaims.* >= ERROR_RECLAIMS_MAX) {
-            std.debug.print("wgl: run {s}: infrastructure keeps failing; deferring to the next pass\n", .{id});
+            std.debug.print("wg: run {s}: infrastructure keeps failing; deferring to the next pass\n", .{id});
             return false;
         }
         return true;
@@ -889,7 +889,7 @@ const Runner = struct {
 
     fn run_view(self: *const Runner, id: []const u8) !?ci.RunView {
         gitx.fetch_collab(self.c.alloc, self.c.io, self.repo, self.remote) catch |err| {
-            std.debug.print("wgl: fetch collab refs failed ({t}); reading local state\n", .{err});
+            std.debug.print("wg: fetch collab refs failed ({t}); reading local state\n", .{err});
         };
         const reader = collabreader.Reader.init(self.c.alloc, self.c.io, self.repo);
         const loaded = try reader.load(self.c.alloc);
@@ -929,9 +929,9 @@ const Runner = struct {
         jsonio.obj_put(&o, self.c.alloc, "commit", .{ .string = commit });
         jsonio.obj_put(&o, self.c.alloc, "ttl", .{ .integer = @intCast(ttl) });
         jsonio.obj_put(&o, self.c.alloc, "attempt", .{ .integer = attempt });
-        jsonio.obj_put(&o, self.c.alloc, "runner", .{ .string = "wgl ci/" ++ util.version });
+        jsonio.obj_put(&o, self.c.alloc, "runner", .{ .string = "wg ci/" ++ util.version });
         const oid = try self.publish(ci.CI_CLAIM_KIND, id, "", .{ .object = o });
-        std.debug.print("wgl: run {s} task {s} attempt {d}: claimed (ttl {d}s)\n", .{ id, task.name, attempt, ttl });
+        std.debug.print("wg: run {s} task {s} attempt {d}: claimed (ttl {d}s)\n", .{ id, task.name, attempt, ttl });
         return oid;
     }
 
@@ -958,7 +958,7 @@ const Runner = struct {
             jsonio.obj_put(&o, self.c.alloc, "log_truncated", .{ .bool = true });
         }
         const oid = try self.publish(ci.CI_RESULT_KIND, id, claim_oid, .{ .object = o });
-        std.debug.print("wgl: run {s} task {s} attempt {d}: {s} (exit {s}, {d} ms) as {s}\n", .{
+        std.debug.print("wg: run {s} task {s} attempt {d}: {s} (exit {s}, {d} ms) as {s}\n", .{
             id,
             task.name,
             attempt,
@@ -984,7 +984,7 @@ const Runner = struct {
         var rand: [8]u8 = undefined;
         self.c.io.random(&rand);
         const tmp_base = self.c.env_or("TMPDIR", "/tmp");
-        const dir_path = std.fmt.allocPrint(self.c.alloc, "{s}/wgl-ci-{s}", .{ tmp_base, util.to_hex(self.c.alloc, &rand) }) catch return fail(millis() - started, "create temp dir: oom");
+        const dir_path = std.fmt.allocPrint(self.c.alloc, "{s}/wg-ci-{s}", .{ tmp_base, util.to_hex(self.c.alloc, &rand) }) catch return fail(millis() - started, "create temp dir: oom");
         {
             var d = std.Io.Dir.cwd();
             if (d.createDirPathOpen(self.c.io, dir_path, .{})) |_| {} else |_| {
@@ -1360,20 +1360,20 @@ fn collect_artifacts(c: *Ctx, worktree: []const u8, task: *const ciconfig.CiReso
         const path = std.fs.path.join(c.alloc, &.{ worktree, rel }) catch continue;
         var d = std.Io.Dir.cwd();
         const stat = d.statFile(c.io, path, .{}) catch {
-            std.debug.print("wgl: artifact \"{s}\": not a regular file, skipped\n", .{rel});
+            std.debug.print("wg: artifact \"{s}\": not a regular file, skipped\n", .{rel});
             continue;
         };
         if (stat.kind != .file) {
-            std.debug.print("wgl: artifact \"{s}\": not a regular file, skipped\n", .{rel});
+            std.debug.print("wg: artifact \"{s}\": not a regular file, skipped\n", .{rel});
             continue;
         }
         if (stat.size > ci.CI_ARTIFACT_MAX_BYTES) {
-            std.debug.print("wgl: artifact \"{s}\": {d} bytes over the {d}-byte cap, skipped\n", .{ rel, stat.size, ci.CI_ARTIFACT_MAX_BYTES });
+            std.debug.print("wg: artifact \"{s}\": {d} bytes over the {d}-byte cap, skipped\n", .{ rel, stat.size, ci.CI_ARTIFACT_MAX_BYTES });
             continue;
         }
         const base = std.fs.path.basename(rel);
         if (base.len == 0 or base.len > 128) {
-            std.debug.print("wgl: artifact \"{s}\": base name missing or over 128 bytes, skipped\n", .{rel});
+            std.debug.print("wg: artifact \"{s}\": base name missing or over 128 bytes, skipped\n", .{rel});
             continue;
         }
         const hash_argv = [_][]const u8{ "hash-object", "-w", "--", rel };
@@ -1549,7 +1549,7 @@ fn ci_run(c: *Ctx, p: *args.Parsed) !u8 {
     try identity.ref_segment("ci.actor", actor);
     const key_path = try p.required("key");
     const key = identity.read_signing_key(c.alloc, c.io, key_path) catch |err| {
-        std.debug.print("wgl: key {s}: {t}\n", .{ key_path, err });
+        std.debug.print("wg: key {s}: {t}\n", .{ key_path, err });
         return error.BadKey;
     };
     const state_file = blk: {
@@ -1572,7 +1572,7 @@ fn ci_run(c: *Ctx, p: *args.Parsed) !u8 {
     try collabreader.ensure_actor_key_binding(c.alloc, c.io, repo, actor, key_path, key);
     const interval = p.u64_of("interval", 15) catch 15;
     const ttl_override: ?u64 = if (p.opt("claim-ttl")) |t| std.fmt.parseInt(u64, t, 10) catch null else null;
-    std.debug.print("wgl: ci: watching {s} via {s} as {s} (interval {d}s, state {s})\n", .{ repo, remote, actor, interval, state_file });
+    std.debug.print("wg: ci: watching {s} via {s} as {s} (interval {d}s, state {s})\n", .{ repo, remote, actor, interval, state_file });
     if (p.boolean("once")) {
         const code = try runner.run_pass(ttl_override);
         if (code != 0) return error.TaskFailed;
@@ -1582,7 +1582,7 @@ fn ci_run(c: *Ctx, p: *args.Parsed) !u8 {
     // interval is the worst-case notification latency.
     while (true) {
         _ = runner.run_pass(ttl_override) catch |err| {
-            std.debug.print("wgl: ci pass failed: {t}\n", .{err});
+            std.debug.print("wg: ci pass failed: {t}\n", .{err});
         };
         c.io.sleep(std.Io.Duration.fromSeconds(@intCast(interval)), .real) catch {};
     }

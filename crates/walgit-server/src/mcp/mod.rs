@@ -32,7 +32,7 @@
 //!   refs-level seq every `mcp.subscribe_interval` and sends
 //!   `notifications/resources/updated` when it moves. No request is held open
 //!   between changes: the seq read *is* a conditional `manifest.pb` GET, the
-//!   same observation lane `git ls-remote` and `wgl collab watch` use. A
+//!   same observation lane `git ls-remote` and `wg collab watch` use. A
 //!   watched repository that disappears sends `notifications/resources/list_changed`
 //!   (the one thing that capability means) and ends the subscription.
 //!
@@ -540,9 +540,9 @@ impl ServerHandler for WalgitMcp {
 const INSTRUCTIONS: &str = "\
 walgit is an object-store-backed git host. This endpoint serves repository and
 WAL reads over MCP; the D1 collaboration tools and resources (board, threads,
-report, CI runs, signed-entry publish) moved to the standalone `wgl mcp`
+report, CI runs, signed-entry publish) moved to the standalone `wg mcp`
 client, which aggregates the checkout's own refs/collab/* (D70). For
-collaboration, run `wgl mcp --repo <checkout>` and use collab_board,
+collaboration, run `wg mcp --repo <checkout>` and use collab_board,
 collab_thread, collab_report, ci_status, collab_publish and collab_register.
 
 Rules that cost a wrong call if skipped:
@@ -558,11 +558,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instructions_point_collaboration_at_wgl_mcp() {
+    fn instructions_point_collaboration_at_wg_mcp() {
         // The host surface is read-only now; an agent that looks for the
         // collaboration tools here must be told where they went.
         assert!(INSTRUCTIONS.contains("Bytes never travel over MCP"));
-        assert!(INSTRUCTIONS.contains("wgl mcp"));
+        assert!(INSTRUCTIONS.contains("wg mcp"));
         assert!(INSTRUCTIONS.contains("collab_board"));
         assert!(INSTRUCTIONS.contains("read-only"));
         assert!(INSTRUCTIONS.contains("Subscriptions are polls"));
