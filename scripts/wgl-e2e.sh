@@ -249,6 +249,42 @@ assert entries[0]["entry"]["sig"].startswith("ed25519:"), thread
 print("   write path: foreign actor and unsigned entry refused; golden vector published and verified")
 PYW
 
+step "MCP collab_register: refuses a silent rotation, force rotates, identity missing is a tool error"
+# The write-path step above rotated alice's published key to the golden
+# fixture key; this checkout still signs with its own key. Register must
+# refuse that silent rotation, then accept it explicitly.
+mcp_register="$tmp/mcp-register.json"
+{
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"collab_register","arguments":{}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"collab_register","arguments":{"force":true}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collab_register","arguments":{}}}'
+} | ( cd "$m_a" && "$W" mcp --repo . --remote origin ) >"$mcp_register" 2>"$tmp/mcp-register.err" \
+    || fail "wgl mcp collab_register round trip failed"
+python3 - "$mcp_register" <<'PYR'
+import json, sys
+msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
+first = msgs[1]["result"]
+assert first.get("isError") is True, first
+assert "different public key" in first["content"][0]["text"], first
+for i in (2, 3):
+    assert not msgs[i]["result"].get("isError"), msgs[i]
+print("   collab_register: rotation refused without force; force rotated; idempotent re-register ok")
+PYR
+
+# No identity in the checkout: the tool refuses with the join hint.
+git clone -q "$m_origin" "$tmp/mcp-noident"
+noident="$tmp/mcp-noident.json"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"collab_register","arguments":{}}}' \
+    | ( cd "$tmp/mcp-noident" && "$W" mcp --repo . --remote origin ) >"$noident" 2>/dev/null \
+    || fail "wgl mcp without an identity crashed"
+python3 - "$noident" <<'PYI'
+import json, sys
+msg = next(iter(map(json.loads, open(sys.argv[1]))))
+assert msg["result"].get("isError") is True, msg
+assert "no D1 identity" in msg["result"]["content"][0]["text"], msg
+print("   collab_register without identity: refused with the join hint")
+PYI
+
 step "MCP done gate: needs-review + verified non-author approve, then a refusal once done"
 # Build the §7.5 precondition through the ordinary CLI: status needs-review,
 # a patch by alice, a verified approve by bob. The signed done entry itself is
@@ -282,21 +318,56 @@ for i in (1, 2):
                       "params": {"name": "collab_publish", "arguments": {"entry": entry}}}))
 print(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                   "params": {"name": "collab_thread", "arguments": {"id": "cc-mcp-card", "fresh": False}}}))
+# A generic client percent-encodes the id's dashes.
+print(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "resources/read",
+                  "params": {"uri": "walgit://collab/thread/cc%2Dmcp%2Dcard"}}))
 PYD
 ( cd "$m_a" && "$W" mcp --repo . --remote origin ) < "$tmp/mcp-done.ndjson" >"$done_out" 2>"$tmp/mcp-done.err" \
     || fail "wgl mcp done-gate round trip failed"
-python3 - "$done_out" <<'PYD'
+python3 - "$done_out" "$done_oid" <<'PYD'
 import json, sys
 msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
 assert not msgs[1]["result"].get("isError"), msgs[1]
+# The blob is the bytes the client signed, so the oid is the CLI's oid — no
+# duplicate entry with the same content.
+pub = json.loads(msgs[1]["result"]["content"][0]["text"])
+assert pub["oid"] == sys.argv[2], (pub["oid"], sys.argv[2])
 assert msgs[2]["result"].get("isError") is True, msgs[2]
 thread = json.loads(msgs[3]["result"]["content"][0]["text"])
+encoded = json.loads(msgs[4]["result"]["contents"][0]["text"])
+assert encoded["id"] == "cc-mcp-card", encoded
 last = thread["entries"][-1]
 assert last["entry"]["kind"] == "status", last
 assert last["entry"]["body"]["status"] == "done", last
 assert last["verified"] is True, last
 print("   done gate: approved thread published; the now-done thread refuses another done")
 PYD
+
+step "MCP transport: a >64 KiB request is read, an overlong line is one error and the lane survives"
+python3 - > "$tmp/mcp-big.ndjson" <<'PYB'
+import json
+entry = {"version": 1, "kind": "comment", "id": "big", "actor": "alice", "ts": 1,
+         "parent": "", "body": {"note": "x" * 70000}}  # no sig: refused by the tool
+print(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "collab_publish", "arguments": {"entry": entry}}}))
+print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}))
+print("x" * 3000000)  # beyond the 2 MiB transport buffer
+print(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}))
+PYB
+big_out="$tmp/mcp-big.json"
+( cd "$m_a" && "$W" mcp --repo . --remote origin ) < "$tmp/mcp-big.ndjson" >"$big_out" 2>"$tmp/mcp-big.err" \
+    || fail "wgl mcp did not survive an overlong line"
+python3 - "$big_out" <<'PYT'
+import json, sys
+msgs = [m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)]
+by_id = {m.get("id"): m for m in msgs}
+assert by_id[1]["result"].get("isError") is True, by_id[1]   # parsed: MissingSig
+assert "sig" in by_id[1]["result"]["content"][0]["text"], by_id[1]
+assert not by_id[2]["result"].get("isError"), by_id[2]      # initialize still answered
+assert any(m.get("error", {}).get("code") == -32700 for m in msgs), msgs
+assert by_id[3]["result"] == {}, by_id[3]                   # lane survived, ping answered
+print("   transport: 70 KiB request parsed; 3 MiB line = one -32700; ping still answered")
+PYT
 
 step "ci timeout: a hung task settles as timeout and the runner returns"
 cat > "$a/.walgit/ci.toml" <<'EOF'

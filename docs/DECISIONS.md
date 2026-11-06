@@ -838,10 +838,14 @@
   - tools `collab_board`, `collab_thread` (`{id, entries:[{oid, principal,
     verified, entry, broken_refs}], pr}`), `collab_report`, `ci_status`
     (`{repo, runs}` with optional `id`), the one write tool `collab_publish`
-    (an entry the caller **already signed**; structure checked, `actor` must be
-    this worktree's identity principal, pushed to
-    `refs/collab/inbox/<actor>/<uuid>`) and `collab_register` (**no arguments**:
-    this worktree identity's public key to `refs/collab/meta/principals/<p>`);
+    (an entry the caller **already signed**; parsed like the server's serde —
+    unknown fields ignored — with `actor` required to be this worktree's
+    identity principal; when given as JSON text its **exact bytes** become the
+    blob, so the oid matches `wgl collab entry`, pushed to
+    `refs/collab/inbox/<actor>/<uuid>`) and `collab_register` (`force?`: this
+    worktree identity's public key to `refs/collab/meta/principals/<p>`; a
+    different existing key is refused unless forced — the §4.3 rotation guard,
+    since rotation makes every past entry unverified);
   - resources `walgit://collab/board` and `walgit://collab/thread/<id>`, with
     `resources/list|templates/list|read|subscribe|unsubscribe`. Subscriptions
     are in-process polls (`--subscribe-interval`, default 5 s, `--max-subscriptions`,
@@ -849,16 +853,23 @@
   **Freshness is the point of the split.** Every read fetches
   `refs/collab/{inbox,meta}` first (`git fetch --prune`, exactly `wgl collab
   claim` step 1) and **fails closed** when that fails; `fresh:false` (per call)
-  or `--no-fetch` (process) reads the cached refs and reports
-  `_meta.fetched_at`. Without this, a worker that had not fetched could see no
-  owner and duplicate the work §8.4 exists to prevent. The fetches and pushes
-  are bounded (120 s); a timed-out transfer is the same fail-closed tool error,
-  never a hung stdio loop.
+  reads the cached refs, and `--no-fetch` (process) is a **hard gate** that no
+  per-call `fresh:true` can override; answers report `_meta.fetched_at`.
+  Without this, a worker that had not fetched could see no owner and duplicate
+  the work §8.4 exists to prevent. The MCP fetch and ref pushes are bounded
+  (120 s); a timed-out transfer is the same fail-closed tool error, never a hung
+  stdio loop. Other CLI writers of big blobs (`collab gc`'s ≤64 MiB snapshot,
+  CI ≤16 MiB artifacts) scale the bound with the payload (`gitx.pushTimeoutSeconds`)
+  instead of inheriting the ref bound. One request line may be 2 MiB (entry cap
+  plus envelope/escaping); a longer line is drained, answered once with
+  `-32700`, and the process keeps serving.
   **Caller and write checks.** The caller is `<git-dir>/walgit/identity` —
-  one identity per worktree (D58/D59/D62). `collab_publish` checks structure
-  (`kind`/`id`/`actor`/signature prefix and 64-byte ed25519 shape), refuses
-  `actor != caller`, and enforces the `status=done` gate locally after a fetch
-  (the same rule as `wgl collab entry` and the thin API). **It does not verify
+  one identity per worktree (D58/D59/D62). `collab_publish` parses the entry
+  through the same structural rules as the server's write path (`refs` shape,
+  `version` range, unknown fields ignored) and additionally requires an
+  `ed25519:` + 64-byte signature, refuses `actor != caller`, and enforces the
+  `status=done` gate locally after a fetch (the same rule as `wgl collab entry`
+  and the thin API). **It does not verify
   the signature on write**: an entry and the registration naming its key may
   land in either order, and the git lane cannot check it — aggregation verifies
   (`docs/D1_PROTOCOL.md` §4.5). A raw `git push` bypasses every local check;

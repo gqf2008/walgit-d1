@@ -41,6 +41,13 @@ const DEFAULT_SUBSCRIBE_INTERVAL_SECS: u64 = 5;
 const DEFAULT_MAX_SUBSCRIPTIONS: usize = 32;
 const MIN_SUBSCRIBE_INTERVAL_SECS: u64 = 1;
 
+/// One JSON-RPC request line. The entry cap is 256 KiB; a request carries the
+/// entry plus the envelope, and `entry` may be its escaped JSON text (an
+/// attachment is base64 inside it), so the transport must hold roughly twice
+/// the entry cap. A line beyond this is refused as one request and discarded,
+/// never a reason to end the process.
+const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
+
 /// The MCP protocol version this server answers when the client names none.
 const DEFAULT_PROTOCOL_VERSION = "2024-11-05";
 
@@ -180,6 +187,9 @@ const Server = struct {
     c: *Ctx,
     repo: []const u8,
     remote: []const u8,
+    /// `--no-fetch` is a hard gate: no per-call argument can re-enable the
+    /// network (an air-gapped/offline process stays offline).
+    no_fetch: bool,
     fresh_default: bool,
     interval_ms: u64,
     max_subs: usize,
@@ -218,6 +228,7 @@ pub fn run(c: *Ctx, p: *args.Parsed) !u8 {
         .c = c,
         .repo = repo,
         .remote = remote,
+        .no_fetch = p.boolean("no-fetch"),
         .fresh_default = !p.boolean("no-fetch"),
         .interval_ms = interval * 1000,
         .max_subs = @intCast(max_subs),
@@ -239,19 +250,38 @@ pub fn run(c: *Ctx, p: *args.Parsed) !u8 {
     return code;
 }
 
+/// Consume the remainder of an oversized line, including its newline. The
+/// reader's buffer is full and holds no delimiter, so drop it and keep filling;
+/// when the tail finally fits it is consumed too.
+fn discardLine(r: *Io.Reader) void {
+    while (true) {
+        _ = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.StreamTooLong => {
+                r.tossBuffered();
+                continue;
+            },
+            else => return,
+        };
+        return;
+    }
+}
+
 fn serveLoop(s: *Server) !u8 {
-    var rbuf: [64 * 1024]u8 = undefined;
-    var reader = std.Io.File.stdin().reader(s.c.io, &rbuf);
+    const rbuf = s.c.alloc.alloc(u8, MAX_LINE_BYTES) catch return error.OutOfMemory;
+    defer s.c.alloc.free(rbuf);
+    var reader = std.Io.File.stdin().reader(s.c.io, rbuf);
     while (true) {
         const raw_line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.EndOfStream => break,
-            // A line longer than the buffer is not a valid JSON-RPC message we
-            // can answer; report it and stop rather than desynchronising.
+            // Too long to be one message: drain it, answer once, and keep the
+            // lane (including its subscriptions) alive.
             error.StreamTooLong => {
+                discardLine(&reader.interface);
                 var arena_state = std.heap.ArenaAllocator.init(s.c.alloc);
                 defer arena_state.deinit();
-                writeRpcError(s, arena_state.allocator(), .null, -32700, "request line exceeds 64 KiB");
-                break;
+                const msg = std.fmt.allocPrint(arena_state.allocator(), "request line exceeds {d} KiB", .{MAX_LINE_BYTES / 1024}) catch "request line too long";
+                writeRpcError(s, arena_state.allocator(), .null, -32700, msg);
+                continue;
             },
             else => break,
         };
@@ -483,12 +513,18 @@ fn toolSchema(a: std.mem.Allocator, k: ToolKind) Value {
             jsonio.obj_put(&props, a, "entry", .{ .object = ep });
             required.append(.{ .string = "entry" }) catch @panic("oom");
         },
-        .collab_register => {},
+        .collab_register => {
+            var fp = jsonio.new_object();
+            jsonio.obj_put(&fp, a, "type", .{ .string = "boolean" });
+            jsonio.obj_put(&fp, a, "description", .{ .string = "rotate an already-registered, different key (default false). Rotation makes every past signature by this principal unverified; prefer an explicit `wgl collab principal-register`." });
+            jsonio.obj_put(&props, a, "force", .{ .object = fp });
+        },
     }
     var schema = jsonio.new_object();
     jsonio.obj_put(&schema, a, "type", .{ .string = "object" });
     jsonio.obj_put(&schema, a, "properties", .{ .object = props });
     jsonio.obj_put(&schema, a, "required", .{ .array = required });
+    jsonio.obj_put(&schema, a, "additionalProperties", .{ .bool = false });
     return .{ .object = schema };
 }
 
@@ -574,19 +610,23 @@ fn callTool(s: *Server, a: std.mem.Allocator, name: []const u8, arguments: Value
             .collab_board, .collab_report => std.mem.eql(u8, e.key_ptr.*, "fresh"),
             .collab_thread, .ci_status => std.mem.eql(u8, e.key_ptr.*, "id") or std.mem.eql(u8, e.key_ptr.*, "fresh"),
             .collab_publish => std.mem.eql(u8, e.key_ptr.*, "entry"),
-            .collab_register => false,
+            .collab_register => std.mem.eql(u8, e.key_ptr.*, "force"),
         };
         if (!allowed) {
             return .{ .invalid = std.fmt.allocPrint(a, "unknown argument `{s}` for `{s}`", .{ e.key_ptr.*, name }) catch "unknown argument" };
         }
     }
-    if (k == .collab_register and o.count() != 0) {
-        return .{ .invalid = "`collab_register` takes no arguments" };
-    }
     if (o.get("fresh")) |v| {
         if (v != .bool) return .{ .invalid = "`fresh` must be a boolean" };
     }
+    if (o.get("force")) |v| {
+        if (v != .bool) return .{ .invalid = "`force` must be a boolean" };
+    }
     const fresh = freshFor(s, o);
+    const force = switch (o.get("force") orelse .null) {
+        .bool => |b| b,
+        else => false,
+    };
     s.git_mutex.lockUncancelable(s.c.io);
     defer s.git_mutex.unlock(s.c.io);
     return switch (k) {
@@ -595,11 +635,14 @@ fn callTool(s: *Server, a: std.mem.Allocator, name: []const u8, arguments: Value
         .collab_report => toolReport(s, a, fresh),
         .ci_status => toolCiStatus(s, a, o, fresh),
         .collab_publish => toolPublish(s, a, o),
-        .collab_register => toolRegister(s, a),
+        .collab_register => toolRegister(s, a, force),
     };
 }
 
 fn freshFor(s: *Server, o: std.json.ObjectMap) bool {
+    // `--no-fetch` wins over any per-call `fresh:true` (SKILL §7 says
+    // process-wide, so it is a gate, not a default).
+    if (s.no_fetch) return false;
     if (o.get("fresh")) |v| {
         return switch (v) {
             .bool => |b| b,
@@ -611,7 +654,7 @@ fn freshFor(s: *Server, o: std.json.ObjectMap) bool {
 
 fn maybeFetch(s: *Server, a: std.mem.Allocator, fresh: bool) ?[]const u8 {
     if (!fresh) return null;
-    gitx.fetch_collab(a, s.c.io, s.repo, s.remote) catch |e| {
+    gitx.fetch_collab_bounded(a, s.c.io, s.repo, s.remote) catch |e| {
         const detail = gitErrorDetail(e);
         return std.fmt.allocPrint(a, "cannot read remote {s} ({s}): {s} — fail closed; pass fresh:false to read the cached refs", .{ s.remote, @errorName(e), detail }) catch "fetch failed";
     };
@@ -968,21 +1011,47 @@ const UriKind = union(enum) {
     thread: []const u8,
 };
 
-fn parseResourceUri(uri: []const u8) ?UriKind {
+fn parseResourceUri(a: std.mem.Allocator, uri: []const u8) ?UriKind {
     if (std.mem.eql(u8, uri, "walgit://collab/board")) return .board;
     const prefix = "walgit://collab/thread/";
     if (std.mem.startsWith(u8, uri, prefix)) {
         const raw = uri[prefix.len..];
         if (raw.len == 0) return null;
-        return .{ .thread = percentDecode(raw) };
+        return .{ .thread = percentDecode(a, raw) orelse return null };
     }
     return null;
 }
 
-fn percentDecode(s: []const u8) []const u8 {
-    // The thread id is a refname-safe segment, which never needs percent
-    // encoding; decode `%XX` anyway so a client's generic encoder works.
-    return s;
+fn hexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Decode `%XX` escapes in a resource URI path segment (a generic client
+/// percent-encodes `@`, `-`, etc.). `+` is not a space in a path. An
+/// incomplete or non-hex escape is not the resource it appears to be: `null`,
+/// which the callers turn into "not a wgl collab resource URI".
+fn percentDecode(a: std.mem.Allocator, s: []const u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '%') == null) return s;
+    var out = util.List(u8).init(a);
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%') {
+            if (i + 2 >= s.len) return null;
+            const hi = hexDigit(s[i + 1]) orelse return null;
+            const lo = hexDigit(s[i + 2]) orelse return null;
+            out.append((hi << 4) | lo) catch return null;
+            i += 3;
+        } else {
+            out.append(s[i]) catch return null;
+            i += 1;
+        }
+    }
+    return out.items;
 }
 
 fn resourcesList(s: *Server, a: std.mem.Allocator) !Value {
@@ -1027,7 +1096,7 @@ const ReadAnswer = struct {
 };
 
 fn resourceRead(s: *Server, a: std.mem.Allocator, uri: []const u8, fresh: bool) !ReadAnswer {
-    const kind = parseResourceUri(uri) orelse return error.BadUri;
+    const kind = parseResourceUri(a, uri) orelse return error.BadUri;
     if (maybeFetch(s, a, fresh)) |m| {
         // `maybeFetch` returns an owned message; carry it as an error the
         // handler can print verbatim.
@@ -1148,7 +1217,7 @@ fn handleSubscribe(s: *Server, a: std.mem.Allocator, id: Value, params: Value) v
             return;
         },
     };
-    if (parseResourceUri(uri) == null) {
+    if (parseResourceUri(a, uri) == null) {
         writeRpcError(s, a, id, -32602, "not a wgl collab resource URI");
         return;
     }
@@ -1270,7 +1339,7 @@ fn pollTick(s: *Server) void {
         var i: usize = 0;
         while (i < s.subs.items.len) {
             const sub = &s.subs.items[i];
-            const kind = parseResourceUri(sub.uri) orelse {
+            const kind = parseResourceUri(a, sub.uri) orelse {
                 drop.append(sub.uri) catch @panic("oom");
                 i += 1;
                 continue;
@@ -1338,25 +1407,32 @@ fn pollTick(s: *Server) void {
 // ---- write tools ------------------------------------------------------------------------
 
 fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall {
-    const entry_value_js = switch (o.get("entry") orelse .null) {
-        .object => o.get("entry").?,
+    const entry_arg = o.get("entry") orelse .null;
+    const entry_value_js = switch (entry_arg) {
+        .object => entry_arg,
         .string => |text| std.json.parseFromSliceLeaky(Value, a, text, .{}) catch {
             return .{ .invalid = "`entry` is not JSON" };
         },
         else => return .{ .invalid = "`entry` must be an object or its JSON text" },
     };
-    if (entry_value_js != .object) return .{ .invalid = "`entry` must be a JSON object" };
+    // Preserve the client's bytes when it sent the signed entry as text: the
+    // blob oid must equal the one `wgl collab entry` wrote, or the same entry
+    // is duplicated (and any `related`/`depends_on` citing that oid breaks).
+    const blob_bytes: []const u8 = switch (entry_arg) {
+        .string => |text| text,
+        .object => jsonio.to_string(a, entry_value_js),
+        else => unreachable,
+    };
 
     const ident = localIdentity(s, a) catch |e| {
         return .{ .out = .{ .err = identityError(a, e) } };
     };
-    validatePublishEntry(a, entry_value_js, ident.principal) catch |e| {
+    const parsed = validatePublishEntry(a, entry_value_js, ident.principal) catch |e| {
         return .{ .out = .{ .err = publishErrorText(a, e) } };
     };
 
-    const entry_obj = entry_value_js.object;
-    const kind = entry_obj.get("kind").?.string;
-    const body = entry_obj.get("body").?;
+    const kind = parsed.kind;
+    const body = parsed.body;
     // The done gate (§7.5): identical to `wgl collab entry` / the thin API.
     if (std.mem.eql(u8, kind, "status")) {
         const st = switch (body) {
@@ -1367,7 +1443,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
             else => "",
         };
         if (std.mem.eql(u8, st, "done")) {
-            gitx.fetch_collab(a, s.c.io, s.repo, s.remote) catch |e| {
+            gitx.fetch_collab_bounded(a, s.c.io, s.repo, s.remote) catch |e| {
                 const detail = gitErrorDetail(e);
                 return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot fetch refs/collab/* before the done gate ({s}): {s}", .{ @errorName(e), detail }) catch "cannot fetch before the done gate" } };
             };
@@ -1375,22 +1451,20 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
             const loaded = reader.load(a) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
             var group = util.List(entry_mod.EntryRef).init(a);
             for (loaded.entries) |er| {
-                if (std.mem.eql(u8, er.entry.id, entry_obj.get("id").?.string)) group.append(er) catch @panic("oom");
+                if (std.mem.eql(u8, er.entry.id, parsed.id)) group.append(er) catch @panic("oom");
             }
             const ordered = collab.thread(a, group.items) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
             collab.validate_status_transition(a, ordered, loaded.principals) catch {
-                return .{ .out = .{ .err = "status transition rejected: transition → done requires the thread at needs-review with a verified non-author approve (D1_PROTOCOL §7.5)" } };
+                return .{ .out = .{ .err = "status transition rejected: transition → done requires the thread at needs-review with a verified non-author approve (D1_PROTOCOL §7.5); if the reviewer's key lives only in the host registry, run `wgl collab principal-fetch` and retry" } };
             };
         }
     }
 
-    // The blob the host would store: the parsed Value re-serialized compact.
-    const compact = jsonio.to_string(a, entry_value_js);
-    if (compact.len > entry_mod.COLLAB_ENTRY_MAX_BYTES) {
-        return .{ .out = .{ .err = std.fmt.allocPrint(a, "entry is {d} bytes; the cap is {d} KiB (D1_PROTOCOL §13)", .{ compact.len, entry_mod.COLLAB_ENTRY_MAX_BYTES / 1024 }) catch "entry too big" } };
+    if (blob_bytes.len > entry_mod.COLLAB_ENTRY_MAX_BYTES) {
+        return .{ .out = .{ .err = std.fmt.allocPrint(a, "entry is {d} bytes; the cap is {d} KiB (D1_PROTOCOL §13)", .{ blob_bytes.len, entry_mod.COLLAB_ENTRY_MAX_BYTES / 1024 }) catch "entry too big" } };
     }
-    const actor = entry_obj.get("actor").?.string;
-    const oid = gitx.write_blob(a, s.c.io, s.repo, compact) catch |e| {
+    const actor = parsed.actor;
+    const oid = gitx.write_blob(a, s.c.io, s.repo, blob_bytes) catch |e| {
         return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot write the entry blob: {t}", .{e}) catch "cannot write the entry blob" } };
     };
     const ref_name = std.fmt.allocPrint(a, "refs/collab/inbox/{s}/{s}", .{ actor, identity.entry_uuid(a, s.c.io) }) catch @panic("oom");
@@ -1406,7 +1480,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
     return .{ .out = .{ .ok = .{ .text = jsonio.to_string_pretty(a, .{ .object = result }), .fresh = false, .fetched_at = fetchedAt(s) } } };
 }
 
-fn toolRegister(s: *Server, a: std.mem.Allocator) ToolCall {
+fn toolRegister(s: *Server, a: std.mem.Allocator, force: bool) ToolCall {
     const ident = localIdentity(s, a) catch |e| {
         return .{ .out = .{ .err = identityError(a, e) } };
     };
@@ -1420,6 +1494,18 @@ fn toolRegister(s: *Server, a: std.mem.Allocator) ToolCall {
         return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot read identity key {s}: {t}", .{ key_path, e }) catch "cannot read key" } };
     };
     const public_key = entry_mod.public_key_b64(a, key);
+    // Read the registry fresh before touching it: a stale local ref would let
+    // a rotation slip past the guard. Fail closed — registration is a write.
+    gitx.fetch_collab_bounded(a, s.c.io, s.repo, s.remote) catch |e| {
+        const detail = gitErrorDetail(e);
+        return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot fetch refs/collab/meta before registering {s} ({s}): {s}", .{ ident.principal, @errorName(e), detail }) catch "cannot fetch before registering" } };
+    };
+    const registered = cmd_collab.registered_public_key(s.c, s.repo, ident.principal) catch {
+        return .{ .out = .{ .err = std.fmt.allocPrint(a, "the registration for {s} is malformed (public_key missing or not a string); run `wgl collab principal-register` explicitly", .{ident.principal}) catch "bad registration" } };
+    };
+    if (rotationRefused(registered, public_key, force)) {
+        return .{ .out = .{ .err = std.fmt.allocPrint(a, "principal {s} is already registered with a different public key; rotating makes every past signature by this principal unverified — re-run with force:true, or rotate explicitly: `wgl collab principal-register --principal {s} --key <key> --push <remote>`", .{ ident.principal, ident.principal }) catch "rotation refused" } };
+    }
     const result = cmd_collab.publish_principal(s.c, s.repo, ident.principal, public_key, s.remote) catch |e| {
         const detail = gitErrorDetail(e);
         return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot register {s}: {s}", .{ ident.principal, detail }) catch "registration failed" } };
@@ -1428,6 +1514,15 @@ fn toolRegister(s: *Server, a: std.mem.Allocator) ToolCall {
     jsonio.obj_put(&v, a, "ref", .{ .string = result.ref_name });
     jsonio.obj_put(&v, a, "oid", .{ .string = result.oid });
     return .{ .out = .{ .ok = .{ .text = jsonio.to_string_pretty(a, .{ .object = v }), .fresh = false, .fetched_at = fetchedAt(s) } } };
+}
+
+/// `collab_register` must not silently rotate: the same guard `wgl collab
+/// join` applies (§4.3). Rotation makes every past entry by the principal
+/// unverified, and the log is append-only.
+fn rotationRefused(registered: ?[]const u8, next: []const u8, force: bool) bool {
+    if (force) return false;
+    const current = registered orelse return false;
+    return !std.mem.eql(u8, current, next);
 }
 
 fn localIdentity(s: *Server, a: std.mem.Allocator) !identity.Identity {
@@ -1453,46 +1548,30 @@ const PublishError = error{
     ActorMismatch,
     MissingSig,
     BadSig,
-    BodyNotObject,
+    OutOfMemory,
 };
 
-fn validatePublishEntry(a: std.mem.Allocator, v: Value, caller: []const u8) PublishError!void {
-    const o = switch (v) {
-        .object => |o| o,
-        else => return error.EntryNotObject,
+/// The same structural parse the server's write path performs
+/// (`serde_json::from_value::<Entry>`): required fields present and typed,
+/// `version` in `u32` range, `refs` an object|null of string|null members,
+/// `body` present (any JSON value), `sig` defaulting to `""`, unknown fields
+/// ignored. On top of that, this tool requires a signature and the caller's
+/// own actor — the MCP write-side discipline.
+fn validatePublishEntry(a: std.mem.Allocator, v: Value, caller: []const u8) PublishError!entry_mod.Entry {
+    const parsed = entry_mod.parse_entry(v) catch |e| return switch (e) {
+        error.NotAnObject => error.EntryNotObject,
+        error.MissingField => error.MissingField,
+        error.WrongType => error.WrongType,
+        error.OutOfMemory => error.OutOfMemory,
     };
-    // Required structural fields (§5.1). `sig` may be empty on the wire type
-    // (serde default) but an unsigned entry is exactly what this tool refuses.
-    const kind = try strField(o, "kind");
-    _ = try strField(o, "id");
-    const actor = try strField(o, "actor");
-    _ = try strField(o, "parent");
-    const sig = try strField(o, "sig");
-    switch (o.get("ts") orelse .null) {
-        .integer => {},
-        else => return error.WrongType,
-    }
-    if (kind.len == 0 or actor.len == 0) return error.EmptyField;
-    switch (o.get("body") orelse .null) {
-        .object => {},
-        else => return error.BodyNotObject,
-    }
-    switch (o.get("version") orelse .null) {
-        .integer => {},
-        else => return error.WrongType,
-    }
-    if (!entry_mod.ref_segment_ok(actor)) return error.ActorNotRefnameSafe;
-    if (!std.mem.eql(u8, actor, caller)) return error.ActorMismatch;
-    if (sig.len == 0) return error.MissingSig;
-    if (!sigLooksLikeEd25519(a, sig)) return error.BadSig;
-}
-
-fn strField(o: std.json.ObjectMap, key: []const u8) PublishError![]const u8 {
-    const v = o.get(key) orelse return error.MissingField;
-    return switch (v) {
-        .string => |s| s,
-        else => error.WrongType,
-    };
+    if (parsed.kind.len == 0 or parsed.actor.len == 0) return error.EmptyField;
+    if (!entry_mod.ref_segment_ok(parsed.actor)) return error.ActorNotRefnameSafe;
+    if (!std.mem.eql(u8, parsed.actor, caller)) return error.ActorMismatch;
+    // `sig` may be absent/empty on the wire type (serde default), but an
+    // unsigned entry is exactly what this tool refuses.
+    if (parsed.sig.len == 0) return error.MissingSig;
+    if (!sigLooksLikeEd25519(a, parsed.sig)) return error.BadSig;
+    return parsed;
 }
 
 fn sigLooksLikeEd25519(a: std.mem.Allocator, sig: []const u8) bool {
@@ -1513,7 +1592,7 @@ fn publishErrorText(a: std.mem.Allocator, e: anyerror) []const u8 {
         error.ActorMismatch => "`entry.actor` is not this worktree's identity principal — publish as the principal whose key you hold",
         error.MissingSig => "`entry.sig` is empty — sign the canonical bytes with your own key (`wgl collab entry` does both)",
         error.BadSig => "`entry.sig` is not `ed25519:` + a base64 64-byte signature",
-        error.BodyNotObject => "`entry.body` must be a JSON object",
+        error.OutOfMemory => "entry is too large to inspect",
         else => "entry rejected",
     };
     return std.fmt.allocPrint(a, "{s}", .{msg}) catch "entry rejected";
@@ -1541,11 +1620,16 @@ test "tool list is the collaboration surface and its schemas are strict objects"
         try std.testing.expectEqualStrings("object", schema.get("type").?.string);
         try std.testing.expect(schema.get("properties") != null);
         try std.testing.expect(schema.get("required") != null);
+        // Same strictness as the host schemas.
+        try std.testing.expectEqual(false, schema.get("additionalProperties").?.bool);
     }
-    // collab_register takes no arguments at all.
+    // collab_register has exactly one optional argument: `force`.
     for (tools) |t| {
         if (std.mem.eql(u8, t.object.get("name").?.string, "collab_register")) {
-            try std.testing.expectEqual(@as(usize, 0), t.object.get("inputSchema").?.object.get("properties").?.object.count());
+            const props = t.object.get("inputSchema").?.object.get("properties").?.object;
+            try std.testing.expectEqual(@as(usize, 1), props.count());
+            try std.testing.expect(props.get("force") != null);
+            try std.testing.expectEqual(@as(usize, 0), t.object.get("inputSchema").?.object.get("required").?.array.items.len);
         }
     }
 }
@@ -1557,7 +1641,7 @@ test "publish validation refuses unsigned, foreign-actor and malformed entries" 
     const good_sig = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
     const base = "{\"version\":1,\"kind\":\"comment\",\"id\":\"c1\",\"actor\":\"alice\",\"ts\":1,\"parent\":\"\",\"body\":{},\"sig\":\"" ++ good_sig ++ "\"}";
     const v = try std.json.parseFromSliceLeaky(Value, a, base, .{});
-    try validatePublishEntry(a, v, "alice");
+    _ = try validatePublishEntry(a, v, "alice");
 
     try std.testing.expectError(error.ActorMismatch, validatePublishEntry(a, v, "bob"));
 
@@ -1572,6 +1656,25 @@ test "publish validation refuses unsigned, foreign-actor and malformed entries" 
 
     const bad_actor = try std.json.parseFromSliceLeaky(Value, a, "{\"version\":1,\"kind\":\"comment\",\"id\":\"c1\",\"actor\":\"a/b\",\"ts\":1,\"parent\":\"\",\"body\":{},\"sig\":\"" ++ good_sig ++ "\"}", .{});
     try std.testing.expectError(error.ActorNotRefnameSafe, validatePublishEntry(a, bad_actor, "a/b"));
+
+    // Same parse as the server's serde: refs must be object|null of
+    // string|null, version must fit u32, body may be any JSON value, and
+    // unknown fields are ignored (not rejected).
+    const bad_refs = try std.json.parseFromSliceLeaky(Value, a, "{\"version\":1,\"kind\":\"comment\",\"id\":\"c1\",\"actor\":\"alice\",\"ts\":1,\"parent\":\"\",\"refs\":{\"base\":7},\"body\":{},\"sig\":\"" ++ good_sig ++ "\"}", .{});
+    try std.testing.expectError(error.WrongType, validatePublishEntry(a, bad_refs, "alice"));
+    const bad_version = try std.json.parseFromSliceLeaky(Value, a, "{\"version\":-1,\"kind\":\"comment\",\"id\":\"c1\",\"actor\":\"alice\",\"ts\":1,\"parent\":\"\",\"body\":{},\"sig\":\"" ++ good_sig ++ "\"}", .{});
+    try std.testing.expectError(error.WrongType, validatePublishEntry(a, bad_version, "alice"));
+    const array_body = try std.json.parseFromSliceLeaky(Value, a, "{\"version\":1,\"kind\":\"comment\",\"id\":\"c1\",\"actor\":\"alice\",\"ts\":1,\"parent\":\"\",\"body\":[1],\"unknown\":true,\"sig\":\"" ++ good_sig ++ "\"}", .{});
+    _ = try validatePublishEntry(a, array_body, "alice");
+}
+
+test "collab_register refuses a silent key rotation unless forced" {
+    const current = "ed25519:OLD";
+    const next = "ed25519:NEW";
+    try std.testing.expect(rotationRefused(current, next, false));
+    try std.testing.expect(!rotationRefused(current, next, true));
+    try std.testing.expect(!rotationRefused(current, current, false));
+    try std.testing.expect(!rotationRefused(null, next, false));
 }
 
 test "thread value carries the host shape: id, ordered entries, broken_refs, pr" {
@@ -1686,11 +1789,20 @@ test "board version is the Rust witness+claim rule" {
 }
 
 test "the resource URI grammar is the two collab resources" {
-    try std.testing.expect(parseResourceUri("walgit://collab/board") != null);
-    const t = parseResourceUri("walgit://collab/thread/card-1").?;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try std.testing.expect(parseResourceUri(a, "walgit://collab/board") != null);
+    const t = parseResourceUri(a, "walgit://collab/thread/card-1").?;
     try std.testing.expectEqualStrings("card-1", t.thread);
-    try std.testing.expect(parseResourceUri("walgit://refs/acme/x") == null);
-    try std.testing.expect(parseResourceUri("walgit://collab/thread/") == null);
+    try std.testing.expect(parseResourceUri(a, "walgit://refs/acme/x") == null);
+    try std.testing.expect(parseResourceUri(a, "walgit://collab/thread/") == null);
+    // A generic client percent-encodes `-` and `@`; decode `%XX`, reject a
+    // malformed escape rather than reading some other thread.
+    const decoded = parseResourceUri(a, "walgit://collab/thread/cc%2Dai%40example").?;
+    try std.testing.expectEqualStrings("cc-ai@example", decoded.thread);
+    try std.testing.expect(parseResourceUri(a, "walgit://collab/thread/card%2") == null);
+    try std.testing.expect(parseResourceUri(a, "walgit://collab/thread/card%zz") == null);
 }
 
 test "fresh policy: the per-call argument wins over the process default" {
@@ -1708,6 +1820,7 @@ test "fresh policy: the per-call argument wins over the process default" {
         .c = undefined,
         .repo = ".",
         .remote = "origin",
+        .no_fetch = false,
         .fresh_default = true,
         .interval_ms = 1000,
         .max_subs = 1,
@@ -1718,6 +1831,12 @@ test "fresh policy: the per-call argument wins over the process default" {
     try std.testing.expect(!freshFor(&srv, jsonio.new_object()));
     try std.testing.expect(freshFor(&srv, o(a, .{ .bool = true })));
     try std.testing.expect(!freshFor(&srv, o(a, .{ .bool = false })));
+    // `--no-fetch` is a hard gate: neither the default nor `fresh:true` can
+    // re-enable the network.
+    srv.no_fetch = true;
+    srv.fresh_default = true;
+    try std.testing.expect(!freshFor(&srv, jsonio.new_object()));
+    try std.testing.expect(!freshFor(&srv, o(a, .{ .bool = true })));
 }
 
 test "ci_status answers the host shape {repo, runs}, optionally filtered by id" {

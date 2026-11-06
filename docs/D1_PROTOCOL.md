@@ -798,8 +798,12 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 `wgl mcp --repo <checkout> [--remote origin] [--no-fetch] [--subscribe-interval 5]
 [--max-subscriptions 32]`。stdout 只有一行一条的 JSON-RPC；日志走 stderr；stdin EOF 退出。
-请求串行处理；订阅由进程内轮询线程负责（best-effort）。读面的 `git fetch` 与写面的
-`git push` 都以 120 秒为界：超时与其他传输失败一样是工具错误，进程不退出。
+请求串行处理；订阅由进程内轮询线程负责（best-effort），无订阅时不做 refs 工作。MCP 读面的
+`git fetch` 有 120 秒上界；写面的 ref push 同样 120 秒：超时与其他传输失败一样是工具错误，
+进程不退出。CLI 的大对象 push（gc snapshot ≤64 MiB、CI 产物 ≤16 MiB）按 payload 大小放宽
+（`gitx.pushTimeoutSeconds` = 120 秒 + 每 64 KiB 1 秒）；未声明大小的 push 仍用 120 秒。
+单行上限 2 MiB（entry cap 256 KiB + envelope/转义）；超长行被丢弃后回一条 `-32700`，进程
+继续服务（订阅不中断）。
 
 | 工具 / 资源 | 语义 | 门禁 |
 |---|---|---|
@@ -807,15 +811,15 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | `collab_thread {id}` | §6/§7.2：`{id, entries:[{oid, principal, verified, entry, broken_refs}], pr}` | 同上 |
 | `collab_report` | §7.4 报告（含 CI runs） | 同上 |
 | `ci_status {id?}` | CI 协议 §8.3：`{repo, runs}` | 同上 |
-| `collab_publish {entry}` | 客户端**已签名**条目 → `refs/collab/inbox/<actor>/<uuid>`（git push） | 结构检查（kind/id/actor/`ed25519:`+64 字节）；`actor == <git-dir>/walgit/identity`；`status=done` 先 fetch 再走 §7.5 门禁；**写侧不验签** |
-| `collab_register`（无参） | 本 worktree 身份公钥 → `refs/collab/meta/principals/<p>` 并 push | identity 缺失即拒绝 |
+| `collab_publish {entry}` | 客户端**已签名**条目 → `refs/collab/inbox/<actor>/<uuid>`（git push） | 与写路径同源的 serde 解析（必填/类型/`refs` 形状/`version` 范围；未知字段忽略）+ `ed25519:`+64 字节 + `actor == <git-dir>/walgit/identity`；`entry` 是 JSON 文本时按**原字节**写 blob（oid 与 `wgl collab entry` 一致，不产生重复条目）；`status=done` 先 fetch 再走 §7.5 门禁；**写侧不验签** |
+| `collab_register {force?}` | 本 worktree 身份公钥 → `refs/collab/meta/principals/<p>` 并 push | identity 缺失即拒绝；已注册的 key 与本次不同且 `force != true` 即拒绝（§4.3 RotationGuard，防止历史条目变 unverified） |
 | `walgit://collab/board` | 看板 JSON | 读前 fetch；`_meta.version = b:<witness>[:claim:<expires_at>]` |
-| `walgit://collab/thread/<id>` | 线程 JSON | 读前 fetch；`_meta.version = h:<tip>` |
+| `walgit://collab/thread/<id>` | 线程 JSON（`<id>` 做 `%XX` 解码） | 读前 fetch；`_meta.version = h:<tip>`；本地 body 无 WAL `seq`（主机 body 有） |
 
-`fresh:false`（逐调用）或 `--no-fetch`（进程）读缓存，`_meta.fetched_at` 标出上次成功 fetch
-的时刻；它只出现在 `_meta`，不进被比对的 body。`resources/subscribe` 的初始版本与随后每次
-轮询都走同一 fetch 策略；TTL 到期只改看板版本（`claim:` 消失），由轮询唤醒；`unsubscribe`、
-stdin EOF 和轮询失败都清理订阅。注意：本地检查只是纪律 —— 裸 `git push` 可绕过
+`fresh:false`（逐调用）读缓存；`--no-fetch`（进程）是**硬门**：逐调用的 `fresh:true` 不能
+重新联网。`_meta.fetched_at` 标出上次成功 fetch 的时刻，只出现在 `_meta`，不进被比对的
+body。`resources/subscribe` 的初始版本与随后每次轮询都走同一 fetch 策略；TTL 到期只改看板
+版本（`claim:` 消失），由轮询唤醒；`unsubscribe`、stdin EOF 和轮询失败都清理订阅。注意：本地检查只是纪律 —— 裸 `git push` 可绕过
 `collab_publish` 的结构/actor/`done` 检查（§7.5、§14）。
 
 ## 13. 限额与预算（汇总）

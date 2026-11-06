@@ -141,8 +141,11 @@ wgl mcp --repo <checkout> [--remote origin] \
 `resources/unsubscribe` and `ping` are implemented; notifications are written
 unprompted. A tool that ran and failed answers `isError: true` with a readable
 message (a bad request is JSON-RPC `-32602`); a failed fetch or push is a tool
-error, never a process exit. Ref fetches and pushes are bounded at two minutes:
-a timed-out transfer is that same tool error.
+error, never a process exit. The MCP read fetch and a ref push are bounded at
+two minutes: a timed-out transfer is that same tool error. Other wgl commands
+that push large blobs (`collab gc`'s snapshot, CI logs/artifacts) scale the
+bound with the payload size (`gitx.pushTimeoutSeconds`: 120 s plus 1 s per
+64 KiB), so a slow uplink does not turn a large fold into a failure.
 
 ### Tools
 
@@ -153,25 +156,37 @@ a timed-out transfer is that same tool error.
 | `collab_report` | `fresh?` | threads, PRs, CI runs, verification health |
 | `ci_status` | `id?`, `fresh?` | `{repo, runs}` (the host's `/collab/ci` shape) |
 | `collab_publish` | `entry` (object or JSON text) | `{ref, oid}` |
-| `collab_register` | none | `{ref, oid}` |
+| `collab_register` | `force?` | `{ref, oid}` |
 
 **Freshness.** Every read fetches `refs/collab/{inbox,meta}` first
 (`git fetch --prune`, the same lane `wgl collab claim` step 1 uses) and **fails
 closed** if it cannot: a stale board is how two workers duplicate a card.
 Pass `fresh:false` to read the cached refs; the result's `_meta` carries
 `fresh` and `fetched_at` (the last successful fetch, absent if none). Those
-fields never enter the body being compared.
+fields never enter the body being compared. `--no-fetch` is a **hard gate**:
+with it, no per-call `fresh:true` re-enables the network (an offline/air-gapped
+process stays offline).
 
 **Caller.** The principal is `<git-dir>/walgit/identity` — one per worktree
 (D58/D59/D62). `collab_publish` refuses an entry whose `actor` is not that
-principal; `collab_register` refuses when there is no identity. `wgl mcp`
+principal; `collab_register` refuses when there is no identity. It also has
+the `wgl collab join` rotation guard: if the registry names a *different* key
+for this principal, it refuses unless `force:true` — rotating makes every past
+entry by that principal unverified, and the log is append-only. Prefer an
+explicit `wgl collab principal-register` for a real rotation. `wgl mcp`
 never signs for you and holds no key: build and sign with `wgl collab entry`
 (or any ed25519 signer over the canonical bytes, `docs/D1_PROTOCOL.md` §5.3).
 
-`collab_publish` checks the entry's structure (`kind`, `id`, `actor`, an
-`ed25519:` + 64-byte signature, body object) and, for `status=done`, fetches
-and applies the §7.5 gate (needs-review + a verified non-author approve) —
-the same rule as `wgl collab entry`. It does **not** verify the signature on
+`collab_publish` parses the entry the way the server's write path does
+(`serde_json::from_value::<Entry>`: required/typed fields, `refs` object|null,
+`version` in `u32` range, unknown fields ignored) and additionally requires an
+`ed25519:` + 64-byte signature and the caller's own `actor`. For
+`status=done` it fetches and applies the §7.5 gate (needs-review + a verified
+non-author approve) — the same rule as `wgl collab entry`. When `entry` is the
+JSON **text**, those exact bytes become the blob, so the returned `oid` equals
+the one `wgl collab entry` wrote (no duplicate entry, and references to the
+CLI's oid stay valid); an object argument is serialized compactly. It does
+**not** verify the signature on
 write (an entry and the key registration may land in either order, and the git
 lane cannot check it); aggregation verifies. Re-read the thread and require
 `verified: true`. A raw `git push` bypasses every local check (§7.5): these are
@@ -185,19 +200,31 @@ receive-pack.
   claim, so a claim TTL lapse wakes you once).
 - `walgit://collab/thread/<id>` — thread JSON; `_meta.version` is `h:<tip>`.
 
-`resources/read` follows the same fresh policy (and `--no-fetch` applies
-process-wide). `resources/subscribe` records the current version and a
+Thread ids in resource URIs are percent-decoded (`cc%2Dai` = `cc-ai`); an
+invalid escape is not that resource. The local resource body has no WAL `seq`
+(there is no WAL in the checkout) — the host's body carries one; compare the
+rest. `resources/read` follows the same fresh policy (and `--no-fetch` is the
+process-wide hard gate). `resources/subscribe` records the current version and a
 background poller emits `notifications/resources/updated` with the `uri` when
 it moves — best-effort, in-process, never a durable push (D55). The poller
-fetches once per tick when freshness is on; an update means **re-read**, never
-"here is the diff". `resources/unsubscribe`, stdin EOF and a failing version
+fetches once per tick when freshness is on and does no refs work when nothing
+is subscribed; an update means **re-read**, never "here is the diff". `resources/unsubscribe`, stdin EOF and a failing version
 read all clean up the subscription (`list_changed` for the last case). The cap
 is `--max-subscriptions` (a second `subscribe` beyond it is `-32602`), and the
 tick is `--subscribe-interval` (>= 1 s, default 5 s).
 
+**Verification and host-only keys.** `verified` (and therefore the `done`
+gate) is computed from this checkout's `refs/walgit/principals/*` cache plus
+`refs/collab/meta/principals/*`. A key registered only in the *host* registry
+is invisible here until `wgl collab principal-fetch`; if a verdict disagrees
+with the host's aggregation, run that first.
+
 ### Error contract
 
 - stdout: JSON-RPC only; diagnostics and git stderr go to stderr.
+- One request line may be up to 2 MiB (the entry cap plus envelope/escaping);
+  a longer line is drained, answered with one `-32700`, and the process keeps
+  serving.
 - `-32700` unparsable line, `-32600` not a request, `-32601` unknown method,
   `-32602` bad params/unknown argument, `-32603` a failed read (including a
   fetch failure).

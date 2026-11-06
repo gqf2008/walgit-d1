@@ -38,9 +38,11 @@ wgl collab join --repo "$checkout" --principal "<proj>-worker-1" --push origin
   (docs/D1_PROTOCOL.md §4 — §5.3 is the *canonical bytes*, not the key). The
   seed file is 64 hex characters (32 bytes, trailing newline optional).
 - An agent that already has an identity can re-publish it over `wgl mcp
-  --repo "$checkout"` with `collab_register` (no arguments). The key push goes
-  over git, so `policy.json` for `refs/collab/meta/principals/*` is the write
-  gate; a rejected push is a hard stop (the name must be refname-safe).
+  --repo "$checkout"` with `collab_register` (optional `force`). The key push
+  goes over git, so `policy.json` for `refs/collab/meta/principals/*` is the
+  write gate; a rejected push is a hard stop (the name must be refname-safe).
+  A different key already registered for the principal is refused unless
+  `force:true` — rotation makes every past entry unverified.
 - `wgl collab join` is idempotent for the same principal; `--force` rebinds or
   rotates (rotation is destructive: every past entry by that principal turns
   unverified).
@@ -277,17 +279,21 @@ wgl mcp --repo <checkout> [--remote origin]   # stdio JSON-RPC; stdout is only J
 
 Tools: `collab_board`, `collab_thread {id}`, `collab_report`, `ci_status
 {id?}`, the one write tool `collab_publish {entry}`, and `collab_register`
-(**no arguments** — this worktree identity's public key).
+(`force?` — this worktree identity's public key; a different registered key is
+refused without force, D70/§4.3).
 
 * **Freshness is built in**: every read fetches `refs/collab/{inbox,meta}`
   first (`git fetch --prune`, the same lane `wgl collab claim` uses) and
   **fails closed** if the remote is unreachable. Pass `fresh:false` (per call)
-  to read the cached refs; `_meta.fetched_at` says when they were last fetched.
-  The freshness flag and timestamp live in the result's `_meta`, never in the
-  body the tools compare.
+  to read the cached refs; `--no-fetch` is process-wide and cannot be
+  overridden by `fresh:true`. `_meta.fetched_at` says when they were last
+  fetched. The freshness flag and timestamp live in the result's `_meta`, never
+  in the body the tools compare.
 * **One identity per worktree**: the caller is `<git-dir>/walgit/identity`
-  (D58/D59/D62). `collab_register` refuses when there is no identity;
-  `collab_publish` refuses an entry whose `actor` is not that principal.
+  (D58/D59/D62). `collab_register` refuses when there is no identity, and
+  refuses a silent rotation (see above); `collab_publish` refuses an entry
+  whose `actor` is not that principal. When `entry` is JSON text its exact
+  bytes are the blob, so the oid equals the one `wgl collab entry` produced.
   It never signs for you and holds no key. The signature is **not verified on
   write** — every entry is verified when the ledger is aggregated, so read the
   thread back and require `verified: true`; a mis-signed entry is already in an

@@ -118,13 +118,16 @@ wgl mcp --repo <checkout> [--remote origin] \
 stdio JSON-RPC, one message per line; stdout carries nothing but JSON-RPC, logs
 go to stderr, stdin EOF exits 0. Tools: `collab_board`, `collab_thread {id}`,
 `collab_report`, `ci_status {id?}`, the one write tool `collab_publish {entry}`,
-and `collab_register` (no arguments — this worktree identity's public key).
+and `collab_register` (optional `force`; this worktree identity's public key —
+a different existing registration is refused without force, the same §4.3
+rotation guard `wgl collab join` applies).
 Resources: `walgit://collab/board` and `walgit://collab/thread/<id>`.
 
 **Every read fetches `refs/collab/{inbox,meta}` first** (`git fetch --prune`,
 the same lane `wgl collab claim` step 1 uses) and fails closed if that fails;
-`fresh:false` (or process-level `--no-fetch`) reads cached refs and
-`_meta.fetched_at` records the last successful fetch (it never enters the body).
+`fresh:false` reads cached refs; process-level `--no-fetch` is a hard gate
+(no per-call `fresh:true` re-enables the network). `_meta.fetched_at` records
+the last successful fetch (it never enters the body).
 Subscriptions are in-process polls; `notifications/resources/updated` carries
 only the `uri` — re-read and compare `_meta.version`. Board version =
 cards + earliest live claim (a TTL lapse wakes once); thread version = its own
@@ -132,8 +135,9 @@ tip.
 
 **Identity and writes.** The caller is `<git-dir>/walgit/identity` (one per
 worktree, D58/D59/D62). `collab_register` refuses when it is missing;
-`collab_publish` refuses `actor != caller`, checks the entry's structure
-(`kind`, `id`, `actor`, `ed25519:` 64-byte signature, body object) and enforces
+`collab_publish` refuses `actor != caller`, parses the entry with the server's
+structural rules (`refs` shape, `version` range, unknown fields ignored) plus
+an `ed25519:` 64-byte signature requirement, and enforces
 `status=done` locally after a fetch (the §7.5 gate). Neither signs for you nor
 holds a key, and the signature is **not verified on write** — aggregation
 verifies, so read the thread back and require `verified: true`. A raw
