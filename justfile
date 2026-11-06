@@ -109,8 +109,8 @@ SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http -
 SERVER_TEST_EXEMPT := "harness e2e sim"
 
 # The wgl client (D69): the collaboration command families left walgit for the
-# standalone Zig module, and the retired `walgit collab`/`ci`/`principal`
-# suites went with them. wgl's lanes are its own: zig unit/golden tests in the
+# standalone Zig module, and the retired Rust collab/ci/principal command
+# families went with them. wgl's lanes are its own: zig unit/golden tests in the
 # module, and the script e2e over real git transport (register → push →
 # second checkout aggregates → claim convergence → gc fold equality; when a
 # walgit binary is present it cross-checks the board hash against the Rust
@@ -215,7 +215,6 @@ ci:
     just check-release-changelog-filter
     just clippy
     just test
-    just wgl-test
     {{t10}} just wgl-e2e
     just e2e
     just sim

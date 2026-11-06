@@ -57,7 +57,7 @@ pub const OPS: &[OpSpec] = &[
                       refs the new snapshot carries (D66). Needs maintenance.collab_fold_principal \
                       and maintenance.collab_fold_key: the snapshot is signed, so the fold runs as \
                       that registered principal. Same operation as the maintainer's unit; \
-                      `walgit collab gc` remains the manual form (and the only one that can also \
+                      `wgl collab gc` remains the manual form (and the only one that can also \
                       truncate deliberately).",
         params: &[],
         mutating: true,
@@ -1413,7 +1413,7 @@ async fn run(
                 .ok_or_else(|| {
                     "collab-fold needs maintenance.collab_fold_principal and \
                      maintenance.collab_fold_key (the snapshot is signed; with neither, fold with \
-                     `walgit collab gc`)"
+                     `wgl collab gc`)"
                         .to_string()
                 })?;
             let out = crate::collab_fold::fold(state, id, &signer, log)

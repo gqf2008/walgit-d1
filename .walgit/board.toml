@@ -22,10 +22,10 @@ direction = "desc" # desc(默认,新在前) | asc
 # 用 blocked / needs-human 表达。评论里写 owner 不算数——只有 status 条目的字段进看板。
 #
 # 示例：
-#   walgit --config ~/.walgit/walgit.toml collab entry --kind status \
+#   wgl collab entry --kind status \
 #     --id <thread-id> --actor <you> --parent <issue-oid> \
 #     --body '{"status":"in-progress","owner":"<principal>","worktree":"wt-x","branch":"feat/x","work":"..."}' --push origin
-# `--principal`/`--actor`/`--key` 缺省取项目身份 (`walgit collab join`)
+# `--principal`/`--actor`/`--key` 缺省取项目身份 (`wgl collab join`)
 
 # 一列一个谓词；只声明你真正想看到的列。
 # 字段：name(必填)、kind、status、merge、unverified

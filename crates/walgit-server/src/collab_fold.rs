@@ -5,7 +5,7 @@
 //! (`COLLAB_REF_BUDGET`, D45's 20k aggregation budget), and a fold is a pure
 //! function of the inbox — the same inbox folds to the same snapshot bytes. So
 //! a repository whose inbox only ever grows stops aggregating, quietly, until
-//! somebody remembers `walgit collab gc`. That is a trap, and a bucket that
+//! somebody remembers `wgl collab gc`. That is a trap, and a bucket that
 //! self-heals is the house style (D22: every maintainer unit is a pure function
 //! of state, bounded, and repeatable).
 //!
@@ -57,7 +57,7 @@ pub struct Signer {
 
 impl Signer {
     /// Load the configured fold identity, or `None` when the host has none (the
-    /// unit is then never planned — folding stays a manual `walgit collab gc`).
+    /// unit is then never planned — folding stays a manual `wgl collab gc`).
     pub fn from_config(cfg: &walgit_config::Config) -> anyhow::Result<Option<Signer>> {
         let Some(principal) = cfg.maintenance.collab_fold_principal.clone() else {
             return Ok(None);
@@ -77,7 +77,7 @@ impl Signer {
     }
 }
 
-/// A seed file is 32 bytes of hex, the shape `walgit collab join` writes.
+/// A seed file is 32 bytes of hex, the shape `wgl collab join` writes.
 fn read_seed(path: &Path) -> anyhow::Result<SigningKey> {
     let text = std::fs::read_to_string(path)?;
     let bytes = hex::decode(text.trim()).map_err(|e| anyhow::anyhow!("not hex: {e:?}"))?;
@@ -204,7 +204,7 @@ pub async fn fold(
         };
         // The principal recorded for an entry is the one whose inbox it sits
         // in — unless that tuple is already held by the *actor's own* inbox ref,
-        // which is the authoritative placement (`walgit collab gc`'s
+        // which is the authoritative placement (`wgl collab gc`'s
         // `keep_fold_record`, same rule).
         if let Some(index) = seen.get(oid).copied()
             && let Some(existing) = records.get_mut(index)
@@ -417,7 +417,7 @@ async fn check_registered(
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "maintenance.collab_fold_principal {:?} is not registered in this repository ({seen}); \
-                 register it with `walgit collab principal-register --principal {} --key <keyfile> \
+                 register it with `wgl collab principal-register --principal {} --key <keyfile> \
                  --push origin`, or leave the pair unset and fold manually",
                 signer.principal,
                 signer.principal

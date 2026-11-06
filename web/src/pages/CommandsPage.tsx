@@ -199,8 +199,8 @@ export function CommandsPage() {
         <CommandRow cmd="wgl ci validate" />
         <CommandRow cmd="wgl ci run" note={t("cmds.s6.run")} />
         <CommandRow cmd="wgl ci status" />
-        <CommandRow cmd="walgit ci log [<run>]" />
-        <CommandRow cmd="walgit ci artifacts [<run>] --out <dir>" note={t("cmds.s6.artifacts")} />
+        <CommandRow cmd="wgl ci log [<run>]" />
+        <CommandRow cmd="wgl ci artifacts [<run>] --out <dir>" note={t("cmds.s6.artifacts")} />
       </Section>
 
       <Section title={t("cmds.s7.t")} lead={t("cmds.s7.lead")}>

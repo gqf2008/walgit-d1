@@ -22,7 +22,7 @@ const usage =
 ;
 
 /// The module version — keep in step with build.zig.zon.
-pub const version = "0.1.0";
+pub const version = util.version;
 
 pub fn main(init: std.process.Init) !u8 {
     var arena_state = std.heap.ArenaAllocator.init(init.gpa);
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (argv.items.len >= 1 and (std.mem.eql(u8, argv.items[0], "--version") or std.mem.eql(u8, argv.items[0], "-V"))) {
         var buf: [96]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "wgl {s} (walgit D1 collaboration client, zig)\n", .{version}) catch "wgl\n";
-        std.debug.print("{s}", .{line});
+        std.Io.File.stdout().writeStreamingAll(init.io, line) catch {};
         return 0;
     }
     if (argv.items.len < 2) {

@@ -65,7 +65,7 @@ verbatim in `docs/reference/cursor-git-at-any-scale.md`.
 
 内核的**语义与不变式**不变（桶仍是唯一事实源、manifest CAS 仍是提交点、实例仍是可丢弃缓存），
 但**改动并不止于新增一层**：相对分叉点共 239 个文件、+46.7k/−4.7k；即便只粗扣
-`collab.rs`/`ci.rs`/`collab_cmd.rs`/`ci_cmd.rs` 四个核心文件，剩余仍有约 37k 行
+`collab.rs`/`ci.rs` 两个核心聚合文件，剩余仍有约 37k 行
 （其中还含协作层的 Web/SDK/测试），包括 Windows 原生支持
 （`crates/walgit-wal/src/platform.rs`）、publish/sync/handle 的可靠性修复（#148 重启后
 refs 回退、#36 幻影 refs、#144 跨卷原子 rename）、对象存储健壮性（#129/#130 socket

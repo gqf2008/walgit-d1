@@ -1,7 +1,7 @@
 const std = @import("std");
 
 // wgl — the standalone D1 collaboration client (`docs/D1_PROTOCOL.md`).
-// Ported from the retired `walgit collab|principal|ci` command families.
+// Ported from the retired Rust collaboration command families.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

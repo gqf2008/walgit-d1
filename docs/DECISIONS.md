@@ -1,4 +1,4 @@
-# walgit — decisions in force (D1–D68)
+# walgit — decisions in force (D1–D69)
 
 > Split out of `AGENTS.md` on 2026-11-05. **Append, never silently change:** a
 > decision that no longer holds is superseded by a later entry that says so in

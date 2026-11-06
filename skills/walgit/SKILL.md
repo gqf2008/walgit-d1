@@ -77,17 +77,18 @@ configured for.
 
 ## 3. MCP (served by the host — the collaboration interface)
 
-`wgl collab …`、`wgl ci …`、`wgl principal …` 已从 `--help` 隐藏并进入**废弃阶段**（D68）：
-协作接口就是 `/mcp`。它们仍然可用（同一份代码），但每次运行都会在 stderr 打一行废弃提示，告诉你 MCP
-里对应的工具是哪个——**没有开关**，这条提示不是权限门，下一个大版本会删掉它们。仓库的 HTTP JSON 也只剩
-`/{owner}/{repo}/api-browser/…` 一条车道（`/api` 保持 404，`web/api.rs` 本身已标为废弃）。
+`wgl collab …`、`wgl ci …`、`wgl principal …` 是独立的 Zig 客户端（D69），**不在 `walgit`
+二进制里**：`walgit --help` 不再包含这三族命令，它们也不会再以隐藏/废弃形式出现。协作接口（读写
+`refs/collab/*`）仍以 `/mcp` 为主；`wgl` 是同一事实源的本地、脚本化形式——读走本地 refs 离线聚合，
+写走普通 git transport。仓库的 HTTP JSON 也只剩 `/{owner}/{repo}/api-browser/…` 一条车道
+（`/api` 保持 404，`web/api.rs` 本身已标为废弃）。
 
 
 Every host serves MCP itself at **`<host>/mcp`** (Streamable HTTP, D64) — there is
 no local `walgit mcp` process to spawn. **This is the interface** for reading and
 writing collaboration state: git carries bytes, MCP carries everything else. The
-`wgl collab`/`repo`/`ci` subcommands are the local, scriptable forms of the
-same acts (a checkout, a key, a shell) and never a second contract — if you are
+`wgl collab`/`wgl ci`/`wgl principal` subcommands are the local, scriptable forms
+of the same acts (a checkout, a key, a shell) and never a second contract — if you are
 writing an agent, use the tools below.
 
 Register the URL with the same credential

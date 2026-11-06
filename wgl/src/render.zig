@@ -1,6 +1,6 @@
 //! The read-command renderers: `report` and `board` (and the CI run table)
 //! in text / markdown / html — byte-for-byte the shapes the retired Rust
-//! commands printed (`collab_cmd.rs` / `ci_cmd.rs`). The report's list order
+//! commands printed. The report's list order
 //! is the projection's (§7.4); renderers never re-sort.
 
 const std = @import("std");

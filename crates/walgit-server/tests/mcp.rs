@@ -381,7 +381,7 @@ async fn wait_for_updated(url: &str, sid: &str, budget: Duration) -> bool {
 async fn a_subscription_pushes_a_notification_when_the_refs_move() -> Result<()> {
     let server = Server::start_with_tweak(|cfg| {
         // The floor a subscription may poll at (D55: one conditional manifest
-        // read per tick, the same lane `walgit collab watch` uses).
+        // read per tick, the same lane `wgl collab watch` uses).
         cfg.mcp.subscribe_interval = Duration::from_secs(1);
     })
     .await?;
@@ -810,7 +810,7 @@ async fn a_write_is_an_entry_the_client_signed_and_the_host_only_forwards() -> R
     Ok(())
 }
 
-/// A signed collab entry, the shape `walgit collab entry` produces: the client
+/// A signed collab entry, the shape `wgl collab entry` produces: the client
 /// owns the key, the canonical bytes and the signature.
 fn signed_entry(
     key: &ed25519_dalek::SigningKey,

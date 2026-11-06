@@ -194,7 +194,7 @@ A branch may merge only when:
 | `GOAL.md` | Everyone, first. What walgit is for, the acceptance table, what we do not optimise for. |
 | `docs/ARCHITECTURE.md` | Everyone. Constraints §1, the WAL §2, the principles a PR is judged against §3. |
 | `AGENTS.md`（根） | 通用协作框架（子代理 worktree/分支、验收流程的骨架）；本文件是其项目化实例 |
-| `docs/DECISIONS.md` | Anyone changing a shape or asking "why is it like this". Every decision in force (D1–D68), append-only. |
+| `docs/DECISIONS.md` | Anyone changing a shape or asking "why is it like this". Every decision in force (D1–D69), append-only. |
 | `docs/WORKING_RULES.md` | Anyone running a gate. Test tiers, known-flaky list, clippy/warnings bar, no-backwards-compat banner. |
 | `docs/RELEASE.md` | Anyone pushing anywhere or cutting a release: remotes, credentials policy, CI signals, the GitHub mirror. |
 | `README.md` | The introduction: why (the Cursor lineage), what it does, how it works briefly, running it, invariants. |
@@ -207,7 +207,7 @@ A branch may merge only when:
 | `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
-| `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `walgit ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation. |
+| `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `wgl ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation. |
 | `docs/D1_PROTOCOL.md` | Anyone touching the D1 collaboration layer: identities, refs layout, entry schema/canonical signing, verification, aggregation, the board projection, the D45 fold, claims (§8.4), observation lanes. |
 | `docs/D1_COLLAB_DESIGN.md` | Design background and progress history of the D1 layer (current normative rules are in `docs/D1_PROTOCOL.md`). |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |

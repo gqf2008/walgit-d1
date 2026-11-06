@@ -44,7 +44,7 @@ pub struct Config {
 pub struct McpConfig {
     /// Poll interval of one resource subscription (`notifications/resources/
     /// updated`). One conditional manifest read per subscribed repo per tick:
-    /// at least 1 s, default 5 s — the same at-least-once lane `walgit collab
+    /// at least 1 s, default 5 s — the same at-least-once lane `wgl collab
     /// watch` uses (D55), never a held request.
     #[serde(with = "humantime_serde")]
     pub subscribe_interval: Duration,
@@ -521,7 +521,7 @@ pub struct MaintenanceConfig {
     /// This is the maintainer's own housekeeping: aggregation reads snapshot ∪
     /// inbox and every collab lane budgets by **ref count**, so an inflated
     /// inbox stops the board from aggregating at all — leaving that to an
-    /// operator who remembers `walgit collab gc` is a silent trap. The fold is a
+    /// operator who remembers `wgl collab gc` is a silent trap. The fold is a
     /// pure function of the inbox (same inbox ⇒ same snapshot bytes) and it only
     /// prunes refs whose entries the new snapshot carries, so a reader of
     /// snapshot ∪ inbox sees the same ledger before and after. 0 = off.
@@ -533,7 +533,7 @@ pub struct MaintenanceConfig {
     #[serde(default)]
     pub collab_fold_principal: Option<String>,
     /// Ed25519 seed of `collab_fold_principal`: 32 bytes as hex, the same file
-    /// `walgit collab join` writes. Host-only (never per-repo settings, D24).
+    /// `wgl collab join` writes. Host-only (never per-repo settings, D24).
     #[serde(default)]
     pub collab_fold_key: Option<PathBuf>,
 }
@@ -1612,13 +1612,13 @@ impl Config {
             (Some(_), Some(key)) => anyhow::ensure!(
                 key.is_file(),
                 "maintenance.collab_fold_key must name a readable file (the 32-byte hex Ed25519 \
-                 seed `walgit collab join` writes); it holds the fold principal's private key"
+                 seed `wgl collab join` writes); it holds the fold principal's private key"
             ),
             (None, None) => {}
             _ => anyhow::bail!(
                 "maintenance.collab_fold_principal and maintenance.collab_fold_key must be set \
                  together (the maintainer folds the collab inbox only as a registered principal \
-                 whose seed it holds; with neither, folding stays a manual `walgit collab gc`)"
+                 whose seed it holds; with neither, folding stays a manual `wgl collab gc`)"
             ),
         }
         // #130 added these socket bounds; #135 pins their floor: `0s` is not

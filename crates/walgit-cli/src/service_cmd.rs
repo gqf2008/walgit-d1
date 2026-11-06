@@ -208,7 +208,7 @@ fn child_setsid() -> std::io::Result<()> {
 /// macOS/Linux only: on Windows the *Task Scheduler* creates the process (D48),
 /// so there is nothing to detach.
 #[cfg(not(windows))]
-#[allow(unsafe_code)] // pre_exec is unsafe — the same platform-seam exception as `proc_group.rs`.
+#[allow(unsafe_code)] // pre_exec is unsafe — the same platform-seam exception as `walgit-wal/src/platform.rs`.
 fn detach_process(cmd: &mut std::process::Command) {
     {
         use std::os::unix::process::CommandExt;
