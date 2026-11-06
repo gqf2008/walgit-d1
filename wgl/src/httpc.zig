@@ -1,9 +1,13 @@
 //! A thin HTTP wrapper over `std.http.Client` for wgl's two HTTP lanes:
 //! the host registry (`/api/v1/principals`, §4.4) and the artifact size
-//! preflight (D1-CI §8.2). TLS honors the URL-scoped Git policy the same
-//! way the retired reqwest client did: `http.<url>.sslCAInfo` pins extra
-//! roots (standalone deployments pin a self-signed CA), `http.sslVerify =
-//! false` skips verification.
+//! preflight (D1-CI §8.2).
+//!
+//! TLS: verification uses the system roots, plus the URL-scoped Git policy
+//! `http.<url>.sslCAInfo` for the artifact preflight (standalone deployments
+//! pin a self-signed CA there). `http.sslVerify = false` is NOT honored —
+//! std.http.Client exposes no skip-verification knob — so a host relying on
+//! it must either install its CA (sslCAInfo) or serve plain http on the
+//! loopback.
 
 const std = @import("std");
 const util = @import("util.zig");
@@ -17,10 +21,31 @@ pub const Response = struct {
 
 pub const Method = enum { GET, PUT, DELETE, HEAD };
 
+pub const RequestOptions = struct {
+    /// A PEM file pinning extra CA roots (git's `http.<url>.sslCAInfo`,
+    /// already expanded — call with `expand_home` first).
+    ca_path: ?[]const u8 = null,
+};
+
+/// Expand a leading `~/` using the process environment (git's own config
+/// paths take the same form).
+pub fn expand_home(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, path: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path, "~/")) return null;
+    const home = env.get("HOME") orelse env.get("USERPROFILE") orelse return null;
+    return std.fmt.allocPrint(alloc, "{s}/{s}", .{ home, path[2..] }) catch null;
+}
+
 /// One request. `headers` are extra request headers (lowercase names).
 pub fn request(alloc: std.mem.Allocator, io: Io, method: Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header) !Response {
+    return request_opts(alloc, io, method, url, payload, headers, .{});
+}
+
+pub fn request_opts(alloc: std.mem.Allocator, io: Io, method: Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header, opts: RequestOptions) !Response {
     var client: std.http.Client = .{ .allocator = alloc, .io = io };
     defer client.deinit();
+    if (opts.ca_path) |p| {
+        client.ca_bundle.addCertsFromFilePathAbsolute(alloc, io, std.Io.Timestamp.now(io, .real), p) catch return error.BadCaFile;
+    }
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
     const m: std.http.Method = switch (method) {
@@ -63,6 +88,7 @@ pub fn git_authorization(alloc: std.mem.Allocator, io: Io, repo: []const u8, rem
 pub fn artifact_head(
     alloc: std.mem.Allocator,
     io: Io,
+    env: *const std.process.Environ.Map,
     repo: []const u8,
     remote_url: []const u8,
     actor: []const u8,
@@ -84,8 +110,11 @@ pub fn artifact_head(
     try url.append_slice(sha256);
     try url.append_slice("?actor=");
     try url.append_slice(actor);
-    _ = gitx;
-    return (try request(alloc, io, .HEAD, url.items, null, headers.items)).status;
+    // The standalone deployment pins its self-signed CA in Git's URL-scoped
+    // config; reuse it the way Git itself would for this URL.
+    const ca = gitx.config_urlmatch(alloc, io, repo, "http.sslCAInfo", remote_url) catch null;
+    const ca_path = if (ca) |p| (expand_home(alloc, env, p) orelse p) else null;
+    return (try request_opts(alloc, io, .HEAD, url.items, null, headers.items, .{ .ca_path = ca_path })).status;
 }
 
 test "placeholder so the module links" {

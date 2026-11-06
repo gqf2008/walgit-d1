@@ -371,7 +371,7 @@ fn remote_artifact_fits_cap(c: *Ctx, repo: []const u8, remote: []const u8, actor
         std.debug.print("wgl: remote \"{s}\" has no walgit artifact size endpoint; refused to fetch {s} before a size check\n", .{ remote_url, sha });
         return error.NoHttpRemote;
     }
-    const status = httpc.artifact_head(c.alloc, c.io, repo, remote_url, actor, sha) catch |err| {
+    const status = httpc.artifact_head(c.alloc, c.io, c.env, repo, remote_url, actor, sha) catch |err| {
         std.debug.print("wgl: HEAD artifact size: {t}\n", .{err});
         return err;
     };
