@@ -798,7 +798,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 
 `wgl mcp --repo <checkout> [--remote origin] [--no-fetch] [--subscribe-interval 5]
 [--max-subscriptions 32]`。stdout 只有一行一条的 JSON-RPC；日志走 stderr；stdin EOF 退出。
-请求串行处理；订阅由进程内轮询线程负责（best-effort）。
+请求串行处理；订阅由进程内轮询线程负责（best-effort）。读面的 `git fetch` 与写面的
+`git push` 都以 120 秒为界：超时与其他传输失败一样是工具错误，进程不退出。
 
 | 工具 / 资源 | 语义 | 门禁 |
 |---|---|---|

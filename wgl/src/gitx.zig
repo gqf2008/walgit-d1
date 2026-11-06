@@ -16,7 +16,15 @@ pub const Error = error{
     GitFailed,
     SpawnFailed,
     OutOfMemory,
+    Timeout,
 };
+
+/// The bounded wait for a ref-only network operation: a `refs/collab/*`
+/// fetch or push moves a handful of small objects, so two minutes without
+/// finishing means a hung remote, not a slow one. The bound is what lets a
+/// long-lived `wgl mcp` answer with a tool error instead of stalling its
+/// serialized stdio loop forever.
+pub const NET_TIMEOUT: Io.Timeout = .{ .duration = .{ .raw = Io.Duration.fromSeconds(120), .clock = .awake } };
 
 pub const Out = struct {
     stdout: []u8,
@@ -31,6 +39,10 @@ pub const Out = struct {
 /// One git invocation, capturing stdout/stderr. A non-zero exit is **not** an
 /// error here — callers decide (the CI runner's fetch failures are warnings).
 pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8) Error!Out {
+    return runWithTimeout(alloc, io, repo, argv, .none);
+}
+
+fn runWithTimeout(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8, timeout: Io.Timeout) Error!Out {
     var full: util.List([]const u8) = .init(alloc);
     defer full.deinit();
     try full.append("git");
@@ -39,8 +51,12 @@ pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []
         try full.append(r);
     }
     try full.append_slice(argv);
-    const res = std.process.run(alloc, io, .{ .argv = full.items }) catch |e| switch (e) {
+    last_stderr = "";
+    // A duration is turned into an absolute deadline once: every read of the
+    // child's output must share the one bound, not restart it.
+    const res = std.process.run(alloc, io, .{ .argv = full.items, .timeout = timeout.toDeadline(io) }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return error.Timeout,
         else => return error.SpawnFailed,
     };
     const code: ?u8 = switch (res.term) {
@@ -52,9 +68,11 @@ pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []
 
 /// Run a fully-formed argv (already starting with `git`) — for callers
 /// that build the command themselves (`push`).
-pub fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8) Error!Out {
-    const res = std.process.run(alloc, io, .{ .argv = argv }) catch |e| switch (e) {
+fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8, timeout: Io.Timeout) Error!Out {
+    last_stderr = "";
+    const res = std.process.run(alloc, io, .{ .argv = argv, .timeout = timeout.toDeadline(io) }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return error.Timeout,
         else => return error.SpawnFailed,
     };
     const code: ?u8 = switch (res.term) {
@@ -66,7 +84,11 @@ pub fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8) Erro
 
 /// Run git and return stdout, or `error.GitFailed` with `last_stderr` set.
 pub fn run_ok(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8) Error![]u8 {
-    const out = try run(alloc, io, repo, argv);
+    return run_ok_timeout(alloc, io, repo, argv, .none);
+}
+
+fn run_ok_timeout(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8, timeout: Io.Timeout) Error![]u8 {
+    const out = try runWithTimeout(alloc, io, repo, argv, timeout);
     if (!out.ok()) {
         last_stderr = std.mem.trim(u8, out.stderr, " \t\r\n");
         return error.GitFailed;
@@ -181,7 +203,7 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
     }
     try full.append(remote);
     try full.append_slice(opts.refspecs);
-    const out = try run_args(alloc, io, full.items);
+    const out = try run_args(alloc, io, full.items, NET_TIMEOUT);
     if (!out.ok()) {
         last_stderr = std.mem.trim(u8, out.stderr, " \t\r\n");
         return error.GitFailed;
@@ -194,11 +216,11 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
 /// refs, folded inbox refs) vanish locally, so a revoked key stops
 /// verifying in long-lived checkouts (§11.1).
 pub fn fetch_collab(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const u8) Error!void {
-    _ = try run_ok(alloc, io, repo, &.{
+    _ = try run_ok_timeout(alloc, io, repo, &.{
         "fetch",                                    "-q",
         "--prune",                                  remote,
         "+refs/collab/inbox/*:refs/collab/inbox/*", "+refs/collab/meta/*:refs/collab/meta/*",
-    });
+    }, NET_TIMEOUT);
 }
 
 /// On-demand pull of one CI artifact ref; `false` = the remote does not

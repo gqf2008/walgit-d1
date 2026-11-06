@@ -851,7 +851,9 @@
   claim` step 1) and **fails closed** when that fails; `fresh:false` (per call)
   or `--no-fetch` (process) reads the cached refs and reports
   `_meta.fetched_at`. Without this, a worker that had not fetched could see no
-  owner and duplicate the work §8.4 exists to prevent.
+  owner and duplicate the work §8.4 exists to prevent. The fetches and pushes
+  are bounded (120 s); a timed-out transfer is the same fail-closed tool error,
+  never a hung stdio loop.
   **Caller and write checks.** The caller is `<git-dir>/walgit/identity` —
   one identity per worktree (D58/D59/D62). `collab_publish` checks structure
   (`kind`/`id`/`actor`/signature prefix and 64-byte ed25519 shape), refuses

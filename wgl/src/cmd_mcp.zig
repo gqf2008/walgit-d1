@@ -612,7 +612,7 @@ fn freshFor(s: *Server, o: std.json.ObjectMap) bool {
 fn maybeFetch(s: *Server, a: std.mem.Allocator, fresh: bool) ?[]const u8 {
     if (!fresh) return null;
     gitx.fetch_collab(a, s.c.io, s.repo, s.remote) catch |e| {
-        const detail = if (gitx.last_stderr.len > 0) gitx.last_stderr else @errorName(e);
+        const detail = gitErrorDetail(e);
         return std.fmt.allocPrint(a, "cannot read remote {s} ({s}): {s} — fail closed; pass fresh:false to read the cached refs", .{ s.remote, @errorName(e), detail }) catch "fetch failed";
     };
     s.last_fetch.store(util.now_ts(), .release);
@@ -621,6 +621,16 @@ fn maybeFetch(s: *Server, a: std.mem.Allocator, fresh: bool) ?[]const u8 {
 
 fn fetchedAt(s: *Server) i64 {
     return s.last_fetch.load(.acquire);
+}
+
+/// A git failure as a tool message. A bounded fetch/push that ran out of
+/// time has no stderr to quote (`git` was killed), so it gets its own text.
+fn gitErrorDetail(e: anyerror) []const u8 {
+    return switch (e) {
+        error.Timeout => "timed out waiting for the remote (ref fetches and pushes are bounded)",
+        error.GitFailed => if (gitx.last_stderr.len > 0) gitx.last_stderr else "git failed",
+        else => @errorName(e),
+    };
 }
 
 fn toolBoard(s: *Server, a: std.mem.Allocator, fresh: bool) ToolCall {
@@ -1351,7 +1361,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
         };
         if (std.mem.eql(u8, st, "done")) {
             gitx.fetch_collab(a, s.c.io, s.repo, s.remote) catch |e| {
-                const detail = if (gitx.last_stderr.len > 0) gitx.last_stderr else @errorName(e);
+                const detail = gitErrorDetail(e);
                 return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot fetch refs/collab/* before the done gate ({s}): {s}", .{ @errorName(e), detail }) catch "cannot fetch before the done gate" } };
             };
             const reader = collabreader.Reader.init(a, s.c.io, s.repo);
@@ -1379,7 +1389,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
     const ref_name = std.fmt.allocPrint(a, "refs/collab/inbox/{s}/{s}", .{ actor, identity.entry_uuid(a, s.c.io) }) catch @panic("oom");
     const spec = std.fmt.allocPrint(a, "{s}:{s}", .{ oid, ref_name }) catch @panic("oom");
     gitx.push(a, s.c.io, s.repo, s.remote, .{ .refspecs = &.{spec} }) catch |e| {
-        const detail = if (gitx.last_stderr.len > 0) gitx.last_stderr else @errorName(e);
+        const detail = gitErrorDetail(e);
         return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot push {s} to {s}: {s}", .{ ref_name, s.remote, detail }) catch "push failed" } };
     };
     gitx.update_ref(a, s.c.io, s.repo, ref_name, oid) catch {};
@@ -1404,7 +1414,7 @@ fn toolRegister(s: *Server, a: std.mem.Allocator) ToolCall {
     };
     const public_key = entry_mod.public_key_b64(a, key);
     const result = cmd_collab.publish_principal(s.c, s.repo, ident.principal, public_key, s.remote) catch |e| {
-        const detail = if (gitx.last_stderr.len > 0) gitx.last_stderr else @errorName(e);
+        const detail = gitErrorDetail(e);
         return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot register {s}: {s}", .{ ident.principal, detail }) catch "registration failed" } };
     };
     var v = jsonio.new_object();

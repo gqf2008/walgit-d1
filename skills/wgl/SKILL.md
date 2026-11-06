@@ -141,7 +141,8 @@ wgl mcp --repo <checkout> [--remote origin] \
 `resources/unsubscribe` and `ping` are implemented; notifications are written
 unprompted. A tool that ran and failed answers `isError: true` with a readable
 message (a bad request is JSON-RPC `-32602`); a failed fetch or push is a tool
-error, never a process exit.
+error, never a process exit. Ref fetches and pushes are bounded at two minutes:
+a timed-out transfer is that same tool error.
 
 ### Tools
 
