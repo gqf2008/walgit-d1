@@ -133,7 +133,7 @@ pub fn thread(c: *Ctx, p: *args.Parsed) !u8 {
 }
 
 /// An entry as a json! value would serialize it (struct → sorted BTreeMap).
-fn entry_value(alloc: std.mem.Allocator, e: *const Entry) Value {
+pub fn entry_value(alloc: std.mem.Allocator, e: *const Entry) Value {
     var o = jsonio.new_object();
     jsonio.obj_put(&o, alloc, "version", .{ .integer = e.version });
     jsonio.obj_put(&o, alloc, "kind", .{ .string = e.kind });
@@ -573,7 +573,7 @@ pub fn join(c: *Ctx, p: *args.Parsed) !u8 {
 /// The public key currently registered for `principal` in this repository,
 /// if any. A present-but-malformed ref is an error — a missing/non-string
 /// `public_key` must not silently skip the rotation guard.
-fn registered_public_key(c: *Ctx, repo: []const u8, principal: []const u8) !?[]const u8 {
+pub fn registered_public_key(c: *Ctx, repo: []const u8, principal: []const u8) !?[]const u8 {
     const ref_name = try std.fmt.allocPrint(c.alloc, "refs/collab/meta/principals/{s}", .{principal});
     const blob = gitx.cat_blob(c.alloc, c.io, repo, ref_name) catch return null;
     const v = std.json.parseFromSliceLeaky(Value, c.alloc, blob, .{}) catch return error.BadRegistration;
@@ -592,7 +592,7 @@ const PublishResult = struct { ref_name: []const u8, oid: []const u8 };
 /// Write/replace the registration blob and its ref (§4.3). Rotation pushes
 /// a forced refspec (`+`): the update is a forced one by construction — the
 /// signer rotated the key — and the ref points at a blob, not a commit.
-fn publish_principal(c: *Ctx, repo: []const u8, principal: []const u8, public_key: []const u8, push: ?[]const u8) !PublishResult {
+pub fn publish_principal(c: *Ctx, repo: []const u8, principal: []const u8, public_key: []const u8, push: ?[]const u8) !PublishResult {
     var o = jsonio.new_object();
     jsonio.obj_put(&o, c.alloc, "version", .{ .integer = 1 });
     jsonio.obj_put(&o, c.alloc, "principal", .{ .string = principal });
@@ -1062,6 +1062,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
     // Nothing new ⇒ prune-only fold: the snapshot is never rebuilt (a
     // rebuild would differ only in ts — pure ref churn).
     var snap_oid: ?[]const u8 = null;
+    var snap_bytes: u64 = 0;
     if (changed or over_cap) {
         const ts = util.now_ts();
         const built = try build_capped_snapshot(c.alloc, actor, ts, records.items, key, truncate, entry_mod.COLLAB_SNAPSHOT_MAX_BYTES);
@@ -1069,6 +1070,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
             std.debug.print("wgl: collab gc: WARNING snapshot truncated: dropped {d} oldest record(s); the ledger is now marked complete=false\n", .{built.snap.dropped_entries});
         }
         snap_oid = try gitx.write_blob(c.alloc, c.io, repo, built.text);
+        snap_bytes = built.text.len;
     }
 
     if (push == null) {
@@ -1089,7 +1091,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
         };
         const lease = try std.fmt.allocPrint(c.alloc, "{s}:{s}", .{ entry_mod.SNAPSHOT_REF, baseline orelse "" });
         const spec = try std.fmt.allocPrint(c.alloc, "{s}:{s}", .{ snapshot_to_push, entry_mod.SNAPSHOT_REF });
-        gitx.push(c.alloc, c.io, repo, remote, .{ .refspecs = &.{spec}, .leases = &.{lease} }) catch |err| {
+        gitx.push(c.alloc, c.io, repo, remote, .{ .refspecs = &.{spec}, .leases = &.{lease}, .payload_bytes = snap_bytes }) catch |err| {
             std.debug.print("wgl: push the snapshot (the fold baseline moved — a concurrent gc? fetch and retry): {t}\n", .{err});
             return err;
         };

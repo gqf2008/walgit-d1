@@ -16,7 +16,29 @@ pub const Error = error{
     GitFailed,
     SpawnFailed,
     OutOfMemory,
+    Timeout,
 };
+
+/// The bounded wait for a ref-only network operation: a `refs/collab/*`
+/// fetch or push moves a handful of small objects, so two minutes without
+/// finishing means a hung remote, not a slow one. The bound is what lets a
+/// long-lived `wgl mcp` answer with a tool error instead of stalling its
+/// serialized stdio loop forever.
+pub const NET_TIMEOUT: Io.Timeout = .{ .duration = .{ .raw = Io.Duration.fromSeconds(120), .clock = .awake } };
+
+/// A push's bound, scaled by the bytes it will move. The 120 s ref bound is
+/// right for an inbox entry but not for a 64 MiB gc snapshot or a 16 MiB CI
+/// artifact on a slow uplink, so callers that know the payload pass it and
+/// get 120 s plus one second per 64 KiB (a 512 kbit/s floor: 64 MiB ≈ 19 min,
+/// 16 MiB ≈ 6 min). Unknown-size pushes keep the ref bound; a caller that
+/// wants the old unbounded behaviour sets `PushOptions.timeout = .none`.
+pub fn pushTimeoutSeconds(payload_bytes: u64) u64 {
+    return 120 + payload_bytes / (64 * 1024);
+}
+
+fn pushTimeoutForSize(payload_bytes: u64) Io.Timeout {
+    return .{ .duration = .{ .raw = Io.Duration.fromSeconds(@intCast(pushTimeoutSeconds(payload_bytes))), .clock = .awake } };
+}
 
 pub const Out = struct {
     stdout: []u8,
@@ -31,6 +53,10 @@ pub const Out = struct {
 /// One git invocation, capturing stdout/stderr. A non-zero exit is **not** an
 /// error here — callers decide (the CI runner's fetch failures are warnings).
 pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8) Error!Out {
+    return runWithTimeout(alloc, io, repo, argv, .none);
+}
+
+fn runWithTimeout(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8, timeout: Io.Timeout) Error!Out {
     var full: util.List([]const u8) = .init(alloc);
     defer full.deinit();
     try full.append("git");
@@ -39,8 +65,12 @@ pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []
         try full.append(r);
     }
     try full.append_slice(argv);
-    const res = std.process.run(alloc, io, .{ .argv = full.items }) catch |e| switch (e) {
+    last_stderr = "";
+    // A duration is turned into an absolute deadline once: every read of the
+    // child's output must share the one bound, not restart it.
+    const res = std.process.run(alloc, io, .{ .argv = full.items, .timeout = timeout.toDeadline(io) }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return error.Timeout,
         else => return error.SpawnFailed,
     };
     const code: ?u8 = switch (res.term) {
@@ -52,9 +82,11 @@ pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []
 
 /// Run a fully-formed argv (already starting with `git`) — for callers
 /// that build the command themselves (`push`).
-pub fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8) Error!Out {
-    const res = std.process.run(alloc, io, .{ .argv = argv }) catch |e| switch (e) {
+fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8, timeout: Io.Timeout) Error!Out {
+    last_stderr = "";
+    const res = std.process.run(alloc, io, .{ .argv = argv, .timeout = timeout.toDeadline(io) }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return error.Timeout,
         else => return error.SpawnFailed,
     };
     const code: ?u8 = switch (res.term) {
@@ -66,7 +98,11 @@ pub fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8) Erro
 
 /// Run git and return stdout, or `error.GitFailed` with `last_stderr` set.
 pub fn run_ok(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8) Error![]u8 {
-    const out = try run(alloc, io, repo, argv);
+    return run_ok_timeout(alloc, io, repo, argv, .none);
+}
+
+fn run_ok_timeout(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8, timeout: Io.Timeout) Error![]u8 {
+    const out = try runWithTimeout(alloc, io, repo, argv, timeout);
     if (!out.ok()) {
         last_stderr = std.mem.trim(u8, out.stderr, " \t\r\n");
         return error.GitFailed;
@@ -163,6 +199,13 @@ pub const PushOptions = struct {
     /// through the refspec here.
     leases: []const []const u8 = &.{},
     atomic: bool = false,
+    /// `null` derives the bound: `payload_bytes` scales it, otherwise the
+    /// 120 s ref bound applies. `.none` means wait forever (the pre-D70
+    /// behaviour for callers that still want it).
+    timeout: ?Io.Timeout = null,
+    /// Total bytes this push is expected to move, when the caller knows it
+    /// (a gc snapshot, CI log/artifacts). Small ref pushes omit it.
+    payload_bytes: ?u64 = null,
 };
 
 /// One push for several refspecs (a single receive-pack round trip).
@@ -181,7 +224,8 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
     }
     try full.append(remote);
     try full.append_slice(opts.refspecs);
-    const out = try run_args(alloc, io, full.items);
+    const timeout = opts.timeout orelse if (opts.payload_bytes) |bytes| pushTimeoutForSize(bytes) else NET_TIMEOUT;
+    const out = try run_args(alloc, io, full.items, timeout);
     if (!out.ok()) {
         last_stderr = std.mem.trim(u8, out.stderr, " \t\r\n");
         return error.GitFailed;
@@ -199,6 +243,18 @@ pub fn fetch_collab(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: 
         "--prune",                                  remote,
         "+refs/collab/inbox/*:refs/collab/inbox/*", "+refs/collab/meta/*:refs/collab/meta/*",
     });
+}
+
+/// The MCP read lane's fetch: bounded, because a stdio server must answer
+/// (fail closed) instead of stalling its serialized request loop. A first
+/// fetch of a large inbox can exceed the bound; `--no-fetch` and `fresh:false`
+/// are the offline escape hatch.
+pub fn fetch_collab_bounded(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const u8) Error!void {
+    _ = try run_ok_timeout(alloc, io, repo, &.{
+        "fetch",                                    "-q",
+        "--prune",                                  remote,
+        "+refs/collab/inbox/*:refs/collab/inbox/*", "+refs/collab/meta/*:refs/collab/meta/*",
+    }, NET_TIMEOUT);
 }
 
 /// On-demand pull of one CI artifact ref; `false` = the remote does not
@@ -414,6 +470,17 @@ pub fn host_root(alloc: std.mem.Allocator, remote: []const u8) Error![]u8 {
     const rest = without_git[scheme_end + 3 ..];
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
     return std.fmt.allocPrint(alloc, "{s}://{s}", .{ without_git[0..scheme_end], rest[0..slash] }) catch error.OutOfMemory;
+}
+
+test "push timeout scales with the payload" {
+    try std.testing.expectEqual(@as(u64, 120), pushTimeoutSeconds(0));
+    try std.testing.expectEqual(@as(u64, 120), pushTimeoutSeconds(64 * 1024 - 1));
+    try std.testing.expectEqual(@as(u64, 121), pushTimeoutSeconds(64 * 1024));
+    // 16 MiB and the 64 MiB snapshot cap sit well beyond the ref bound, and
+    // the bound stays monotonic in size.
+    try std.testing.expectEqual(@as(u64, 376), pushTimeoutSeconds(16 * 1024 * 1024));
+    try std.testing.expectEqual(@as(u64, 1144), pushTimeoutSeconds(64 * 1024 * 1024));
+    try std.testing.expect(pushTimeoutSeconds(64 * 1024 * 1024) > pushTimeoutSeconds(16 * 1024 * 1024));
 }
 
 test "host_root strips scheme and path" {

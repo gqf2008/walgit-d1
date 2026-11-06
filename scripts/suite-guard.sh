@@ -50,7 +50,7 @@ grep -qE '^[[:space:]]*cargo test -p walgit-server \{\{SERVER_TESTS\}\}[[:space:
     || die "test-server-integration no longer interpolates SERVER_TESTS on its own line — the single source became decorative"
 grep -qE '^[[:space:]]*cd wgl && zig build test[[:space:]]*$' justfile \
     || die "wgl-test no longer runs `zig build test` on its own line — the single source became decorative"
-grep -qE '^[[:space:]]*scripts/wgl-e2e.sh[[:space:]]*$' justfile \
+grep -qE '^[[:space:]]*(bash )?scripts/wgl-e2e\.sh[[:space:]]*$' justfile \
     || die "wgl-e2e no longer runs the script on its own line — the single source became decorative"
 grep -qE '^[[:space:]]*cargo test \{\{WILDCARD_TEST_PKGS\}\} --tests[[:space:]]*$' justfile \
     || die "test-wildcard-crates no longer interpolates WILDCARD_TEST_PKGS on its own line — the single source became decorative"

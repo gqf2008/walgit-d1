@@ -1,4 +1,4 @@
-//! The wgl entrypoint: `wgl <collab|principal|ci> <action> [--flags]`.
+//! The wgl entrypoint: `wgl <collab|principal|ci|mcp> <action> [--flags]`.
 //! One arena per run; every command is a leaf returning an exit code (the
 //! card-claim stand-down is exit 2, §8.4).
 
@@ -8,6 +8,7 @@ const cmd_collab = @import("cmd_collab.zig");
 const cmd_principal = @import("cmd_principal.zig");
 const cmd_ci = @import("cmd_ci.zig");
 const util = @import("util.zig");
+const cmd_mcp = @import("cmd_mcp.zig");
 
 const usage =
     \\wgl — the standalone D1 collaboration client (docs/D1_PROTOCOL.md)
@@ -18,6 +19,7 @@ const usage =
     \\            claim|gc|watch
     \\  wgl principal register|rotate|list|revoke
     \\  wgl ci validate|run|status|log|artifacts
+    \\  wgl mcp --repo <checkout> [--remote origin]
     \\
 ;
 
@@ -64,8 +66,36 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, group, "ci")) {
         return cmd_ci.dispatch(&ctx, action, rest);
     }
+    if (std.mem.eql(u8, group, "mcp")) {
+        // `wgl mcp` is one long-lived process whose whole surface is stdio
+        // JSON-RPC; the action slot is unused, so accept the flag form
+        // (`wgl mcp --repo .`) as well as a stray positional-free action.
+        var mcp_rest: util.List([]const u8) = util.List([]const u8).init(alloc);
+        if (action.len > 0 and action[0] == '-') try mcp_rest.append(action);
+        try mcp_rest.append_slice(rest);
+        var parsed = args.parse(alloc, mcp_rest.items, mcp_specs()) catch |err| switch (err) {
+            error.OutOfMemory => return 1,
+            else => return 2,
+        };
+        defer parsed.deinit();
+        return cmd_mcp.run(&ctx, &parsed) catch |err| {
+            report_failure(&ctx, "mcp", "serve", err);
+            return 1;
+        };
+    }
     std.debug.print("wgl: unknown group \"{s}\"\n{s}", .{ group, usage });
     return 2;
+}
+
+fn mcp_specs() []const args.Spec {
+    const S = args.Spec;
+    return &.{
+        S{ .name = "repo" },
+        S{ .name = "remote" },
+        S{ .name = "no-fetch", .boolean = true },
+        S{ .name = "subscribe-interval" },
+        S{ .name = "max-subscriptions" },
+    };
 }
 
 fn collab_dispatch(ctx: *cmd_collab.Ctx, action: []const u8, rest: []const []const u8) u8 {
@@ -240,4 +270,27 @@ fn intern_pr(action: []const u8) PrincipalAction {
     if (eq(action, "list")) return .list;
     if (eq(action, "revoke")) return .revoke;
     return .unknown;
+}
+
+// Zig 0.17's `zig test` only collects tests from files a test declaration
+// references; an executable's imports are not enough (verified: a root that
+// calls a function from an imported file runs 0 tests). Keep every module that
+// carries tests in this block, or `just wgl-test` silently tests nothing.
+test {
+    _ = @import("args.zig");
+    _ = @import("boarddef.zig");
+    _ = @import("ciconfig.zig");
+    _ = @import("cmd_ci.zig");
+    _ = @import("cmd_collab.zig");
+    _ = @import("cmd_mcp.zig");
+    _ = @import("cmd_principal.zig");
+    _ = @import("collabreader.zig");
+    _ = @import("cron.zig");
+    _ = @import("gitx.zig");
+    _ = @import("httpc.zig");
+    _ = @import("identity.zig");
+    _ = @import("jsonio.zig");
+    _ = @import("render.zig");
+    _ = @import("toml.zig");
+    _ = @import("util.zig");
 }

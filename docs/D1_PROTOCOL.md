@@ -757,15 +757,14 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   `seq + 1`（或定义为「下一条待读」）。
 - **HTTP SSE**：`text/event-stream` 信封，best-effort（可能丢包）；要无损 push 语义必须自建
   sidecar 从 pull 车道转发（D46）。
-- **MCP 面**：宿主自己在内置的 `/mcp`（Streamable HTTP，D64）暴露**宿主自己的 JSON API** 的工具与
-  `walgit://` 资源 —— 工具名与宿主 API 一一对应（`repo_*` 读仓库，`collab_board`/`collab_thread`/
-  `collab_report` 读聚合，`wal_ls` 读保留日志），唯一的写工具 `collab_publish` 收下客户端**已签名**的条目
-  并转交 `POST …/api-browser/collab/entries`：服务端不签名、不持钥，只做签名校验 + `actor == 调用者`，
-  工作卡认领就是发布一条 `card_claim` 后重读看板。资源 `walgit://refs/<o>/<r>`、
-  `walgit://wal/<o>/<r>{?from}`、`walgit://collab/board/<o>/<r>`、
-  `walgit://collab/thread/<o>/<r>/<id>`，`resources/read` 带稳定 `_meta.version`；订阅是
-  **服务端 refs 级轮询、best-effort**（同 D52，不是持久推送）；字节不过 MCP（clone/fetch/push
-  仍走 git/bundle-uri）。实现：`crates/walgit-server/src/mcp/`，说明见 `web/SKILL.md`。
+- **MCP 面（D70 起分两处）**：宿主 `/mcp`（Streamable HTTP，D64）只保留**宿主自己的 JSON
+  API** 的仓库读面 —— `repo_*` 与 `wal_ls`，资源 `walgit://refs/<o>/<r>`、
+  `walgit://wal/<o>/<r>{?from}`；订阅是服务端 refs 级轮询、best-effort（同 D52，不是持久推送）。
+  协作面（`collab_board`/`collab_thread`/`collab_report`/`ci_status`/`collab_publish`/
+  `collab_register` 与 `walgit://collab/*`）在独立的 **`wgl mcp`**（stdio JSON-RPC），
+  聚合的是 checkout 自己的 `refs/collab/*`：读前默认 `git fetch --prune`（失败即 fail
+  closed），写是把客户端**已签名**条目 push 成收件箱 ref。字节不过 MCP（clone/fetch/push 仍走
+  git/bundle-uri）。表见 §12.1；实现 `crates/walgit-server/src/mcp/` 与 `wgl/src/cmd_mcp.zig`。
 
 ### 11.3 去重与幂等（汇总）
 
@@ -794,6 +793,34 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 预算与缓存：collab 聚合端点受 §9.4 的 20k/64MiB 预算保护，超限 `503` 指向 gc / 离线 CLI；
 三个聚合读端点一律 **SWR + 响应体 sha256 ETag、永不 immutable**（同一 body 的重复请求 304；
 `report` 含 `now` 相关的 CI 运行态，跨 TTL 边界 body 变化即回 200）。
+
+### 12.1 agent MCP 面（`wgl mcp`，stdio，D70）
+
+`wgl mcp --repo <checkout> [--remote origin] [--no-fetch] [--subscribe-interval 5]
+[--max-subscriptions 32]`。stdout 只有一行一条的 JSON-RPC；日志走 stderr；stdin EOF 退出。
+请求串行处理；订阅由进程内轮询线程负责（best-effort），无订阅时不做 refs 工作。MCP 读面的
+`git fetch` 有 120 秒上界；写面的 ref push 同样 120 秒：超时与其他传输失败一样是工具错误，
+进程不退出。CLI 的大对象 push（gc snapshot ≤64 MiB、CI 产物 ≤16 MiB）按 payload 大小放宽
+（`gitx.pushTimeoutSeconds` = 120 秒 + 每 64 KiB 1 秒）；未声明大小的 push 仍用 120 秒。
+单行上限 2 MiB（entry cap 256 KiB + envelope/转义）；超长行被丢弃后回一条 `-32700`，进程
+继续服务（订阅不中断）。
+
+| 工具 / 资源 | 语义 | 门禁 |
+|---|---|---|
+| `collab_board` | §8 看板（读本地 HEAD 的 `.walgit/board.toml`） | 读前 fetch；失败即工具错误 |
+| `collab_thread {id}` | §6/§7.2：`{id, entries:[{oid, principal, verified, entry, broken_refs}], pr}` | 同上 |
+| `collab_report` | §7.4 报告（含 CI runs） | 同上 |
+| `ci_status {id?}` | CI 协议 §8.3：`{repo, runs}` | 同上 |
+| `collab_publish {entry}` | 客户端**已签名**条目 → `refs/collab/inbox/<actor>/<uuid>`（git push） | 与写路径同源的 serde 解析（必填/类型/`refs` 形状/`version` 范围；未知字段忽略）+ `ed25519:`+64 字节 + `actor == <git-dir>/walgit/identity`；`entry` 是 JSON 文本时按**原字节**写 blob（oid 与 `wgl collab entry` 一致，不产生重复条目）；`status=done` 先 fetch 再走 §7.5 门禁；**写侧不验签** |
+| `collab_register {force?}` | 本 worktree 身份公钥 → `refs/collab/meta/principals/<p>` 并 push | identity 缺失即拒绝；已注册的 key 与本次不同且 `force != true` 即拒绝（§4.3 RotationGuard，防止历史条目变 unverified） |
+| `walgit://collab/board` | 看板 JSON | 读前 fetch；`_meta.version = b:<witness>[:claim:<expires_at>]` |
+| `walgit://collab/thread/<id>` | 线程 JSON（`<id>` 做 `%XX` 解码） | 读前 fetch；`_meta.version = h:<tip>`；本地 body 无 WAL `seq`（主机 body 有） |
+
+`fresh:false`（逐调用）读缓存；`--no-fetch`（进程）是**硬门**：逐调用的 `fresh:true` 不能
+重新联网。`_meta.fetched_at` 标出上次成功 fetch 的时刻，只出现在 `_meta`，不进被比对的
+body。`resources/subscribe` 的初始版本与随后每次轮询都走同一 fetch 策略；TTL 到期只改看板
+版本（`claim:` 消失），由轮询唤醒；`unsubscribe`、stdin EOF 和轮询失败都清理订阅。注意：本地检查只是纪律 —— 裸 `git push` 可绕过
+`collab_publish` 的结构/actor/`done` 检查（§7.5、§14）。
 
 ## 13. 限额与预算（汇总）
 
@@ -848,8 +875,8 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
 | `walgit-wal/src/collab.rs::golden_tests` + `web/src/collab-canonical.test.ts` + `crates/walgit-server/tests/web_api.rs::collab_sdk_golden_entry_verifies_end_to_end` | 跨语言金标向量：SDK/WebCrypto 与 Rust 覆盖同一 canonical 字节串（含 `"sig":""`），且浏览器式条目经薄 API 聚合 verified |
 | `…::snapshot_tests` | git blob oid 已知答案（sha1/sha256）；全量/部分折叠字节等价（含 verified 标志）；撒谎 oid/不可解析记录跳过；快照 version/kind fail-closed；快照签名；EntrySet 去重与属主偏好；完整性标记 round-trip（`snapshot_completeness_marker_round_trips`） |
 | `…::transition_tests` | `done` 门禁（needs-review + verified approve，且排除 patch 作者）；先 thread() 后判定；card prose 抽取；merge 去重/非作者（`merge_rule_counts_distinct_non_author_approvers` / `pr_view_collects_verified_patch_authors_only` / `done_gate_rejects_self_approval_by_the_patch_author`） |
-| `wgl/` 的 Zig 测试（`zig build test`） | 金标向量（§5.3.1 第三实现）；canonicalize 紧凑键序；签名/验签/篡改；thread 链序（含递减 `ts` 全量解析）；看板确定性；card_claim 收敛（胜者/过期/pending）；merge 只计非 `svc-` 非作者；report 投影排序；done 门禁；快照 round-trip；EntrySet 去重与属主偏好 |
-| `scripts/wgl-e2e.sh`（`just wgl-e2e`，D69 起） | 真实 git 传输全流程（注册→issue→链式条目→approve→第二克隆聚合验签→合并门禁放行→两 principal 认领竞争恰一执行、败者退出码 2→gc 折叠前后看板哈希一致→watch 快照事件→ci validate）；有 walgit 二进制时跨实现核对看板哈希 |
+| `wgl/` 的 Zig 测试（`zig build test`） | 金标向量（§5.3.1 第三实现）；canonicalize 紧凑键序；签名/验签/篡改；thread 链序（含递减 `ts` 全量解析）；看板确定性；card_claim 收敛（胜者/过期/pending）；merge 只计非 `svc-` 非作者；report 投影排序；done 门禁；快照 round-trip；EntrySet 去重与属主偏好；`wgl mcp` 的 tools/list 面、board/thread/report/ci 输出形状、Rust `DefaultHasher` 版本串、fresh 策略、publish/register 拒绝路径 |
+| `scripts/wgl-e2e.sh`（`just wgl-e2e`，D69 起） | 真实 git 传输全流程（注册→issue→链式条目→approve→第二克隆聚合验签→合并门禁放行→两 principal 认领竞争恰一执行、败者退出码 2→gc 折叠前后看板哈希一致→watch 快照事件→ci validate）；`wgl mcp` 的 fail-closed、订阅（claim TTL 到期唤醒、`--max-subscriptions`、unsubscribe、EOF）；有仍带 `collab` 的参考二进制时跨实现核对看板哈希（D69 后的二进制显式跳过）；`WALGIT_SERVER_BIN` 可探测到时用 memory store 起真服务器，逐端点做 `wgl mcp` ↔ `api-browser/collab/*` 的解析后 JSON 相等比较（探测不到显式跳过） |
 | `crates/walgit-server/tests/web_api.rs` (`collab_*`) | 薄 API 签名条目（服务端不验签、聚合验）；report/thread 聚合；注册+verified；薄 API 遵守 policy；默认板投影；CI 产物按哈希供字节；超大快照物化前拒绝 |
 | `crates/walgit-server/src/policy.rs` 测试 + `crates/walgit-server/tests/policy_inbox.rs` | `{principal}` 段捕获与单规则收件箱隔离（`collab_inbox_shards_with_one_principal_relative_rule`，bypass 只放行被捕获的 owner）；token 模式按 actor 分片的字面规则版 |
 | `web/src/collab-text.test.ts` + Rust `card_prose_is_the_thread_page_field_walk` | 跨语言 prose 抽取同表（看板卡片与线程页不漂移） |

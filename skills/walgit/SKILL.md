@@ -75,122 +75,83 @@ configured for.
   gets *re-spawned* mid-install no longer blocks the upgrade — but stopping them first is still the
   clean path (a stopped lane also comes back on the **new** binary instead of the renamed old one).
 
-## 3. MCP (served by the host — the collaboration interface)
+## 3. MCP — two surfaces (D70)
 
-`wgl collab …`、`wgl ci …`、`wgl principal …` 是独立的 Zig 客户端（D69），**不在 `walgit`
-二进制里**：`walgit --help` 不再包含这三族命令，它们也不会再以隐藏/废弃形式出现。协作接口（读写
-`refs/collab/*`）仍以 `/mcp` 为主；`wgl` 是同一事实源的本地、脚本化形式——读走本地 refs 离线聚合，
-写走普通 git transport。仓库的 HTTP JSON 也只剩 `/{owner}/{repo}/api-browser/…` 一条车道
-（`/api` 保持 404，`web/api.rs` 本身已标为废弃）。
+Since D69 the `collab` / `ci` / `principal` command families live in the
+standalone **`wgl`** client. Since D70 the collaboration MCP face moved with
+them: the host serves **repository and WAL reads**, and `wgl mcp` serves
+**collaboration**, over a checkout's own `refs/collab/*`.
 
+### 3a. Host MCP (`<host>/mcp`) — read-only repository state
 
-Every host serves MCP itself at **`<host>/mcp`** (Streamable HTTP, D64) — there is
-no local `walgit mcp` process to spawn. **This is the interface** for reading and
-writing collaboration state: git carries bytes, MCP carries everything else. The
-`wgl collab`/`wgl ci`/`wgl principal` subcommands are the local, scriptable forms
-of the same acts (a checkout, a key, a shell) and never a second contract — if you are
-writing an agent, use the tools below.
-
-Register the URL with the same credential
-git uses:
+Streamable HTTP (D64); the URL takes the same credential git uses:
 
 ```jsonc
 { "url": "https://<host>/mcp", "headers": { "Authorization": "Bearer <token>" } }
 ```
 
 `POST /mcp` carries JSON-RPC (`Accept: application/json, text/event-stream` is
-required by the transport); `GET /mcp` with the `Mcp-Session-Id` from `initialize`
-holds the notification stream; `DELETE /mcp` ends the session. A bad credential
-is a real 401 with a `Bearer` challenge.
+required by the transport); `GET /mcp` with the `Mcp-Session-Id` from
+`initialize` holds the notification stream; `DELETE /mcp` ends the session. A bad
+credential is a real 401 with a `Bearer` challenge. Tools: `repo_list`,
+`repo_owners`, `repo_overview`, `repo_refs`, `repo_resolve`, `repo_tree`,
+`repo_blob`, `repo_commits`, `repo_commit`, `repo_diff`, `repo_merge_base`,
+`repo_blame`, `repo_tasks`, `repo_ops`, `repo_policy`, `repo_settings`,
+`wal_ls`. All read-only. Resources: `walgit://refs/<owner>/<repo>` (the
+repository-wide lane) and `walgit://wal/<owner>/<repo>?from=<seq>`, with
+`resources/subscribe` as per-instance best-effort polling (D52).
 
 ```jsonc
 {"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
- "params":{"uri":"walgit://collab/board/acme/repo"}}
-{"jsonrpc":"2.0","id":2,"method":"resources/list"}
-{"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}
-{"jsonrpc":"2.0","id":4,"method":"resources/read",
- "params":{"uri":"walgit://collab/board/acme/repo"}}
+ "params":{"uri":"walgit://refs/acme/repo"}}
 ```
 
-A project is covered end to end by two subscriptions (one `resources/subscribe` call each, the
-shape shown above, `uri` set to each in turn):
+### 3b. Collaboration MCP (`wgl mcp`, stdio)
 
-```jsonc
-[
-  "walgit://refs/<owner>/<repo>",           // every git action — push, branch/tag — plus refs/collab/inbox/*
-  "walgit://collab/board/<owner>/<repo>"    // the whole board projection: new threads, replies, status flow
-]
+The D1 tools/resources are **not** on `/mcp` any more. In a checkout:
+
+```sh
+wgl mcp --repo <checkout> [--remote origin] \
+        [--no-fetch] [--subscribe-interval 5] [--max-subscriptions 32]
 ```
 
-The refs subscription is a refs-level read of the WAL head (one conditional
-manifest GET per tick), so a push, a branch/tag move and a new
-`refs/collab/inbox/*` entry all bump it — it watches the whole repository by
-design. The board subscription covers the projection instead (new thread, new
-reply, status transition) without diffing refs yourself, and it stays quiet
-while nothing on the board moves: its version fingerprints the cards plus the
-earliest live claim, so a `ci-artifacts` ref or another repository's churn
-wakes nobody. A single card can be followed with
-`walgit://collab/thread/<owner>/<repo>/<id>`, whose version is that card's own
+stdio JSON-RPC, one message per line; stdout carries nothing but JSON-RPC, logs
+go to stderr, stdin EOF exits 0. Tools: `collab_board`, `collab_thread {id}`,
+`collab_report`, `ci_status {id?}`, the one write tool `collab_publish {entry}`,
+and `collab_register` (optional `force`; this worktree identity's public key —
+a different existing registration is refused without force, the same §4.3
+rotation guard `wgl collab join` applies).
+Resources: `walgit://collab/board` and `walgit://collab/thread/<id>`.
+
+**Every read fetches `refs/collab/{inbox,meta}` first** (`git fetch --prune`,
+the same lane `wgl collab claim` step 1 uses) and fails closed if that fails;
+`fresh:false` reads cached refs; process-level `--no-fetch` is a hard gate
+(no per-call `fresh:true` re-enables the network). `_meta.fetched_at` records
+the last successful fetch (it never enters the body).
+Subscriptions are in-process polls; `notifications/resources/updated` carries
+only the `uri` — re-read and compare `_meta.version`. Board version =
+cards + earliest live claim (a TTL lapse wakes once); thread version = its own
 tip.
 
-Subscriptions are server-side polling, **per-instance** and **best-effort**
-(D52), rather than a durable push channel: the poller dies with the session, so
-read once at startup and never treat a restart as "nothing new". Version changes
-arrive as `notifications/resources/updated` with the resource `uri`;
-disappearance arrives as `notifications/resources/list_changed`. The poll
-interval is the host operator's `mcp.subscribe_interval` (>= 1s), and
-`mcp.max_subscriptions` caps a caller's live subscriptions (excess is rejected).
+**Identity and writes.** The caller is `<git-dir>/walgit/identity` (one per
+worktree, D58/D59/D62). `collab_register` refuses when it is missing;
+`collab_publish` refuses `actor != caller`, parses the entry with the server's
+structural rules (`refs` shape, `version` range, unknown fields ignored) plus
+an `ed25519:` 64-byte signature requirement, and enforces
+`status=done` locally after a fetch (the §7.5 gate). Neither signs for you nor
+holds a key, and the signature is **not verified on write** — aggregation
+verifies, so read the thread back and require `verified: true`. A raw
+`git push` bypasses all local checks: these are discipline, not a security
+boundary; `policy.json` on receive-pack is the write gate. Claiming is still
+read board → publish a **root** `card_claim` → re-read board (the verdict is the
+claim's oid; `wgl collab claim` does this and exits 2 on stand-down).
 
-In the UI: each repository's `/collab` page, the board's empty state and the
-collab guide state the same two facts as **one paragraph with one copy button** —
-the endpoint and this repository's three resource URIs (`walgit://refs/…`,
-`walgit://wal/…`, `walgit://collab/board/…`) — so an operator can copy it into an
-agent and let the agent configure its own client. The page carries no curl and no
-protocol reminders: MCP is a standard, and the four URI forms are served by
-`resources/templates/list`. The full semantics are documented in the public host
-`/SKILL.md` under **MCP (optional, served by the host)**; use that as the single
-detailed reference.
-
-After an update notification, `resources/read` the same `uri` — the notification
-carries no content or version. Compare `_meta.version` with the last one you
-processed for the URI, then re-read the specific thread before acting.
-`notifications/resources/list_changed` means the resource vanished — re-list and
-re-subscribe.
-
-Two tools write, and neither needs a key handed over:
-
-* `collab_register {repo, principal, public_key}` — name **your own** principal's
-  public key once (before the first entry, or after rotating). `wgl collab
-  join` does this for a CLI user.
-* `collab_publish` — build the entry, sign it with **your own** principal key
-  (`wgl collab entry` does both), then pass it as `entry` (an object, or its
-  JSON text). The host publishes it as an ordinary entry; it holds no key and
-  signs nothing. It does **not** verify the signature on write — verification
-  happens at aggregation, so read the thread back and require `verified: true`
-  (an entry and its `collab_register` may land in either order, and nothing in
-  the append-only log can be retracted). Claim a work card
-by publishing a **root** `card_claim` entry (`parent = ""`; `wgl collab claim`
-builds it, then reads the board back): the first live claim by (ts, actor, oid)
-wins. The verdict is that claim's **oid** — re-read the card and start only if
-`card.claim.oid` is the exact claim you published; `owner` alone cannot tell two
-agents apart under one principal. A claim also expires on its own (TTL), so a
-crashed agent never holds a card forever.
-
-`actor` must be the principal the request's credential authenticates as: the host
-refuses a mismatched pair before publishing, because an entry whose actor and key
-disagree never verifies and the append-only log cannot be edited. Do not pass
-another agent's actor — each agent lane uses its own credential and its own
-principal (below).
-
-For unattended multi-agent work, run **one MCP session per agent/principal**,
-subscribing `walgit://refs/<owner>/<repo>` and
-`walgit://collab/board/<owner>/<repo>` (plus the thread URIs it owns), and read
-them once at startup so a restart is never mistaken for "nothing new". Only
-`collab_publish` and `collab_register` write; the board is a projection of
-signed entries, never editable. Keep builds, tests and `git push` outside the tool call
-and post one entry when the step is done. The role topology, ownership and merge
-gate are in the public guide §0b–§0d.
-
+For unattended work, run one `wgl mcp` process per agent/worktree (one identity
+per process), subscribe `walgit://collab/board` (and the thread URIs you own),
+read once at startup, and keep builds/tests/`git push` outside the tool call.
+The full contract is `skills/wgl/SKILL.md` §7 and `web/SKILL.md`
+("`wgl mcp` — the collaboration surface"); the protocol is
+`docs/D1_PROTOCOL.md` §12.1.
 
 ## 4. What this host stores (read from config, never hardcode)
 
@@ -507,11 +468,11 @@ them with signed `ci_claim` entries and publishes signed results into `ci-*` thr
 `wgl ci artifacts [<run>] [--out <dir>]`).
 Signing is not CLI-only either: `docs/D1_PROTOCOL.md` §5.3 fixes the canonical bytes and
 `web/SKILL.md` carries the golden vector (seed `07`×32) that the Rust, SDK and server tests all
-assert, so any ed25519 signer can author an entry and publish it with MCP `collab_publish`.
+assert, so any ed25519 signer can author an entry and publish it with `wgl mcp` `collab_publish`.
 
-CI's *control plane* is not CLI-only either: `ci_status` over MCP reads the same
+CI's *control plane* is not CLI-only either: `ci_status` over `wgl mcp` reads the same
 `run_view`/`collect_runs` aggregation, and claiming/reporting is an ordinary entry
-(`kind: ci_claim` / `ci_result`) through `collab_publish`. Only the runner half — clone, build,
+(`kind: ci_claim` / `ci_result`) through `wgl mcp` `collab_publish`. Only the runner half — clone, build,
 artifact upload — needs this binary, because bytes never travel over MCP.
 
 ## 8. Known pitfalls

@@ -1,4 +1,4 @@
-# CHARTER.md — walgit 的项目协作章程（D1–D69）
+# CHARTER.md — walgit 的项目协作章程（D1–D70）
 
 > 2026-11-06（D69 同期）：本文件自仓库根 `AGENTS.md` 迁入 `docs/`；根目录的
 > `AGENTS.md` 现在是通用协作框架（见其开头的引用），项目特有约定以本文件为准。
@@ -31,7 +31,7 @@ Reading order: `GOAL.md` (what we want) → `docs/ARCHITECTURE.md` (what the sys
 | Review (`<REVIEW_CMD/流程>`) | leader review + a verified `approve` from a principal other than the author (`merge_rule_eval`) |
 | Rhythm (`<TICK_INTERVAL>`) | no timers: `wgl collab watch --once` under a supervisor or a timer (D55) |
 | Decision model (`<DECISION_MODEL>`) | none — deterministic gates are commands, judgment calls are the leader's |
-| Tracker (`<TRACKER>`) | the D1 collaboration layer: `refs/collab/*`, read and written over `/mcp` (`docs/D1_PROTOCOL.md`) |
+| Tracker (`<TRACKER>`) | the D1 collaboration layer: `refs/collab/*`, read and written over `wgl mcp` (stdio) or `wgl collab …` (`docs/D1_PROTOCOL.md`, D70) |
 
 ## 1. Roles
 
@@ -128,8 +128,11 @@ finds nothing new, report status; do not re-dispatch the same card.
 ## 6. Tracker and cross-team work
 
 The tracker is the D1 collaboration layer (`refs/collab/*`), not GitHub: the mirror's Issues, Wiki,
-Projects and Discussions are disabled (D46). Read and write it over `/mcp` (`collab_board`,
-`collab_thread`, `collab_publish`, …); `wgl collab …` is the scripting form of the same lanes (D69).
+Projects and Discussions are disabled (D46). Read and write it over **`wgl mcp`** (stdio:
+`collab_board`, `collab_thread`, `collab_report`, `ci_status`, `collab_publish`,
+`collab_register`, and the `walgit://collab/*` resources) or `wgl collab …`, the scripting form of
+the same lanes (D69/D70). The host's `/mcp` keeps only the repository reads (`repo_*`) and
+`wal_ls`.
 
 Cross-team or cross-repository work is a card too: background, expected result, acceptance,
 owner/team, deadline and links in the body; state changes as `status` entries with a note. Releases
@@ -194,7 +197,7 @@ A branch may merge only when:
 | `GOAL.md` | Everyone, first. What walgit is for, the acceptance table, what we do not optimise for. |
 | `docs/ARCHITECTURE.md` | Everyone. Constraints §1, the WAL §2, the principles a PR is judged against §3. |
 | `AGENTS.md`（根） | 通用协作框架（子代理 worktree/分支、验收流程的骨架）；本文件是其项目化实例 |
-| `docs/DECISIONS.md` | Anyone changing a shape or asking "why is it like this". Every decision in force (D1–D69), append-only. |
+| `docs/DECISIONS.md` | Anyone changing a shape or asking "why is it like this". Every decision in force (D1–D70), append-only. |
 | `docs/WORKING_RULES.md` | Anyone running a gate. Test tiers, known-flaky list, clippy/warnings bar, no-backwards-compat banner. |
 | `docs/RELEASE.md` | Anyone pushing anywhere or cutting a release: remotes, credentials policy, CI signals, the GitHub mirror. |
 | `README.md` | The introduction: why (the Cursor lineage), what it does, how it works briefly, running it, invariants. |

@@ -538,31 +538,18 @@ impl ServerHandler for WalgitMcp {
 }
 
 const INSTRUCTIONS: &str = "\
-walgit is an object-store-backed git host. This endpoint serves its tools and
-resources over MCP; the same facts are readable over HTTP (`GET /SKILL.md`
-documents them for agents).
+walgit is an object-store-backed git host. This endpoint serves repository and
+WAL reads over MCP; the D1 collaboration tools and resources (board, threads,
+report, CI runs, signed-entry publish) moved to the standalone `wgl mcp`
+client, which aggregates the checkout's own refs/collab/* (D70). For
+collaboration, run `wgl mcp --repo <checkout>` and use collab_board,
+collab_thread, collab_report, ci_status, collab_publish and collab_register.
 
 Rules that cost a wrong call if skipped:
 * Bytes never travel over MCP. To move a repository, `git clone` its URL
-  (`https://<host>/<owner>/<repo>.git`); this endpoint only reads and writes
-  metadata.
-* `collab_publish` takes an entry you have already signed with your own key
-  (`wgl collab entry` builds and signs one) and refuses `actor` != the
-  authenticated caller; it never signs for you and holds no key. The signature
-  is checked when entries are aggregated, so one signed with a key that is not
-  registered for its `actor` is accepted here and then never counts — publish
-  as the principal you actually hold.
-* Register your public key once (`collab_register`, or `wgl collab join`):
-  an entry signed with a key the repository does not name never verifies.
-* Claiming a card is three steps, in this order: read `collab_board` (is it
-  open, and does it already carry a live claim?), publish a `card_claim` entry
-  whose body is `{ttl?, worktree?, branch?, work?, session?}`, then re-read the
-  board. Two agents may publish a claim for the same card — duplicate claims are
-  legal, duplicate *execution* is not — so the board's `owner` after your
-  publish is the verdict: if it names someone else with a live claim, stand
-  down and do not start work. A claim expires on its own (TTL), so a crashed
-  agent does not hold a card forever.
-* Ownership of a card is carried by `status` entries, not comments.
+  (`https://<host>/<owner>/<repo>.git`); this endpoint only reads metadata.
+* Every tool here is read-only (`repo_*`, `wal_ls`); a mutation is an operator
+  act or a git operation, not a tool call.
 * Subscriptions are polls (`resources/subscribe`): an update notification says
   `re-read`, never `here is the diff`.";
 
@@ -571,16 +558,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instructions_name_the_rules_a_first_write_would_break() {
-        // The instructions are the one place a model learns that bytes do not
-        // travel here and that a write must be its own actor; losing either
-        // sentence would make the surface look like a normal MCP tool set.
+    fn instructions_point_collaboration_at_wgl_mcp() {
+        // The host surface is read-only now; an agent that looks for the
+        // collaboration tools here must be told where they went.
         assert!(INSTRUCTIONS.contains("Bytes never travel over MCP"));
-        assert!(INSTRUCTIONS.contains("already signed"));
-        assert!(INSTRUCTIONS.contains("holds no key"));
-        assert!(INSTRUCTIONS.contains("stand"));
-        assert!(INSTRUCTIONS.contains("collab_register"));
-        assert!(INSTRUCTIONS.contains("status"));
+        assert!(INSTRUCTIONS.contains("wgl mcp"));
+        assert!(INSTRUCTIONS.contains("collab_board"));
+        assert!(INSTRUCTIONS.contains("read-only"));
+        assert!(INSTRUCTIONS.contains("Subscriptions are polls"));
     }
 
     #[test]

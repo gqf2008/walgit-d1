@@ -13,9 +13,9 @@
 //! cost is that the API is reached through its own URL grammar, so paths and
 //! query values must be encoded here.
 //!
-//! Every tool goes through [`Call`], the one write included (`collab_publish`
-//! is a POST and nothing else): the API decides what a write means, so there is
-//! no second path to keep in step with it.
+//! Every tool goes through [`Call`]. The D1 write tools moved to `wgl mcp`
+//! (D70); what remains here is the read projection, so the API answers every
+//! call and there is no second path to keep in step with it.
 
 use std::sync::Arc;
 
@@ -67,8 +67,8 @@ impl<'a> Call<'a> {
     /// request's own `require_read`/`require_write` resolve the caller from:
     /// behind an edge or a push broker the credential in `Authorization` is the
     /// *hop's*, so without this the inner request runs as the forwarder (which
-    /// is usually an admin) and `collab_publish`'s `actor == caller` compares
-    /// against the wrong name.
+    /// is usually an admin) and the caller check compares against the wrong
+    /// name.
     pub fn new(st: &'a Arc<AppState>, headers: &HeaderMap, principal: &str) -> Self {
         // Only what an inner request needs to be the *same* caller: the
         // credential, the session cookie (browser lane), and the host (absolute

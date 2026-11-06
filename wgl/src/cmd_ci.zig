@@ -147,8 +147,14 @@ fn ci_status(c: *Ctx, p: *args.Parsed) !u8 {
 /// parse JSON and never byte-compare this command. (`board`/`thread` remain
 /// byte-identical — D69 only claims that for the aggregation.)
 fn runs_json(c: *Ctx, now: i64, runs: []const ci.RunEntry) ![]u8 {
-    var out: util.List(u8) = .init(c.alloc);
-    out.append_slice(try std.fmt.allocPrint(c.alloc, "{{\n  \"now\": {d},\n  \"runs\": ", .{now})) catch @panic("oom");
+    return runs_json_with(c.alloc, now, runs);
+}
+
+/// The allocator-parameterised form: `wgl mcp` calls it with a per-request
+/// arena so a long-lived server does not leak one run table per call.
+pub fn runs_json_with(alloc: std.mem.Allocator, now: i64, runs: []const ci.RunEntry) ![]u8 {
+    var out: util.List(u8) = .init(alloc);
+    out.append_slice(try std.fmt.allocPrint(alloc, "{{\n  \"now\": {d},\n  \"runs\": ", .{now})) catch @panic("oom");
     if (runs.len == 0) {
         out.append_slice("[]\n}") catch @panic("oom");
         return out.items;
@@ -157,14 +163,14 @@ fn runs_json(c: *Ctx, now: i64, runs: []const ci.RunEntry) ![]u8 {
     for (runs, 0..) |kv, i| {
         if (i > 0) out.append(',') catch @panic("oom");
         out.append('\n') catch @panic("oom");
-        out.append_slice(try run_view_json(c, &kv.view)) catch @panic("oom");
+        out.append_slice(try run_view_json(alloc, &kv.view)) catch @panic("oom");
     }
     out.append_slice("\n  ]\n}") catch @panic("oom");
     return out.items;
 }
 
-fn run_view_json(c: *Ctx, r: *const ci.RunView) ![]u8 {
-    var out: util.List(u8) = .init(c.alloc);
+pub fn run_view_json(alloc: std.mem.Allocator, r: *const ci.RunView) ![]u8 {
+    var out: util.List(u8) = .init(alloc);
     const w = struct {
         fn f(o: *util.List(u8), comptime fmt: []const u8, a: anytype) void {
             const s = std.fmt.allocPrint(o.alloc, fmt, a) catch @panic("oom");
@@ -186,7 +192,7 @@ fn run_view_json(c: *Ctx, r: *const ci.RunView) ![]u8 {
         out.append('[') catch @panic("oom");
         for (r.attempts, 0..) |a, i| {
             if (i > 0) out.append(',') catch @panic("oom");
-            out.append_slice(try attempt_json(c, &a)) catch @panic("oom");
+            out.append_slice(try attempt_json(alloc, &a)) catch @panic("oom");
         }
         out.append(']') catch @panic("oom");
     }
@@ -206,8 +212,8 @@ fn run_view_json(c: *Ctx, r: *const ci.RunView) ![]u8 {
     return out.items;
 }
 
-fn attempt_json(c: *Ctx, a: *const ci.AttemptView) ![]u8 {
-    var out: util.List(u8) = .init(c.alloc);
+fn attempt_json(alloc: std.mem.Allocator, a: *const ci.AttemptView) ![]u8 {
+    var out: util.List(u8) = .init(alloc);
     const w = struct {
         fn f(o: *util.List(u8), comptime fmt: []const u8, arg: anytype) void {
             const s = std.fmt.allocPrint(o.alloc, fmt, arg) catch @panic("oom");
@@ -215,10 +221,10 @@ fn attempt_json(c: *Ctx, a: *const ci.AttemptView) ![]u8 {
         }
     }.f;
     w(&out, "      {{\"attempt\":{d},\"claims\":", .{a.attempt});
-    try claim_array(c, &out, a.claims);
+    try claim_array(alloc, &out, a.claims);
     w(&out, ",\"winner\":", .{});
     if (a.winner) |winner| {
-        out.append_slice(try claim_json(c, &winner)) catch @panic("oom");
+        out.append_slice(try claim_json(alloc, &winner)) catch @panic("oom");
     } else {
         out.append_slice("null") catch @panic("oom");
     }
@@ -229,13 +235,13 @@ fn attempt_json(c: *Ctx, a: *const ci.AttemptView) ![]u8 {
         out.append('[') catch @panic("oom");
         for (a.results, 0..) |*res, i| {
             if (i > 0) out.append(',') catch @panic("oom");
-            out.append_slice(try result_json(c, res)) catch @panic("oom");
+            out.append_slice(try result_json(alloc, res)) catch @panic("oom");
         }
         out.append(']') catch @panic("oom");
     }
     w(&out, ",\"effective\":", .{});
     if (a.effective) |*eff| {
-        out.append_slice(try result_json(c, eff)) catch @panic("oom");
+        out.append_slice(try result_json(alloc, eff)) catch @panic("oom");
     } else {
         out.append_slice("null") catch @panic("oom");
     }
@@ -243,7 +249,7 @@ fn attempt_json(c: *Ctx, a: *const ci.AttemptView) ![]u8 {
     return out.items;
 }
 
-fn claim_array(c: *Ctx, out: *util.List(u8), claims: []const ci.CiClaim) !void {
+fn claim_array(alloc: std.mem.Allocator, out: *util.List(u8), claims: []const ci.CiClaim) !void {
     if (claims.len == 0) {
         out.append_slice("[]") catch @panic("oom");
         return;
@@ -251,43 +257,43 @@ fn claim_array(c: *Ctx, out: *util.List(u8), claims: []const ci.CiClaim) !void {
     out.append('[') catch @panic("oom");
     for (claims, 0..) |*claim, i| {
         if (i > 0) out.append(',') catch @panic("oom");
-        out.append_slice(try claim_json(c, claim)) catch @panic("oom");
+        out.append_slice(try claim_json(alloc, claim)) catch @panic("oom");
     }
     out.append(']') catch @panic("oom");
 }
 
-fn claim_json(c: *Ctx, claim: *const ci.CiClaim) ![]u8 {
-    return std.fmt.allocPrint(c.alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"ttl_secs\":{d},\"attempt\":{d}}}", .{
-        quoted(c, claim.oid),      quoted(c, claim.actor),  claim.ts,       quoted(c, claim.task),
-        quoted(c, claim.repo_ref), quoted(c, claim.commit), claim.ttl_secs, claim.attempt,
+fn claim_json(alloc: std.mem.Allocator, claim: *const ci.CiClaim) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"ttl_secs\":{d},\"attempt\":{d}}}", .{
+        quoted(alloc, claim.oid),      quoted(alloc, claim.actor),  claim.ts,       quoted(alloc, claim.task),
+        quoted(alloc, claim.repo_ref), quoted(alloc, claim.commit), claim.ttl_secs, claim.attempt,
     });
 }
 
-fn result_json(c: *Ctx, r: *const ci.CiResult) ![]u8 {
-    var out: util.List(u8) = .init(c.alloc);
-    out.append_slice(try std.fmt.allocPrint(c.alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"attempt\":{d},\"claim\":{s},\"conclusion\":\"{s}\",\"exit_code\":", .{
-        quoted(c, r.oid),      quoted(c, r.actor),
-        r.ts,                  quoted(c, r.task),
-        quoted(c, r.repo_ref), quoted(c, r.commit),
-        r.attempt,             quoted(c, r.claim),
+fn result_json(alloc: std.mem.Allocator, r: *const ci.CiResult) ![]u8 {
+    var out: util.List(u8) = .init(alloc);
+    out.append_slice(try std.fmt.allocPrint(alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"attempt\":{d},\"claim\":{s},\"conclusion\":\"{s}\",\"exit_code\":", .{
+        quoted(alloc, r.oid),      quoted(alloc, r.actor),
+        r.ts,                      quoted(alloc, r.task),
+        quoted(alloc, r.repo_ref), quoted(alloc, r.commit),
+        r.attempt,                 quoted(alloc, r.claim),
         r.conclusion.as_str(),
     })) catch @panic("oom");
     if (r.exit_code) |code| {
-        out.append_slice(try std.fmt.allocPrint(c.alloc, "{d}", .{code})) catch @panic("oom");
+        out.append_slice(try std.fmt.allocPrint(alloc, "{d}", .{code})) catch @panic("oom");
     } else {
         out.append_slice("null") catch @panic("oom");
     }
     out.append_slice(",\"duration_ms\":") catch @panic("oom");
     if (r.duration_ms) |d| {
-        out.append_slice(try std.fmt.allocPrint(c.alloc, "{d}", .{d})) catch @panic("oom");
+        out.append_slice(try std.fmt.allocPrint(alloc, "{d}", .{d})) catch @panic("oom");
     } else {
         out.append_slice("null") catch @panic("oom");
     }
     out.append_slice(",\"log_summary\":") catch @panic("oom");
-    out.append_slice(quoted(c, r.log_summary)) catch @panic("oom");
+    out.append_slice(quoted(alloc, r.log_summary)) catch @panic("oom");
     out.append_slice(",\"log_sha256\":") catch @panic("oom");
-    out.append_slice(quoted(c, r.log_sha256)) catch @panic("oom");
-    out.append_slice(try std.fmt.allocPrint(c.alloc, ",\"log_truncated\":{}", .{r.log_truncated})) catch @panic("oom");
+    out.append_slice(quoted(alloc, r.log_sha256)) catch @panic("oom");
+    out.append_slice(try std.fmt.allocPrint(alloc, ",\"log_truncated\":{}", .{r.log_truncated})) catch @panic("oom");
     out.append_slice(",\"artifacts\":") catch @panic("oom");
     if (r.artifacts.len == 0) {
         out.append_slice("[]") catch @panic("oom");
@@ -295,9 +301,9 @@ fn result_json(c: *Ctx, r: *const ci.CiResult) ![]u8 {
         out.append('[') catch @panic("oom");
         for (r.artifacts, 0..) |*a, i| {
             if (i > 0) out.append(',') catch @panic("oom");
-            out.append_slice(try std.fmt.allocPrint(c.alloc, "{{\"name\":{s},\"path\":{s},\"sha256\":{s},\"bytes\":{d},\"url\":{s}}}", .{
-                quoted(c, a.name),                       quoted(c, a.path), quoted(c, a.sha256), a.bytes,
-                if (a.url) |u| quoted(c, u) else "null",
+            out.append_slice(try std.fmt.allocPrint(alloc, "{{\"name\":{s},\"path\":{s},\"sha256\":{s},\"bytes\":{d},\"url\":{s}}}", .{
+                quoted(alloc, a.name),                       quoted(alloc, a.path), quoted(alloc, a.sha256), a.bytes,
+                if (a.url) |u| quoted(alloc, u) else "null",
             })) catch @panic("oom");
         }
         out.append(']') catch @panic("oom");
@@ -306,8 +312,8 @@ fn result_json(c: *Ctx, r: *const ci.CiResult) ![]u8 {
     return out.items;
 }
 
-fn quoted(c: *Ctx, s: []const u8) []u8 {
-    var out: util.List(u8) = .init(c.alloc);
+fn quoted(alloc: std.mem.Allocator, s: []const u8) []u8 {
+    var out: util.List(u8) = .init(alloc);
     jsonio.write_string(&out, s);
     return out.items;
 }
@@ -864,7 +870,11 @@ const Runner = struct {
             try gitx.update_ref(self.c.alloc, self.c.io, self.repo, kv.key_ptr.*, kv.value_ptr.*);
             try names.append(kv.key_ptr.*);
         }
-        try gitx.push(self.c.alloc, self.c.io, self.repo, self.remote, .{ .refspecs = names.items });
+        // Log/artifact blobs are the bulk of this push; the size-scaled
+        // bound keeps a 16 MiB artifact from hitting the 120 s ref bound.
+        var payload_bytes: u64 = outcome.log.len;
+        for (outcome.artifacts) |*a| payload_bytes += a.bytes;
+        try gitx.push(self.c.alloc, self.c.io, self.repo, self.remote, .{ .refspecs = names.items, .payload_bytes = payload_bytes });
         var out: util.List(std.json.Value) = .init(self.c.alloc);
         for (outcome.artifacts) |*a| {
             var o = jsonio.new_object();
@@ -1586,9 +1596,6 @@ test "run_view_json renders a real claim without dangling" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var env = std.process.Environ.Map.init(arena);
-    var ctx = Ctx{ .alloc = arena, .io = undefined, .env = &env };
-
     const sk = entry_mod.SigningKey.generateDeterministic(@splat(5)) catch unreachable;
     var o = jsonio.new_object();
     jsonio.obj_put(&o, arena, "task", .{ .string = "test" });
@@ -1616,7 +1623,7 @@ test "run_view_json renders a real claim without dangling" {
 
     const er = entry_mod.EntryRef{ .oid = oid, .principal = "ci-bot", .entry = e };
     const view = (try ci.run_view(arena, "ci-abc", &.{er}, &principals, 1_100)) orelse return error.NoView;
-    const text = try run_view_json(&ctx, &view);
+    const text = try run_view_json(arena, &view);
     try testing.expect(std.mem.indexOf(u8, text, "ci-abc") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"state\":\"claimed\"") != null);
 }
