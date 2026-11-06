@@ -56,11 +56,11 @@ pub fn run_id(alloc: std.mem.Allocator, task: []const u8, repo_ref: []const u8, 
 pub fn scheduled_run_id(alloc: std.mem.Allocator, task: []const u8, repo_ref: []const u8, commit: []const u8, slot_epoch: i64) ![]u8 {
     var buf = util.List(u8).init(alloc);
     defer buf.deinit();
-    try buf.appendSlice(task);
+    try buf.append_slice(task);
     try buf.append(0x1f);
-    try buf.appendSlice(repo_ref);
+    try buf.append_slice(repo_ref);
     try buf.append(0x1f);
-    try buf.appendSlice(commit);
+    try buf.append_slice(commit);
     try buf.append(0x1f);
     try buf.writer().print("{d}", .{slot_epoch});
     return std.fmt.allocPrint(alloc, "ci-{x:0>16}", .{fnv1a64(buf.items)});
@@ -590,7 +590,7 @@ pub fn ci_entries(alloc: std.mem.Allocator, entries: []const EntryRef) ![]EntryR
             try out.append(e);
         }
     }
-    return try out.toOwnedSlice();
+    return try out.to_owned_slice();
 }
 
 pub const RunEntry = struct {
@@ -629,7 +629,7 @@ pub fn collect_runs(alloc: std.mem.Allocator, entries: []const EntryRef, princip
             try out.append(.{ .id = id, .view = view });
         }
     }
-    return try out.toOwnedSlice();
+    return try out.to_owned_slice();
 }
 
 // ---- §7.3 decide: the runner's normative decision --------------------------------

@@ -7,12 +7,14 @@ const std = @import("std");
 const entry = @import("d1/entry.zig");
 const collab = @import("d1/collab.zig");
 const ci = @import("d1/ci.zig");
+const snapshot = @import("d1/snapshot.zig");
 const jsonio = @import("jsonio.zig");
 const util = @import("util.zig");
 
 comptime {
     _ = collab;
     _ = ci;
+    _ = snapshot;
 }
 
 pub fn main(init: std.process.Init) !u8 {

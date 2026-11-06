@@ -68,12 +68,12 @@ pub fn thread(alloc: std.mem.Allocator, entries: []const EntryRef) ![]EntryRef {
             }
         }
         alloc.free(pending);
-        pending = try next.toOwnedSlice();
+        pending = try next.to_owned_slice();
         if (pending.len == before) break;
     }
-    try out.appendSlice(pending);
+    try out.append_slice(pending);
     alloc.free(pending);
-    return try out.toOwnedSlice();
+    return try out.to_owned_slice();
 }
 
 pub const ThreadHead = struct { id: []const u8, head: []const u8 };
@@ -111,7 +111,7 @@ pub fn thread_head_map(alloc: std.mem.Allocator, entries: []const EntryRef) ![]T
             try out.append(.{ .id = id, .head = ordered[ordered.len - 1].oid });
         }
     }
-    return try out.toOwnedSlice();
+    return try out.to_owned_slice();
 }
 
 // ---- PR view (§7.2) ---------------------------------------------------------------------------
@@ -188,10 +188,10 @@ pub fn pr_view(alloc: std.mem.Allocator, entries: []const EntryRef, principals: 
         .base = base,
         .head = head,
         .status = status,
-        .reviews = try reviews.toOwnedSlice(),
-        .human_approvals = try human_approvals.toOwnedSlice(),
-        .authors = try authors.toOwnedSlice(),
-        .unverified = try unverified.toOwnedSlice(),
+        .reviews = try reviews.to_owned_slice(),
+        .human_approvals = try human_approvals.to_owned_slice(),
+        .authors = try authors.to_owned_slice(),
+        .unverified = try unverified.to_owned_slice(),
     };
 }
 
@@ -225,7 +225,7 @@ pub fn parse_merge_rules(arena: std.mem.Allocator, bytes: []const u8) !MergeRule
                 .string => |s| try list.append(s),
                 else => return error.BadRules,
             };
-            rules.protect = try list.toOwnedSlice();
+            rules.protect = try list.to_owned_slice();
         },
         else => return error.BadRules,
     };
@@ -250,7 +250,7 @@ fn countable_approvers(alloc: std.mem.Allocator, pr: *const PrView) ![]const []c
             try out.append(r.actor);
         }
     }
-    return try out.toOwnedSlice();
+    return try out.to_owned_slice();
 }
 
 pub fn merge_rule_eval(alloc: std.mem.Allocator, rules: *const MergeRules, pr: *const PrView) !MergeEval {
@@ -440,7 +440,7 @@ pub fn card_claim_view(alloc: std.mem.Allocator, entries: []const EntryRef, prin
         }
     }
     return .{
-        .claims = try claims.toOwnedSlice(),
+        .claims = try claims.to_owned_slice(),
         .winner = winner,
         .unverified = unverified,
     };
@@ -572,7 +572,7 @@ pub const Board = struct {
             jsonio.put_raw(&out, "]}");
         }
         jsonio.put_raw(&out, "]}");
-        return out.to_owned();
+        return out.to_owned_slice() catch @panic("oom");
     }
 };
 
@@ -782,7 +782,11 @@ fn sort_cards(cards: []BoardCard, sort: BoardSort) void {
                 .ts => std.math.order(a.last_ts, b.last_ts),
                 .id => std.mem.order(u8, a.id, b.id),
             };
-            const oriented = if (self.sort.direction == .desc) primary.reverse() else primary;
+            const oriented = switch (primary) {
+                .lt => if (self.sort.direction == .desc) std.math.Order.gt else std.math.Order.lt,
+                .gt => if (self.sort.direction == .desc) std.math.Order.lt else std.math.Order.gt,
+                .eq => std.math.Order.eq,
+            };
             if (oriented != .eq) return oriented == .lt;
             // The card id breaks ties ascending either way — a total order.
             return std.mem.order(u8, a.id, b.id) == .lt;
@@ -813,7 +817,7 @@ pub fn build_board(alloc: std.mem.Allocator, entries: []const EntryRef, principa
     var columns_lists = try alloc.alloc(util.List(BoardCard), board.columns.len);
     for (board.columns, 0..) |def, i| {
         columns[i] = .{ .name = def.name, .cards = &.{} };
-        columns_lists[i] = .empty;
+        columns_lists[i] = util.List(BoardCard).init(alloc);
     }
 
     var git = groups.iterator();
@@ -902,7 +906,7 @@ pub fn build_board(alloc: std.mem.Allocator, entries: []const EntryRef, principa
             .entries = group.len,
             .verified = verified,
             .unverified = group.len - verified,
-            .kinds = try kinds.toOwnedSlice(),
+            .kinds = try kinds.to_owned_slice(),
             .last_oid = if (ordered.len > 0) ordered[ordered.len - 1].oid else "",
             .merge = merge,
             .claim = try claim_view.to_board(),
@@ -913,12 +917,12 @@ pub fn build_board(alloc: std.mem.Allocator, entries: []const EntryRef, principa
             if (!card_matches(&card, def)) continue;
             if (def.unverified) {
                 if (!alerted) {
-                    try columns_lists[i].append(alloc, card);
+                    try columns_lists[i].append(card);
                     alerted = true;
                 }
                 continue;
             }
-            try columns_lists[i].append(alloc, card);
+            try columns_lists[i].append(card);
             break;
         }
     }
@@ -1034,7 +1038,7 @@ pub fn build_report(alloc: std.mem.Allocator, entries: []const EntryRef, princip
             .entries = group.len,
             .verified = verified,
             .last_ts = last_ts,
-            .kinds = try kinds.toOwnedSlice(),
+            .kinds = try kinds.to_owned_slice(),
         });
 
         var has_patch = false;
@@ -1142,9 +1146,9 @@ pub fn build_report(alloc: std.mem.Allocator, entries: []const EntryRef, princip
     }
 
     return .{
-        .threads = try threads.toOwnedSlice(),
+        .threads = try threads.to_owned_slice(),
         .prs = stripped,
-        .runs = try runs.toOwnedSlice(),
+        .runs = try runs.to_owned_slice(),
         .total_entries = entries.len,
         .verified_entries = verified_total,
         .unverified_entries = unverified_total,
@@ -1168,7 +1172,7 @@ fn sorted_counts(alloc: std.mem.Allocator, map: *std.StringHashMap(usize)) ![]Re
     for (keys.items) |k| {
         try out.append(.{ .key = k, .n = map.get(k).? });
     }
-    return try out.toOwnedSlice();
+    return try out.to_owned_slice();
 }
 
 // ---- small value helpers ----------------------------------------------------------------------
@@ -1209,4 +1213,390 @@ fn contains_str(list: []const []const u8, s: []const u8) bool {
         if (std.mem.eql(u8, item, s)) return true;
     }
     return false;
+}
+
+// ---- tests (the §16 anchors that live next to the aggregation) ------------------
+
+const testing = std.testing;
+const snapshot_mod = @import("snapshot.zig");
+
+const NOW: i64 = 1_800_000_000;
+
+fn kp(seed: u8) entry_mod.SigningKey {
+    const seed_bytes: [32]u8 = @splat(seed);
+    return entry_mod.SigningKey.generateDeterministic(seed_bytes) catch unreachable;
+}
+
+fn oid_of(arena: std.mem.Allocator, e: *const Entry) []const u8 {
+    const bytes = entry_mod.entry_json(arena, e, true);
+    return entry_mod.git_blob_oid(arena, bytes, .sha1);
+}
+
+/// A signed entry whose oid is the real git blob oid of its bytes (parents
+/// chain bottom-up like git, exactly as the production write path does).
+fn signed_entry(arena: std.mem.Allocator, sk: entry_mod.SigningKey, id: []const u8, kind: []const u8, actor: []const u8, parent: []const u8, ts: i64, body: Value) EntryRef {
+    var e = Entry{
+        .version = 1,
+        .kind = kind,
+        .id = id,
+        .actor = actor,
+        .ts = ts,
+        .parent = parent,
+        .refs = null,
+        .body = body,
+        .sig = "",
+    };
+    entry_mod.sign_entry(arena, &e, sk);
+    return .{ .oid = oid_of(arena, &e), .principal = actor, .entry = e };
+}
+
+fn unsigned_entry(arena: std.mem.Allocator, id: []const u8, kind: []const u8, actor: []const u8, parent: []const u8, ts: i64, body: Value) EntryRef {
+    const e = Entry{
+        .version = 1,
+        .kind = kind,
+        .id = id,
+        .actor = actor,
+        .ts = ts,
+        .parent = parent,
+        .refs = null,
+        .body = body,
+        .sig = "",
+    };
+    return .{ .oid = oid_of(arena, &e), .principal = actor, .entry = e };
+}
+
+fn body1(arena: std.mem.Allocator, key: []const u8, v: []const u8) Value {
+    var o = jsonio.new_object();
+    jsonio.obj_put(&o, arena, key, .{ .string = v });
+    return .{ .object = o };
+}
+
+fn principals_of(arena: std.mem.Allocator, keys: []const struct { name: []const u8, seed: u8 }) *Principals {
+    const p = arena.create(Principals) catch unreachable;
+    p.* = Principals.init(arena);
+    for (keys) |k| {
+        const sk = kp(k.seed);
+        p.put(k.name, entry_mod.public_key_b64(arena, sk)) catch unreachable;
+    }
+    return p;
+}
+
+test "thread resolves descending ts chains without truncation" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A chain whose ts descends along it: the sort key is the exact reverse
+    // of the parent chain — the input class the old round guard truncated.
+    for ([_]usize{ 6, 7, 10, 12 }) |n| {
+        var refs: util.List(EntryRef) = .init(arena);
+        var parent: []const u8 = "";
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const ts: i64 = @intCast(n - i);
+            const e = unsigned_entry(arena, "t", "comment", "alice", parent, ts, body1(arena, "text", "x"));
+            parent = e.oid;
+            try refs.append(e);
+        }
+        const ordered = try thread(arena, refs.items);
+        try testing.expectEqual(refs.items.len, ordered.len);
+        for (ordered, refs.items) |got, want| {
+            try testing.expectEqualStrings(want.oid, got.oid);
+        }
+        // The chain tip is last.
+        try testing.expectEqualStrings(refs.items[refs.items.len - 1].oid, ordered[ordered.len - 1].oid);
+    }
+}
+
+test "thread keeps chain order for entries appended after a long chain" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var refs: util.List(EntryRef) = .init(arena);
+    var parent: []const u8 = "";
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        const ts: i64 = @intCast(10 - i);
+        const e = unsigned_entry(arena, "t", "comment", "alice", parent, ts, body1(arena, "text", "x"));
+        parent = e.oid;
+        try refs.append(e);
+    }
+    // A follow-up entry (ts 1) appended after the long chain stays the tip.
+    const follow = unsigned_entry(arena, "t", "status", "alice", parent, 1, body1(arena, "status", "needs-review"));
+    try refs.append(follow);
+    const ordered = try thread(arena, refs.items);
+    try testing.expectEqual(refs.items.len, ordered.len);
+    try testing.expectEqualStrings(refs.items[refs.items.len - 1].oid, ordered[ordered.len - 1].oid);
+    try testing.expectEqualStrings("status", ordered[ordered.len - 1].entry.kind);
+}
+
+test "board is deterministic and claim convergence works" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const alice = kp(11);
+    const bob = kp(12);
+    const principals = principals_of(arena, &.{
+        .{ .name = "alice", .seed = 11 },
+        .{ .name = "bob", .seed = 12 },
+    });
+    const rules = MergeRules{};
+    const board_def = try default_board(arena);
+
+    // t1: issue -> status(in-progress) -> claim by alice (a root), plus an
+    // unsigned comment (the visible red). t2: a plain closed card.
+    const issue = signed_entry(arena, alice, "t1", "issue", "alice", "", NOW - 60, body1(arena, "title", "fix it"));
+    const status = signed_entry(arena, alice, "t1", "status", "alice", issue.oid, NOW - 50, blk: {
+        var o = jsonio.new_object();
+        jsonio.obj_put(&o, arena, "status", .{ .string = "in-progress" });
+        jsonio.obj_put(&o, arena, "worktree", .{ .string = "wt-a" });
+        break :blk .{ .object = o };
+    });
+    const claim = signed_entry(arena, alice, "t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, blk: {
+        var o = jsonio.new_object();
+        jsonio.obj_put(&o, arena, "ttl", .{ .integer = 300 });
+        jsonio.obj_put(&o, arena, "worktree", .{ .string = "wt-a" });
+        jsonio.obj_put(&o, arena, "branch", .{ .string = "feat/a" });
+        break :blk .{ .object = o };
+    });
+    const unsigned = unsigned_entry(arena, "t1", "comment", "bob", status.oid, NOW - 5, body1(arena, "text", "unsigned"));
+    const t2_issue = signed_entry(arena, bob, "t2", "issue", "bob", "", NOW - 40, body1(arena, "title", "clean"));
+    const t2_close = signed_entry(arena, bob, "t2", "status", "bob", t2_issue.oid, NOW - 30, body1(arena, "status", "closed"));
+
+    var refs: util.List(EntryRef) = .init(arena);
+    try refs.append(issue);
+    try refs.append(status);
+    try refs.append(claim);
+    try refs.append(unsigned);
+    try refs.append(t2_issue);
+    try refs.append(t2_close);
+
+    const board1 = try build_board(arena, refs.items, principals, &rules, &board_def, NOW);
+    const bytes1 = board1.to_json(arena);
+    // The projection is a function of the set: permuted read order, same bytes.
+    std.mem.reverse(EntryRef, refs.items);
+    const board2 = try build_board(arena, refs.items, principals, &rules, &board_def, NOW);
+    try testing.expectEqualSlices(u8, bytes1, board2.to_json(arena));
+
+    // t1 sits in the catch-all (in-progress, claim owner), t2 in closed.
+    var t1_card: ?*const BoardCard = null;
+    var t2_card: ?*const BoardCard = null;
+    for (board1.columns) |*col| {
+        for (col.cards) |*card| {
+            if (std.mem.eql(u8, card.id, "t1")) t1_card = card;
+            if (std.mem.eql(u8, card.id, "t2")) t2_card = card;
+        }
+    }
+    const t1 = t1_card.?;
+    try testing.expectEqualStrings("in-progress", t1.status);
+    try testing.expectEqualStrings("alice", t1.owner);
+    try testing.expectEqualStrings("wt-a", t1.worktree);
+    try testing.expectEqualStrings("feat/a", t1.branch);
+    try testing.expectEqualStrings("fix it", t1.title);
+    try testing.expectEqual(@as(usize, 4), t1.entries);
+    try testing.expectEqual(@as(usize, 3), t1.verified);
+    try testing.expectEqual(@as(usize, 1), t1.unverified);
+    // last_oid is the chain tip (§6.2): the newest entry — bob's unsigned
+    // comment, not the claim (a claim is a root, never the tip here).
+    try testing.expectEqualStrings(unsigned.oid, t1.last_oid);
+    try testing.expect(t1.claim != null);
+    try testing.expectEqualStrings("claimed", t1.claim.?.state);
+    try testing.expectEqualStrings(claim.oid, t1.claim.?.oid);
+    try testing.expect(t2_card != null);
+    try testing.expectEqualStrings("closed", t2_card.?.status);
+
+    // After the TTL the claim goes stale: the status owner (none here)
+    // remains, the claim projection says stale, and the card is claimable
+    // again.
+    const board3 = try build_board(arena, refs.items, principals, &rules, &board_def, NOW + 400);
+    for (board3.columns) |*col| {
+        for (col.cards) |*card| {
+            if (std.mem.eql(u8, card.id, "t1")) {
+                try testing.expectEqualStrings("in-progress", card.status);
+                try testing.expect(card.claim != null);
+                try testing.expectEqualStrings("stale", card.claim.?.state);
+            }
+        }
+    }
+}
+
+test "merge rules count distinct non-author human approvals" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const alice = kp(11);
+    const carol = kp(13);
+    const principals = principals_of(arena, &.{
+        .{ .name = "alice", .seed = 11 },
+        .{ .name = "carol", .seed = 13 },
+    });
+    const rules = MergeRules{ .protect = &.{"refs/heads/main"}, .require_human_approvals = 1 };
+
+    const issue = signed_entry(arena, alice, "pr1", "issue", "alice", "", 1, body1(arena, "title", "t"));
+    const comment = unsigned_entry(arena, "pr1", "comment", "bob", issue.oid, 2, body1(arena, "text", "x"));
+    const patch = blk: {
+        var e = Entry{
+            .version = 1,
+            .kind = "patch",
+            .id = "pr1",
+            .actor = "alice",
+            .ts = 3,
+            .parent = comment.oid,
+            .refs = .{ .base = "refs/heads/main", .head = "refs/heads/topic" },
+            .body = body1(arena, "message", "the change"),
+            .sig = "",
+        };
+        entry_mod.sign_entry(arena, &e, alice);
+        break :blk EntryRef{ .oid = oid_of(arena, &e), .principal = "alice", .entry = e };
+    };
+    // Alice (the patch author) approving her own change does not count;
+    // carol's does.
+    const self_review = signed_entry(arena, alice, "pr1", "review", "alice", patch.oid, 4, body1(arena, "decision", "approve"));
+    const review = signed_entry(arena, carol, "pr1", "review", "carol", self_review.oid, 5, body1(arena, "decision", "approve"));
+
+    const refs = [_]EntryRef{ issue, comment, patch, self_review, review };
+    const report = try build_report(arena, &refs, principals, &rules, 10);
+    try testing.expectEqual(@as(usize, 1), report.prs.len);
+    try testing.expectEqual(@as(usize, 1), report.prs[0].approvals);
+    try testing.expect(report.prs[0].merge_allowed);
+    // The thread row exists too, titled by the canonical root.
+    try testing.expectEqual(@as(usize, 1), report.threads.len);
+    try testing.expectEqualStrings("t", report.threads[0].title);
+    // Verification counts: bob's unsigned comment is the visible red.
+    try testing.expectEqual(@as(usize, 5), report.total_entries);
+    try testing.expectEqual(@as(usize, 4), report.verified_entries);
+    try testing.expectEqual(@as(usize, 1), report.unverified_entries);
+    try testing.expectEqual(@as(usize, 1), report.missing_principals);
+}
+
+test "report lists arrive ordered from the projection" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const principals = principals_of(arena, &.{});
+    const rules = MergeRules{};
+
+    var refs: util.List(EntryRef) = .init(arena);
+    try refs.append(unsigned_entry(arena, "t-mid", "comment", "bob", "", 20, body1(arena, "text", "x")));
+    try refs.append(unsigned_entry(arena, "t-late", "comment", "bob", "", 30, body1(arena, "text", "x")));
+    try refs.append(unsigned_entry(arena, "t-tie-b", "comment", "bob", "", 10, body1(arena, "text", "x")));
+    try refs.append(unsigned_entry(arena, "t-tie-a", "comment", "bob", "", 10, body1(arena, "text", "x")));
+    // PRs: one merged, one closed, two open with different activity.
+    const PatchCtx = struct {
+        fn add(list: *util.List(EntryRef), ar: std.mem.Allocator, id: []const u8, ts: i64, st: ?[]const u8) !void {
+            var e = Entry{
+                .version = 1,
+                .kind = "patch",
+                .id = id,
+                .actor = "alice",
+                .ts = ts,
+                .parent = "",
+                .refs = .{ .base = "refs/heads/main", .head = ar.dupe(u8, id) catch unreachable },
+                .body = body1(ar, "message", id),
+                .sig = "",
+            };
+            _ = &e;
+            try list.append(.{ .oid = oid_of(ar, &e), .principal = "alice", .entry = e });
+            if (st) |s| {
+                try list.append(unsigned_entry(ar, id, "status", "alice", "", ts + 1, body1(ar, "status", s)));
+            }
+        }
+    };
+    try PatchCtx.add(&refs, arena, "pr-merged", 50, "merged");
+    try PatchCtx.add(&refs, arena, "pr-cold", 100, "closed");
+    try PatchCtx.add(&refs, arena, "pr-open-old", 1, null);
+    try PatchCtx.add(&refs, arena, "pr-open-new", 5, null);
+
+    const report = try build_report(arena, refs.items, principals, &rules, 200);
+    const want_threads = [_][]const u8{ "pr-cold", "pr-merged", "t-late", "t-mid", "t-tie-a", "t-tie-b", "pr-open-new", "pr-open-old" };
+    try testing.expectEqual(want_threads.len, report.threads.len);
+    for (report.threads, want_threads) |t, want| {
+        try testing.expectEqualStrings(want, t.id);
+    }
+    const want_prs = [_][]const u8{ "pr-open-new", "pr-open-old", "pr-merged", "pr-cold" };
+    try testing.expectEqual(want_prs.len, report.prs.len);
+    for (report.prs, want_prs) |p, want| {
+        try testing.expectEqualStrings(want, p.id);
+    }
+}
+
+test "done gate: needs-review plus verified non-author approve" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const alice = kp(11);
+    const bob = kp(12);
+    const principals = principals_of(arena, &.{
+        .{ .name = "alice", .seed = 11 },
+        .{ .name = "bob", .seed = 12 },
+    });
+
+    const issue = signed_entry(arena, alice, "t9", "issue", "alice", "", 1, body1(arena, "title", "x"));
+    const status = signed_entry(arena, alice, "t9", "status", "alice", issue.oid, 2, body1(arena, "status", "needs-review"));
+    const patch = signed_entry(arena, alice, "t9", "patch", "alice", status.oid, 3, body1(arena, "message", "x"));
+
+    // The author's own approve does not unblock done.
+    const self_review = signed_entry(arena, alice, "t9", "review", "alice", patch.oid, 4, body1(arena, "decision", "approve"));
+    var refs: util.List(EntryRef) = .init(arena);
+    try refs.append(issue);
+    try refs.append(status);
+    try refs.append(patch);
+    try refs.append(self_review);
+    const ordered = try thread(arena, refs.items);
+    try testing.expectError(error.TransitionNoApprove, validate_status_transition(arena, ordered, principals));
+
+    // A second, non-author reviewer unblocks it.
+    const review = signed_entry(arena, bob, "t9", "review", "bob", self_review.oid, 5, body1(arena, "decision", "approve"));
+    try refs.append(review);
+    const ordered2 = try thread(arena, refs.items);
+    try validate_status_transition(arena, ordered2, principals);
+
+    // Wrong current status: also refused (needs-review is the only source).
+    const reopen = signed_entry(arena, alice, "t9", "status", "alice", ordered2[ordered2.len - 1].oid, 6, body1(arena, "status", "in-progress"));
+    try refs.append(reopen);
+    const ordered3 = try thread(arena, refs.items);
+    try testing.expectError(error.TransitionNotNeedsReview, validate_status_transition(arena, ordered3, principals));
+}
+
+test "card claims: unverified and malformed claims never own a card" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const alice = kp(11);
+    const bob = kp(12);
+    const principals = principals_of(arena, &.{ .{ .name = "alice", .seed = 11 } });
+    const rules = MergeRules{};
+    const board_def = try default_board(arena);
+
+    const issue = signed_entry(arena, alice, "t1", "issue", "alice", "", NOW - 100, body1(arena, "title", "t"));
+    // Signed by the wrong key: visible, never verified.
+    const hijack = signed_entry(arena, bob, "t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, body1(arena, "ttl", "300"));
+    // Correctly signed, but the ttl is not a number: malformed.
+    const malformed = signed_entry(arena, alice, "t1", CARD_CLAIM_KIND, "alice", "", NOW - 10, body1(arena, "ttl", "soon"));
+    // A claim that replies to another entry is not a claim.
+    const reply = signed_entry(arena, alice, "t1", CARD_CLAIM_KIND, "alice", issue.oid, NOW - 10, body1(arena, "ttl", "300"));
+
+    const refs = [_]EntryRef{ issue, hijack, malformed, reply };
+    const view = try card_claim_view(arena, &refs, principals, NOW);
+    try testing.expectEqual(@as(usize, 0), view.claims.len);
+    try testing.expect(view.winner == null);
+    try testing.expectEqual(@as(usize, 3), view.unverified);
+
+    const board = try build_board(arena, &refs, principals, &rules, &board_def, NOW);
+    var found: ?*const BoardCard = null;
+    for (board.columns) |*col| {
+        for (col.cards) |*card| {
+            if (std.mem.eql(u8, card.id, "t1")) found = card;
+        }
+    }
+    const card = found.?;
+    try testing.expectEqualStrings("open", card.status);
+    try testing.expectEqualStrings("", card.owner);
+    try testing.expect(card.claim != null);
+    try testing.expectEqualStrings("pending", card.claim.?.state);
 }

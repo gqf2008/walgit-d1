@@ -114,13 +114,13 @@ pub fn esc(alloc: std.mem.Allocator, s: []const u8) []u8 {
     var out = std.ArrayList(u8).init(alloc);
     for (s) |c| {
         switch (c) {
-            '&' => out.appendSlice("&amp;") catch @panic("oom"),
-            '<' => out.appendSlice("&lt;") catch @panic("oom"),
-            '>' => out.appendSlice("&gt;") catch @panic("oom"),
+            '&' => out.append_slice("&amp;") catch @panic("oom"),
+            '<' => out.append_slice("&lt;") catch @panic("oom"),
+            '>' => out.append_slice("&gt;") catch @panic("oom"),
             else => out.append(c) catch @panic("oom"),
         }
     }
-    return out.toOwnedSlice() catch @panic("oom");
+    return out.to_owned_slice() catch @panic("oom");
 }
 
 /// Markdown table cell: HTML-escape, then `|` → `\|`, newlines → `<br>`
@@ -132,20 +132,20 @@ pub fn md_cell(alloc: std.mem.Allocator, s: []const u8) []u8 {
     var i: usize = 0;
     while (i < escaped.len) {
         if (escaped[i] == '|') {
-            out.appendSlice("\\|") catch @panic("oom");
+            out.append_slice("\\|") catch @panic("oom");
             i += 1;
         } else if (i + 1 < escaped.len and escaped[i] == '\r' and escaped[i + 1] == '\n') {
-            out.appendSlice("<br>") catch @panic("oom");
+            out.append_slice("<br>") catch @panic("oom");
             i += 2;
         } else if (escaped[i] == '\r' or escaped[i] == '\n') {
-            out.appendSlice("<br>") catch @panic("oom");
+            out.append_slice("<br>") catch @panic("oom");
             i += 1;
         } else {
             out.append(escaped[i]) catch @panic("oom");
             i += 1;
         }
     }
-    return out.toOwnedSlice() catch @panic("oom");
+    return out.to_owned_slice() catch @panic("oom");
 }
 
 /// Print a message to stderr and exit with a non-zero code.
