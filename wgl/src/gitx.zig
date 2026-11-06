@@ -174,8 +174,9 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
     // (full is the complete argv; run_args does not prepend)
     if (opts.atomic) try full.append("--atomic");
     for (opts.leases) |lease| {
+        // The arena frees these wholesale; a per-iteration  here
+        // would free each spec before git ever saw the argv.
         const spec = std.fmt.allocPrint(alloc, "--force-with-lease={s}", .{lease}) catch return error.OutOfMemory;
-        defer alloc.free(spec);
         try full.append(spec);
     }
     try full.append(remote);

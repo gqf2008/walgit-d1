@@ -115,7 +115,7 @@ fn specs_for(action: []const u8) []const args.Spec {
             S{ .name = "fold-threshold" },
         },
         .join => &.{ repo, S{ .name = "principal" }, key, push, S{ .name = "force", .boolean = true } },
-        .principal_register => &.{ repo, actor, key, push },
+        .principal_register => &.{ repo, S{ .name = "principal" }, key, push },
         .principal_revoke => &.{ repo, S{ .name = "principal" }, push },
         .principal_fetch => &.{ repo, S{ .name = "remote" }, token },
         .claim => &.{
