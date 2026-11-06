@@ -1,6 +1,6 @@
 //! `wgl principal` — the host-global principal registry commands (§4.4):
 //! register / rotate / list / revoke against `/api/v1/principals`. HTTP
-//! only, no bucket access. Ported from `principal_cmd.rs`.
+//! only, no bucket access. Ported from the retired Rust principal commands.
 
 const std = @import("std");
 const args = @import("args.zig");

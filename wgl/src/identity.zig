@@ -1,7 +1,7 @@
 //! The project-local collaboration identity (`docs/D1_PROTOCOL.md` §4.1,
 //! D58/D59/D62): one principal + key per **worktree**, materialized in that
 //! worktree's git dir under `walgit/` — never tracked, never touched by
-//! `git clean`, `0600` on every secret. Ported from `collab_cmd.rs`.
+//! `git clean`, `0600` on every secret. Ported from the retired Rust collab commands.
 
 const std = @import("std");
 const entry_mod = @import("d1/entry.zig");
@@ -167,11 +167,15 @@ pub fn make_private_dir(alloc: std.mem.Allocator, io: Io, dir: []const u8) !void
         error.PathAlreadyExists => {},
         else => return error.WriteFailed,
     }
-    // best-effort chmod; on failure the 0600 files still protect the seed
-    var f = d.openDir(io, dir, .{}) catch return;
-    defer f.close(io);
-    if (@hasDecl(std.Io.Dir, "chmod")) {
-        f.chmod(io, 0o700) catch {};
+    // POSIX chmod on the directory handle (`std.Io.Dir.setPermissions` is the
+    // 0.17 lane; the old `@hasDecl` probe never fired). On Windows the mode
+    // bits do not exist — the 0600 files still protect the seed.
+    if (@import("builtin").os.tag == .windows) {
+        return;
+    } else {
+        var dir_handle = d.openDir(io, dir, .{}) catch return;
+        defer dir_handle.close(io);
+        dir_handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o700)) catch {};
     }
 }
 

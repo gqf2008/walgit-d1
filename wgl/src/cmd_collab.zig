@@ -1,5 +1,5 @@
 //! `wgl collab` — the D1 collaboration command surface
-//! (`docs/D1_PROTOCOL.md`), ported from the retired `walgit collab` family.
+//! (`docs/D1_PROTOCOL.md`), ported from the retired Rust collaboration family.
 //! Read commands aggregate the local `refs/collab/*` offline (§3.2); writes
 //! are local refs pushed over receive-pack, and the host registry commands
 //! speak HTTP (§4.4).
@@ -307,7 +307,7 @@ pub fn report(c: *Ctx, p: *args.Parsed) !u8 {
 
     var buf: util.List(u8) = .init(c.alloc);
     // The CLI's CI section reads only the ci-kind slice — exactly what the
-    // retired `walgit collab report` rendered (collab_cmd.rs run_report).
+    // retired Rust report renderer produced.
     const ci_slice = try ci_mod.ci_entries(c.alloc, loaded.entries);
     const now_runs = try ci_mod.collect_runs(c.alloc, ci_slice, loaded.principals, now);
     if (std.mem.eql(u8, format, "text")) {

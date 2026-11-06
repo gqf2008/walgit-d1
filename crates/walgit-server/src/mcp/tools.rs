@@ -12,9 +12,9 @@
 //! serves a host, not one checkout) and reads through the store rather than a
 //! local clone.
 //!
-//! **Nothing is signed here.** The one write tool takes an entry the caller has
-//! already signed and forwards it, so this process never holds a collaborator's
-//! key (D64); the entry arrives exactly as `walgit collab entry` would push it.
+//! **The surface is read-only.** The D1 write tools moved to `wgl mcp` (D70),
+//! which takes entries the caller already signed; this process never holds a
+//! collaborator's key (D64).
 
 use std::sync::Arc;
 

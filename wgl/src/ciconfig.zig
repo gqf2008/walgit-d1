@@ -1,6 +1,6 @@
 //! `.walgit/ci.toml` schema (D1-CI §3.1, V1–V11): parse + validate with
 //! pipeline defaults applied — what the runner executes. Ported from
-//! `ci_cmd.rs`; every violation is collected, never fail-silent.
+//! the retired Rust runner; every violation is collected, never fail-silent.
 
 const std = @import("std");
 const toml = @import("toml.zig");
@@ -348,31 +348,55 @@ fn int_of(v: toml.Value) ?i64 {
     };
 }
 
-/// `"30s"` / `"10m"` / `"1h"` / compound `"1h 30m"` → whole seconds.
+/// A duration in the humantime shapes the protocol accepts: `"30s"`,
+/// `"10m"`, `"1h"`, `"1hour"`, `"1h30m"`, `"1h 30m"`, `"90m"`, `"2 days"`.
+/// Sub-second units round down to 0 seconds; the §3.1 bound then rejects
+/// them for `timeout`/`claim_ttl`. Anything else is `NotADuration`.
 pub fn parse_duration_secs(s: []const u8) !u64 {
     var total: u64 = 0;
+    var i: usize = 0;
     var any = false;
-    var it = std.mem.tokenizeAny(u8, s, " \t");
-    while (it.next()) |part| {
-        var i: usize = 0;
-        while (i < part.len and std.ascii.isDigit(part[i])) i += 1;
-        if (i == 0) return error.NotADuration;
-        const n = std.fmt.parseInt(u64, part[0..i], 10) catch return error.NotADuration;
-        const unit = part[i..];
-        const mult: u64 = blk: {
-            if (std.mem.eql(u8, unit, "s")) break :blk 1;
-            if (std.mem.eql(u8, unit, "m")) break :blk 60;
-            if (std.mem.eql(u8, unit, "h")) break :blk 3600;
-            if (std.mem.eql(u8, unit, "d")) break :blk 86400;
-            if (std.mem.eql(u8, unit, "ms")) break :blk 0; // sub-second rounds to 0 here
-            if (std.mem.eql(u8, unit, "us") or std.mem.eql(u8, unit, "ns")) break :blk 0;
-            return error.NotADuration;
-        };
+    while (true) {
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
+        if (i == s.len) break;
+        const digits_start = i;
+        while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+        if (i == digits_start) return error.NotADuration;
+        const n = std.fmt.parseInt(u64, s[digits_start..i], 10) catch return error.NotADuration;
+        // humantime also allows whitespace between the number and the unit.
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
+        const unit_start = i;
+        while (i < s.len and (std.ascii.isAlphabetic(s[i]) or s[i] == 0xC2 or s[i] == 0xB5)) i += 1;
+        if (i == unit_start) return error.NotADuration;
+        const mult = duration_unit_multiplier(s[unit_start..i]) orelse return error.NotADuration;
         total = std.math.add(u64, total, std.math.mul(u64, n, mult) catch return error.NotADuration) catch return error.NotADuration;
         any = true;
     }
     if (!any) return error.NotADuration;
     return total;
+}
+
+/// humantime's unit table (the constants the Rust parser used). `M` is
+/// month, distinct from `m` (minute); the rest are lowercase.
+fn duration_unit_multiplier(unit: []const u8) ?u64 {
+    const eql = std.mem.eql;
+    if (eql(u8, unit, "ns") or eql(u8, unit, "nano") or eql(u8, unit, "nanos") or
+        eql(u8, unit, "nanosecond") or eql(u8, unit, "nanoseconds")) return 0;
+    if (eql(u8, unit, "us") or eql(u8, unit, "µs") or eql(u8, unit, "micro") or eql(u8, unit, "micros") or
+        eql(u8, unit, "microsecond") or eql(u8, unit, "microseconds")) return 0;
+    if (eql(u8, unit, "ms") or eql(u8, unit, "milli") or eql(u8, unit, "millis") or
+        eql(u8, unit, "millisecond") or eql(u8, unit, "milliseconds")) return 0;
+    if (eql(u8, unit, "s") or eql(u8, unit, "sec") or eql(u8, unit, "secs") or
+        eql(u8, unit, "second") or eql(u8, unit, "seconds")) return 1;
+    if (eql(u8, unit, "m") or eql(u8, unit, "min") or eql(u8, unit, "mins") or
+        eql(u8, unit, "minute") or eql(u8, unit, "minutes")) return 60;
+    if (eql(u8, unit, "h") or eql(u8, unit, "hr") or eql(u8, unit, "hrs") or
+        eql(u8, unit, "hour") or eql(u8, unit, "hours")) return 3600;
+    if (eql(u8, unit, "d") or eql(u8, unit, "day") or eql(u8, unit, "days")) return 86_400;
+    if (eql(u8, unit, "w") or eql(u8, unit, "week") or eql(u8, unit, "weeks")) return 604_800;
+    if (eql(u8, unit, "M") or eql(u8, unit, "month") or eql(u8, unit, "months")) return 2_630_016;
+    if (eql(u8, unit, "y") or eql(u8, unit, "year") or eql(u8, unit, "years")) return 31_557_600;
+    return null;
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*`.
@@ -387,8 +411,10 @@ pub fn valid_env_name(name: []const u8) bool {
 }
 
 /// Glob over ref names (§3.2): `*` matches any run of characters **including
-/// `/`**, `?` one character, everything else literal; the whole name must
-/// match. Iterative greedy backtracking, no allocations per candidate.
+/// `/`, `?` one Unicode code point, everything else literal; the whole name
+/// must match. Iterative greedy backtracking, no allocations per candidate.
+/// Rust matched `char`s; advancing by UTF-8 code point keeps non-ASCII ref
+/// names identical across the two implementations.
 pub fn glob_match(pattern: []const u8, name: []const u8) bool {
     const p = pattern;
     const n = name;
@@ -398,7 +424,10 @@ pub fn glob_match(pattern: []const u8, name: []const u8) bool {
     var mark: usize = 0;
     while (ni < n.len) {
         const pc: ?u8 = if (pi < p.len) p[pi] else null;
-        if (pc != null and (pc.? == '?' or pc.? == n[ni])) {
+        if (pc != null and pc.? == '?') {
+            pi += 1;
+            ni += utf8CodepointLen(n[ni]);
+        } else if (pc != null and pc.? == n[ni]) {
             pi += 1;
             ni += 1;
         } else if (pc != null and pc.? == '*') {
@@ -407,7 +436,7 @@ pub fn glob_match(pattern: []const u8, name: []const u8) bool {
             pi += 1;
         } else if (star != std.math.maxInt(usize)) {
             pi = star + 1;
-            mark += 1;
+            mark += utf8CodepointLen(n[mark]);
             ni = mark;
         } else {
             return false;
@@ -415,6 +444,14 @@ pub fn glob_match(pattern: []const u8, name: []const u8) bool {
     }
     while (pi < p.len and p[pi] == '*') pi += 1;
     return pi == p.len;
+}
+
+fn utf8CodepointLen(b: u8) usize {
+    if (b < 0x80) return 1;
+    if (b & 0xE0 == 0xC0) return 2;
+    if (b & 0xF0 == 0xE0) return 3;
+    if (b & 0xF8 == 0xF0) return 4;
+    return 1; // invalid lead byte: byte semantics, never overrun
 }
 
 // ---- tests -----------------------------------------------------------------------
@@ -426,6 +463,11 @@ test "glob matches the §3.2 semantics" {
     try testing.expect(glob_match("refs/heads/*", "refs/heads/a/b")); // `*` spans `/`
     try testing.expect(glob_match("refs/tags/v*", "refs/tags/v1.0"));
     try testing.expect(glob_match("refs/heads/feature-?", "refs/heads/feature-x"));
+    // `?` consumes one UTF-8 code point, like Rust's `char` matcher.
+    try testing.expect(glob_match("refs/heads/?", "refs/heads/é"));
+    try testing.expect(glob_match("refs/heads/*?", "refs/heads/é"));
+    try testing.expect(glob_match("refs/heads/é", "refs/heads/é"));
+    try testing.expect(!glob_match("refs/heads/?", "refs/heads/éx"));
     try testing.expect(!glob_match("refs/heads/*", "refs/tags/v1"));
     try testing.expect(!glob_match("refs/heads/ma*", "refs/heads")); // must match whole name
     try testing.expect(glob_match("refs/heads/main", "refs/heads/main"));
@@ -436,8 +478,19 @@ test "durations parse" {
     try testing.expectEqual(@as(u64, 600), try parse_duration_secs("10m"));
     try testing.expectEqual(@as(u64, 3600), try parse_duration_secs("1h"));
     try testing.expectEqual(@as(u64, 5400), try parse_duration_secs("1h 30m"));
+    // humantime shapes: long units, no separator, spaces around the unit.
+    try testing.expectEqual(@as(u64, 3600), try parse_duration_secs("1hour"));
+    try testing.expectEqual(@as(u64, 5400), try parse_duration_secs("1h30m"));
+    try testing.expectEqual(@as(u64, 5400), try parse_duration_secs("90m"));
+    try testing.expectEqual(@as(u64, 5400), try parse_duration_secs("1 hour 30 minutes"));
+    try testing.expectEqual(@as(u64, 172_800), try parse_duration_secs("2 days"));
+    try testing.expectEqual(@as(u64, 0), try parse_duration_secs("250ms"));
     try testing.expectError(error.NotADuration, parse_duration_secs("abc"));
     try testing.expectError(error.NotADuration, parse_duration_secs(""));
+    try testing.expectError(error.NotADuration, parse_duration_secs("1h30"));
+    try testing.expectError(error.NotADuration, parse_duration_secs("1 hour later"));
+    try testing.expectError(error.NotADuration, parse_duration_secs("-1s"));
+    try testing.expectError(error.NotADuration, parse_duration_secs("1fortnight"));
 }
 
 test "ci.toml validates with defaults applied" {

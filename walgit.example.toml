@@ -172,7 +172,7 @@ gc_interval = "24h"                # bucket GC: drop superseded packs older than
 collab_fold_refs = 5000            # D66: fold refs/collab/inbox/* into refs/collab/meta/snapshot once a repo has this many inbox refs; 0 = off
                                    # (aggregation budgets by ref count, so an unfolded inbox silently stops the board from updating)
 # collab_fold_principal = "ops"    # the registered principal the fold signs its snapshot as; set this AND the key, or neither
-# collab_fold_key = "/etc/walgit/keys/ops.ed25519"   # its 32-byte hex seed, the file `walgit collab join` writes; the maintainer
+# collab_fold_key = "/etc/walgit/keys/ops.ed25519"   # its 32-byte hex seed, the file `wgl collab join` writes; the maintainer
                                    # refuses to fold with a key the registry does not name, so a wrong pair can never strand readers
 retention_wal = "7d"               # bucket GC: folded log segments (below manifest.min_seq) and non-live checkpoints are
                                    # dropped past this window; never touched: the live checkpoint, live log segments, the

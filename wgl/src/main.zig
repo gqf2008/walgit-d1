@@ -1,4 +1,4 @@
-//! The wgl entrypoint: `wgl <collab|principal|ci> <action> [--flags]`.
+//! The wgl entrypoint: `wgl <collab|principal|ci|mcp> <action> [--flags]`.
 //! One arena per run; every command is a leaf returning an exit code (the
 //! card-claim stand-down is exit 2, §8.4).
 
@@ -9,7 +9,6 @@ const cmd_principal = @import("cmd_principal.zig");
 const cmd_ci = @import("cmd_ci.zig");
 const util = @import("util.zig");
 const cmd_mcp = @import("cmd_mcp.zig");
-const version = @import("version.zig");
 
 const usage =
     \\wgl — the standalone D1 collaboration client (docs/D1_PROTOCOL.md)
@@ -20,9 +19,12 @@ const usage =
     \\            claim|gc|watch
     \\  wgl principal register|rotate|list|revoke
     \\  wgl ci validate|run|status|log|artifacts
+    \\  wgl mcp --repo <checkout> [--remote origin]
     \\
 ;
 
+/// The module version — keep in step with build.zig.zon.
+pub const version = util.version;
 
 pub fn main(init: std.process.Init) !u8 {
     var arena_state = std.heap.ArenaAllocator.init(init.gpa);
@@ -37,8 +39,8 @@ pub fn main(init: std.process.Init) !u8 {
     while (it.next()) |arg| try argv.append(arg);
     if (argv.items.len >= 1 and (std.mem.eql(u8, argv.items[0], "--version") or std.mem.eql(u8, argv.items[0], "-V"))) {
         var buf: [96]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "wgl {s} (walgit D1 collaboration client, zig)\n", .{version.string}) catch "wgl\n";
-        std.debug.print("{s}", .{line});
+        const line = std.fmt.bufPrint(&buf, "wgl {s} (walgit D1 collaboration client, zig)\n", .{version}) catch "wgl\n";
+        std.Io.File.stdout().writeStreamingAll(init.io, line) catch {};
         return 0;
     }
     if (argv.items.len < 2) {

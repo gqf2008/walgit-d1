@@ -32,7 +32,6 @@ const gitx = @import("gitx.zig");
 const identity = @import("identity.zig");
 const jsonio = @import("jsonio.zig");
 const util = @import("util.zig");
-const version = @import("version.zig");
 
 const Io = std.Io;
 const Value = std.json.Value;
@@ -374,7 +373,7 @@ fn initializeResult(a: std.mem.Allocator, protocol: []const u8) Value {
     jsonio.obj_put(&caps, a, "resources", .{ .object = res });
     var info = jsonio.new_object();
     jsonio.obj_put(&info, a, "name", .{ .string = "wgl" });
-    jsonio.obj_put(&info, a, "version", .{ .string = version.string });
+    jsonio.obj_put(&info, a, "version", .{ .string = util.version });
     var o = jsonio.new_object();
     jsonio.obj_put(&o, a, "protocolVersion", .{ .string = protocol });
     jsonio.obj_put(&o, a, "capabilities", .{ .object = caps });

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # wgl e2e (D69): the collaboration client loop against real git transport —
-# the lane the retired `walgit collab`/`ci` integration suites owned. Two
+# the lane the retired Rust collaboration integration suites owned. Two
 # clones push through receive-pack to a bare origin, a second principal
 # aggregates and verifies, the claim race converges (§8.4: exactly one
 # winner, the loser exits 2), and the gc fold keeps aggregation byte-identical
@@ -22,6 +22,7 @@ fi
 W="$wgl_bin"
 
 rust_bin="${WALGIT_BIN:-}"
+rust_explicit=""
 if [ -z "$rust_bin" ]; then
     for cand in "$root/target/debug/walgit" \
                 "$root/target/release/walgit" \
@@ -29,6 +30,8 @@ if [ -z "$rust_bin" ]; then
                 "$(dirname "$(dirname "$root")")/target/release/walgit"; do
         if [ -x "$cand" ]; then rust_bin="$cand"; break; fi
     done
+else
+    rust_explicit=1
 fi
 have_rust=""; [ -n "$rust_bin" ] && [ -x "$rust_bin" ] && have_rust=1
 
@@ -46,6 +49,21 @@ git -C "$b" pull -q origin main
 
 step() { echo "== $*"; }
 fail() { echo "wgl-e2e: $*" >&2; exit 1; }
+
+# A reference binary only counts when it still has the collab family. After
+# D69 a branch-built `walgit` exits 2 here; that must skip the cross-check,
+# not fail the lane (an explicitly supplied WALGIT_BIN that cannot answer is
+# a caller error and is reported as such).
+if [ -n "$have_rust" ]; then
+    if "$rust_bin" --config /dev/null collab board --repo "$root" --format hash >/dev/null 2>&1; then
+        :
+    elif [ -n "$rust_explicit" ]; then
+        fail "WALGIT_BIN=$rust_bin does not support the collab commands (D69 moved them to wgl); it cannot serve as the cross-implementation reference"
+    else
+        echo "wgl-e2e: $rust_bin has no collab commands (a D69+ walgit build); skipping the cross-implementation check"
+        have_rust=""
+    fi
+fi
 
 step "register two principals through receive-pack"
 ( cd "$a" && "$W" collab join --principal alice --push origin >/dev/null ) || fail "alice join"
@@ -195,22 +213,85 @@ wait "$mcp_pid" || fail "wgl mcp did not exit 0 on stdin EOF"
 grep -q '"id":1' "$out" || fail "initialize did not answer"
 echo "   mcp: 2 TTL updates, cap enforced, unsubscribe quiet, EOF exit 0"
 
+step "ci timeout: a hung task settles as timeout and the runner returns"
+cat > "$a/.walgit/ci.toml" <<'EOF'
+version = 1
+
+[[task]]
+name = "test"
+command = "true"
+
+[[task]]
+name = "slow"
+command = "sleep 5"
+timeout = "1s"
+
+[[task]]
+name = "race"
+command = "sleep 3"
+EOF
+( cd "$a" && git add .walgit/ci.toml && git commit -q -m 'ci: add timeout and race tasks' \
+    && git push -q origin main ) || fail "pushing the timeout/race ci.toml"
+slow_start="$(date +%s)"
+rc_slow=0
+( cd "$a" && "$W" ci run --once --actor ci-slow --key "$ci_key" --task slow \
+    --state "$tmp/slow-state.json" ) >"$tmp/slow.log" 2>&1 || rc_slow=$?
+slow_elapsed=$(( $(date +%s) - slow_start ))
+{ [ "$rc_slow" = 0 ] || [ "$rc_slow" = 1 ]; } \
+    || fail "timeout runner exited $rc_slow (expected 0/1): $(cat "$tmp/slow.log")"
+[ "$slow_elapsed" -le 20 ] \
+    || fail "the timeout runner did not return within 20s (${slow_elapsed}s): $(cat "$tmp/slow.log")"
+( cd "$b" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
+slow_conclusion="$( cd "$b" && "$W" ci status --format json | python3 -c 'import json,sys
+runs=json.load(sys.stdin)["runs"]
+eff=None
+for r in runs:
+    if r["task"] != "slow": continue
+    for a in r["attempts"]:
+        if a.get("effective"): eff=a["effective"]
+print((eff or {}).get("conclusion") or "none")' )"
+[ "$slow_conclusion" = "timeout" ] || fail "the slow task did not settle as timeout: $slow_conclusion"
+echo "   slow settled timeout in ${slow_elapsed}s"
+
+step "two runners race: exactly one effective result, the loser stands down"
+( cd "$a" && "$W" ci run --once --actor ci-a --key "$ci_key" --task race \
+    --state "$tmp/race-a-state.json" ) >"$tmp/race-a.log" 2>&1 &
+race_a_pid=$!
+( cd "$b" && "$W" ci run --once --actor ci-b --key "$ci_key" --task race \
+    --state "$tmp/race-b-state.json" ) >"$tmp/race-b.log" 2>&1 &
+race_b_pid=$!
+race_rc_a=0; wait "$race_a_pid" || race_rc_a=$?
+race_rc_b=0; wait "$race_b_pid" || race_rc_b=$?
+[ "$race_rc_a" = 0 ] || fail "race runner ci-a exited $race_rc_a: $(cat "$tmp/race-a.log")"
+[ "$race_rc_b" = 0 ] || fail "race runner ci-b exited $race_rc_b: $(cat "$tmp/race-b.log")"
+( cd "$b" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
+race_out="$( cd "$b" && "$W" ci status --format json | python3 -c 'import json,sys
+runs=json.load(sys.stdin)["runs"]
+eff=[]
+for r in runs:
+    if r["task"] != "race": continue
+    for a in r["attempts"]:
+        if a.get("effective"): eff.append(a["effective"])
+print(len(eff), (eff[0]["actor"] if eff else "none"))' )"
+set -- $race_out
+race_effective_count="$1"; race_effective_actor="$2"
+[ "$race_effective_count" = "1" ] \
+    || fail "the race must settle exactly one effective result, got $race_effective_count"
+[ "$race_effective_actor" = "ci-a" ] || [ "$race_effective_actor" = "ci-b" ] \
+    || fail "unexpected effective actor: $race_effective_actor"
+if [ "$race_effective_actor" = "ci-a" ]; then loser_log="$tmp/race-b.log"; else loser_log="$tmp/race-a.log"; fi
+grep -qE 'standing down|lost the claim race|held by' "$loser_log" \
+    || fail "the losing runner did not stand down: $(cat "$loser_log")"
+echo "   winner $race_effective_actor; loser stood down"
+
 step "cross-implementation: the Rust aggregation must agree on the board hash"
 if [ -n "$have_rust" ]; then
-    # D69 moved the collaboration command family to wgl. A reference binary
-    # built from this tree therefore has no `collab` subcommand, and calling
-    # one must be an **explicit skip**, not a red on a clean build. Probe the
-    # command surface first; only an older binary that still answers it is a
-    # usable cross-check.
-    if "$rust_bin" --config /dev/null collab --help >/dev/null 2>&1; then
-        rust_hash="$( "$rust_bin" --config /dev/null collab board --repo "$b" --format hash 2>/dev/null )"
-        [ "$rust_hash" = "$after" ] || fail "wgl and walgit disagree on the board hash: $after vs ${rust_hash:-<none>}"
-        echo "   wgl == walgit: $after"
-    else
-        echo "   (reference binary has no \`collab\` command — D69 moved it to wgl; skipping the cross-check explicitly)"
-    fi
+    rust_hash="$( "$rust_bin" --config /dev/null collab board --repo "$b" --format hash 2>/dev/null )" \
+        || fail "the reference $rust_bin failed the collab board cross-check"
+    [ "$rust_hash" = "$after" ] || fail "wgl and walgit disagree on the board hash: $after vs ${rust_hash:-<none>}"
+    echo "   wgl == walgit: $after"
 else
-    echo "   (no walgit binary found; skipping the cross-check explicitly)"
+    echo "   (no reference walgit binary with collab commands; skipping the cross-check)"
 fi
 
 step "real server (optional): wgl mcp == the host's own aggregation"

@@ -5,6 +5,7 @@
 //! worktree, and publishes a signed `ci_result` into its inbox.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const args = @import("args.zig");
 const ci = @import("d1/ci.zig");
 const entry_mod = @import("d1/entry.zig");
@@ -114,7 +115,7 @@ fn ci_status(c: *Ctx, p: *args.Parsed) !u8 {
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const loaded = try reader.load(c.alloc);
     const now = util.now_ts();
-    // The retired ci_cmd read only the ci-kind slice (§7.1) — one aggregation,
+    // The retired Rust runner read only the ci-kind slice (§7.1) — one aggregation,
     // never a second answer.
     const ci_slice = try ci.ci_entries(c.alloc, loaded.entries);
     const runs = try ci.collect_runs(c.alloc, ci_slice, loaded.principals, now);
@@ -140,6 +141,11 @@ fn ci_status(c: *Ctx, p: *args.Parsed) !u8 {
 
 /// `{"now": …, "runs": [RunView…]}` — the json! wrapper sorts the top level;
 /// each run keeps its struct field order (the wire order the SPA reads).
+/// The byte shape is deliberately **not** identical to the retired Rust
+/// `serde_json::to_string_pretty` output (that sorted every object key and
+/// indented recursively): the contract is the parsed document, so consumers
+/// parse JSON and never byte-compare this command. (`board`/`thread` remain
+/// byte-identical — D69 only claims that for the aggregation.)
 fn runs_json(c: *Ctx, now: i64, runs: []const ci.RunEntry) ![]u8 {
     return runs_json_with(c.alloc, now, runs);
 }
@@ -919,7 +925,7 @@ const Runner = struct {
         jsonio.obj_put(&o, self.c.alloc, "commit", .{ .string = commit });
         jsonio.obj_put(&o, self.c.alloc, "ttl", .{ .integer = @intCast(ttl) });
         jsonio.obj_put(&o, self.c.alloc, "attempt", .{ .integer = attempt });
-        jsonio.obj_put(&o, self.c.alloc, "runner", .{ .string = "wgl" });
+        jsonio.obj_put(&o, self.c.alloc, "runner", .{ .string = "wgl ci/" ++ util.version });
         const oid = try self.publish(ci.CI_CLAIM_KIND, id, "", .{ .object = o });
         std.debug.print("wgl: run {s} task {s} attempt {d}: claimed (ttl {d}s)\n", .{ id, task.name, attempt, ttl });
         return oid;
@@ -1051,93 +1057,91 @@ const Runner = struct {
         if (@import("builtin").os.tag != .windows) spawn_opts.pgid = 0;
         var child = std.process.spawn(self.c.io, spawn_opts) catch return fail(millis() - started, "spawn failed");
 
-        // Drain both pipes into one capped tail while the child runs.
-        const Drain = struct {
-            fn go(r: *std.Io.File.Reader, buf: *Capture) void {
-                var tmp: [8192]u8 = undefined;
-                while (true) {
-                    const n = r.interface.readSliceShort(&tmp) catch return;
-                    if (n == 0) return;
-                    buf.append(tmp[0..n]);
-                }
-            }
-        };
-        var capture = Capture.init(self.c.alloc);
-        var rbuf1: [64 * 1024]u8 = undefined;
-        var rbuf2: [64 * 1024]u8 = undefined;
-        var r1 = child.stdout.?.reader(self.c.io, &rbuf1);
-        var r2 = child.stderr.?.reader(self.c.io, &rbuf2);
-        const drain1 = struct {
-            fn go(r: *std.Io.File.Reader, cap: *Capture) void {
-                Drain.go(r, cap);
-            }
-        }.go;
-        _ = drain1;
-        const t1 = std.Thread.spawn(.{}, Drain.go, .{ &r1, &capture }) catch {
+        // Take ownership of both pipes before the child can be reaped: the
+        // wait/kill cleanup closes `child.stdout`/`child.stderr`, which must
+        // not race a drain thread still reading those descriptors (and the
+        // tail written just before exit must survive).
+        const out_state = self.c.alloc.create(DrainState) catch return fail(millis() - started, "oom");
+        out_state.* = .{ .io = self.c.io, .file = child.stdout.?, .capture = Capture.init(self.c.alloc) };
+        child.stdout = null;
+        const err_state = self.c.alloc.create(DrainState) catch return fail(millis() - started, "oom");
+        err_state.* = .{ .io = self.c.io, .file = child.stderr.?, .capture = Capture.init(self.c.alloc) };
+        child.stderr = null;
+
+        const t1 = std.Thread.spawn(.{}, DrainState.run, .{out_state}) catch {
+            killTree(self.c.io, &child);
+            out_state.file.close(self.c.io);
+            err_state.file.close(self.c.io);
             return fail(millis() - started, "thread spawn failed");
         };
-        const t2 = std.Thread.spawn(.{}, Drain.go, .{ &r2, &capture }) catch {
+        const t2 = std.Thread.spawn(.{}, DrainState.run, .{err_state}) catch {
+            // The first drain owns stdout; kill the child so it reaches EOF.
+            killTree(self.c.io, &child);
+            if (joinBounded(self.c.io, t1, &out_state.done, DRAIN_GRACE_MS)) {
+                out_state.file.close(self.c.io);
+            }
+            err_state.file.close(self.c.io);
             return fail(millis() - started, "thread spawn failed");
         };
 
         const deadline_ms = started + task.timeout_secs * 1000;
+        var term: ?std.process.Child.Term = null;
         while (true) {
-            const term = child.wait(self.c.io) catch null;
-            if (term) |t| {
-                t1.join();
-                t2.join();
-                const code: ?i64 = switch (t) {
-                    .exited => |code| code,
-                    else => null,
-                };
-                const captured = capture.take();
-                return .{
-                    .conclusion = if (code != null and code.? == 0) .success else .failure,
-                    .exit_code = code,
-                    .duration_ms = millis() - started,
-                    .log = captured.log,
-                    .log_truncated = captured.truncated,
-                };
+            if (pollTerm(self.c.io, &child)) |t| {
+                term = t;
+                break;
             }
             if (millis() >= deadline_ms) break;
             self.c.io.sleep(std.Io.Duration.fromNanoseconds(25 * std.time.ns_per_ms), .real) catch {};
         }
-        // Hard timeout: kill the whole process group.
-        if (child.id) |pid| {
-            if (@import("builtin").os.tag != .windows) {
-                std.posix.kill(-@as(i32, @intCast(pid)), std.posix.SIG.KILL) catch {};
-            }
+
+        if (term == null) {
+            // Hard timeout: the child ran in its own process group (POSIX) /
+            // a taskkill tree (Windows), so grandchildren holding the capture
+            // pipes die with it and the drains can reach EOF.
+            killTree(self.c.io, &child);
+            const merged = collectLog(self.c.io, self.c.alloc, out_state, err_state, t1, t2);
+            return .{
+                .conclusion = .timeout,
+                .exit_code = null,
+                .duration_ms = millis() - started,
+                .log = merged.log,
+                .log_truncated = merged.truncated,
+            };
         }
-        child.kill(self.c.io);
-        t1.join();
-        t2.join();
-        const captured = capture.take();
+
+        // The process is gone, so the drains reach EOF once the pipe's write
+        // ends close. A daemonized grandchild could still hold one open: the
+        // join is bounded, the stream is abandoned, and the log is marked
+        // truncated rather than hanging the runner.
+        const merged = collectLog(self.c.io, self.c.alloc, out_state, err_state, t1, t2);
+        const code: ?i64 = switch (term.?) {
+            .exited => |exit_code| exit_code,
+            else => null,
+        };
         return .{
-            .conclusion = .timeout,
-            .exit_code = null,
+            .conclusion = if (code != null and code.? == 0) .success else .failure,
+            .exit_code = code,
             .duration_ms = millis() - started,
-            .log = captured.log,
-            .log_truncated = captured.truncated,
+            .log = merged.log,
+            .log_truncated = merged.truncated,
         };
     }
 };
 
-/// One stream's capped tail. The two pipes drain into separate buffers and
-/// the merged log is stdout ++ stderr — the retired Rust implementation
-/// interleaved them through one ring, but the interleaving there was
-/// nondeterministic anyway, so the deterministic order costs nothing.
+/// One stream's capped tail. stdout and stderr have independent buffers, so
+/// the two drain threads share no mutable state; the merged log is
+/// stdout ++ stderr, trimmed to the same 16 MiB tail. (The retired Rust
+/// implementation interleaved both pipes through one mutex-guarded ring; that
+/// interleaving was nondeterministic anyway, so the deterministic order costs
+/// nothing and removes the data race.)
 const Capture = struct {
     alloc: std.mem.Allocator,
     bytes: util.List(u8),
     truncated: bool = false,
-    done: bool = false,
 
     fn init(alloc: std.mem.Allocator) Capture {
         return .{ .alloc = alloc, .bytes = util.List(u8).init(alloc) };
-    }
-
-    fn take(self: *Capture) struct { log: []const u8, truncated: bool } {
-        return .{ .log = self.bytes.items, .truncated = self.truncated };
     }
 
     fn append(self: *Capture, chunk: []const u8) void {
@@ -1157,6 +1161,138 @@ const Capture = struct {
         self.bytes.append_slice(chunk) catch {};
     }
 };
+
+/// How long a drain thread is given to reach EOF before it is abandoned.
+const DRAIN_GRACE_MS: u64 = 2000;
+
+/// One pipe's drain thread. Heap-allocated: an abandoned thread (see
+/// `joinBounded`) must never touch a caller's stack frame.
+const DrainState = struct {
+    io: Io,
+    file: std.Io.File,
+    capture: Capture,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *DrainState) void {
+        defer self.done.store(true, .release);
+        var tmp: [8192]u8 = undefined;
+        while (true) {
+            const n = self.file.readStreaming(self.io, &.{&tmp}) catch return;
+            if (n == 0) return;
+            self.capture.append(tmp[0..n]);
+        }
+    }
+};
+
+const MergedLog = struct { log: []const u8, truncated: bool };
+
+/// Bounded join: poll the thread's completion flag, detach after the grace.
+fn joinBounded(io: Io, t: std.Thread, done: *std.atomic.Value(bool), grace_ms: u64) bool {
+    const until = millis() + grace_ms;
+    while (!done.load(.acquire)) {
+        if (millis() >= until) {
+            t.detach();
+            return false;
+        }
+        io.sleep(std.Io.Duration.fromNanoseconds(10 * std.time.ns_per_ms), .real) catch {};
+    }
+    t.join();
+    return true;
+}
+
+/// Join both drains within `DRAIN_GRACE_MS`, close the pipes that finished,
+/// and merge in deterministic stdout ++ stderr order. A stream whose thread
+/// had to be abandoned contributes nothing and marks the log truncated.
+fn collectLog(io: Io, alloc: std.mem.Allocator, out_state: *DrainState, err_state: *DrainState, t1: std.Thread, t2: std.Thread) MergedLog {
+    const out_joined = joinBounded(io, t1, &out_state.done, DRAIN_GRACE_MS);
+    const err_joined = joinBounded(io, t2, &err_state.done, DRAIN_GRACE_MS);
+    if (out_joined) out_state.file.close(io);
+    if (err_joined) err_state.file.close(io);
+    return mergeCaptures(alloc, &out_state.capture, &err_state.capture, out_joined, err_joined);
+}
+
+fn mergeCaptures(alloc: std.mem.Allocator, out: *const Capture, err: *const Capture, out_ok: bool, err_ok: bool) MergedLog {
+    var merged = util.List(u8).init(alloc);
+    var truncated = false;
+    if (out_ok) {
+        merged.append_slice(out.bytes.items) catch {};
+        truncated = truncated or out.truncated;
+    } else {
+        truncated = true;
+    }
+    if (err_ok) {
+        merged.append_slice(err.bytes.items) catch {};
+        truncated = truncated or err.truncated;
+    } else {
+        truncated = true;
+    }
+    if (merged.items.len > LOG_CAPTURE_MAX) {
+        const drop = merged.items.len - LOG_CAPTURE_MAX;
+        return .{ .log = merged.items[drop..], .truncated = true };
+    }
+    return .{ .log = merged.items, .truncated = truncated };
+}
+
+/// §8.1 timeout kill: POSIX a group signal (spawn made the child its own
+/// group leader), Windows `taskkill /T /F` so `cmd`'s grandchildren die too.
+/// Falls back to killing the direct child.
+fn killTree(io: Io, child: *std.process.Child) void {
+    switch (builtin.os.tag) {
+        .windows => {
+            if (child.id) |handle| {
+                const Kernel32 = struct {
+                    extern "kernel32" fn GetProcessId(process: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
+                };
+                const pid = Kernel32.GetProcessId(handle);
+                if (pid != 0) {
+                    var pid_buf: [16]u8 = undefined;
+                    const pid_text = std.fmt.bufPrint(&pid_buf, "{d}", .{pid}) catch "0";
+                    const argv = [_][]const u8{ "taskkill", "/PID", pid_text, "/T", "/F" };
+                    if (std.process.run(std.heap.page_allocator, io, .{
+                        .argv = &argv,
+                        .expand_arg0 = .expand,
+                        .stdout_limit = .limited(4096),
+                        .stderr_limit = .limited(4096),
+                    })) |res| {
+                        std.heap.page_allocator.free(res.stdout);
+                        std.heap.page_allocator.free(res.stderr);
+                    } else |_| {}
+                }
+            }
+            child.kill(io);
+        },
+        else => {
+            if (child.id) |pid| {
+                std.posix.kill(-@as(i32, @intCast(pid)), std.posix.SIG.KILL) catch {};
+            }
+            child.kill(io);
+        },
+    }
+}
+
+/// Nonblocking child-status probe. POSIX reaps with `waitpid(WNOHANG)` —
+/// `Child.wait` blocks, which would defeat the deadline. Windows polls the
+/// process handle with a zero timeout and then lets `wait` clean up.
+fn pollTerm(io: Io, child: *std.process.Child) ?std.process.Child.Term {
+    switch (builtin.os.tag) {
+        .windows => {
+            const handle = child.id orelse return null;
+            var timeout: std.os.windows.LARGE_INTEGER = 0;
+            switch (std.os.windows.ntdll.NtWaitForSingleObject(handle, .FALSE, &timeout)) {
+                .WAIT_0 => return child.wait(io) catch null,
+                else => return null,
+            }
+        },
+        else => {
+            const pid = child.id orelse return null;
+            var status: if (builtin.link_libc) c_int else i32 = undefined;
+            const rc = std.posix.system.wait4(pid, &status, std.posix.W.NOHANG, null);
+            if (std.posix.errno(rc) != .SUCCESS or rc == 0) return null;
+            child.id = null;
+            return std.Io.Threaded.statusToTerm(@bitCast(status));
+        },
+    }
+}
 
 pub const ScheduleEntry = struct { name: []const u8, expr: ?[]const u8 };
 
@@ -1486,4 +1622,49 @@ test "run_view_json renders a real claim without dangling" {
     const text = try run_view_json(arena, &view);
     try testing.expect(std.mem.indexOf(u8, text, "ci-abc") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"state\":\"claimed\"") != null);
+}
+
+test "concurrent stdout and stderr drains keep both streams" {
+    const io = self_io();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Both pipes are written concurrently; under the old shared-Capture
+    // design this is exactly the interleaving that corrupted the list.
+    const command: []const []const u8 = if (builtin.os.tag == .windows)
+        &.{ "cmd", "/C", "for /L %i in (1,1,4000) do @(echo out-%i & echo err-%i 1>&2)" }
+    else
+        &.{ "sh", "-c", "i=0; while [ $i -lt 4000 ]; do echo out-$i; echo err-$i >&2; i=$((i+1)); done" };
+    var child = try std.process.spawn(io, .{
+        .argv = command,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    const out_state = try arena.create(DrainState);
+    out_state.* = .{ .io = io, .file = child.stdout.?, .capture = Capture.init(arena) };
+    child.stdout = null;
+    const err_state = try arena.create(DrainState);
+    err_state.* = .{ .io = io, .file = child.stderr.?, .capture = Capture.init(arena) };
+    child.stderr = null;
+
+    const t1 = try std.Thread.spawn(.{}, DrainState.run, .{out_state});
+    const t2 = try std.Thread.spawn(.{}, DrainState.run, .{err_state});
+    const term = try child.wait(io);
+    t1.join();
+    t2.join();
+    out_state.file.close(io);
+    err_state.file.close(io);
+
+    try testing.expect(term == .exited and term.exited == 0);
+    const merged = mergeCaptures(arena, &out_state.capture, &err_state.capture, true, true);
+    try testing.expect(!merged.truncated);
+    // The complete tails of both streams survive.
+    try testing.expect(std.mem.indexOf(u8, merged.log, "out-3999\n") != null);
+    try testing.expect(std.mem.indexOf(u8, merged.log, "err-3999\n") != null);
+    // Deterministic merge order: stdout, then stderr.
+    const out_at = std.mem.indexOf(u8, merged.log, "out-0\n").?;
+    const err_at = std.mem.indexOf(u8, merged.log, "err-0\n").?;
+    try testing.expect(out_at < err_at);
 }

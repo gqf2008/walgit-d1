@@ -4,7 +4,7 @@ walgit is a git server (one binary in front of an object store) with a WAL-backe
 storage engine, developed as an **agent-native collaboration platform**. Read
 the charter and the architecture before touching anything: `AGENTS.md` + `docs/CHARTER.md` (roles,
 dispatch, acceptance gates, document map), `docs/ARCHITECTURE.md` (constraints §1,
-WAL design §2, principles §3), `docs/DECISIONS.md` (every decision in force, D1–D68),
+WAL design §2, principles §3), `docs/DECISIONS.md` (every decision in force, D1–D69),
 then `GOAL.md` for what it is for, `CONTRIBUTING.md` for the workflow. These
 outrank any generic convention.
 
@@ -13,7 +13,7 @@ outrank any generic convention.
 - **The canonical repository is walgit** (`origin = http://127.0.0.1:8081/gqf2008/walgit.git`);
   GitHub is a read-only mirror plus the release pipeline. Work units, PRs, reviews and the
   board are signed entries in walgit's D1 collaboration layer (`refs/collab/*`): follow the
-  `walgit` skill's flow (`walgit collab entry --kind issue|status|patch|review|merge_result`),
+  `walgit` skill's flow (`wgl collab entry --kind issue|status|patch|review|merge_result`),
   not GitHub labels/PRs. Feature branches are never pushed to the GitHub remote; a **release** pushes
   `main` and its tag by hand (`git push github main` + `git push github vX.Y.Z`), and the tag is what
   triggers the GitHub Actions release (docs/DECISIONS.md D57). The `sync-to-github.sh` mirror is not in the

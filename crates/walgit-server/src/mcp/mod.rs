@@ -32,7 +32,7 @@
 //!   refs-level seq every `mcp.subscribe_interval` and sends
 //!   `notifications/resources/updated` when it moves. No request is held open
 //!   between changes: the seq read *is* a conditional `manifest.pb` GET, the
-//!   same observation lane `git ls-remote` and `walgit collab watch` use. A
+//!   same observation lane `git ls-remote` and `wgl collab watch` use. A
 //!   watched repository that disappears sends `notifications/resources/list_changed`
 //!   (the one thing that capability means) and ends the subscription.
 //!

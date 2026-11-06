@@ -584,7 +584,7 @@ pub fn ci_entries<'a>(entries: &[&'a EntryRef]) -> Vec<&'a EntryRef> {
 }
 
 /// Every run in the log, by id, as of `now` (§7.1). The one aggregation
-/// behind `walgit ci status`, the collab report's CI section and the SPA's
+/// behind `wgl ci status`, the collab report's CI section and the SPA's
 /// thread display — three surfaces, one answer, no second semantics.
 pub fn collect_runs(
     entries: &[&EntryRef],
