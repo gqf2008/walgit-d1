@@ -1168,10 +1168,11 @@ struct CollabPrincipalPost {
 /// (`refs/collab/inbox/<actor>/…`, `refs/collab/meta/principals/<principal>`).
 ///
 /// Shared by every surface that can create such a segment or name a principal
-/// for one: the collab API (`collab_entries`, `collab_principal`), the MCP write
-/// tier (`collab_publish`) and `walgit token add` — so what a client
-/// is allowed to name, and what an operator is allowed to configure, cannot drift
-/// apart.
+/// for one: the collab API (`collab_entries`, `collab_principal`) and
+/// `walgit token add` — so what a client is allowed to name, and what an
+/// operator is allowed to configure, cannot drift apart. (The D1 MCP write
+/// face lives in `wgl mcp` now, D70; its `collab_register` writes this ref
+/// over git, where receive-pack policy applies the same segment rule.)
 pub fn ref_segment_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 255
@@ -2222,7 +2223,8 @@ async fn collab_ci_artifact_size(
 /// §8.3): every run the loaded ledger carries, with its attempts, winner, state
 /// and effective conclusion. The same aggregation core (`walgit_wal::ci`) the
 /// CLI's `wgl ci status` and the report's CI section use, serialized once —
-/// so an MCP client's `ci_status` is this answer, not a second implementation.
+/// so `wgl mcp`'s `ci_status` (D70) is this answer, not a second
+/// implementation; the host `/mcp` does not serve it.
 #[derive(serde::Deserialize)]
 struct CiRunsQuery {
     id: Option<String>,
