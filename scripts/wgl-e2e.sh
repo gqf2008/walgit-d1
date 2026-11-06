@@ -426,6 +426,42 @@ PYEOF
         echo "   (the auto-detected walgit-server is older than a compared endpoint — explicit skip; set WALGIT_SERVER_BIN to the build under test)"
     fi
     fi
+    # The write path over MCP: refusals first (a foreign actor and an
+    # unsigned entry must be refused before anything is pushed), then the
+    # §5.3 golden vector signed with the seed 07×32 — actor `alice`, the
+    # worktree identity here — published through `collab_publish` and read
+    # back verified by this checkout's own aggregation.
+    golden='{"version":1,"kind":"issue","id":"golden","actor":"alice","ts":1786500000,"parent":"","body":{"title":"golden vector"},"sig":"ed25519:VFROsCUBDR4Sj1eFoMdDI/iRfV0A0jgRSGFGjAB91MVh2oh3IwnohAxj7Mq55x+uvpyrhM2tlq6x3WYuT9f5DQ=="}'
+    # The golden vector is signed with the seed 07x32; rotate the fixture's
+    # `alice` to that key (after the read comparisons, which used the random
+    # key) so the published entry verifies in this checkout's aggregation.
+    golden_key="$tmp/golden.key"
+    printf '0707070707070707070707070707070707070707070707070707070707070707' > "$golden_key"
+    ( cd "$srv" && "$W" collab principal-register --principal alice --key "$golden_key" --push origin >/dev/null ) \
+        || fail "golden key rotation"
+    srv_out="$tmp/srv-write.json"
+    {
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"collab_publish","arguments":{"entry":{"version":1,"kind":"comment","id":"golden","actor":"bob","ts":1,"parent":"","body":{},"sig":"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"collab_publish","arguments":{"entry":{"version":1,"kind":"comment","id":"golden","actor":"alice","ts":1,"parent":"","body":{},"sig":""}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collab_publish","arguments":{"entry":'"$golden"'}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"collab_thread","arguments":{"id":"golden","fresh":false}}}'
+    } | ( cd "$srv" && "$W" mcp --repo . --remote origin ) >"$srv_out" 2>"$tmp/srv-write.err" \
+        || fail "wgl mcp write round trip failed"
+    python3 - "$srv_out" <<'PYW'
+import json, sys
+msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
+for i in (1, 2):
+    assert msgs[i]["result"].get("isError") is True, (i, msgs[i])
+assert not msgs[3]["result"].get("isError"), msgs[3]
+pub = json.loads(msgs[3]["result"]["content"][0]["text"])
+assert pub["ref"].startswith("refs/collab/inbox/alice/"), pub
+thread = json.loads(msgs[4]["result"]["content"][0]["text"])
+entries = thread["entries"]
+assert len(entries) == 1, thread
+assert entries[0]["verified"] is True, thread
+assert entries[0]["entry"]["sig"].startswith("ed25519:"), thread
+print("   write path: foreign actor and unsigned entry refused; golden vector published and verified")
+PYW
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
     server_pid=""
