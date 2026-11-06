@@ -367,6 +367,21 @@ log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,
 `wgl principal register|rotate|list|revoke` (host-global registry, one
 registration verifies in every repo of that host).
 
+## Downloads
+
+Every release publishes the platform packages and the standalone **`wgl`**
+collaboration client at <https://github.com/gqf2008/walgit-d1/releases/latest>:
+
+| what | asset |
+|---|---|
+| linux | `walgit_<version>_amd64.deb` (installs `walgit`, `walgit-server`, `walgit-tray`, `wgl`) |
+| windows | `walgit-setup-<version>.exe` (installs `wgl.exe` next to `walgit.exe`) |
+| macOS | `walgit-<version>-<arch>.dmg` — signed + notarized (`wgl` inside) |
+| wgl only | `wgl-x86_64-linux.tar.gz`, `wgl-aarch64-linux.tar.gz`, `wgl-x86_64-windows.zip`, `wgl-aarch64-macos.zip`, `wgl-x86_64-macos.zip` |
+
+The `wgl` asset names carry no version, so
+`releases/latest/download/<asset>` is a stable link.
+
 ## Agent collaboration standard (normative)
 
 Any job needing more than one agent runs as **signed threads on

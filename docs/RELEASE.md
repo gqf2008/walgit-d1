@@ -68,8 +68,13 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   installer, and the signed/notarized macOS DMG, changelog from Conventional
   Commits, attaches to `gh release`; `workflow_dispatch` runs the same packaging
   path as a signing dry run and skips publication; re-pushing an existing tag
-  re-attaches fresh artefacts). One installer per platform, no raw binaries
-  (issue #108). Versioning is semantic; milestone `v0.1` is the first release
+  re-attaches fresh artefacts). One installer per platform, no raw walgit
+  binaries (issue #108). Since D69 every release also ships the standalone
+  **wgl** client — inside all three packages, and as versionless per-platform
+  archives (`wgl-<arch>-<os>.tar.gz|zip`) so
+  `releases/latest/download/<asset>` stays stable; the macOS zips are signed
+  with the same Developer ID and notarized, and `wgl --version` names the
+  build. Versioning is semantic; milestone `v0.1` is the first release
   target. A release is also a work unit: create a `batch` issue with the release
   checklist.
 

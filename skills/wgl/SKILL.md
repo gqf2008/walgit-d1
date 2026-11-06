@@ -9,6 +9,26 @@ metadata:
 
 # wgl — the D1 collaboration client
 
+## 0. Install (prebuilt binaries)
+
+Each release ships the `wgl` client for every supported platform. The asset
+names carry no version, so `releases/latest/download` is stable:
+
+```sh
+# Linux (static musl; x86_64 or aarch64)
+curl -fsSL https://github.com/gqf2008/walgit-d1/releases/latest/download/wgl-x86_64-linux.tar.gz | tar -xz -C ~/.local/bin wgl
+
+# macOS (aarch64 or x86_64) — signed and notarized by Apple; Gatekeeper
+# checks the notarization ticket online on first launch.
+curl -fsSL -o wgl-macos.zip https://github.com/gqf2008/walgit-d1/releases/latest/download/wgl-aarch64-macos.zip && unzip -o wgl-macos.zip -d ~/.local/bin
+
+# Windows (x86_64): unzip wgl-x86_64-windows.zip and put wgl.exe on PATH
+```
+
+The distro packages (`.deb`, the Windows installer, the macOS DMG) also carry
+`wgl` next to `walgit` — installing the host's package is enough.
+Every asset lives at <https://github.com/gqf2008/walgit-d1/releases/latest>; `wgl --version` names the build.
+
 `wgl` is the standalone client for walgit's D1 collaboration layer
 (`docs/D1_PROTOCOL.md`). The server hosts `refs/collab/*` like any ref;
 **every command below reads those refs locally and verifies Ed25519

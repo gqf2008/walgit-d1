@@ -14,6 +14,14 @@ serves smart HTTP, LFS, bundles and the web UI, local disk is a cache, there is 
 primary node. See the host's `/SKILL.md` for the *consumer* guide (clone recipes, HTTP API, collab lane);
 this skill is the *operator* guide.
 
+## Downloads
+
+Release assets for every platform live at <https://github.com/gqf2008/walgit-d1/releases/latest>: the linux `.deb`,
+the Windows installer (`walgit-setup-*.exe`), the signed-and-notarized macOS
+DMG (`walgit-<version>-<arch>.dmg`), and the standalone **`wgl`** collaboration
+client (`wgl-<arch>-<os>.tar.gz|zip`; the macOS zips are signed and notarized).
+The packages install `wgl` next to `walgit`; `wgl --version` names the build.
+
 ## 1. Service lifecycle (start with this)
 
 ```bash

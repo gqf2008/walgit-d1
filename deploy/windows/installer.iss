@@ -62,6 +62,8 @@ Name: "autostart"; Description: "{cm:AutoStartTask}"; GroupDescription: "{cm:Add
 
 [Files]
 Source: "..\..\target\release\walgit.exe"; DestDir: "{app}"; Flags: ignoreversion
+; wgl（D69 协作客户端）与 walgit 同目录，随安装器进 PATH。
+Source: "..\..\target\release\wgl.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 计划任务的动作(见 walgit service 的 task_xml):GUI 子系统的无窗口 launcher。
 ; 缺它 service start 会在建任务前就报错,而不是留一个跑不起来任务。
 Source: "..\..\target\release\walgit-service-host.exe"; DestDir: "{app}"; Flags: ignoreversion

@@ -97,6 +97,11 @@ function BlankSlate() {
       <Box title={t("blank.once")}>
         <CodeSample code={`${install}\ngit push -u origin HEAD`} />
       </Box>
+      <p className="downloads small">
+        <a href="https://github.com/gqf2008/walgit-d1/releases/latest" target="_blank" rel="noreferrer">
+          {t("blank.downloads")}
+        </a>
+      </p>
       <p className="muted small">
         <code>area</code>
         {t("blank.names.and")}
