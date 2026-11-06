@@ -256,8 +256,12 @@ async fn refs_level_poll(
         .map_err(|e| PollError::Other(ErrorData::invalid_params(format!("{owner}/{repo}: {e}"), None)))?;
     let handle = st.registry.open(&id).await.map_err(|e| match e {
         walgit_wal::WalError::NotFound => PollError::Gone,
+        // The resource lane is the MCP read path without a `tools/call`
+        // envelope: classify the same way the HTTP lanes do (a transient store
+        // failure says "service unavailable", and `message()` redacts the
+        // presigned URL) instead of a bare `internal_error`.
         other => PollError::Other(ErrorData::internal_error(
-            format!("opening {id}: {other}"),
+            crate::error::ApiError::from(&other).message(),
             None,
         )),
     })?;
@@ -267,7 +271,7 @@ async fn refs_level_poll(
     {
         let _guard = handle.sync_refs().await.map_err(|e| {
             PollError::Other(ErrorData::internal_error(
-                format!("syncing refs of {id}: {e}"),
+                crate::error::ApiError::from(&e).message(),
                 None,
             ))
         })?;

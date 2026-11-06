@@ -1454,6 +1454,8 @@ fn size_recursive(path: &Path) -> u64 {
 fn wal_err(error: &walgit_wal::WalError) -> ApiError {
     match error {
         walgit_wal::WalError::NotFound => ApiError::NotFound("repository not found".into()),
+        // A transient store failure is 503 + Retry-After on the UI lane too.
+        other if other.is_retryable() => ApiError::ServiceUnavailable(format!("wal: {other}")),
         other => ApiError::Internal(format!("wal: {other}")),
     }
 }

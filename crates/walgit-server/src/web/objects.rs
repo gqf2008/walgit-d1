@@ -58,7 +58,13 @@ fn not_found(m: impl Into<String>) -> ApiError {
     ApiError::NotFound(m.into())
 }
 fn wal(e: &walgit_wal::WalError) -> ApiError {
-    ApiError::Internal(format!("remote objects: {e}"))
+    // Remote reads are object-store GETs: a transport failure is transient and
+    // must tell the caller to retry (cc-ai-store-503).
+    if e.is_retryable() {
+        ApiError::ServiceUnavailable(format!("remote objects: {e}"))
+    } else {
+        ApiError::Internal(format!("remote objects: {e}"))
+    }
 }
 
 /// One pending visit of the blame walk: a `(commit, path)` pair ordered by

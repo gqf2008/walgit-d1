@@ -352,7 +352,10 @@ async fn open(
     let id = walgit_git::RepoId::new(owner, name).map_err(|_| not_found("repository"))?;
     st.registry.open(&id).await.map_err(|e| match e {
         walgit_wal::WalError::NotFound => not_found("repository"),
-        _ => internal(e),
+        // A cold registry's first read of `manifest.pb` is where the incident's
+        // MCP lane 500'd: the coordinated store error must stay classified
+        // (503 + Retry-After), not collapse into the catch-all.
+        _ => crate::smart::wal_err(&e),
     })
 }
 
@@ -550,7 +553,11 @@ pub(crate) async fn owners(
         .require_read(&headers)
         .await
         .map_err(ApiError::from)?;
-    let repos = st.registry.list().await.map_err(internal)?;
+    let repos = st
+        .registry
+        .list()
+        .await
+        .map_err(|e| crate::smart::wal_err(&e))?;
     let mut out: Vec<String> = repos.into_iter().map(|r| r.owner().to_string()).collect();
     out.sort();
     out.dedup();
@@ -565,7 +572,11 @@ pub(crate) async fn owner_repos(
         .require_read(&headers)
         .await
         .map_err(ApiError::from)?;
-    let repos = st.registry.list().await.map_err(internal)?;
+    let repos = st
+        .registry
+        .list()
+        .await
+        .map_err(|e| crate::smart::wal_err(&e))?;
     let mut out: Vec<String> = repos
         .into_iter()
         .filter(|r| r.owner() == owner)
@@ -1520,7 +1531,7 @@ async fn publish_collab_ref(
     // browser path too — one ref, one guard level, no second write semantics.
     let policy = crate::policy::load(&st.store, handle.id())
         .await
-        .map_err(|e| internal(format!("load policy: {e}")))?;
+        .map_err(ApiError::from)?;
     let mut forces = std::collections::HashSet::<String>::new();
     if policy.has_protect() {
         for u in &txn.updates {
@@ -1614,7 +1625,7 @@ pub(crate) async fn publish_refs(
     // `publish_collab_ref` applies: one ref, one guard level.
     let policy = crate::policy::load(&st.store, handle.id())
         .await
-        .map_err(|e| internal(format!("load policy: {e}")))?;
+        .map_err(ApiError::from)?;
     let mut forces = std::collections::HashSet::<String>::new();
     if policy.has_protect() {
         for u in &txn.updates {

@@ -26,6 +26,8 @@ use anyhow::Result;
 use harness::{Server, TestRepo, git_in};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use walgit_store::fault::FaultPlan;
+use walgit_store::memory::MemoryStore;
 
 /// One `POST /mcp`, returning (status, session header, body as JSON when it
 /// parses).
@@ -864,5 +866,115 @@ async fn wal_ls_reads_a_window_a_checkpoint_folded() -> Result<()> {
         Some(first.len()),
         "the resource agrees with the tool: {body}"
     );
+    Ok(())
+}
+
+/// A manifest read that fails as `Retryable` (the shape a transport error,
+/// timeout, upstream 5xx or throttle takes).
+fn manifest_outage() -> FaultPlan {
+    FaultPlan {
+        p_err_before: 1.0,
+        only_keys: Some(vec!["manifest".into()]),
+        ..Default::default()
+    }
+}
+
+/// Incident cc-ai-store-503: with the bucket unreachable, the git smart HTTP
+/// lane and the MCP read lane answered 500, which git clients treat as
+/// permanent. A retryable store failure must be 503 + Retry-After on both, and
+/// the MCP tool must carry the same classification (it forwards the host's own
+/// router, D64). The warm handle (`sync_refs`) and the cold registry
+/// (`registry.open`) are different code paths and both are covered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transient_store_failures_are_503_on_git_and_mcp_reads() -> Result<()> {
+    let mem = MemoryStore::shared();
+
+    // Seed through a healthy link and keep this instance warm: its repo handle
+    // is cached, so arming the link exercises the `sync_refs` lane.
+    let (warm, warm_link) = Server::start_with_link(mem.clone(), |_| {}).await?;
+    warm.put_repo("t", "outage").await?;
+    push_repo(&warm, "t", "outage", 1)?;
+    warm_link.set(manifest_outage());
+
+    let url = format!(
+        "{}/t/outage.git/info/refs?service=git-upload-pack",
+        warm.base_url
+    );
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "warm git read"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("15"),
+        "a 503 must say when to retry"
+    );
+
+    // A cold instance over the same bucket (fresh registry and cache): the
+    // first read is `registry.open`, the path that swallowed the coordinated
+    // store error into a 500 before this fix.
+    let (cold, cold_link) = Server::start_with_link(mem, |_| {}).await?;
+    cold_link.set(manifest_outage());
+
+    let url = format!(
+        "{}/t/outage.git/info/refs?service=git-upload-pack",
+        cold.base_url
+    );
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cold git read"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("15")
+    );
+
+    // The JSON API lane `/mcp` forwards: same status and header.
+    let url = format!("{}/t/outage/api-browser/refs?kind=branches", cold.base_url);
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "api-browser read"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("15")
+    );
+
+    // And the tool a model actually calls reports the same classification:
+    // a tool that ran and failed is `isError` content (the spec's split, not a
+    // protocol error), and the status travels appended to the sentence —
+    // `service unavailable: … (503)` is what tells the model a retry is
+    // worthwhile.
+    let sid = initialize(&cold).await?;
+    let (status, _, body) = post(
+        &cold,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "repo_refs", "arguments": {"repo": "t/outage", "kind": "branches"}},
+        }),
+        Some(&sid),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["isError"], json!(true), "{body}");
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("service unavailable"), "{body}");
+    assert!(text.contains("503"), "the status must travel with it: {body}");
     Ok(())
 }

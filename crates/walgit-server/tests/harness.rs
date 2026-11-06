@@ -162,7 +162,39 @@ impl Server {
     /// wizard's tests arm `config_path` this way — `Arc::get_mut` succeeds
     /// because nothing has cloned the state yet).
     async fn start_with_parts_and_state_hook(
+        store: Arc<MemoryStore>,
+        cache_dir: std::path::PathBuf,
+        cache: Option<tempfile::TempDir>,
+        tweak: impl FnOnce(&mut Config),
+        state_hook: impl FnOnce(&mut AppState),
+    ) -> Result<Self> {
+        let dyn_store: DynStore = store.clone();
+        Self::start_with_dyn(store, dyn_store, cache_dir, cache, tweak, state_hook).await
+    }
+
+    /// A fresh, cold instance over a caller-chosen store link — the shape a
+    /// store-outage test needs. `link` is a [`walgit_store::fault::FaultStore`]
+    /// over the same [`MemoryStore`]: start with an empty plan (so the repo can
+    /// be seeded through this instance's own HTTP lane), then arm it with
+    /// [`walgit_store::fault::FaultStore::set`] and issue the request under
+    /// test. The registry/cache are this instance's own, so the first read is
+    /// genuinely cold (the `registry.open` path, not only `sync_refs`).
+    pub async fn start_with_link(
+        store: Arc<MemoryStore>,
+        tweak: impl FnOnce(&mut Config),
+    ) -> Result<(Self, Arc<walgit_store::fault::FaultStore>)> {
+        let link = walgit_store::fault::FaultStore::new(store.clone(), "test-link", 7);
+        let dyn_store: DynStore = link.clone();
+        let cache = tempfile::tempdir()?;
+        let dir = cache.path().to_path_buf();
+        let server =
+            Self::start_with_dyn(store, dyn_store, dir, Some(cache), tweak, |_| {}).await?;
+        Ok((server, link))
+    }
+
+    async fn start_with_dyn(
         mut store: Arc<MemoryStore>,
+        dyn_store: DynStore,
         cache_dir: std::path::PathBuf,
         cache: Option<tempfile::TempDir>,
         tweak: impl FnOnce(&mut Config),
@@ -213,7 +245,6 @@ impl Server {
         cfg.server.public_url = Some(base_url.clone());
         cfg.validate().context("config validate")?;
 
-        let dyn_store: DynStore = store.clone();
         let mut state = AppState::new(Arc::new(cfg), dyn_store).await?;
         if let Some(st) = Arc::get_mut(&mut state) {
             state_hook(st);

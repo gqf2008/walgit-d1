@@ -1499,7 +1499,7 @@ async fn receive_pack_process(
 
     let policy = crate::policy::load(&st.store, &route_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("load policy: {e}")))?;
+        .map_err(ApiError::from)?;
     let mut forces = std::collections::HashSet::<String>::new();
     if policy.has_protect() {
         for u in &txn.updates {
@@ -1547,7 +1547,14 @@ async fn receive_pack_process(
         ),
         Err(e) => {
             tracing::error!(error = ?e, "receive-pack publish failed");
-            return Err(ApiError::Internal(format!("publish failed: {e}")));
+            // A store that went away mid-publish is transient: answer 503 so
+            // the client retries, not the 500 that got the incident's pushes
+            // stuck (cc-ai-store-503).
+            return Err(if e.is_retryable() {
+                ApiError::ServiceUnavailable(format!("publish failed: {e}"))
+            } else {
+                ApiError::Internal(format!("publish failed: {e}"))
+            });
         }
     };
     for (name, res) in per_ref_pub {
@@ -1569,8 +1576,24 @@ async fn build_report(
     unpack: Result<(), String>,
     per_ref: &[(String, Result<(), String>)],
 ) -> Vec<u8> {
+    // These strings are printed by the git client itself ("remote: …"), so
+    // they are a client-visible surface too: never carry a signed URL out on
+    // the sideband (the receive-pack error lane through `ApiError::message`
+    // already redacts; this covers the per-ref/publish lane that formats a
+    // RefError directly).
+    let unpack = unpack.map_err(|m| crate::error::redact_url_queries(&m));
+    let per_ref: Vec<(String, Result<(), String>)> = per_ref
+        .iter()
+        .map(|(name, result)| {
+            let result = match result {
+                Ok(()) => Ok(()),
+                Err(m) => Err(crate::error::redact_url_queries(m)),
+            };
+            (name.clone(), result)
+        })
+        .collect();
     let mut w = VecWriter::new();
-    let _ = walgit_git::receive::report_status(caps, unpack, per_ref, &mut w).await;
+    let _ = walgit_git::receive::report_status(caps, unpack, &per_ref, &mut w).await;
     w.into_inner()
 }
 
@@ -1583,16 +1606,18 @@ async fn refusal_report(
     txn: &walgit_proto::v1::RefTransaction,
     msg: &str,
 ) -> Vec<u8> {
+    // Shown by `git` verbatim ("remote: …"): redact before it leaves.
+    let msg = crate::error::redact_url_queries(msg);
     let per_ref: Vec<(String, Result<(), String>)> = txn
         .updates
         .iter()
-        .map(|u| (u.name.clone(), Err(msg.to_string())))
+        .map(|u| (u.name.clone(), Err(msg.clone())))
         .collect();
     let mut out = Vec::new();
     if caps.side_band_64k {
         out.extend_from_slice(&sideband_pkt(2, &format!("{msg}\n")));
     }
-    out.extend(build_report(caps, Err(msg.to_string()), &per_ref).await);
+    out.extend(build_report(caps, Err(msg), &per_ref).await);
     out
 }
 
@@ -2066,16 +2091,7 @@ fn git_err(e: &walgit_git::GitError) -> ApiError {
     ApiError::Internal(format!("git: {e}"))
 }
 pub(crate) fn wal_err(e: &walgit_wal::WalError) -> ApiError {
-    match e {
-        walgit_wal::WalError::NotFound => ApiError::NotFound(e.to_string()),
-        walgit_wal::WalError::TooLarge { .. } => ApiError::ServiceUnavailable(e.to_string()),
-        // A store call that timed out / was throttled: fail fast, let the
-        // client retry (never hang the request on the bucket).
-        walgit_wal::WalError::Store(se) if se.is_retryable() => {
-            ApiError::ServiceUnavailable(format!("object store: {se}"))
-        }
-        _ => ApiError::Internal(format!("wal: {e}")),
-    }
+    ApiError::from(e)
 }
 fn bundle_err(e: &walgit_bundle::BundleError) -> ApiError {
     ApiError::Internal(format!("bundle: {e}"))

@@ -85,8 +85,5 @@ pub async fn list_repos(st: &AppState, headers: &HeaderMap) -> Result<Response, 
         .into_response())
 }
 fn wal_err(e: &walgit_wal::WalError) -> ApiError {
-    match e {
-        walgit_wal::WalError::NotFound => ApiError::NotFound(e.to_string()),
-        _ => ApiError::Internal(format!("wal: {e}")),
-    }
+    ApiError::from(e)
 }

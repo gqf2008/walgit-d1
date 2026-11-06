@@ -53,6 +53,30 @@ pub enum WalError {
     TooLarge { bytes: u64, max: u64 },
 }
 
+impl WalError {
+    /// Transient failures the caller should retry.
+    ///
+    /// A store transport error/timeout/upstream 5xx/throttle reaches this layer
+    /// in two shapes: `Store` directly, and `Coord(CoordError::Store(..))` from
+    /// the CAS/read helpers (`get_message`, `cas_update`). The HTTP lanes map
+    /// this class to 503 + Retry-After (cc-ai-store-503): a 500 makes git
+    /// clients treat the failure as permanent, which is exactly what an outage
+    /// of the bucket must not do. The same applies to the coordination loop's
+    /// terminal `RetriesExhausted`, and to the WAL's own retry budget /
+    /// reclaim-race refusals, whose Display already says "retry".
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            // The store error wrapped directly, or one level deeper inside the
+            // coordination helpers' `CoordError::Store`: same verdict either way.
+            WalError::Store(e) | WalError::Coord(CoordError::Store(e)) => e.is_retryable(),
+            WalError::Coord(CoordError::RetriesExhausted { .. })
+            | WalError::Retry { .. }
+            | WalError::Reclaiming(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Per-ref error within a publish result.
 #[derive(Debug, Clone, Error)]
 pub enum RefError {

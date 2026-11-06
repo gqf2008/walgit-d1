@@ -816,7 +816,7 @@ async fn ensure_repo(st: &AppState, route: &RepoRoute) -> Result<(), ApiError> {
         if matches!(e, walgit_wal::WalError::NotFound) {
             ApiError::NotFound(format!("{}", route.id))
         } else {
-            ApiError::Internal(format!("wal: {e}"))
+            ApiError::from(&e)
         }
     })
 }

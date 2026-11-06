@@ -45,9 +45,11 @@ impl ToolError {
         ToolError::InvalidParams(m.into())
     }
     /// A tool ran and failed. The API's own sentence is kept — it is the one
-    /// that names the fix.
-    fn exec(e: CallError) -> Self {
-        ToolError::Execution(e.message)
+    /// that names the fix — and the status travels appended to it: an
+    /// `isError` result has no status field, and `… (503)` is the part that
+    /// tells the model the next attempt is not futile (cc-ai-store-503).
+    fn exec(e: &CallError) -> Self {
+        ToolError::Execution(format!("{} ({})", e.message, e.status.as_u16()))
     }
 }
 
@@ -412,7 +414,9 @@ async fn run(
     args: &Value,
 ) -> Result<Value, ToolError> {
     let call = Call::new(st, headers, principal);
-    let p = |path: String| async move { call.get(&path).await.map_err(ToolError::exec) };
+    let p = |path: String| async move {
+        call.get(&path).await.map_err(|e| ToolError::exec(&e))
+    };
     let kind = Kind::parse(name)
         .ok_or_else(|| ToolError::invalid(format!("unknown tool `{name}`")))?;
     match kind {
@@ -421,7 +425,16 @@ async fn run(
                 .registry
                 .list()
                 .await
-                .map_err(|e| ToolError::Execution(format!("listing repositories: {e}")))?;
+                .map_err(|e| {
+                    // Same shape as `ToolError::exec`: sentence + status, so a
+                    // transient store failure reads as `… (503)` here too.
+                    let api = crate::error::ApiError::from(&e);
+                    ToolError::Execution(format!(
+                        "listing repositories: {} ({})",
+                        api.message(),
+                        api.status().as_u16()
+                    ))
+                })?;
             repos.sort_by_key(std::string::ToString::to_string);
             Ok(json!({
                 "repos": repos.iter().map(|r| json!({
@@ -571,7 +584,7 @@ async fn run(
                     enc(&repo)
                 ))
                 .await
-                .map_err(ToolError::exec)?;
+                .map_err(|e| ToolError::exec(&e))?;
             Ok(json!({ "repo": format!("{owner}/{repo}"), "toml": toml }))
         }
         Kind::WalLs => {
