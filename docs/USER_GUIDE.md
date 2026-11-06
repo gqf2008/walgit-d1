@@ -226,8 +226,8 @@ wgl ci validate --repo <checkout>
 wgl ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile> --once
 wgl ci run --repo <checkout> --remote origin --actor ci-runner --key <keyfile>   # 常驻：轮询 loop
 wgl ci status --repo <checkout>
-walgit ci log --repo <checkout> [<run-id>]              # 打印该 run 所存日志（超限时告警）
-walgit ci artifacts --repo <checkout> [<run-id>] --out out/  # 逐个 sha256 校验下载产物
+wgl ci log --repo <checkout> [<run-id>]              # 打印该 run 所存日志（超限时告警）
+wgl ci artifacts --repo <checkout> [<run-id>] --out out/  # 逐个 sha256 校验下载产物
 ```
 - runner 认领任务、执行、把结果签成 `ci_result` 条目回传；
 - 同一 run 的多次尝试收敛到唯一生效结果；秘密只进 runner 环境，不进仓库。
