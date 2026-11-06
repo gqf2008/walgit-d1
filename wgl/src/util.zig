@@ -3,6 +3,9 @@
 
 const std = @import("std");
 
+/// The client version — keep in step with `build.zig.zon`.
+pub const version = "0.1.0";
+
 /// A managed growable list — the allocator-carried shape the 0.17 std
 /// `ArrayList` dropped. One wrapper keeps the whole port readable. `items`
 /// is always the active prefix of `buffer`.
@@ -130,7 +133,6 @@ pub fn esc(alloc: std.mem.Allocator, s: []const u8) []u8 {
 }
 
 /// Markdown table cell: HTML-escape, then `|` → `\|`, newlines → `<br>`
-/// (`collab_cmd::md_cell`).
 pub fn md_cell(alloc: std.mem.Allocator, s: []const u8) []u8 {
     const escaped = esc(alloc, s);
     defer alloc.free(escaped);
