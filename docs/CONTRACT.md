@@ -5,15 +5,15 @@ crates in parallel)**, kept as the reference for names and shapes. Rule still in
 — a type or function listed here is relied on by another crate. **Where this file and the code disagree, the
 code is right and this file is stale**; verify with `rg`/`cargo doc` before relying on a signature. Known
 supersessions (2026-08-20 sweep): `RepoHandle::sync()` is now the *Serve* level of the sync-level family
-(`sync_refs` / `sync` = Serve / `sync_full` / `sync_objects`, `AGENTS.md §2.3`); auth is Google identities only
-(`AGENTS.md §1.3`, no "admin token"); the server router is `web/API.md` + `AGENTS.md D15/D20/D26/D27`; bundle
+(`sync_refs` / `sync` = Serve / `sync_full` / `sync_objects`, `docs/ARCHITECTURE.md §2.3`); auth is Google identities only
+(`docs/ARCHITECTURE.md §1.3`, no "admin token"); the server router is `web/API.md` + `docs/DECISIONS.md D15/D20/D26/D27`; bundle
 schedule/retention semantics are specified only by `docs/BUNDLE_URI_DESIGN.md §3–§4` (calendar slots,
 slot-epoch tokens, contiguous-chain retention, main-only refs). Read when you touch a crate boundary; update
 the relevant block when you extend one.
 
 Shared interfaces between crates. Implement exactly these names/shapes; extend freely, do not rename.
 Original owners (parallel batch): StoreS3, StoreGcs, StoreCoord, GitEngine, Wal, Server, Bundle, Cli.
-Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/phases/config draft is the measurement log).
+Read `docs/ARCHITECTURE.md` first (design §1–§2) and `docs/DECISIONS.md` (every decision in force); the original layout/phases/config draft is the measurement log.
 
 ## Existing (do not rewrite; extend only)
 - `walgit-proto`: prost types from `proto/walgit/v1/wal.proto` (Manifest, LogSegmentRef, LogEntry, PackRef,
@@ -263,7 +263,7 @@ pub async fn serve(state: Arc<AppState>, shutdown: impl Future<Output=()> + Send
 //   PUT  /  (create repo, write permission)   DELETE / (write permission)
 // Non-repo: GET /healthz /readyz /metrics ; GET / (list repos, text/plain)
 // Auth: verified Google identity; writes require write permission. Sync level depends on the endpoint
-// (Refs, Serve, Full, or Objects; AGENTS.md §2.3).
+// (Refs, Serve, Full, or Objects; docs/ARCHITECTURE.md §2.3).
 ```
 
 ## walgit-bundle (owner: Bundle)

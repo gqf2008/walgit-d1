@@ -2,7 +2,7 @@
 
 Context: **normative spec** of the per-repo push policy language (`repos/<o>/<r>/policy.json`, D16), for anyone
 implementing, reviewing or writing a policy. Technical detail for one sub-module (`crates/walgit-server/src/policy.rs`);
-the operating decision is `AGENTS.md §3 D16`. Read when touching receive-pack authorization or the policy API.
+the operating decision is `docs/DECISIONS.md D16`. Read when touching receive-pack authorization or the policy API.
 
 Normative. Implementation: `crates/walgit-server/src/policy.rs`.
 On-store object: `repos/<owner>/<repo>/policy.json` (not on the WAL, not in

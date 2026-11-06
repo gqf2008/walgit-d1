@@ -1,7 +1,7 @@
 # Git at any scale — Vicent Martí, Cursor, 2026-08-18
 
 Context: **reference material, verbatim below this header** — the design walgit re-implements. Read it before
-changing the WAL, publish, sync, or placement. walgit's architecture and deltas are in `AGENTS.md`; its acceptance
+changing the WAL, publish, sync, or placement. walgit's architecture and deltas are in `docs/ARCHITECTURE.md`; its acceptance
 bar is `GOAL.md`.
 
 Source: https://cursor.com/blog/git-at-any-scale (fetched 2026-08-20 with interactive diagrams reduced to text labels).

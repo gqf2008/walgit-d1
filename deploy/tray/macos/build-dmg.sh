@@ -290,6 +290,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 WALGIT_BIN="${WALGIT_BIN:-$ROOT/target/release/walgit}"
 WALGIT_TRAY_BIN="${WALGIT_TRAY_BIN:-$ROOT/target/release/walgit-tray}"
+# wgl（D69 协作客户端）：可选，设置 WGL_BIN 时随 DMG 分发（与 app 同签名）。
+WGL_BIN="${WGL_BIN:-}"
 if [ "${WALGIT_SKIP_BUILD:-0}" = "1" ]; then
     echo "== [1/8] build release binaries (skipped; using prebuilt) =="
 else
@@ -366,6 +368,18 @@ mkdir -p "$STAGE"
 # and ENOSPC on the release runner.
 mv "$APP" "$STAGE/walgit-tray.app"
 ln -s /Applications "$STAGE/Applications"
+if [ -n "$WGL_BIN" ] && [ -x "$WGL_BIN" ]; then
+    cp "$WGL_BIN" "$STAGE/wgl"
+    unlock_codesign_keychain
+    if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
+        codesign --force --options runtime --timestamp --keychain "$CODESIGN_KEYCHAIN" \
+            --sign "$IDENTITY" "$STAGE/wgl"
+    else
+        codesign --force --options runtime --timestamp --sign "$IDENTITY" "$STAGE/wgl"
+    fi
+    codesign --verify --strict --verbose=2 "$STAGE/wgl"
+    echo "   + wgl ($WGL_BIN)"
+fi
 check_tree "$STAGE"
 TMP_DMG="$WORK/walgit-${VERSION}-${ARCH}.dmg"
 df -h "$WORK" || true

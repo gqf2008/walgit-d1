@@ -1,6 +1,7 @@
 # Contributing
 
-动手前先读 [AGENTS.md](AGENTS.md) —— 它是这个仓库的宪法：约束、决策、工作规则都在里面，本文件只是路标。
+动手前先读 [AGENTS.md](AGENTS.md)（协作框架）与 [docs/CHARTER.md](docs/CHARTER.md)（项目章程：角色、派工、验收、合并）
+以及 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（架构：约束、WAL、原则）—— 本文件只是路标。
 
 ## 环境
 
@@ -11,10 +12,10 @@
 ## 流程
 
 主仓在 walgit（`origin = http://127.0.0.1:8081/gqf2008/walgit.git`），GitHub 只做镜像与发布；
-issue/PR/评审/看板都是 `refs/collab/*` 里的签名条目（见 `AGENTS.md` 的 "Where this repository lives"
+issue/PR/评审/看板都是 `refs/collab/*` 里的签名条目（见 `docs/RELEASE.md`
 与 `walgit` skill），不再走 GitHub 的 label/PR 流程。
 
-1. 从线程开始：用 `walgit collab entry --kind issue` 建工作单元（同类同机制 ≥3 条合并为一个批次线程 + checklist）。
+1. 从线程开始：用 `wgl collab entry --kind issue` 建工作单元（同类同机制 ≥3 条合并为一个批次线程 + checklist）。
 2. 在 worktree/分支上开发（基于 `origin/main`），不在 main 直接改；开工与状态流转用 `status` 条目记账。
 3. 自跑门禁：`just warnings && just clippy && just test`（当前 clippy/warnings 有预存债务，
    见跟踪 issue —— 增量必须为零）；smart HTTP 改动加 `just e2e`。
@@ -31,7 +32,7 @@ Conventional Commits（`feat|fix|chore|docs|refactor|test|perf(scope): 描述`�
 
 - 版本语义化（semver）：`v<major>.<minor>.<patch>`；在 walgit 侧打 tag 并 push `origin`，**再手动
   `git push github main` + `git push github v<major>.<minor>.<patch>`** 把主分支与 tag 推到 GitHub——
-  发布由 GitHub Actions 统一执行，tag 到不了 GitHub 就没有 release（AGENTS.md D57）——然后 `release.yml`
+  发布由 GitHub Actions 统一执行，tag 到不了 GitHub 就没有 release（docs/DECISIONS.md D57）——然后 `release.yml`
   触发（构建 linux/windows/macOS 产物、从 Conventional Commits 生成 changelog、挂到 GitHub Release）。
   镜像脚本不在发布路径里（其它分支不推，GitHub 只收 main 与 release tag）。
 - 发布本身是一个工作单元：开 `batch` issue 列发布清单（里程碑 `v0.1` 是首个目标）。

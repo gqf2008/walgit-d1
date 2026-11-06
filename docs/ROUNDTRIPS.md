@@ -8,7 +8,7 @@ scenarios (`crates/walgit-server/tests/sim.rs`), because a sim fix that is corre
 is a regression, not a fix. Read it *before* designing the change, use §5 when writing the commit/PR, and
 keep §2 current. It exists because walgit runs on a tmpfs host instances that own nothing but a bucket: every
 user-visible latency is a sum of sequential GCS requests, and the manifest is a single CAS'd object with a hard
-write-rate cap — so the number and shape of round trips *is* the performance design. Referenced from AGENTS.md
+write-rate cap — so the number and shape of round trips *is* the performance design. Referenced from `docs/ARCHITECTURE.md`
 (read order and §5 working rules) and from the sim harness briefs.
 
 **Correct is necessary, not sufficient.** walgit's only durable primitive is a bucket with ~60–80 ms per
@@ -60,7 +60,7 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | Collab aggregation read (report/thread/board; D45 fold) | refs sync (1 cond GET) → snapshot object-header size probe → fault + one `cat-file --batch` over the snapshot blob + unfolded inbox tail (bounded: tail ≤ 20k refs, snapshot ≤ 64 MiB — the fold turns "one object per historical entry" into 1 ref + 1 blob) | +1 metadata round on the remote path; local path uses one `git cat-file -s` before body read | `web/api.rs::collab_load` |
 | MCP tool call / resource read (D64, 2026-10-30) | the inner call is `oneshot` on this instance's own router, so it costs **exactly what the equivalent HTTP API call costs** (rows above) and **no extra round trip** — no bucket request is added to relay the call; the MCP layer itself pays 0 | 0 extra | `mcp/api.rs::Call` |
 | MCP subscription (`resources/subscribe`) | one refs-level `sync_refs()` per subscription per `mcp.subscribe_interval` (default 5 s) = 1 conditional manifest GET (15–18 ms) that 304s; no pack, no LIST, no object read. **N subscriptions on one repo = N polls** (no per-repo sharing yet) — bounded by `mcp.max_subscriptions` per caller | 1 cond GET / tick / subscription | `mcp/mod.rs::watch` |
-| CI artifact/log read | CLI fresh clone: exact-actor `HEAD ?actor=` size preflight → one `git fetch` only on 200; server GET: refs sync (1 cond GET) → object-header size probe per same-address candidate → fault/read → SHA-256 verify before serving | CLI +1 HEAD only when the object is safe to fetch; server +1 metadata round on the remote path, local path uses `git cat-file -s` before body read | `ci_cmd.rs::remote_artifact_fits_cap`, `web/api.rs::collab_ci_artifact{,_size}` |
+| CI artifact/log read | CLI fresh clone: exact-actor `HEAD ?actor=` size preflight → one `git fetch` only on 200; server GET: refs sync (1 cond GET) → object-header size probe per same-address candidate → fault/read → SHA-256 verify before serving | CLI +1 HEAD only when the object is safe to fetch; server +1 metadata round on the remote path, local path uses `git cat-file -s` before body read | `wgl/src/cmd_ci.zig::remote_artifact_fits_cap`, `web/api.rs::collab_ci_artifact{,_size}` |
 
 `healthy_request_round_trip_budgets` in `crates/walgit-server/tests/sim.rs` pins the healthy MemoryStore
 counts at push **5**, warm refs **1**, cold refs with one tail segment **2**, and checkpoint **4**. Cold open used to spend an

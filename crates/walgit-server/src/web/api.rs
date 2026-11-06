@@ -1339,7 +1339,7 @@ async fn collab_entries(
 }
 
 /// Upper bound on the collab namespace one aggregation request may read: the
-/// inbox is folded by `walgit collab gc` (D45 / `docs/D1_PROTOCOL.md` §9), so this counts only
+/// inbox is folded by `wgl collab gc` (D45 / `docs/D1_PROTOCOL.md` §9), so this counts only
 /// the **unfolded** tail plus the principals registry — past this size the
 /// answer is a 503 pointing at gc / the CLI, not an unbounded fan-out of
 /// faults and objects. The snapshot itself is one ref + one bounded blob
@@ -1747,7 +1747,7 @@ async fn collab_principal(
 /// registry and the merge-rule document (`refs/collab/meta/rules`, `docs/D1_PROTOCOL.md` §7.3).
 /// Entries that do not parse are skipped — one corrupt inbox entry must not
 /// take the dashboard down; the deterministic aggregation over the rest is
-/// identical to what the `walgit collab` CLI computes locally.
+/// identical to what the `wgl collab` CLI computes locally.
 pub(crate) struct CollabState {
     pub(crate) entries: Vec<EntryRef>,
     /// principal → registered public key (the repo's registry overlaid with the
@@ -1797,7 +1797,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
     if plan.len() > COLLAB_MAX_ENTRIES {
         metrics::counter!("walgit_collab_budget_exceeded").increment(1);
         return Err(ApiError::ServiceUnavailable(format!(
-            "collab namespace has more than {COLLAB_MAX_ENTRIES} unfolded refs; fold the inbox with `walgit collab gc` (docs/D1_PROTOCOL.md §9) or aggregate offline with the `walgit collab` CLI (this budget guards the remote reader and the per-request object fan-out)"
+            "collab namespace has more than {COLLAB_MAX_ENTRIES} unfolded refs; fold the inbox with `wgl collab gc` (docs/D1_PROTOCOL.md §9) or aggregate offline with the `wgl collab` CLI (this budget guards the remote reader and the per-request object fan-out)"
         )));
     }
     // D45 size precheck: refuse an oversized snapshot before materializing its
@@ -1808,7 +1808,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
         })
     {
         return Err(ApiError::ServiceUnavailable(format!(
-            "collab snapshot exceeds {} MiB; aggregate offline with the `walgit collab` CLI",
+            "collab snapshot exceeds {} MiB; aggregate offline with the `wgl collab` CLI",
             COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
         )));
     }
@@ -1863,7 +1863,7 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
         };
         if bytes.len() > COLLAB_SNAPSHOT_MAX_BYTES {
             return Err(ApiError::ServiceUnavailable(format!(
-                "collab snapshot exceeds {} MiB; aggregate offline with the `walgit collab` CLI",
+                "collab snapshot exceeds {} MiB; aggregate offline with the `wgl collab` CLI",
                 COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
             )));
         }
@@ -2208,7 +2208,7 @@ async fn collab_ci_artifact_size(
 }
 
 /// The work-unit board (`docs/D1_PROTOCOL.md` §7.4/§8): `build_board` — the same projection the
-/// `walgit collab` CLI computes offline — over the collab state, under the
+/// `wgl collab` CLI computes offline — over the collab state, under the
 /// board definition versioned at `.walgit/board.toml` (HEAD).
 ///
 /// The render cache (`cache/api/v1/*.json`, `docs/D1_COLLAB_DESIGN.md` §11 item 3) is
@@ -2221,7 +2221,7 @@ async fn collab_ci_artifact_size(
 /// `GET …/api/collab/ci[?id=<run>]` — the CI projection (`docs/D1_CI_PROTOCOL.md`
 /// §8.3): every run the loaded ledger carries, with its attempts, winner, state
 /// and effective conclusion. The same aggregation core (`walgit_wal::ci`) the
-/// CLI's `walgit ci status` and the report's CI section use, serialized once —
+/// CLI's `wgl ci status` and the report's CI section use, serialized once —
 /// so an MCP client's `ci_status` is this answer, not a second implementation.
 #[derive(serde::Deserialize)]
 struct CiRunsQuery {

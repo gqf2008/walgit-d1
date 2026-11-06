@@ -1,6 +1,6 @@
 //! Local git repository engine: gix in-process for odb/refs/revwalk/pack
 //! generation; upstream git subprocess for ingest (`index-pack`), repack,
-//! bundle, and the selectable `Engine::Git` upload-pack fallback. See AGENTS.md
+//! bundle, and the selectable `Engine::Git` upload-pack fallback. See `docs/ARCHITECTURE.md`
 //! D2 and docs/CONTRACT.md walgit-git.
 
 pub mod follow;

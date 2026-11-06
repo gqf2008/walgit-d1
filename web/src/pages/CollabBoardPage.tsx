@@ -15,7 +15,7 @@ import { useI18n, statusLabel } from "../i18n";
 /**
  * The D1 work-unit board (docs/D1_COLLAB_DESIGN.md §8): `/collab/board` — a
  * read-only renderer of the deterministic `build_board` projection the
- * `walgit collab board` CLI computes offline. The page writes nothing itself;
+ * `wgl collab board` CLI computes offline. The page writes nothing itself;
  * moving a card posts an ordinary signed `status` entry through the existing
  * thin API, and the projection re-derives the columns from it.
  */

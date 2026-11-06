@@ -108,32 +108,18 @@ SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http -
 # the file — only files that genuinely are not suites belong on it.
 SERVER_TEST_EXEMPT := "harness e2e sim"
 
-# The walgit-cli integration suites (issue #141) — the first execution lane
-# these files ever had; until now both CI legs only compiled them. Ubuntu-only,
-# and the platform seam is stated per-file (verified on ab75c81, cited files
-# unchanged through 65fe9a3; collab_e2e.rs cites refreshed for the D45 gc e2e,
-# #160 — the new spawn is the same /dev/null seam), because "looks clean" is
-# not the bar for a windows lane (AGENTS.md §5, issue #94 history):
-#   - every CLI invocation in both suites passes `--config /dev/null`
-#     (ci_e2e.rs:140,155,415; collab_e2e.rs:89,192,298,467,520) — D39 makes `NUL`
-#     the windows form and the tests never branch, so each spawn exits 2;
-#   - ci_e2e's task fixtures are POSIX-shell scripts, executed by the runner
-#     through `cmd /C` on windows (ci_cmd.rs:1147-1150): `sleep 3` (ci_e2e.rs:402),
-#     `sleep 30` (ci_e2e.rs:577) and `test "$CI_E2E_ALLOWED" = yes && …`
-#     (ci_e2e.rs:507) do not exist in cmd;
-#   - `collab watch --exec` spawns `sh -c` in the product itself
-#     (collab_cmd.rs:1099) and the watch test's callback is
-#     `cat > …/$WALGIT_COLLAB_*` (collab_e2e.rs:232) — no windows twin.
-# The two git-driven collab suites (cli_full_collab_flow…, board_projection…)
-# are windows-clean apart from the /dev/null seam; they stay in this single
-# ubuntu-only lane rather than splitting the set — a windows lane for them is a
-# product change (`NUL`/`sh` twins), not a test change, and belongs to its own
-# work unit.
-CLI_TESTS := "--test ci_e2e --test collab_e2e"
+# The wgl client (D69): the collaboration command families left walgit for the
+# standalone Zig module, and the retired Rust collab/ci/principal command
+# families went with them. wgl's lanes are its own: zig unit/golden tests in the
+# module, and the script e2e over real git transport (register → push →
+# second checkout aggregates → claim convergence → gc fold equality; when a
+# walgit binary is present it cross-checks the board hash against the Rust
+# aggregation). The zig toolchain pins 0.17.0 (wgl/build.zig.zon).
+wgl-test:
+    cd wgl && zig build test
 
-# tests/ files in walgit-cli that are not suites (read by scripts/suite-guard.sh).
-# Empty today: both files are suites. An entry means NO leg runs the file.
-CLI_TEST_EXEMPT := ""
+wgl-e2e:
+    scripts/wgl-e2e.sh
 
 # Every crate whose whole tests/ directory runs through a single `--tests`
 # invocation — no per-suite registration (a file added there runs the moment it
@@ -159,11 +145,6 @@ WILDCARD_TEST_PKGS := "-p walgit-store -p walgit-git -p walgit-wal -p walgit-bun
 test-server-integration:
     cargo test -p walgit-server {{SERVER_TESTS}}
 
-# The walgit-cli integration set, unwrapped (same no-probe invariant; scripts/
-# suite-guard.sh anchors this exact line). Ubuntu-only in CI — see CLI_TESTS.
-test-cli:
-    cargo test -p walgit-cli {{CLI_TESTS}}
-
 # The wildcard crates' integration suites, unwrapped; both legs call this
 # (issue #141). Anchored by scripts/suite-guard.sh — keep the line shape.
 test-wildcard-crates:
@@ -177,6 +158,7 @@ test:
     {{t5}} cargo test --workspace --lib --bins
     {{t5}} just test-wildcard-crates
     {{t10}} just test-server-integration
+    just wgl-test
 
 # Smart-HTTP end-to-end against real git (≈ 20 s) — run when touching smart.rs/receive/upload-pack/wal.
 e2e *ARGS:
@@ -233,7 +215,7 @@ ci:
     just check-release-changelog-filter
     just clippy
     just test
-    {{t10}} just test-cli
+    {{t10}} just wgl-e2e
     just e2e
     just sim
 

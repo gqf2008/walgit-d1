@@ -1,5 +1,5 @@
 //! Git smart HTTP server (protocol v0/v2), LFS, bundle serving, admin, health, metrics.
-//! See AGENTS.md Phase 3.
+//! See `docs/ARCHITECTURE.md` Phase 3.
 
 pub mod admin;
 pub mod auth;

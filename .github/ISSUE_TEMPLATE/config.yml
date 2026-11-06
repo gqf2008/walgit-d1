@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: 架构与协作规则
-    url: https://github.com/gqf2008/walgit-d1/blob/main/AGENTS.md
+    url: https://github.com/gqf2008/walgit-d1/blob/main/docs/CHARTER.md
     about: 动手前必读：约束、决策、工作单元协议（§6）、工作规则。仓库级规则优先于通用约定。

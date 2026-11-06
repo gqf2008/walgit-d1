@@ -3,7 +3,7 @@ name: Release
 # Tag v* to publish: builds the linux, windows, and signed/notarized macOS
 # installers, generates a changelog from Conventional Commits since the previous
 # tag, and attaches everything to a GitHub Release. Versioning is semantic; the
-# v0.1 milestone is the first target (AGENTS.md §6.4). workflow_dispatch runs
+# v0.1 milestone is the first target (docs/RELEASE.md). workflow_dispatch runs
 # the packaging/signing path without publishing a release.
 
 on:
@@ -53,6 +53,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 (wgl/build.zig.zon); the release binaries are
+      # built from the same toolchain the tests use.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -80,6 +85,37 @@ jobs:
       # Windows 的 shell 从可执行文件自己的 PE 资源取图标(安装器建的快捷方式
       # IconLocation 是 ",0")。这条断言让"图标没编进去"在构建阶段就红,而不是等
       # 用户再看到一次白图标(线程 win-tray-no-embedded-icon)。
+      # wgl: the packages get the native binary (deb / Inno Setup), and the
+      # linux leg additionally cross-compiles the standalone per-platform
+      # archives. Asset names carry no version so
+      # releases/latest/download/wgl-<arch>-<os>.<ext> stays stable.
+      - name: Build wgl (packages + cross-platform binaries)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            (cd wgl && zig build -Doptimize=ReleaseSafe)
+            cp wgl/zig-out/bin/wgl target/release/wgl
+            mkdir -p wgl-dist
+            for t in x86_64-linux-musl aarch64-linux-musl; do
+              (cd wgl && zig build -Doptimize=ReleaseSafe -Dtarget="$t")
+              arch="${t%%-*}"
+              tar -czf "wgl-dist/wgl-${arch}-linux.tar.gz" -C wgl/zig-out/bin wgl
+            done
+            (cd wgl && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows-gnu)
+            cp wgl/zig-out/bin/wgl.exe wgl-dist/wgl.exe
+            (cd wgl-dist && zip -q wgl-x86_64-windows.zip wgl.exe && rm wgl.exe)
+          else
+            (cd wgl && zig build -Doptimize=ReleaseSafe)
+            cp wgl/zig-out/bin/wgl.exe target/release/wgl.exe
+          fi
+      - name: Upload the wgl binaries
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgl-binaries
+          path: wgl-dist/*
+          if-no-files-found: error
       - name: Windows binaries carry the product icon
         if: runner.os == 'Windows'
         shell: pwsh
@@ -145,6 +181,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -167,6 +206,12 @@ jobs:
           # WALGIT_SKIP_BUILD=1 消费这个预构建产物。
           cargo build --release --target-dir target \
             --manifest-path deploy/tray/tray-rs/Cargo.toml
+          # Both mac arches of wgl (signed + notarized after the keychain
+          # import below; the host-arch one also rides the DMG).
+          (cd wgl && zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos)
+          cp wgl/zig-out/bin/wgl wgl/wgl-aarch64
+          (cd wgl && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-macos)
+          cp wgl/zig-out/bin/wgl wgl/wgl-x86_64
 
       - name: Import Developer ID certificate (temporary keychain)
         id: signing
@@ -215,7 +260,56 @@ jobs:
           set -euo pipefail
           version="${RELEASE_VERSION#v}"
           [ -n "$version" ] || { echo "missing release version" >&2; exit 1; }
+          # The DMG carries the host-arch wgl next to the tray app; the
+          # standalone per-arch zips are signed+notarized in the next step.
+          export WGL_BIN="$PWD/wgl/wgl-$( [ "$(uname -m)" = "arm64" ] && echo aarch64 || echo x86_64 )"
           ./deploy/tray/macos/build-dmg.sh "$version"
+
+      - name: Sign, notarize, and package the wgl macOS binaries
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          CODESIGN_KEYCHAIN: ${{ runner.temp }}/walgit-signing.keychain-db
+          CODESIGN_KEYCHAIN_PASSWORD: walgit-ci-signing
+          WALGIT_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: |
+          set -euo pipefail
+          mkdir -p wgl-dist
+          for arch in aarch64 x86_64; do
+            security unlock-keychain -p "$CODESIGN_KEYCHAIN_PASSWORD" "$CODESIGN_KEYCHAIN"
+            # The distributed archive carries the executable as plain `wgl`
+            # (the documented install command puts it on PATH unchanged).
+            stage="wgl-dist/wgl-$arch-macos"
+            rm -rf "$stage"
+            mkdir -p "$stage"
+            cp "wgl/wgl-$arch" "$stage/wgl"
+            codesign --force --options runtime --timestamp \
+              --keychain "$CODESIGN_KEYCHAIN" --sign "$WALGIT_IDENTITY" "$stage/wgl"
+            codesign --verify --strict --verbose=2 "$stage/wgl"
+            # A bare binary cannot be stapled; the ticket binds to the zip's
+            # contents and Gatekeeper checks it online at first launch.
+            (cd "$stage" && zip -q "../wgl-$arch-macos.zip" wgl)
+            rm -rf "$stage"
+          done
+          for arch in aarch64 x86_64; do
+            attempt=1
+            until xcrun notarytool submit "wgl-dist/wgl-$arch-macos.zip" \
+                --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_APP_PASSWORD" --wait --no-s3-acceleration; do
+              [ "$attempt" -ge 3 ] && { echo "notarization failed for $arch" >&2; exit 1; }
+              attempt=$((attempt + 1))
+              sleep 15
+            done
+          done
+          rm -f wgl/wgl-aarch64 wgl/wgl-x86_64
+
+      - name: Upload the wgl macOS binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgl-binaries-macos
+          path: wgl-dist/*
+          if-no-files-found: error
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4

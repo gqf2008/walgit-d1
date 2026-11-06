@@ -15,14 +15,10 @@ mod settings_cmd;
 mod synth;
 
 mod bundle_cmd;
-mod ci_cmd;
-mod collab_cmd;
 mod compact;
 mod import;
 mod import_direct;
 mod mirror;
-mod principal_cmd;
-mod proc_group;
 pub mod repo;
 mod serve;
 mod service_cmd;
@@ -109,38 +105,8 @@ enum Command {
         #[command(subcommand)]
         action: WalAction,
     },
-    /// D1 collaboration layer: deterministic aggregation over `refs/collab/*`.
-    ///
-    /// Hidden and refused by default (D68): the collaboration interface is MCP
-    /// (`/mcp`), and a second surface for the same acts is what D68 ends. The
-    /// command survives for scripts and emergencies behind
-    /// `WALGIT_LOCAL_COMMANDS=1` — the code is the same, only the door moves.
-    #[command(hide = true)]
-    Collab {
-        #[command(subcommand)]
-        action: collab_cmd::CollabAction,
-    },
-    /// Host-global principal registry (cross-repo identity, issue #76).
-    ///
-    /// Hidden and refused by default (D68) — see [`Command::Collab`].
-    #[command(hide = true)]
-    Principal {
-        #[command(subcommand)]
-        action: principal_cmd::PrincipalAction,
-    },
-    /// Decentralized CI (`docs/D1_CI_PROTOCOL.md`): a client-side runner that
-    /// subscribes to ref updates, claims runs with signed entries, executes the
-    /// tested commit's `.walgit/ci.toml` and publishes signed results. The
-    /// server holds no CI logic.
-    ///
-    /// Hidden and refused by default (D68) — CI's control plane is MCP
-    /// (`ci_status` + `collab_publish` of `ci_claim`/`ci_result`); the runner
-    /// half is still local, and `WALGIT_LOCAL_COMMANDS=1` is its door.
-    #[command(hide = true)]
-    Ci {
-        #[command(subcommand)]
-        action: ci_cmd::CiAction,
-    },
+    // The `collab` / `principal` / `ci` command families moved to the
+    // standalone `wgl` client (D69); the D68 deprecation stubs are gone.
     /// Manage the local server process: `start` / `stop` / `status` /
     /// `restart`. The tray uses this too — there is no separate shell
     /// supervisor.
@@ -869,8 +835,7 @@ fn edits_the_config_in_place(command: &Command) -> bool {
 fn is_host_read(command: &Command) -> bool {
     matches!(
         command,
-        Command::Principal { .. }
-            | Command::Repo {
+        Command::Repo {
                 action: RepoAction::Refs { .. }
                     | RepoAction::Ref { .. }
                     | RepoAction::MergeBase { .. }
@@ -889,27 +854,6 @@ fn is_host_read(command: &Command) -> bool {
                     | RepoAction::Tasks { .. }
             }
     )
-}
-
-/// D68, in its deprecation stage: the collaboration acts belong to MCP. The
-/// subcommands stay in the binary — they are the same protocol code, and an
-/// operator needs them for a script or an emergency — but they are hidden from
-/// `--help` and every run says once, on stderr, that they are on their way out.
-///
-/// There is no switch: the notice is not a permission, and a migration that
-/// depends on an environment variable has not started. The next major release
-/// removes the subcommands; until then they behave exactly as before.
-fn note_local_command_deprecated(name: &str) -> String {
-    format!(
-        "walgit {name}: deprecated — the collaboration interface is MCP at /mcp \
-         (collab_board / collab_thread / collab_report, collab_publish, ci_status, \
-         resources/subscribe). This local form keeps working until the next major release."
-    )
-}
-
-/// Say it once per run, on stderr, where a script's stdout stays clean.
-fn note_local_command(name: &str) {
-    eprintln!("{}", note_local_command_deprecated(name));
 }
 
 async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf) -> Result<()> {
@@ -935,18 +879,6 @@ async fn dispatch(command: Command, cfg: Config, config_path: std::path::PathBuf
         Command::Bundle { action } => bundle_cmd::run(action, &cfg).await,
         Command::Repo { action } => repo::run(action, &cfg).await,
         Command::Wal { action } => wal_cmd::run(action, &cfg).await,
-        Command::Collab { action } => {
-            note_local_command("collab");
-            collab_cmd::run(action).await
-        }
-        Command::Principal { action } => {
-            note_local_command("principal");
-            principal_cmd::run(action).await
-        }
-        Command::Ci { action } => {
-            note_local_command("ci");
-            ci_cmd::run(action).await
-        }
         Command::Mirror {
             from,
             to,
@@ -1073,28 +1005,9 @@ mod stack_tests {
 
 #[cfg(test)]
 mod local_command_tests {
-    use super::note_local_command_deprecated;
-
-    /// D68's deprecation stage: the notice says what replaced the subcommand and
-    /// when the subcommand goes — no environment variable, no permission.
-    #[test]
-    fn the_notice_names_mcp_and_the_removal() {
-        for name in ["collab", "principal", "ci"] {
-            let notice = note_local_command_deprecated(name);
-            assert!(notice.starts_with(&format!("walgit {name}: ")), "{notice}");
-            assert!(notice.contains("deprecated"), "{notice}");
-            assert!(notice.contains("/mcp"), "{notice}");
-            assert!(notice.contains("collab_publish"), "{notice}");
-            assert!(notice.contains("next major release"), "{notice}");
-            assert!(
-                !notice.contains("WALGIT_LOCAL_COMMANDS"),
-                "the switch is gone: {notice}"
-            );
-        }
-    }
-
-    /// The three collaboration groups are the ones that moved to MCP; they must
-    /// not be advertised, and everything else must stay discoverable.
+    /// D69: the collaboration groups moved to the standalone `wgl` client;
+    /// the D68 deprecation stubs are deleted, not advertised, and everything
+    /// else must stay discoverable.
     #[test]
     fn the_collaboration_groups_are_hidden_from_help() {
         use clap::CommandFactory;

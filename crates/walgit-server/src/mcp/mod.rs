@@ -11,7 +11,7 @@
 //!
 //! * **Authentication is HTTP-level, before any JSON-RPC is parsed.** A caller
 //!   without a credential gets a real `401` with `WWW-Authenticate: Bearer`
-//!   (never `Basic` — `/mcp` is browser-reachable, AGENTS.md §1.3), and the
+//!   (never `Basic` — `/mcp` is browser-reachable, docs/ARCHITECTURE.md §1.3), and the
 //!   identity that lands in the handler is the one `Auth::require_read` named.
 //!   The request's own headers are stuffed into a [`Caller`] extension so each
 //!   tool call can replay them on the inner API request it makes
@@ -32,7 +32,7 @@
 //!   refs-level seq every `mcp.subscribe_interval` and sends
 //!   `notifications/resources/updated` when it moves. No request is held open
 //!   between changes: the seq read *is* a conditional `manifest.pb` GET, the
-//!   same observation lane `git ls-remote` and `walgit collab watch` use. A
+//!   same observation lane `git ls-remote` and `wgl collab watch` use. A
 //!   watched repository that disappears sends `notifications/resources/list_changed`
 //!   (the one thing that capability means) and ends the subscription.
 //!
@@ -547,12 +547,12 @@ Rules that cost a wrong call if skipped:
   (`https://<host>/<owner>/<repo>.git`); this endpoint only reads and writes
   metadata.
 * `collab_publish` takes an entry you have already signed with your own key
-  (`walgit collab entry` builds and signs one) and refuses `actor` != the
+  (`wgl collab entry` builds and signs one) and refuses `actor` != the
   authenticated caller; it never signs for you and holds no key. The signature
   is checked when entries are aggregated, so one signed with a key that is not
   registered for its `actor` is accepted here and then never counts — publish
   as the principal you actually hold.
-* Register your public key once (`collab_register`, or `walgit collab join`):
+* Register your public key once (`collab_register`, or `wgl collab join`):
   an entry signed with a key the repository does not name never verifies.
 * Claiming a card is three steps, in this order: read `collab_board` (is it
   open, and does it already carry a live claim?), publish a `card_claim` entry

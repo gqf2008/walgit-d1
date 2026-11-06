@@ -4,10 +4,14 @@
 # claim: every crates/*/tests/*.rs must sit in an execution lane, or the run
 # that forgot it goes red here instead of the suite silently never running
 # (the walgit-cli ci_e2e/collab_e2e orphanage #140's audit found on disk).
+# D69: the collab/principal/ci families and their suites moved to the
+# standalone wgl client; walgit-cli has no integration suites, and the wgl
+# lanes (zig tests + the script e2e) are anchored here in their place.
 #
-# Lanes (all defined once, in the justfile; both CI legs consume them):
+# Lanes (all defined once, in the justfile; CI consumes them):
 #   walgit-server  SERVER_TESTS, run by test-server-integration
-#   walgit-cli     CLI_TESTS, run by test-cli (ubuntu only — seams at CLI_TESTS)
+#   wgl            zig unit/golden tests (wgl-test) + the transport e2e
+#                  (wgl-e2e); the retired CLI_TESTS lane is gone
 #   everything else  WILDCARD_TEST_PKGS, run by test-wildcard-crates: the whole
 #                  tests/ directory is the lane, a new file runs the moment it
 #                  is committed
@@ -44,22 +48,21 @@ nested="$(find crates/*/tests -mindepth 2 -name '*.rs' -not -name 'mod.rs' 2>/de
 # the lane's removal loud.
 grep -qE '^[[:space:]]*cargo test -p walgit-server \{\{SERVER_TESTS\}\}[[:space:]]*$' justfile \
     || die "test-server-integration no longer interpolates SERVER_TESTS on its own line — the single source became decorative"
-grep -qE '^[[:space:]]*cargo test -p walgit-cli \{\{CLI_TESTS\}\}[[:space:]]*$' justfile \
-    || die "test-cli no longer interpolates CLI_TESTS on its own line — the single source became decorative"
+grep -qE '^[[:space:]]*cd wgl && zig build test[[:space:]]*$' justfile \
+    || die "wgl-test no longer runs `zig build test` on its own line — the single source became decorative"
+grep -qE '^[[:space:]]*scripts/wgl-e2e.sh[[:space:]]*$' justfile \
+    || die "wgl-e2e no longer runs the script on its own line — the single source became decorative"
 grep -qE '^[[:space:]]*cargo test \{\{WILDCARD_TEST_PKGS\}\} --tests[[:space:]]*$' justfile \
     || die "test-wildcard-crates no longer interpolates WILDCARD_TEST_PKGS on its own line — the single source became decorative"
 
 server_list="$(just --evaluate SERVER_TESTS)"
 server_exempt="$(just --evaluate SERVER_TEST_EXEMPT)"
-cli_list="$(just --evaluate CLI_TESTS)"
-cli_exempt="$(just --evaluate CLI_TEST_EXEMPT)"
 wild="$(just --evaluate WILDCARD_TEST_PKGS)"
 # An empty lane variable makes the registration test below pass vacuously —
 # `cargo test -p walgit-cli` with no --test flags is a different (broader,
 # unregistered) invocation. A crate with integration suites always has a
 # non-empty explicit lane.
 [ -n "$server_list" ] || die "SERVER_TESTS evaluates empty — the server lane cannot register anything"
-[ -n "$cli_list" ] || die "CLI_TESTS evaluates empty — the cli lane cannot register anything"
 [ -n "$wild" ] || die "WILDCARD_TEST_PKGS evaluates empty — the wildcard lane is gone"
 
 n_registered=0
@@ -72,7 +75,7 @@ for d in crates/*/tests; do
         || die "crate $crate: tests/ exists but no top-level suite matches — vacuous lane, delete the dir or name a suite"
     case "$crate" in
         walgit-server) list="$server_list"; exempt="$server_exempt" ;;
-        walgit-cli) list="$cli_list"; exempt="$cli_exempt" ;;
+        walgit-cli) die "walgit-cli grew an integration suite — register it in a lane like SERVER_TESTS (D69 moved the collab suites to wgl)" ;;
         *)
             case " $wild " in *" -p $crate "*) ;;
                 *) die "crate $crate has integration suites but no lane — add it to WILDCARD_TEST_PKGS (the whole tests/ dir then runs on both legs) or give it an explicit *_TESTS like the server and the cli" ;;
@@ -107,7 +110,5 @@ check_lane_names() {
 }
 # shellcheck disable=SC2086 # the lists are --test/name token pairs by contract
 check_lane_names walgit-server $server_list
-# shellcheck disable=SC2086
-check_lane_names walgit-cli $cli_list
 
 echo "suite-guard: $n_registered integration suite files have execution lanes"

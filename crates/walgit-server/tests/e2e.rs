@@ -668,7 +668,7 @@ async fn push_protocol_v0() -> TestResult {
 
 /// Many-ref advertisement: v0 and v2 prefix filtering stay fast. The fast tier
 /// uses 2k refs (~2 s); the ignored bench pushes 20k (dominated by git's own
-/// client-side `send-pack`, ~70 s — see AGENTS.md §5 test tiers). `WALGIT_TEST_REFS=N`
+/// client-side `send-pack`, ~70 s — see `docs/WORKING_RULES.md` test tiers). `WALGIT_TEST_REFS=N`
 /// overrides the count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_refs_advertisement_and_v2_prefix_are_fast() -> TestResult {

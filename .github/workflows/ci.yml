@@ -2,7 +2,7 @@ name: CI
 
 # The repository had no build/test workflow: only pages.yml (a site deploy). A workspace that did
 # not compile reached main because nothing ran cargo on push. This runs `just ci` — the same
-# tiers AGENTS.md documents (warnings, clippy, test, e2e) — so CI and a contributor's laptop cannot drift.
+# tiers `docs/WORKING_RULES.md` documents (warnings, clippy, test, e2e) — so CI and a contributor's laptop cannot drift.
 # The tier definitions live in the justfile, never duplicated here.
 
 on:
@@ -49,6 +49,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -73,7 +78,8 @@ jobs:
         run: scripts/check-release-changelog-filter.sh
       # #137's structural anti-drift guard, generalized to every crate by #141:
       # the filesystem (crates/*/tests/*.rs) is the truth, the justfile's lane
-      # variables (SERVER_TESTS / CLI_TESTS / WILDCARD_TEST_PKGS) are the claim;
+      # variables (SERVER_TESTS / WILDCARD_TEST_PKGS; the wgl lanes are
+      # anchored recipe lines) are the claim;
       # scripts/suite-guard.sh is the one script (runnable identically on a
       # laptop) that goes red on an unregistered suite, on a vacuous glob/empty
       # lane (#140's fix), or on a recipe line that stops interpolating its
@@ -127,26 +133,21 @@ jobs:
             echo "a listed suite ran 0 tests on ubuntu — a platform gate hid it (#137); the lines above name the binary"
             exit 1
           fi
-      # The walgit-cli integration suites (D1 CI runner + collab CLI) — the
-      # first execution lane these ever had (#141: compiled on both legs, run
-      # nowhere). Ubuntu-only; the per-file platform seams that bar a windows
-      # lane are argued at the justfile's CLI_TESTS. Measured: 8 tests, 13–34 s
-      # of run (two laptop measurements) + link of the two test binaries —
-      # timeout-minutes guards the lane. No built-in rerun: this set
-      # has no flake history yet, and a step that adds one MUST name itself in
-      # the summary job's rerun_once regex in the same commit. The zero-test
-      # assertion (#137's "registered means executed") keeps a future cfg-gate
-      # from shrinking it silently.
-      - name: CLI integration suites
+      # The wgl client (D69): the collaboration families live in the standalone
+      # Zig module now; its unit/golden tests and the transport e2e (register →
+      # push → second clone aggregates → claim race → fold equality → the Rust
+      # cross-check) run in place of the retired CLI suites. zig is pinned at
+      # 0.17.0 (wgl/build.zig.zon). No built-in rerun: no flake history yet, and
+      # a step that adds one MUST name itself in the summary job's rerun_once
+      # regex in the same commit.
+      - name: wgl client lanes
         timeout-minutes: 10
         run: |
           set -eo pipefail
-          just test-cli 2>&1 | tee cli-integration.log
-          if grep -n '^running 0 tests' cli-integration.log; then
-            echo "a registered CLI suite ran 0 tests on ubuntu — a platform gate hid it (#137 shape, #141); the lines above name the binary"
-            exit 1
-          fi
-      # Rerun once on failure: sim has known-flaky cases (base_rebuild, AGENTS.md §5);
+          # wgl-test already runs inside the fast tier (`just test`); this
+          # step is the transport e2e the retired CLI suites owned.
+          just wgl-e2e
+      # Rerun once on failure: sim has known-flaky cases (base_rebuild; list in docs/WORKING_RULES.md);
       # a second failure is a regression. The rate cannot be read off this step: the
       # rerun is why #138 had to count first-pass reds in the logs instead.
       - name: Simulation suite
@@ -203,6 +204,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - name: Create the rustfs bucket
         run: |
           for _ in $(seq 1 30); do
@@ -256,6 +262,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - name: First-batch contract models
         env:
           WALGIT_TLC_JOBS: 1
@@ -289,6 +300,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - run: just clippy
 
   e2e:
@@ -304,6 +320,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -315,7 +336,7 @@ jobs:
       - name: Build the SPA and the SDK
         run: just web-build
       # Rerun once on failure: reads_after_an_acknowledged_push is a known
-      # flake (AGENTS.md §5 / issue #4); a second failure is a regression.
+      # flake (docs/WORKING_RULES.md, issue #4); a second failure is a regression.
       - name: Smart-HTTP end-to-end
         run: |
           just e2e || { echo "e2e failed once (possibly known-flaky); rerunning"; sleep 5; just e2e; }
@@ -332,7 +353,7 @@ jobs:
   # is decided by seams, not speed: the walgit-cli suites are ubuntu-only,
   # argued per-file at the justfile's CLI_TESTS. This job exists exactly so
   # platform seams stop drifting unnoticed; the clippy leg waits on its
-  # ruleset check (AGENTS.md §5).
+  # ruleset check (docs/WORKING_RULES.md).
   windows:
     name: windows fast tier
     runs-on: windows-latest
@@ -348,6 +369,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -403,13 +429,13 @@ jobs:
           # The wildcard crates set — the justfile's WILDCARD_TEST_PKGS, one
           # list both legs consume (#141; this leg's hand-enumerated `-p` lines
           # are gone — the ubuntu `test` recipe now runs the same recipe).
-          # Set-level rerun once (windows timing; AGENTS.md §5 — the walgit-wal
+          # Set-level rerun once (windows timing; list in docs/WORKING_RULES.md — the walgit-wal
           # refs-sync case, issue #94; the same shape as Server integration
           # below), then a repeat is real.
           just test-wildcard-crates || { echo "wildcard crates failed once (windows timing flaky); rerunning"; sleep 3; just test-wildcard-crates; }
       # The server integration suites: the justfile's SERVER_TESTS — the same list
       # both legs run (issue #137; this leg's hand-copied enumeration is gone).
-      # Suite-set-level rerun once (windows timing; AGENTS.md §5), then a repeat
+      # Suite-set-level rerun once (windows timing; list in docs/WORKING_RULES.md), then a repeat
       # is real. timeout-minutes replaces the justfile's tN guards — windows must
       # not wrap cargo lines with them (see the recipe's comment). The zero-test
       # assertion: a cfg-gated suite compiles to an empty binary and exits GREEN,
@@ -429,7 +455,7 @@ jobs:
       - name: Simulation suite
         # Fault-injected cluster (WALGIT_SIM_SEEDS, default 2). Known flaky:
         # base_rebuild_resumes_after_a_kill_between_any_two_phases (shared
-        # TEST_ABORT_AFTER; AGENTS.md §5) — rerun once, not skip. Note this rerun
+        # TEST_ABORT_AFTER; docs/WORKING_RULES.md) — rerun once, not skip. Note this rerun
         # is exactly why the step cannot measure its own flake rate: #138 had to
         # count first-pass reds in the log, not job conclusions.
         shell: bash
@@ -834,7 +860,7 @@ jobs:
             // predates this regex and has never matched it — #141 folded its
             // wal-only retry into a set-level retry and paid the naming debt; do
             // not create another such pair). Job names are ruleset-pinned
-            // (AGENTS.md §6.4): never rename those.
+            // (docs/RELEASE.md): never rename those.
             const rerun_once = /Simulation suite|Smart-HTTP end-to-end|Fast tier|Fast hermetic tier|Server integration/;
             for (const j of jobs) {
               if (j.name === 'CI summary') continue; // don't report on ourselves

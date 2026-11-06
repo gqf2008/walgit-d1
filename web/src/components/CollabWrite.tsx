@@ -29,7 +29,7 @@ export interface CollabWriteProps {
  */
 export async function enableCollabKey(full: string, t?: TFunc): Promise<string> {
   if (!(await ed25519Supported())) {
-    throw new Error(t ? t("write.err.noWebCrypto") : "This browser has no WebCrypto Ed25519 support — use the walgit collab CLI to sign entries.");
+    throw new Error(t ? t("write.err.noWebCrypto") : "This browser has no WebCrypto Ed25519 support — use the wgl collab CLI to sign entries.");
   }
   const me = await api.me();
   if (me.anonymous) {

@@ -3,14 +3,14 @@
 Context: **design of record for bundle-uri** — the north star of `GOAL.md` (fast clone + fast catch-up through
 static bundles). For the agent/human building or reviewing the bundle scheduler, the SSD maintainer's weekly
 base rebuild, or the
-clone/fetch experience of big repos. Normative where marked; `AGENTS.md §2.6` is the summary, D17/D21/D22 the
+clone/fetch experience of big repos. Normative where marked; `docs/ARCHITECTURE.md §2.6` is the summary, D17/D21/D22 the
 decisions. Technical detail for `crates/walgit-bundle`, SSD-backed maintainers, and manual
 `walgit compact --base` recovery.
 
 Status: **implemented design of record** (2026-08-21). Calendar slots, deterministic tokens, as-of-slot
 content, backfill, two-newest retention, self-contained incrementals, and the blobless family are live.
-Remaining work belongs in §8 and `AGENTS.md §2.6`. Reading order:
-AGENTS.md §2.6 (summary) → this file (detail) → `crates/walgit-bundle/` (code) → `web/API.md` (what the UI shows).
+Remaining work belongs in §8 and `docs/ARCHITECTURE.md §2.6`. Reading order:
+docs/ARCHITECTURE.md §2.6 (summary) → this file (detail) → `crates/walgit-bundle/` (code) → `web/API.md` (what the UI shows).
 
 ## 1. Why bundles exist here
 

@@ -29,7 +29,7 @@ chmod 600 "$(git -C "$checkout" rev-parse --git-dir)/walgit/keys/<principal>.ed2
 
 ```text
 # 2. register the public key, over MCP. The file format is the one
-#    `walgit collab join` writes: 64 hex characters (32 bytes, no newline
+#    `wgl collab join` writes: 64 hex characters (32 bytes, no newline
 #    needed); the public half is base64 of the ed25519 verifying key
 #    (docs/D1_PROTOCOL.md §4 — §5.3 is the *canonical bytes*, not the key)
 tools/call collab_register {"repo": "<owner>/<repo>",
@@ -41,7 +41,7 @@ tools/call collab_register {"repo": "<owner>/<repo>",
   **write** permission — a read-scoped token answers `403`, which is not a
   registration failure. A rejected registration is a hard stop (the name must be
   refname-safe, and it must be the principal your credential authenticates as).
-- `walgit collab join --repo … --principal … --push origin` is the operator's
+- `wgl collab join --repo … --principal … --push origin` is the operator's
   one-shot form of the same two steps: it writes that seed file, the identity
   pointer in `<git-dir>/walgit/identity`, and publishes the key. Use it if you
   have the binary and prefer one command.
@@ -71,7 +71,7 @@ git -C "$checkout" worktree add .worktrees/wt-<thread> -b feat/<thread> main
 
 - The worktree **is** where the identity lives, so it is never deleted (D62):
   merged **branches** may be pruned; worktrees stay. Retiring a principal is
-  `walgit collab principal-revoke`, never `git worktree remove`.
+  `wgl collab principal-revoke`, never `git worktree remove`.
 
 ### 4. Collaborate — card → claim → patch → review → merge
 
@@ -159,7 +159,7 @@ lanes budget by **ref count** (`COLLAB_MAX_ENTRIES`). When a host configures
 snapshot needs), its maintainer folds the inbox as an ordinary unit (D66) — you do not run anything,
 and the board keeps aggregating. Nothing changes for a reader: before and after a fold the same
 entries aggregate the same way. An unconfigured host still leaves it to an operator
-(`walgit collab gc`), which is also the manual form for truncating an over-64 MiB ledger.
+(`wgl collab gc`), which is also the manual form for truncating an over-64 MiB ledger.
 
 ## Signing an entry without the CLI
 
@@ -200,7 +200,7 @@ Sign one and publish it with MCP `collab_publish` (`{"repo": "<owner>/<repo>", "
 refuses an `actor` that is not the principal your credential authenticates as, and an entry whose
 `actor` has no registered key (or the wrong one) **still lands** — the signature is verified when the
 ledger is aggregated, so read the thread back and require `verified: true`.
-`walgit collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
+`wgl collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
 already have it in the SDK.
 
 ## MCP — how an agent talks to this host
@@ -254,9 +254,9 @@ The two writes never make you hand over a key:
 
 * `collab_register {repo, principal, public_key}` — name **your own** principal's
   public key (the private half never travels). Do this once, before your first
-  entry, or after rotating; `walgit collab join` does it for a CLI user.
+  entry, or after rotating; `wgl collab join` does it for a CLI user.
 * `collab_publish {repo, entry}` — an entry you have **already signed** with your
-  own key (`walgit collab entry` builds and signs one, or see §5.3 above). The
+  own key (`wgl collab entry` builds and signs one, or see §5.3 above). The
   host refuses `actor` != the principal the credential authenticates as, never
   signs for you and holds no key of yours. It does **not** verify the signature
   on write (an entry and the `collab_register` that names its key may land in
@@ -344,27 +344,43 @@ out. It cannot mint or revoke `wgt_…` access tokens: those come from
 
 **Not the agent lane, and documented by `--help` rather than here:**
 `walgit repo …` (a shell front for the same reads the MCP tools answer),
-`walgit collab …` (`entry`/`claim`/`watch`/`gc` — the scripting forms of the
+`wgl collab …` (`entry`/`claim`/`watch`/`gc` — the scripting forms of the
 lanes above; `join`/`principal-register`/`principal-revoke` are the operator
-forms of identity; `gc` is the manual fold, D66) and `walgit ci …` (the CI
+forms of identity; `gc` is the manual fold, D66) and `wgl ci …` (the CI
 *runner*: `.walgit/ci.toml` declares tasks, a client claims and executes them;
 the control plane — `ci_status`, and `ci_claim`/`ci_result` entries through
 `collab_publish` — is MCP). None of them adds a way to talk to this host; they
 save flags for a script or a CI job, and each one either signs or pushes, i.e.
 acts over git, not over a private API.
 
-**`collab`, `ci` and `principal` are hidden and deprecated** (D68): they do not
-appear in `--help`, and running one prints one line on stderr naming the MCP
-tool that replaces it, then does the work as before. There is no switch — the
-notice is not a permission — and the next major release deletes them.
+**D69 superseded D68's deprecation stage**: the `collab` / `ci` / `principal`
+command families are gone from the `walgit` binary entirely — they live in the
+standalone **`wgl`** client now (a separate Zig binary; `wgl --help` is its
+guide, and its operator manual is the `wgl` skill). The walgit binary answers
+only host lanes.
 
 **WAL & maintenance** — `walgit wal head|ls|show|materialize --at-seq` (the
 log is provenance), `walgit wal add-pack`, `walgit wal annotate-pack`,
 `walgit wal rev-index`; `walgit compact [REPO] [--base]`;
 `walgit bundle run|plan|compose|rm`; `walgit import --from <url> <repo>`;
 `walgit mirror --from <src> --to <dst> --dir <buffer>`;
-`walgit principal register|rotate|list|revoke` (host-global registry, one
+`wgl principal register|rotate|list|revoke` (host-global registry, one
 registration verifies in every repo of that host).
+
+## Downloads
+
+Every release publishes the platform packages and the standalone **`wgl`**
+collaboration client at <https://github.com/gqf2008/walgit-d1/releases/latest>:
+
+| what | asset |
+|---|---|
+| linux | `walgit_<version>_amd64.deb` (installs `walgit`, `walgit-server`, `walgit-tray`, `wgl`) |
+| windows | `walgit-setup-<version>.exe` (installs `wgl.exe` next to `walgit.exe`) |
+| macOS | `walgit-<version>-<arch>.dmg` — signed + notarized (`wgl` inside) |
+| wgl only | `wgl-x86_64-linux.tar.gz`, `wgl-aarch64-linux.tar.gz`, `wgl-x86_64-windows.zip`, `wgl-aarch64-macos.zip`, `wgl-x86_64-macos.zip` |
+
+The `wgl` asset names carry no version, so
+`releases/latest/download/<asset>` is a stable link.
 
 ## Agent collaboration standard (normative)
 
@@ -378,7 +394,7 @@ re-derives the same view from the refs.
 The seed lives at `<git-dir>/walgit/keys/<name>.ed25519` (0600) and the public
 half is registered by MCP `collab_register` (§1 of the quick start); the
 registry ref is `refs/collab/meta/principals/<name>`. The operator shortcut that
-does both locally is `walgit collab join --repo "$checkout" --principal <name>
+does both locally is `wgl collab join --repo "$checkout" --principal <name>
 --push origin` (it also writes `<git-dir>/walgit/identity`, the file the CLI
 reads when you do not pass `--key`). **One worktree carries one identity** —
 the main checkout and each linked worktree are distinct collaborators; that is
@@ -434,7 +450,7 @@ reconnect read once and keep the version as the cursor. Three traps: ignore
 events your own writes caused (compare the head entry's `actor`), never do the
 work inside the event handler (park it and spawn a worker), and only ever act
 on entries that verify. An agent that has no MCP client can instead tail the
-refs with `git ls-remote` (or `walgit collab watch --repo … --exec <hook>`,
+refs with `git ls-remote` (or `wgl collab watch --repo … --exec <hook>`,
 the scripting form: one hook run per new inbox ref).
 
 ### 0d. Autonomous delivery — one console per project (D59/D62)
