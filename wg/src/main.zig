@@ -1,4 +1,4 @@
-//! The wgl entrypoint: `wgl <collab|principal|ci|mcp> <action> [--flags]`.
+//! The wg entrypoint: `wg <collab|principal|ci|mcp> <action> [--flags]`.
 //! One arena per run; every command is a leaf returning an exit code (the
 //! card-claim stand-down is exit 2, §8.4).
 
@@ -11,15 +11,15 @@ const util = @import("util.zig");
 const cmd_mcp = @import("cmd_mcp.zig");
 
 const usage =
-    \\wgl — the standalone D1 collaboration client (docs/D1_PROTOCOL.md)
+    \\wg — the standalone D1 collaboration client (docs/D1_PROTOCOL.md)
     \\
     \\usage:
-    \\  wgl collab ls|thread|thread-heads|pr|report|board|entry|join|
+    \\  wg collab ls|thread|thread-heads|pr|report|board|entry|join|
     \\            principal-register|principal-revoke|principal-fetch|
     \\            claim|gc|watch
-    \\  wgl principal register|rotate|list|revoke
-    \\  wgl ci validate|run|status|log|artifacts
-    \\  wgl mcp --repo <checkout> [--remote origin]
+    \\  wg principal register|rotate|list|revoke
+    \\  wg ci validate|run|status|log|artifacts
+    \\  wg mcp --repo <checkout> [--remote origin]
     \\
 ;
 
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !u8 {
     while (it.next()) |arg| try argv.append(arg);
     if (argv.items.len >= 1 and (std.mem.eql(u8, argv.items[0], "--version") or std.mem.eql(u8, argv.items[0], "-V"))) {
         var buf: [96]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "wgl {s} (walgit D1 collaboration client, zig)\n", .{version}) catch "wgl\n";
+        const line = std.fmt.bufPrint(&buf, "wg {s} (walgit D1 collaboration client, zig)\n", .{version}) catch "wg\n";
         std.Io.File.stdout().writeStreamingAll(init.io, line) catch {};
         return 0;
     }
@@ -67,9 +67,9 @@ pub fn main(init: std.process.Init) !u8 {
         return cmd_ci.dispatch(&ctx, action, rest);
     }
     if (std.mem.eql(u8, group, "mcp")) {
-        // `wgl mcp` is one long-lived process whose whole surface is stdio
+        // `wg mcp` is one long-lived process whose whole surface is stdio
         // JSON-RPC; the action slot is unused, so accept the flag form
-        // (`wgl mcp --repo .`) as well as a stray positional-free action.
+        // (`wg mcp --repo .`) as well as a stray positional-free action.
         var mcp_rest: util.List([]const u8) = util.List([]const u8).init(alloc);
         if (action.len > 0 and action[0] == '-') try mcp_rest.append(action);
         try mcp_rest.append_slice(rest);
@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         };
     }
-    std.debug.print("wgl: unknown group \"{s}\"\n{s}", .{ group, usage });
+    std.debug.print("wg: unknown group \"{s}\"\n{s}", .{ group, usage });
     return 2;
 }
 
@@ -122,7 +122,7 @@ fn collab_dispatch(ctx: *cmd_collab.Ctx, action: []const u8, rest: []const []con
         break :blk null;
     };
     const run = runner orelse {
-        std.debug.print("wgl: unknown collab action \"{s}\"\n", .{action});
+        std.debug.print("wg: unknown collab action \"{s}\"\n", .{action});
         return 2;
     };
     return run(ctx, &parsed) catch |err| {
@@ -224,15 +224,15 @@ fn report_failure(ctx: *cmd_collab.Ctx, group: []const u8, action: []const u8, e
     _ = ctx;
     const gitx = @import("gitx.zig");
     if (gitx.last_stderr.len > 0) {
-        std.debug.print("wgl: {s} {s}: git: {s}\n", .{ group, action, gitx.last_stderr });
+        std.debug.print("wg: {s} {s}: git: {s}\n", .{ group, action, gitx.last_stderr });
         gitx.last_stderr = "";
         return;
     }
     if (err == error.OutOfMemory) {
-        std.debug.print("wgl: {s} {s}: out of memory\n", .{ group, action });
+        std.debug.print("wg: {s} {s}: out of memory\n", .{ group, action });
         return;
     }
-    std.debug.print("wgl: {s} {s}: {t}\n", .{ group, action, err });
+    std.debug.print("wg: {s} {s}: {t}\n", .{ group, action, err });
 }
 
 fn ci_fail(c: *cmd_collab.Ctx, action: []const u8, err: anyerror) u8 {
@@ -275,7 +275,7 @@ fn intern_pr(action: []const u8) PrincipalAction {
 // Zig 0.17's `zig test` only collects tests from files a test declaration
 // references; an executable's imports are not enough (verified: a root that
 // calls a function from an imported file runs 0 tests). Keep every module that
-// carries tests in this block, or `just wgl-test` silently tests nothing.
+// carries tests in this block, or `just wg-test` silently tests nothing.
 test {
     _ = @import("args.zig");
     _ = @import("boarddef.zig");

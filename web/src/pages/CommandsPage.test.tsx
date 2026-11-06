@@ -11,8 +11,8 @@ describe("CommandsPage", () => {
     render(<CommandsPage />);
     expect(screen.getByText("cmds.title")).toBeTruthy();
     // The board command appears both in first-contact and in the read section.
-    expect(screen.getAllByText("wgl collab board")).toHaveLength(2);
-    expect(screen.getByText("wgl collab thread <id>")).toBeTruthy();
+    expect(screen.getAllByText("wg collab board")).toHaveLength(2);
+    expect(screen.getByText("wg collab thread <id>")).toBeTruthy();
     expect(
       screen.getAllByRole("button", { name: /cmds\.copy:/ }).length,
     ).toBeGreaterThan(20);

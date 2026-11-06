@@ -15,7 +15,7 @@
 issue/PR/评审/看板都是 `refs/collab/*` 里的签名条目（见 `docs/RELEASE.md`
 与 `walgit` skill），不再走 GitHub 的 label/PR 流程。
 
-1. 从线程开始：用 `wgl collab entry --kind issue` 建工作单元（同类同机制 ≥3 条合并为一个批次线程 + checklist）。
+1. 从线程开始：用 `wg collab entry --kind issue` 建工作单元（同类同机制 ≥3 条合并为一个批次线程 + checklist）。
 2. 在 worktree/分支上开发（基于 `origin/main`），不在 main 直接改；开工与状态流转用 `status` 条目记账。
 3. 自跑门禁：`just warnings && just clippy && just test`（当前 clippy/warnings 有预存债务，
    见跟踪 issue —— 增量必须为零）；smart HTTP 改动加 `just e2e`。

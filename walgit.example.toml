@@ -172,7 +172,7 @@ gc_interval = "24h"                # bucket GC: drop superseded packs older than
 collab_fold_refs = 5000            # D66: fold refs/collab/inbox/* into refs/collab/meta/snapshot once a repo has this many inbox refs; 0 = off
                                    # (aggregation budgets by ref count, so an unfolded inbox silently stops the board from updating)
 # collab_fold_principal = "ops"    # the registered principal the fold signs its snapshot as; set this AND the key, or neither
-# collab_fold_key = "/etc/walgit/keys/ops.ed25519"   # its 32-byte hex seed, the file `wgl collab join` writes; the maintainer
+# collab_fold_key = "/etc/walgit/keys/ops.ed25519"   # its 32-byte hex seed, the file `wg collab join` writes; the maintainer
                                    # refuses to fold with a key the registry does not name, so a wrong pair can never strand readers
 retention_wal = "7d"               # bucket GC: folded log segments (below manifest.min_seq) and non-live checkpoints are
                                    # dropped past this window; never touched: the live checkpoint, live log segments, the
@@ -305,10 +305,10 @@ max_object_bytes = "16GiB"
                                    # read-only tools over this host's own JSON API (`repo_*`, `wal_ls`), resources
                                    # over the refs/WAL, and one SSE stream per session for
                                    # `notifications/resources/updated`. In-memory sessions only. The D1
-                                   # collaboration tools/resources moved to the standalone `wgl mcp` (stdio,
+                                   # collaboration tools/resources moved to the standalone `wg mcp` (stdio,
                                    # D70) — this block does not configure them.
 subscribe_interval = "5s"         # one resource subscription = one conditional manifest read per repo per tick;
-                                   # >=1s (D55: the same refs-level lane `wgl collab watch` uses)
+                                   # >=1s (D55: the same refs-level lane `wg collab watch` uses)
 max_subscriptions = 32             # live subscriptions per caller (principal), across that caller's sessions
 session_ttl = "30m"               # an MCP session with no request and no open SSE stream is dropped after this
                                    # (rmcp's session keep-alive; the session's subscriptions go with it)

@@ -1,4 +1,4 @@
-//! JSON serialization for wgl, byte-compatible with serde_json's output.
+//! JSON serialization for wg, byte-compatible with serde_json's output.
 //!
 //! Two output shapes exist in the retired Rust implementation and both are
 //! reproduced here (`docs/D1_PROTOCOL.md` §8.2: the wire order is part of the

@@ -111,7 +111,7 @@ export interface CollabPush {
 
 /** D1 aggregation read answers (server: `GET /{o}/{r}/api/collab/report` and
     `/threads/{id}`; mirrors `walgit-wal::collab`) — the browser shows exactly
-    what the `wgl collab` CLI computes locally. */
+    what the `wg collab` CLI computes locally. */
 export interface CollabEntryRef {
   oid: string;
   principal: string;
@@ -1081,7 +1081,7 @@ export class RepoClient {
     thread: (id: string, opts?: CallOptions) => this.client.json<CollabThread>(`${this.p}/collab/threads/${enc(id)}`, opts),
     /** The work-unit board (docs/D1_PROTOCOL.md §7.4/§8): the threads projected under the board
         definition versioned at `.walgit/board.toml` (HEAD) — the same
-        `build_board` the `wgl collab board` CLI renders offline. Read-only;
+        `build_board` the `wg collab board` CLI renders offline. Read-only;
         moving a card posts an ordinary signed `status` entry (`buildEntry` +
         `post`). */
     board: (opts?: CallOptions) => this.client.json<CollabBoard>(`${this.p}/collab/board`, opts),
@@ -1127,7 +1127,7 @@ export class RepoClient {
      * storage convention, issue #161): the bytes the runner pushed to
      * `refs/collab/ci-artifacts/<actor>/<sha256>`. The server verifies the
      * payload against the address before serving (a mismatch is a 404), caps
-     * at 16 MiB, immutable + ETag. Mirrors `wgl ci log|artifacts`.
+     * at 16 MiB, immutable + ETag. Mirrors `wg ci log|artifacts`.
      */
     artifact: async (sha256: string, opts?: CallOptions): Promise<ArrayBuffer> => {
       if (!/^[0-9a-f]{64}$/.test(sha256)) {

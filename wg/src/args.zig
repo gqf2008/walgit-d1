@@ -1,4 +1,4 @@
-//! Argument parsing for wgl — long flags only, mirroring the retired clap
+//! Argument parsing for wg — long flags only, mirroring the retired clap
 //! surface: `--flag value`, `--flag=value`, boolean `--flag`, repeatable
 //! flags collect in order, positional arguments are collected separately.
 
@@ -54,7 +54,7 @@ pub const Parsed = struct {
     /// A required value flag; a missing one names the flag on stderr.
     pub fn required(self: *const Parsed, name: []const u8) ![]const u8 {
         return self.values.get(name) orelse {
-            std.debug.print("wgl: missing required --{s}\n", .{name});
+            std.debug.print("wg: missing required --{s}\n", .{name});
             return error.MissingFlag;
         };
     }
@@ -62,7 +62,7 @@ pub const Parsed = struct {
     /// A required positional (no `--name`); missing names the slot.
     pub fn required_positional(self: *const Parsed, name: []const u8, index: usize) ![]const u8 {
         return self.positional(index) orelse {
-            std.debug.print("wgl: missing required argument <{s}>\n", .{name});
+            std.debug.print("wg: missing required argument <{s}>\n", .{name});
             return error.MissingPositional;
         };
     }
@@ -70,7 +70,7 @@ pub const Parsed = struct {
     pub fn u64_of(self: *const Parsed, name: []const u8, default: u64) !u64 {
         const v = self.opt(name) orelse return default;
         return std.fmt.parseInt(u64, v, 10) catch {
-            std.debug.print("wgl: --{s} must be a number, got \"{s}\"\n", .{ name, v });
+            std.debug.print("wg: --{s} must be a number, got \"{s}\"\n", .{ name, v });
             return error.BadFlagValue;
         };
     }
@@ -99,7 +99,7 @@ pub fn parse(alloc: std.mem.Allocator, argv: []const []const u8, specs: []const 
                 for (specs) |s| {
                     if (std.mem.eql(u8, s.name, name)) break :blk s;
                 }
-                std.debug.print("wgl: unknown flag --{s}\n", .{name});
+                std.debug.print("wg: unknown flag --{s}\n", .{name});
                 return error.UnknownFlag;
             };
             if (spec.boolean) {
@@ -112,7 +112,7 @@ pub fn parse(alloc: std.mem.Allocator, argv: []const []const u8, specs: []const 
             } else {
                 i += 1;
                 if (i >= argv.len) {
-                    std.debug.print("wgl: --{s} expects a value\n", .{name});
+                    std.debug.print("wg: --{s} expects a value\n", .{name});
                     return error.MissingFlagValue;
                 }
                 value = argv[i];

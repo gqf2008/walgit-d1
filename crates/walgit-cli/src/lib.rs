@@ -106,7 +106,7 @@ enum Command {
         action: WalAction,
     },
     // The `collab` / `principal` / `ci` command families moved to the
-    // standalone `wgl` client (D69); the D68 deprecation stubs are gone.
+    // standalone `wg` client (D69); the D68 deprecation stubs are gone.
     /// Manage the local server process: `start` / `stop` / `status` /
     /// `restart`. The tray uses this too — there is no separate shell
     /// supervisor.
@@ -1005,7 +1005,7 @@ mod stack_tests {
 
 #[cfg(test)]
 mod local_command_tests {
-    /// D69: the collaboration groups moved to the standalone `wgl` client;
+    /// D69: the collaboration groups moved to the standalone `wg` client;
     /// the D68 deprecation stubs are deleted, not advertised, and everything
     /// else must stay discoverable.
     #[test]

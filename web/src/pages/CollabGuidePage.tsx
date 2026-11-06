@@ -267,9 +267,9 @@ function BugsSection() {
 function CommandsSection() {
   const { t } = useI18n();
   const cmds: [string, string][] = [
-    ["wgl collab thread <id>", t("guide.cmd1.what")],
-    ["wgl collab board", t("guide.cmd2.what")],
-    ["wgl collab report", t("guide.cmd3.what")],
+    ["wg collab thread <id>", t("guide.cmd1.what")],
+    ["wg collab board", t("guide.cmd2.what")],
+    ["wg collab report", t("guide.cmd3.what")],
   ];
   return (
     <Box title={t("guide.cmds.title")}>

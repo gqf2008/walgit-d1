@@ -2,7 +2,7 @@
 //! deterministic aggregation over `refs/collab/*` — entry schema, canonical
 //! form, Ed25519 verification, `thread` / `pr` / `merge_rule_eval` / `report`.
 //! Pure functions: every client that reads the same refs and verifies the same
-//! signatures computes the same answer. Shared by the `wgl collab` CLI and
+//! signatures computes the same answer. Shared by the `wg collab` CLI and
 //! the server's collab API.
 
 use serde::{Deserialize, Serialize};
@@ -143,7 +143,7 @@ pub fn verify_entry(entry: &Entry, public_key_b64: &str) -> Result<(), String> {
 }
 
 /// Sign an entry's canonical form with a `SigningKey`; returns `ed25519:<base64>`.
-/// Used by the write path (`wgl collab entry` / the SDK); the aggregation
+/// Used by the write path (`wg collab entry` / the SDK); the aggregation
 /// core only verifies, so this is exercised by tests.
 #[allow(dead_code)]
 pub fn sign_entry(entry: &mut Entry, key: &SigningKey) -> String {
@@ -166,7 +166,7 @@ pub fn sign_entry(entry: &mut Entry, key: &SigningKey) -> String {
 // byte-identical. Normative text: `docs/D1_PROTOCOL.md` §9.
 
 /// Where the folded collab state lives: one ref per repository, moved forward
-/// by `wgl collab gc` (snapshot first, then the pruned inbox refs are
+/// by `wg collab gc` (snapshot first, then the pruned inbox refs are
 /// deleted — a mid-fold reader sees duplicates, never a loss).
 pub const SNAPSHOT_REF: &str = "refs/collab/meta/snapshot";
 
@@ -296,7 +296,7 @@ pub fn snapshot_canonical(snap: &Snapshot) -> String {
 }
 
 /// Sign a snapshot document; returns `ed25519:<base64>`. Symmetric to
-/// `sign_entry`; used by the fold's write path (`wgl collab gc`).
+/// `sign_entry`; used by the fold's write path (`wg collab gc`).
 pub fn sign_snapshot(snap: &mut Snapshot, key: &SigningKey) -> String {
     let canonical = snapshot_canonical(snap);
     let sig = key.sign(canonical.as_bytes());
@@ -743,7 +743,7 @@ pub struct ReportPr {
 /// One CI run, projected by the D1-CI §7 aggregation (`docs/D1_CI_PROTOCOL.md` §8.3 —
 /// the report's CI section; pure-CI threads are not board cards, but the
 /// report and the SPA need to find them: the guide's claim-race diagram and
-/// `wgl collab report`'s CI section both read this).
+/// `wg collab report`'s CI section both read this).
 #[derive(Serialize, Clone, Debug)]
 pub struct ReportRun {
     pub id: String,
@@ -833,7 +833,7 @@ pub fn build_report(
     for (id, group) in &by_thread {
         // Threads with no work-unit content are not cards: pure CI run threads
         // (docs/D1_CI_PROTOCOL.md §8.3) and bare claims without a card
-        // (docs/D1_PROTOCOL.md §8.4) — their surfaces are `wgl ci status`,
+        // (docs/D1_PROTOCOL.md §8.4) — their surfaces are `wg ci status`,
         // the report's CI section and the SPA thread badge, and on a board
         // they would only ever be untitled "open" cards.
         if group.iter().all(|r| non_card_kind(r.entry.kind.as_str())) {
@@ -1104,7 +1104,7 @@ pub fn card_claim_view(
 /// owns an `open`/`in-progress` card; `needs-review` and everything after
 /// (`blocked`/`needs-human`/`merged`/`done`/`closed`, or any free-form status)
 /// is the status entries' business. One gate shared by the board projection
-/// and `wgl collab claim`'s refusal, so a granted claim always owns the
+/// and `wg collab claim`'s refusal, so a granted claim always owns the
 /// card and a card the projection would ignore is refused up front.
 pub fn card_claim_governs(status: &str) -> bool {
     matches!(status, "open" | "in-progress")
@@ -1545,7 +1545,7 @@ pub fn build_board(
     for (id, group) in &by_thread {
         // Threads with no work-unit content are not cards: pure CI run threads
         // (docs/D1_CI_PROTOCOL.md §8.3) and bare claims without a card
-        // (docs/D1_PROTOCOL.md §8.4) — their surfaces are `wgl ci status`,
+        // (docs/D1_PROTOCOL.md §8.4) — their surfaces are `wg ci status`,
         // the report's CI section and the SPA thread badge, and on a board
         // they would only ever be untitled "open" cards.
         if group.iter().all(|r| non_card_kind(r.entry.kind.as_str())) {

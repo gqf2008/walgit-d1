@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// wgl — the standalone D1 collaboration client (`docs/D1_PROTOCOL.md`).
+// wg — the standalone D1 collaboration client (`docs/D1_PROTOCOL.md`).
 // Ported from the retired Rust collaboration command families.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const exe = b.addExecutable(.{ .name = "wgl", .root_module = exe_mod });
+    const exe = b.addExecutable(.{ .name = "wg", .root_module = exe_mod });
     b.installArtifact(exe);
 
     const tests = b.addTest(.{ .root_module = exe_mod });

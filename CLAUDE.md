@@ -13,9 +13,9 @@ D1–D69 决定链的引用），与本框架冲突时以章程与全局规则�
   按约定阻塞合并。
 - e2e 与 sim 套件已在 Windows 上跑通（issue #2 已合并）；CI 的 windows leg 覆盖
   快速层 + server 集成套件 + sim + e2e + web-test 与零 rustc 警告门（各 lane 清单
-  单一来源在 justfile：SERVER_TESTS / WILDCARD_TEST_PKGS / wgl 车道（wgl-test、
-  wgl-e2e），完备性守卫 scripts/suite-guard.sh 推广到全部 crate，issue #137/#141；
-  D69 起 walgit-cli 不再有集成套件——协作命令家族迁去了独立的 wgl Zig 客户端。
+  单一来源在 justfile：SERVER_TESTS / WILDCARD_TEST_PKGS / wg 车道（wg-test、
+  wg-e2e），完备性守卫 scripts/suite-guard.sh 推广到全部 crate，issue #137/#141；
+  D69 起 walgit-cli 不再有集成套件——协作命令家族迁去了独立的 wg Zig 客户端。
   跑 `just test` 若断言 SPA 资产（api_v1 的 /repos.js）须先 `just web-build`，否则
   占位 web/dist 造成环境性假红。测试偶发红先查 docs/WORKING_RULES.md known-flaky 名单与
   docs/RELEASE.md 的 CI 信号。

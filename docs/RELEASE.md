@@ -6,7 +6,7 @@
 ## Where this repository lives
 
 - **Canonical: walgit** — `origin = http://127.0.0.1:8081/gqf2008/walgit.git`. Issues, PRs, reviews and the
-  board are signed entries in the D1 collaboration layer (`refs/collab/*`, `wgl collab ...`), not GitHub.
+  board are signed entries in the D1 collaboration layer (`refs/collab/*`, `wg collab ...`), not GitHub.
 - **GitHub is the release pipeline** — `github = gqf2008/walgit-d1`. **Releases go through GitHub Actions, and
   their refs get there by hand**: after `main` and the tag are on walgit, `git push github main` and
   `git push github vX.Y.Z` — nothing else carries them, and pushing the tag is what fires
@@ -61,7 +61,7 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   (`git push github main`, D57).
 - Design decisions and Q&A: historically GitHub **Discussions** (Announcements/General/
   Ideas/Polls/Q&A/Show and tell); discussions are disabled on the mirror now — put the "why"
-  in the wgl collab thread (`comment` entries) instead.
+  in the wg collab thread (`comment` entries) instead.
 - Vulnerabilities: private reporting (SECURITY.md) + Dependabot security updates +
   CodeQL scanning on PRs (results in the Security tab).
 - Releases: tag `v*` triggers `release.yml` (builds the linux `.deb`, the Windows
@@ -70,10 +70,10 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   path as a signing dry run and skips publication; re-pushing an existing tag
   re-attaches fresh artefacts). One installer per platform, no raw walgit
   binaries (issue #108). Since D69 every release also ships the standalone
-  **wgl** client — inside all three packages, and as versionless per-platform
-  archives (`wgl-<arch>-<os>.tar.gz|zip`) so
+  **wg** client — inside all three packages, and as versionless per-platform
+  archives (`wg-<arch>-<os>.tar.gz|zip`) so
   `releases/latest/download/<asset>` stays stable; the macOS zips are signed
-  with the same Developer ID and notarized, and `wgl --version` names the
+  with the same Developer ID and notarized, and `wg --version` names the
   build. Versioning is semantic; milestone `v0.1` is the first release
   target. A release is also a work unit: create a `batch` issue with the release
   checklist.

@@ -15,7 +15,7 @@
 //! pushed repository through the tools and through a resource, hold one SSE
 //! stream, be notified when a subscription's version moves, and end the session.
 //! The surface is read-only (D70): the D1 collaboration tools and resources
-//! moved to `wgl mcp`, and this suite asserts they are gone rather than
+//! moved to `wg mcp`, and this suite asserts they are gone rather than
 //! silently answering through an old path.
 
 mod harness;
@@ -261,7 +261,7 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
     let sid = initialize(&server).await?;
 
     // tools/list carries the host's read surface. Collaboration moved to
-    // `wgl mcp` (D70), so none of those names may reappear here (D49: a call
+    // `wg mcp` (D70), so none of those names may reappear here (D49: a call
     // cannot reach what `tools/list` hides, and the list must not advertise a
     // removed tool).
     let tools = call(&server, &sid, "tools/list", json!({})).await?;
@@ -383,7 +383,7 @@ async fn wait_for_updated(url: &str, sid: &str, budget: Duration) -> bool {
 async fn a_subscription_pushes_a_notification_when_the_refs_move() -> Result<()> {
     let server = Server::start_with_tweak(|cfg| {
         // The floor a subscription may poll at (D55: one conditional manifest
-        // read per tick, the same lane `wgl collab watch` uses).
+        // read per tick, the same lane `wg collab watch` uses).
         cfg.mcp.subscribe_interval = Duration::from_secs(1);
     })
     .await?;

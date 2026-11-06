@@ -1,4 +1,4 @@
-//! `wgl collab` — the D1 collaboration command surface
+//! `wg collab` — the D1 collaboration command surface
 //! (`docs/D1_PROTOCOL.md`), ported from the retired Rust collaboration family.
 //! Read commands aggregate the local `refs/collab/*` offline (§3.2); writes
 //! are local refs pushed over receive-pack, and the host registry commands
@@ -113,7 +113,7 @@ pub fn thread(c: *Ctx, p: *args.Parsed) !u8 {
         if (std.mem.eql(u8, e.entry.id, id)) try filtered.append(e);
     }
     if (filtered.items.len == 0) {
-        std.debug.print("wgl: no entries for thread {s}\n", .{id});
+        std.debug.print("wg: no entries for thread {s}\n", .{id});
         return error.NoThread;
     }
     const ordered = try collab.thread(c.alloc, filtered.items);
@@ -176,7 +176,7 @@ pub fn pr(c: *Ctx, p: *args.Parsed) !u8 {
     }
     const pr_view = try collab.pr_view(c.alloc, filtered.items, loaded.principals);
     const rules = collabreader.load_merge_rules(c.alloc, c.io, repo, p.opt("rules")) catch {
-        std.debug.print("wgl: merge rules document is invalid — fail closed\n", .{});
+        std.debug.print("wg: merge rules document is invalid — fail closed\n", .{});
         return error.BadRules;
     };
     const eval = try collab.merge_rule_eval(c.alloc, &rules, &pr_view);
@@ -232,11 +232,11 @@ pub fn board(c: *Ctx, p: *args.Parsed) !u8 {
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const loaded = try reader.load(c.alloc);
     const rules = collabreader.load_merge_rules(c.alloc, c.io, repo, p.opt("rules")) catch {
-        std.debug.print("wgl: merge rules document is invalid — fail closed\n", .{});
+        std.debug.print("wg: merge rules document is invalid — fail closed\n", .{});
         return error.BadRules;
     };
     const board_def = collabreader.load_board_def(c.alloc, c.io, repo, p.opt("board")) catch {
-        std.debug.print("wgl: board definition is invalid — fail closed (never a silently mis-folded board)\n", .{});
+        std.debug.print("wg: board definition is invalid — fail closed (never a silently mis-folded board)\n", .{});
         return error.BadBoard;
     };
     const b = try collab.build_board(c.alloc, loaded.entries, loaded.principals, &rules, &board_def, util.now_ts());
@@ -254,7 +254,7 @@ pub fn board(c: *Ctx, p: *args.Parsed) !u8 {
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         c.stdout_line(util.to_hex(c.alloc, &digest));
     } else {
-        std.debug.print("wgl: unknown board format {s} (text|markdown|json|hash)\n", .{format});
+        std.debug.print("wg: unknown board format {s} (text|markdown|json|hash)\n", .{format});
         return error.BadFormat;
     }
     return 0;
@@ -266,7 +266,7 @@ pub fn report(c: *Ctx, p: *args.Parsed) !u8 {
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const loaded = try reader.load(c.alloc);
     const rules = collabreader.load_merge_rules(c.alloc, c.io, repo, p.opt("rules")) catch {
-        std.debug.print("wgl: merge rules document is invalid — fail closed\n", .{});
+        std.debug.print("wg: merge rules document is invalid — fail closed\n", .{});
         return error.BadRules;
     };
     const now = util.now_ts();
@@ -278,7 +278,7 @@ pub fn report(c: *Ctx, p: *args.Parsed) !u8 {
     if (p.opt("remote")) |remote| {
         const local = try reader.syncable_refs();
         const remote_refs = gitx.ls_remote(c.alloc, c.io, repo, remote) catch {
-            std.debug.print("wgl: cannot read remote {s} — refusing to report unpushed: 0\n", .{remote});
+            std.debug.print("wg: cannot read remote {s} — refusing to report unpushed: 0\n", .{remote});
             return error.RemoteUnreachable;
         };
         var count: usize = 0;
@@ -330,7 +330,7 @@ pub fn report(c: *Ctx, p: *args.Parsed) !u8 {
         const full = std.mem.replaceOwned(u8, c.alloc, html, "</body>", std.fmt.allocPrint(c.alloc, "{s}</body>", .{section}) catch @panic("oom")) catch @panic("oom");
         buf.append_slice(full) catch @panic("oom");
     } else {
-        std.debug.print("wgl: unknown report format {s} (text|markdown|html)\n", .{format});
+        std.debug.print("wg: unknown report format {s} (text|markdown|html)\n", .{format});
         return error.BadFormat;
     }
     c.stdout(buf.items);
@@ -346,11 +346,11 @@ pub fn entry(c: *Ctx, p: *args.Parsed) !u8 {
 
     const body_text = try p.required("body");
     const body_v = std.json.parseFromSliceLeaky(Value, c.alloc, body_text, .{}) catch {
-        std.debug.print("wgl: --body must be JSON: {s}\n", .{body_text});
+        std.debug.print("wg: --body must be JSON: {s}\n", .{body_text});
         return error.BadBody;
     };
     if (body_v != .object) {
-        std.debug.print("wgl: --body must be a JSON object to attach related/depends-on\n", .{});
+        std.debug.print("wg: --body must be a JSON object to attach related/depends-on\n", .{});
         return error.BadBody;
     }
     var body = body_v.object;
@@ -376,11 +376,11 @@ pub fn entry(c: *Ctx, p: *args.Parsed) !u8 {
         for (p.many("attach")) |path| {
             var d = std.Io.Dir.cwd();
             const bytes = d.readFileAlloc(c.io, path, c.alloc, .limited(64 * 1024 + 1)) catch {
-                std.debug.print("wgl: --attach {s}: read failed\n", .{path});
+                std.debug.print("wg: --attach {s}: read failed\n", .{path});
                 return error.AttachReadFailed;
             };
             if (bytes.len > 64 * 1024) {
-                std.debug.print("wgl: --attach {s}: {d} bytes exceeds the {d} KiB per-file cap\n", .{ path, bytes.len, 64 * 1024 / 1024 });
+                std.debug.print("wg: --attach {s}: {d} bytes exceeds the {d} KiB per-file cap\n", .{ path, bytes.len, 64 * 1024 / 1024 });
                 return error.AttachTooBig;
             }
             var digest: [32]u8 = undefined;
@@ -426,9 +426,9 @@ pub fn entry(c: *Ctx, p: *args.Parsed) !u8 {
                 const ordered = try collab.thread(c.alloc, group.items);
                 collab.validate_status_transition(c.alloc, ordered, loaded.principals) catch |err| {
                     if (err == error.TransitionNoApprove) {
-                        std.debug.print("wgl: status transition rejected: transition → done requires a verified approve review in the thread\n提示: approve reviewer 的 key 若仅在 host registry,先 `wgl collab principal-fetch` 再试\n", .{});
+                        std.debug.print("wg: status transition rejected: transition → done requires a verified approve review in the thread\n提示: approve reviewer 的 key 若仅在 host registry,先 `wg collab principal-fetch` 再试\n", .{});
                     } else {
-                        std.debug.print("wgl: status transition rejected: transition → done requires current status needs-review (got {s})\n", .{collab.card_status(ordered)});
+                        std.debug.print("wg: status transition rejected: transition → done requires current status needs-review (got {s})\n", .{collab.card_status(ordered)});
                     }
                     return err;
                 };
@@ -437,7 +437,7 @@ pub fn entry(c: *Ctx, p: *args.Parsed) !u8 {
     }
 
     const key = identity.read_signing_key(c.alloc, c.io, resolved.key_path) catch |err| {
-        std.debug.print("wgl: key {s}: {t}\n", .{ resolved.key_path, err });
+        std.debug.print("wg: key {s}: {t}\n", .{ resolved.key_path, err });
         return error.BadKey;
     };
     try collabreader.ensure_actor_key_binding(c.alloc, c.io, repo, resolved.principal, resolved.key_path, key);
@@ -466,12 +466,12 @@ pub fn entry(c: *Ctx, p: *args.Parsed) !u8 {
 fn run_auto_fold(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, remote: []const u8, threshold: u64) void {
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const n = reader.inbox_refs() catch |err| {
-        std.debug.print("wgl: collab auto-fold skipped (cannot list inbox): {t}\n", .{err});
+        std.debug.print("wg: collab auto-fold skipped (cannot list inbox): {t}\n", .{err});
         return;
     };
     if (n.len < threshold) return;
     gc_inner(c, repo, actor, key_path, remote, false) catch |err| {
-        std.debug.print("wgl: collab auto-fold skipped (entry is published): {t}\n", .{err});
+        std.debug.print("wg: collab auto-fold skipped (entry is published): {t}\n", .{err});
         return;
     };
     const msg = std.fmt.allocPrint(c.alloc, "collab auto-fold: folded {d} inbox ref(s) (threshold {d})", .{ n.len, threshold }) catch return;
@@ -491,11 +491,11 @@ pub fn join(c: *Ctx, p: *args.Parsed) !u8 {
     if (identity_exists) {
         if (!force) {
             const existing = identity.read_identity_at(c.alloc, c.io, dir) catch |e| {
-                std.debug.print("wgl: read identity {s}: {t}\n", .{ identity_path, e });
+                std.debug.print("wg: read identity {s}: {t}\n", .{ identity_path, e });
                 return e;
             };
             if (!std.mem.eql(u8, existing.principal, principal)) {
-                std.debug.print("wgl: this project is already bound to principal \"{s}\" ({s}); pass --force to rebind\n", .{ existing.principal, identity_path });
+                std.debug.print("wg: this project is already bound to principal \"{s}\" ({s}); pass --force to rebind\n", .{ existing.principal, identity_path });
                 return error.AlreadyBound;
             }
         }
@@ -516,11 +516,11 @@ pub fn join(c: *Ctx, p: *args.Parsed) !u8 {
     var key: identity.SigningKey = undefined;
     if ((std.Io.Dir.cwd().access(c.io, key_path, .{}) catch error.FileNotFound) != error.FileNotFound) {
         key = identity.read_signing_key(c.alloc, c.io, key_path) catch |err| {
-            std.debug.print("wgl: existing key {s}: {t}\n", .{ key_path, err });
+            std.debug.print("wg: existing key {s}: {t}\n", .{ key_path, err });
             return err;
         };
     } else if (explicit_key) {
-        std.debug.print("wgl: --key {s} does not exist\n", .{key_path});
+        std.debug.print("wg: --key {s} does not exist\n", .{key_path});
         return error.KeyMissing;
     } else {
         var seed: [32]u8 = undefined;
@@ -535,7 +535,7 @@ pub fn join(c: *Ctx, p: *args.Parsed) !u8 {
     if (!force) {
         if (registered_public_key(c, repo, principal) catch null) |registered| {
             if (!std.mem.eql(u8, registered, public_key)) {
-                std.debug.print("wgl: principal {s} is already registered with a different public key; rotating it makes every past signature by this principal unverified — pass --force to rotate\n", .{principal});
+                std.debug.print("wg: principal {s} is already registered with a different public key; rotating it makes every past signature by this principal unverified — pass --force to rotate\n", .{principal});
                 return error.RotationGuard;
             }
         }
@@ -641,7 +641,7 @@ pub fn principal_fetch(c: *Ctx, p: *args.Parsed) !u8 {
     const remote = p.get("remote", "origin");
     const remote_url = gitx.remote_url(c.alloc, c.io, repo, remote) catch return error.RemoteUrlFailed;
     const root = gitx.host_root(c.alloc, remote_url) catch {
-        std.debug.print("wgl: remote URL \"{s}\" has no scheme\n", .{remote_url});
+        std.debug.print("wg: remote URL \"{s}\" has no scheme\n", .{remote_url});
         return error.NoScheme;
     };
     const url = try std.fmt.allocPrint(c.alloc, "{s}/api/v1/principals", .{root});
@@ -654,11 +654,11 @@ pub fn principal_fetch(c: *Ctx, p: *args.Parsed) !u8 {
     }
     try headers.append(.{ .name = "accept", .value = "application/json" });
     const resp = httpc.request(c.alloc, c.io, .GET, url, null, headers.items) catch |err| {
-        std.debug.print("wgl: GET {s} failed: {t}\n", .{ url, err });
+        std.debug.print("wg: GET {s} failed: {t}\n", .{ url, err });
         return err;
     };
     if (resp.status / 100 != 2) {
-        std.debug.print("wgl: GET {s} -> {d}: {s}\n", .{ url, resp.status, resp.body });
+        std.debug.print("wg: GET {s} -> {d}: {s}\n", .{ url, resp.status, resp.body });
         return error.HttpFailed;
     }
     const v = std.json.parseFromSliceLeaky(Value, c.alloc, resp.body, .{}) catch return error.BadRegistryJson;
@@ -712,11 +712,11 @@ pub fn claim(c: *Ctx, p: *args.Parsed) !u8 {
     const ttl = p.u64_of("ttl", collab.CARD_CLAIM_TTL_DEFAULT_SECS) catch return error.BadTtl;
     const format = p.get("format", "text");
     if (ttl < collab.CARD_CLAIM_TTL_MIN_SECS or ttl > collab.CARD_CLAIM_TTL_MAX_SECS) {
-        std.debug.print("wgl: --ttl {d} outside [{d}, {d}] seconds\n", .{ ttl, collab.CARD_CLAIM_TTL_MIN_SECS, collab.CARD_CLAIM_TTL_MAX_SECS });
+        std.debug.print("wg: --ttl {d} outside [{d}, {d}] seconds\n", .{ ttl, collab.CARD_CLAIM_TTL_MIN_SECS, collab.CARD_CLAIM_TTL_MAX_SECS });
         return error.BadTtl;
     }
     if (!std.mem.eql(u8, format, "text") and !std.mem.eql(u8, format, "json")) {
-        std.debug.print("wgl: unknown claim format {s} (text|json)\n", .{format});
+        std.debug.print("wg: unknown claim format {s} (text|json)\n", .{format});
         return error.BadFormat;
     }
     const resolved = try identity.resolve_identity(c.alloc, c.io, repo, p.opt("actor"), p.opt("key"));
@@ -726,7 +726,7 @@ pub fn claim(c: *Ctx, p: *args.Parsed) !u8 {
             const t = std.mem.trim(u8, s, " \t");
             if (t.len > 0) {
                 if (t.len > 128) {
-                    std.debug.print("wgl: --session is {d} bytes, over the 128-byte cap\n", .{t.len});
+                    std.debug.print("wg: --session is {d} bytes, over the 128-byte cap\n", .{t.len});
                     return error.SessionTooLong;
                 }
                 break :blk t;
@@ -741,7 +741,7 @@ pub fn claim(c: *Ctx, p: *args.Parsed) !u8 {
     try collabreader.ensure_actor_key_binding(c.alloc, c.io, repo, resolved.principal, resolved.key_path, key);
     const view_now = try claim_view_now(c, repo, id);
     if (!collab.card_claim_governs(view_now.status)) {
-        std.debug.print("wgl: card {s} is {s} — not claimable; only open/in-progress cards take claims\n", .{ id, view_now.status });
+        std.debug.print("wg: card {s} is {s} — not claimable; only open/in-progress cards take claims\n", .{ id, view_now.status });
         return error.NotClaimable;
     }
     // Restart recovery is scoped to one session (§8.4): the remembered
@@ -795,7 +795,7 @@ pub fn claim(c: *Ctx, p: *args.Parsed) !u8 {
     entry_mod.sign_entry(c.alloc, &e, key);
     const content = entry_mod.entry_json(c.alloc, &e, true);
     if (content.len > entry_mod.COLLAB_ENTRY_MAX_BYTES) {
-        std.debug.print("wgl: claim entry is {d} bytes, over the {d}-byte collab entry cap\n", .{ content.len, entry_mod.COLLAB_ENTRY_MAX_BYTES });
+        std.debug.print("wg: claim entry is {d} bytes, over the {d}-byte collab entry cap\n", .{ content.len, entry_mod.COLLAB_ENTRY_MAX_BYTES });
         return error.EntryTooBig;
     }
     const oid = try gitx.write_blob(c.alloc, c.io, repo, content);
@@ -816,7 +816,7 @@ pub fn claim(c: *Ctx, p: *args.Parsed) !u8 {
     try gitx.fetch_collab(c.alloc, c.io, repo, remote);
     const after = try claim_view_now(c, repo, id);
     if (!collab.card_claim_governs(after.status)) {
-        std.debug.print("wgl: card {s} became {s} while the claim was publishing — not claimable; the claim stays in the log\n", .{ id, after.status });
+        std.debug.print("wg: card {s} became {s} while the claim was publishing — not claimable; the claim stays in the log\n", .{ id, after.status });
         return error.NotClaimable;
     }
     if (after.view.winner) |w2| {
@@ -830,11 +830,11 @@ pub fn claim(c: *Ctx, p: *args.Parsed) !u8 {
     // set, or expired between publish and re-read.
     for (after.view.claims) |cl| {
         if (std.mem.eql(u8, cl.oid, oid)) {
-            std.debug.print("wgl: claim {s} expired between publish and re-read; retry with a larger --ttl\n", .{oid});
+            std.debug.print("wg: claim {s} expired between publish and re-read; retry with a larger --ttl\n", .{oid});
             return error.ClaimExpired;
         }
     }
-    std.debug.print("wgl: claim {s} was published but is not a live verified claim — check that principal {s} is registered and --key matches its registered public key\n", .{ oid, resolved.principal });
+    std.debug.print("wg: claim {s} was published but is not a live verified claim — check that principal {s} is registered and --key matches its registered public key\n", .{ oid, resolved.principal });
     return error.ClaimNotVerified;
 }
 
@@ -851,7 +851,7 @@ fn claim_view_now(c: *Ctx, repo: []const u8, id: []const u8) !ClaimNow {
         if (std.mem.eql(u8, e.entry.id, id)) try group.append(e);
     }
     if (group.items.len == 0) {
-        std.debug.print("wgl: no card with id \"{s}\" in this checkout (is the id right, and are refs/collab/* fetched?)\n", .{id});
+        std.debug.print("wg: no card with id \"{s}\" in this checkout (is the id right, and are refs/collab/* fetched?)\n", .{id});
         return error.NoCard;
     }
     var has_card = false;
@@ -859,7 +859,7 @@ fn claim_view_now(c: *Ctx, repo: []const u8, id: []const u8) !ClaimNow {
         if (!collab.non_card_kind(e.entry.kind)) has_card = true;
     }
     if (!has_card) {
-        std.debug.print("wgl: thread \"{s}\" has no work-card entries — a CI run or bare claims are not claimable\n", .{id});
+        std.debug.print("wg: thread \"{s}\" has no work-card entries — a CI run or bare claims are not claimable\n", .{id});
         return error.NotACard;
     }
     const ordered = try collab.thread(c.alloc, group.items);
@@ -974,7 +974,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
     const principals = try reader.principals();
     const registered = principals.get(actor) orelse {
         std.debug.print(
-            "wgl: gc.actor {s} has no registered collab key in the registry visible to this checkout (local ∪ host cache); if {s} is registered on the host, run `wgl collab principal-fetch` first; otherwise register the seed you already hold with `wgl collab principal-register --principal {s} --key <keyfile> --push origin` — without `--push origin` the registration stays local and the snapshot stays unverified on the remote\n",
+            "wg: gc.actor {s} has no registered collab key in the registry visible to this checkout (local ∪ host cache); if {s} is registered on the host, run `wg collab principal-fetch` first; otherwise register the seed you already hold with `wg collab principal-register --principal {s} --key <keyfile> --push origin` — without `--push origin` the registration stays local and the snapshot stays unverified on the remote\n",
             .{ actor, actor, actor },
         );
         return error.ActorUnregistered;
@@ -987,7 +987,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
         std.base64.standard.Decoder.decode(buf[0..32], std.mem.trim(u8, registered, " \t\r\n")) catch return error.BadKey;
         if (!std.mem.eql(u8, buf[0..32], &key.public_key.bytes)) {
             std.debug.print(
-                "wgl: gc.key does not match the public key registered for gc.actor {s} in the registry visible to this checkout (local ∪ host cache): this signature does not verify until {s} is rotated to this key, and the collab log is append-only, so the entry cannot be deleted or edited. Use the key registered for {s}, or rotate {s} on purpose with `wgl collab principal-register --principal {s} --key <keyfile> --push origin`; rotation is destructive, because every past entry signed by {s} turns unverified\n",
+                "wg: gc.key does not match the public key registered for gc.actor {s} in the registry visible to this checkout (local ∪ host cache): this signature does not verify until {s} is rotated to this key, and the collab log is append-only, so the entry cannot be deleted or edited. Use the key registered for {s}, or rotate {s} on purpose with `wg collab principal-register --principal {s} --key <keyfile> --push origin`; rotation is destructive, because every past entry signed by {s} turns unverified\n",
                 .{ actor, actor, actor, actor, actor, actor },
             );
             return error.KeyMismatch;
@@ -1003,7 +1003,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
         baseline_len = snap.bytes.len;
         baseline = snap.oid;
         const parsed = snapshot_mod.parse_snapshot(c.alloc, snap.bytes) catch |e| {
-            std.debug.print("wgl: {s}: snapshot document rejected ({t})\n", .{ entry_mod.SNAPSHOT_REF, e });
+            std.debug.print("wg: {s}: snapshot document rejected ({t})\n", .{ entry_mod.SNAPSHOT_REF, e });
             return error.BadSnapshot;
         };
         try records.append_slice(parsed.entries);
@@ -1051,7 +1051,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
     const over_cap = baseline_len > entry_mod.COLLAB_SNAPSHOT_MAX_BYTES;
     if (folded.items.len == 0 and !(over_cap and truncate)) {
         if (over_cap) {
-            std.debug.print("wgl: collab gc: {s} is {d} MiB, over the {d} MiB cap; re-run with --truncate to drop the oldest records (marked complete:false)\n", .{ entry_mod.SNAPSHOT_REF, baseline_len / (1024 * 1024), entry_mod.COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024) });
+            std.debug.print("wg: collab gc: {s} is {d} MiB, over the {d} MiB cap; re-run with --truncate to drop the oldest records (marked complete:false)\n", .{ entry_mod.SNAPSHOT_REF, baseline_len / (1024 * 1024), entry_mod.COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024) });
             return error.SnapshotOverCap;
         }
         const msg = std.fmt.allocPrint(c.alloc, "collab gc: nothing to fold ({d} unparseable inbox blob(s) left in place)", .{left}) catch @panic("oom");
@@ -1067,7 +1067,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
         const ts = util.now_ts();
         const built = try build_capped_snapshot(c.alloc, actor, ts, records.items, key, truncate, entry_mod.COLLAB_SNAPSHOT_MAX_BYTES);
         if (!built.snap.complete) {
-            std.debug.print("wgl: collab gc: WARNING snapshot truncated: dropped {d} oldest record(s); the ledger is now marked complete=false\n", .{built.snap.dropped_entries});
+            std.debug.print("wg: collab gc: WARNING snapshot truncated: dropped {d} oldest record(s); the ledger is now marked complete=false\n", .{built.snap.dropped_entries});
         }
         snap_oid = try gitx.write_blob(c.alloc, c.io, repo, built.text);
         snap_bytes = built.text.len;
@@ -1086,13 +1086,13 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
         // a concurrent fold that moved the ref fails the lease and the gc
         // retries, never overwrites (§9.3).
         const snapshot_to_push = snap_oid orelse baseline orelse {
-            std.debug.print("wgl: cannot prune a remote without a snapshot: fetch the remote and retry\n", .{});
+            std.debug.print("wg: cannot prune a remote without a snapshot: fetch the remote and retry\n", .{});
             return error.NoSnapshotBaseline;
         };
         const lease = try std.fmt.allocPrint(c.alloc, "{s}:{s}", .{ entry_mod.SNAPSHOT_REF, baseline orelse "" });
         const spec = try std.fmt.allocPrint(c.alloc, "{s}:{s}", .{ snapshot_to_push, entry_mod.SNAPSHOT_REF });
         gitx.push(c.alloc, c.io, repo, remote, .{ .refspecs = &.{spec}, .leases = &.{lease}, .payload_bytes = snap_bytes }) catch |err| {
-            std.debug.print("wgl: push the snapshot (the fold baseline moved — a concurrent gc? fetch and retry): {t}\n", .{err});
+            std.debug.print("wg: push the snapshot (the fold baseline moved — a concurrent gc? fetch and retry): {t}\n", .{err});
             return err;
         };
         // Prune only refs the remote still advertises; a concurrent gc may
@@ -1120,7 +1120,7 @@ fn gc_inner(c: *Ctx, repo: []const u8, actor: []const u8, key_path: []const u8, 
                 try leases.append(dl);
             }
             gitx.push(c.alloc, c.io, repo, remote, .{ .refspecs = specs.items, .leases = leases.items }) catch |err| {
-                std.debug.print("wgl: delete folded inbox refs; re-run `wgl collab gc` to converge (idempotent): {t}\n", .{err});
+                std.debug.print("wg: delete folded inbox refs; re-run `wg collab gc` to converge (idempotent): {t}\n", .{err});
                 return err;
             };
             i = end;
@@ -1171,7 +1171,7 @@ fn build_capped_snapshot(alloc: std.mem.Allocator, actor: []const u8, ts: i64, r
         return .{ .snap = snap, .text = text };
     }
     if (!truncate) {
-        std.debug.print("wgl: collab gc: folded snapshot would exceed {d} MiB; re-run with --truncate to drop the oldest records (marked complete:false), or raise the server cap\n", .{entry_mod.COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)});
+        std.debug.print("wg: collab gc: folded snapshot would exceed {d} MiB; re-run with --truncate to drop the oldest records (marked complete:false), or raise the server cap\n", .{entry_mod.COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)});
         return error.SnapshotOverCap;
     }
     // Precompute each record's entry ts (unparseable → the oldest slot),
@@ -1258,14 +1258,14 @@ pub fn watch(c: *Ctx, p: *args.Parsed) !u8 {
                 child_env.put("WALGIT_COLLAB_ACTOR", ev.actor) catch {};
                 child_env.put("WALGIT_COLLAB_VERIFIED", if (ev.verified) "true" else "false") catch {};
                 exec_sh(c, cmd, ev.text, &child_env) catch |err| {
-                    std.debug.print("wgl: --exec failed: {t}\n", .{err});
+                    std.debug.print("wg: --exec failed: {t}\n", .{err});
                     return error.ExecFailed;
                 };
             }
             c.stdout_line(try std.fmt.allocPrint(c.alloc, "{s} {s}", .{ ev_pair.name, ev_pair.oid }));
         }
         write_watch_state(c, state_file, &cur) catch |err| {
-            std.debug.print("wgl: write watch state: {t}\n", .{err});
+            std.debug.print("wg: write watch state: {t}\n", .{err});
         };
         if (once) return 0;
         c.io.sleep(std.Io.Duration.fromSeconds(@intCast(interval)), .real) catch {};

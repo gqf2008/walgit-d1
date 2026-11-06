@@ -108,21 +108,21 @@ SERVER_TESTS := "--test web_api --test web_ui --test api_v1 --test static_http -
 # the file — only files that genuinely are not suites belong on it.
 SERVER_TEST_EXEMPT := "harness e2e sim"
 
-# The wgl client (D69/D70): the collaboration command families left walgit for
+# The wg client (D69/D70): the collaboration command families left walgit for
 # the standalone Zig module, and the retired Rust collab/ci/principal command
-# families went with them. wgl's lanes are its own: zig unit/golden tests in the
+# families went with them. wg's lanes are its own: zig unit/golden tests in the
 # module, and the script e2e over real git transport (register → push →
 # second checkout aggregates → claim convergence → gc fold equality; the MCP
 # subscription segment; when a still-collab-capable walgit binary is present it
 # cross-checks the board hash against the Rust aggregation; when
-# WALGIT_SERVER_BIN (or a target binary) is present it compares wgl mcp's
+# WALGIT_SERVER_BIN (or a target binary) is present it compares wg mcp's
 # answers with the host's api-browser/collab/* aggregations). The zig toolchain
-# pins 0.17.0 (wgl/build.zig.zon).
-wgl-test:
-    cd wgl && zig build test
+# pins 0.17.0 (wg/build.zig.zon).
+wg-test:
+    cd wg && zig build test
 
-wgl-e2e:
-    bash scripts/wgl-e2e.sh
+wg-e2e:
+    bash scripts/wg-e2e.sh
 
 # Every crate whose whole tests/ directory runs through a single `--tests`
 # invocation — no per-suite registration (a file added there runs the moment it
@@ -161,7 +161,7 @@ test:
     {{t5}} cargo test --workspace --lib --bins
     {{t5}} just test-wildcard-crates
     {{t10}} just test-server-integration
-    just wgl-test
+    just wg-test
 
 # Smart-HTTP end-to-end against real git (≈ 20 s) — run when touching smart.rs/receive/upload-pack/wal.
 e2e *ARGS:
@@ -218,7 +218,7 @@ ci:
     just check-release-changelog-filter
     just clippy
     just test
-    {{t10}} just wgl-e2e
+    {{t10}} just wg-e2e
     just e2e
     just sim
 

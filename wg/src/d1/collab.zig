@@ -80,7 +80,7 @@ pub const ThreadHead = struct { id: []const u8, head: []const u8 };
 
 /// `thread id -> tip oid` for many threads in one pass. Emitted in sorted-id
 /// order (the retired Rust command serialized a `HashMap` whose order was
-/// process-random; wgl is deterministic).
+/// process-random; wg is deterministic).
 pub fn thread_head_map(alloc: std.mem.Allocator, entries: []const EntryRef) ![]ThreadHead {
     // group by id (sorted ids → deterministic output)
     var ids = util.List([]const u8).init(alloc);
