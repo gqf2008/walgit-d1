@@ -99,25 +99,25 @@ export function CommandsPage() {
       <Section title={t("cmds.s1.t")} lead={t("cmds.s1.lead")}>
         <CommandRow cmd="git for-each-ref refs/collab/meta/principals" />
         <CommandRow
-          cmd='wgl collab join --repo "$checkout" --principal <proj>-worker-2 --push origin'
+          cmd='wg collab join --repo "$checkout" --principal <proj>-worker-2 --push origin'
           note={t("cmds.s1.join")}
         />
         <CommandRow cmd="git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'" />
-        <CommandRow cmd="wgl collab board" note={t("cmds.s1.board")} />
+        <CommandRow cmd="wg collab board" note={t("cmds.s1.board")} />
       </Section>
 
       <Section title={t("cmds.s2.t")} lead={t("cmds.s2.lead")}>
-        <CommandRow cmd="wgl collab board" note={t("cmds.s2.board")} />
-        <CommandRow cmd="wgl collab thread <id>" note={t("cmds.s2.thread")} />
-        <CommandRow cmd="wgl collab thread-heads" />
-        <CommandRow cmd="wgl collab pr <id>" note={t("cmds.s2.pr")} />
-        <CommandRow cmd="wgl collab report --remote origin" note={t("cmds.s2.report")} />
-        <CommandRow cmd="wgl collab ls" />
+        <CommandRow cmd="wg collab board" note={t("cmds.s2.board")} />
+        <CommandRow cmd="wg collab thread <id>" note={t("cmds.s2.thread")} />
+        <CommandRow cmd="wg collab thread-heads" />
+        <CommandRow cmd="wg collab pr <id>" note={t("cmds.s2.pr")} />
+        <CommandRow cmd="wg collab report --remote origin" note={t("cmds.s2.report")} />
+        <CommandRow cmd="wg collab ls" />
       </Section>
 
       <Section title={t("cmds.s3.t")} lead={t("cmds.s3.lead")}>
         <CommandRow
-          cmd='wgl collab claim --id <card> --worktree <wt> --branch <br> --work "<plan>" --session <id> --push origin'
+          cmd='wg collab claim --id <card> --worktree <wt> --branch <br> --work "<plan>" --session <id> --push origin'
           note={t("cmds.s3.claim")}
         />
         <div className="cmds-table-wrap">
@@ -151,17 +151,17 @@ export function CommandsPage() {
           </table>
         </div>
         <p className="cmds-note">{t("cmds.s3.entries")}</p>
-        <CommandRow cmd={`wgl collab entry --kind issue --id <thread> --body '{"title":"…","body":"…"}' --push origin`} />
-        <CommandRow cmd={`wgl collab entry --kind comment --id <thread> --parent <oid> --body '{"note":"…"}' --push origin`} />
+        <CommandRow cmd={`wg collab entry --kind issue --id <thread> --body '{"title":"…","body":"…"}' --push origin`} />
+        <CommandRow cmd={`wg collab entry --kind comment --id <thread> --parent <oid> --body '{"note":"…"}' --push origin`} />
         <CommandRow
-          cmd={`wgl collab entry --kind patch --id <thread> --parent <oid> --base refs/heads/main --head refs/heads/<br> --body '{"note":"…"}' --push origin`}
+          cmd={`wg collab entry --kind patch --id <thread> --parent <oid> --base refs/heads/main --head refs/heads/<br> --body '{"note":"…"}' --push origin`}
           note={t("cmds.s3.review")}
         />
         <CommandRow
-          cmd={`wgl collab entry --kind status --id <card> --parent <oid> --body '{"status":"needs-review","owner":"<p>","worktree":"<wt>","branch":"<br>"}' --push origin`}
+          cmd={`wg collab entry --kind status --id <card> --parent <oid> --body '{"status":"needs-review","owner":"<p>","worktree":"<wt>","branch":"<br>"}' --push origin`}
           note={t("cmds.s3.close")}
         />
-        <CommandRow cmd="wgl collab gc --actor <principal> --push origin [--truncate]" note={t("cmds.s3.gc")} />
+        <CommandRow cmd="wg collab gc --actor <principal> --push origin [--truncate]" note={t("cmds.s3.gc")} />
       </Section>
 
       <Section title={t("cmds.s4.t")} lead={t("cmds.s4.lead")}>
@@ -181,11 +181,11 @@ export function CommandsPage() {
 
       <Section title={t("cmds.s5.t")} lead={t("cmds.s5.lead")}>
         <CommandRow
-          cmd='wgl collab watch --repo "$checkout" --remote origin --interval 10 --exec /path/watch-hook.sh'
+          cmd='wg collab watch --repo "$checkout" --remote origin --interval 10 --exec /path/watch-hook.sh'
           note={t("cmds.s5.hook")}
         />
         <CommandRow
-          cmd='wgl collab watch --once --repo "$checkout" --remote origin --exec /path/watch-hook.sh'
+          cmd='wg collab watch --once --repo "$checkout" --remote origin --exec /path/watch-hook.sh'
           note={t("cmds.s5.once")}
         />
         <CommandRow
@@ -196,11 +196,11 @@ export function CommandsPage() {
       </Section>
 
       <Section title={t("cmds.s6.t")} lead={t("cmds.s6.lead")}>
-        <CommandRow cmd="wgl ci validate" />
-        <CommandRow cmd="wgl ci run" note={t("cmds.s6.run")} />
-        <CommandRow cmd="wgl ci status" />
-        <CommandRow cmd="wgl ci log [<run>]" />
-        <CommandRow cmd="wgl ci artifacts [<run>] --out <dir>" note={t("cmds.s6.artifacts")} />
+        <CommandRow cmd="wg ci validate" />
+        <CommandRow cmd="wg ci run" note={t("cmds.s6.run")} />
+        <CommandRow cmd="wg ci status" />
+        <CommandRow cmd="wg ci log [<run>]" />
+        <CommandRow cmd="wg ci artifacts [<run>] --out <dir>" note={t("cmds.s6.artifacts")} />
       </Section>
 
       <Section title={t("cmds.s7.t")} lead={t("cmds.s7.lead")}>

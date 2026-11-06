@@ -13,7 +13,7 @@
 //! cost is that the API is reached through its own URL grammar, so paths and
 //! query values must be encoded here.
 //!
-//! Every tool goes through [`Call`]. The D1 write tools moved to `wgl mcp`
+//! Every tool goes through [`Call`]. The D1 write tools moved to `wg mcp`
 //! (D70); what remains here is the read projection, so the API answers every
 //! call and there is no second path to keep in step with it.
 

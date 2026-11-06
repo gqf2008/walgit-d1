@@ -3,7 +3,7 @@
 
 ## 关联
 
-wgl collab thread: `<thread-id>`（GitHub 已只做镜像+发布，Issues 关闭；PR 模板仅作历史保留，
+wg collab thread: `<thread-id>`（GitHub 已只做镜像+发布，Issues 关闭；PR 模板仅作历史保留，
 流程见 `docs/RELEASE.md`）
 
 ## 变更

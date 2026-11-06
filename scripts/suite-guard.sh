@@ -5,13 +5,13 @@
 # that forgot it goes red here instead of the suite silently never running
 # (the walgit-cli ci_e2e/collab_e2e orphanage #140's audit found on disk).
 # D69: the collab/principal/ci families and their suites moved to the
-# standalone wgl client; walgit-cli has no integration suites, and the wgl
+# standalone wg client; walgit-cli has no integration suites, and the wg
 # lanes (zig tests + the script e2e) are anchored here in their place.
 #
 # Lanes (all defined once, in the justfile; CI consumes them):
 #   walgit-server  SERVER_TESTS, run by test-server-integration
-#   wgl            zig unit/golden tests (wgl-test) + the transport e2e
-#                  (wgl-e2e); the retired CLI_TESTS lane is gone
+#   wg             zig unit/golden tests (wg-test) + the transport e2e
+#                  (wg-e2e); the retired CLI_TESTS lane is gone
 #   everything else  WILDCARD_TEST_PKGS, run by test-wildcard-crates: the whole
 #                  tests/ directory is the lane, a new file runs the moment it
 #                  is committed
@@ -48,10 +48,10 @@ nested="$(find crates/*/tests -mindepth 2 -name '*.rs' -not -name 'mod.rs' 2>/de
 # the lane's removal loud.
 grep -qE '^[[:space:]]*cargo test -p walgit-server \{\{SERVER_TESTS\}\}[[:space:]]*$' justfile \
     || die "test-server-integration no longer interpolates SERVER_TESTS on its own line — the single source became decorative"
-grep -qE '^[[:space:]]*cd wgl && zig build test[[:space:]]*$' justfile \
-    || die "wgl-test no longer runs `zig build test` on its own line — the single source became decorative"
-grep -qE '^[[:space:]]*(bash )?scripts/wgl-e2e\.sh[[:space:]]*$' justfile \
-    || die "wgl-e2e no longer runs the script on its own line — the single source became decorative"
+grep -qE '^[[:space:]]*cd wg && zig build test[[:space:]]*$' justfile \
+    || die "wg-test no longer runs `zig build test` on its own line — the single source became decorative"
+grep -qE '^[[:space:]]*(bash )?scripts/wg-e2e\.sh[[:space:]]*$' justfile \
+    || die "wg-e2e no longer runs the script on its own line — the single source became decorative"
 grep -qE '^[[:space:]]*cargo test \{\{WILDCARD_TEST_PKGS\}\} --tests[[:space:]]*$' justfile \
     || die "test-wildcard-crates no longer interpolates WILDCARD_TEST_PKGS on its own line — the single source became decorative"
 
@@ -75,7 +75,7 @@ for d in crates/*/tests; do
         || die "crate $crate: tests/ exists but no top-level suite matches — vacuous lane, delete the dir or name a suite"
     case "$crate" in
         walgit-server) list="$server_list"; exempt="$server_exempt" ;;
-        walgit-cli) die "walgit-cli grew an integration suite — register it in a lane like SERVER_TESTS (D69 moved the collab suites to wgl)" ;;
+        walgit-cli) die "walgit-cli grew an integration suite — register it in a lane like SERVER_TESTS (D69 moved the collab suites to wg)" ;;
         *)
             case " $wild " in *" -p $crate "*) ;;
                 *) die "crate $crate has integration suites but no lane — add it to WILDCARD_TEST_PKGS (the whole tests/ dir then runs on both legs) or give it an explicit *_TESTS like the server and the cli" ;;

@@ -27,11 +27,11 @@ Reading order: `GOAL.md` (what we want) → `docs/ARCHITECTURE.md` (what the sys
 | Build (`<BUILD_CMD>`) | `cargo build --workspace --all-targets`; SPA `just web-build` |
 | Check (`<CHECK_CMD>`) | `just warnings`, `just clippy`; SPA `pnpm run build` (oxlint `--deny-warnings` + tsc) |
 | Test (`<TEST_CMD>`) | `just test`; SPA `just web-test` |
-| Integration (`<INTEGRATION_CMD>`) | `just wgl-e2e`, `just e2e`, `just sim`; everything at once is `just ci` |
+| Integration (`<INTEGRATION_CMD>`) | `just wg-e2e`, `just e2e`, `just sim`; everything at once is `just ci` |
 | Review (`<REVIEW_CMD/流程>`) | leader review + a verified `approve` from a principal other than the author (`merge_rule_eval`) |
-| Rhythm (`<TICK_INTERVAL>`) | no timers: `wgl collab watch --once` under a supervisor or a timer (D55) |
+| Rhythm (`<TICK_INTERVAL>`) | no timers: `wg collab watch --once` under a supervisor or a timer (D55) |
 | Decision model (`<DECISION_MODEL>`) | none — deterministic gates are commands, judgment calls are the leader's |
-| Tracker (`<TRACKER>`) | the D1 collaboration layer: `refs/collab/*`, read and written over `wgl mcp` (stdio) or `wgl collab …` (`docs/D1_PROTOCOL.md`, D70) |
+| Tracker (`<TRACKER>`) | the D1 collaboration layer: `refs/collab/*`, read and written over `wg mcp` (stdio) or `wg collab …` (`docs/D1_PROTOCOL.md`, D70) |
 
 ## 1. Roles
 
@@ -57,7 +57,7 @@ Reading order: `GOAL.md` (what we want) → `docs/ARCHITECTURE.md` (what the sys
 - **Does not spawn sub-agents**, does not push to `main`, does not merge.
 
 The set of surviving worktrees is the team's physical roster: retiring a principal is
-`wgl collab principal-revoke`, never `git worktree remove` (D62).
+`wg collab principal-revoke`, never `git worktree remove` (D62).
 
 ## 2. Delivery flow
 
@@ -84,8 +84,8 @@ from the entries.
 just warnings      # zero rustc warnings
 just clippy        # -D warnings
 just test          # fast tier: lib/bins, wildcard crates, server integration
-just wgl-test      # the wgl client's zig unit/golden tests
-just wgl-e2e       # the wgl transport e2e (register→push→aggregate→claim→fold)
+just wg-test       # the wg client's zig unit/golden tests
+just wg-e2e        # the wg transport e2e (register→push→aggregate→claim→fold)
 just e2e           # smart HTTP against real git
 just sim           # fault-injected cluster over one truth store
 just web-test      # SPA unit tests; plus `pnpm run build` for oxlint + tsc
@@ -108,7 +108,7 @@ Blocking, on top of the commands:
 
 ## 4. Rhythm
 
-There is no scheduler. The leader advances the board by reading it — `wgl collab watch` under a
+There is no scheduler. The leader advances the board by reading it — `wg collab watch` under a
 supervisor, or `--once` under a timer — and by dispatching what is unowned. Instance state is local
 and disposable; durable truth is `refs/collab/*`. A held, long-polling "wait until something
 changes" request is not an option: refs-level polling is the observation surface (D55). If a pass
@@ -128,9 +128,9 @@ finds nothing new, report status; do not re-dispatch the same card.
 ## 6. Tracker and cross-team work
 
 The tracker is the D1 collaboration layer (`refs/collab/*`), not GitHub: the mirror's Issues, Wiki,
-Projects and Discussions are disabled (D46). Read and write it over **`wgl mcp`** (stdio:
+Projects and Discussions are disabled (D46). Read and write it over **`wg mcp`** (stdio:
 `collab_board`, `collab_thread`, `collab_report`, `ci_status`, `collab_publish`,
-`collab_register`, and the `walgit://collab/*` resources) or `wgl collab …`, the scripting form of
+`collab_register`, and the `walgit://collab/*` resources) or `wg collab …`, the scripting form of
 the same lanes (D69/D70). The host's `/mcp` keeps only the repository reads (`repo_*`) and
 `wal_ls`.
 
@@ -210,7 +210,7 @@ A branch may merge only when:
 | `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
-| `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `wgl ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation. |
+| `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `wg ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation. |
 | `docs/D1_PROTOCOL.md` | Anyone touching the D1 collaboration layer: identities, refs layout, entry schema/canonical signing, verification, aggregation, the board projection, the D45 fold, claims (§8.4), observation lanes. |
 | `docs/D1_COLLAB_DESIGN.md` | Design background and progress history of the D1 layer (current normative rules are in `docs/D1_PROTOCOL.md`). |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |

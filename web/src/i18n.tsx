@@ -165,7 +165,7 @@ const en = {
   "write.ph.write": "Write…",
   "write.baseRef": "base ref",
   "write.headRef": "head ref",
-  "write.err.noWebCrypto": "This browser has no WebCrypto Ed25519 support — use the wgl collab CLI to sign entries.",
+  "write.err.noWebCrypto": "This browser has no WebCrypto Ed25519 support — use the wg collab CLI to sign entries.",
   "write.err.signedOut": "Signed out — sign in to participate in the collaboration layer.",
   "write.err.untitled": "untitled",
 
@@ -413,7 +413,7 @@ const en = {
   "blank.names.and": " and ",
   "blank.names.rule.pre": " are ",
   "blank.names.rule.post": ", 1–100 characters.",
-  "blank.downloads": "Prebuilt binaries for every platform (including the wgl collaboration client): GitHub Releases →",
+  "blank.downloads": "Prebuilt binaries for every platform (including the wg collaboration client): GitHub Releases →",
   "footer.kind.serverless": "a serverless host",
   "footer.kind.ssd": "The SSD host 🚀",
   "footer.kind.dev": "dev",
@@ -775,11 +775,11 @@ const en = {
 
   "home.role.leader.t": "Leader",
   "home.role.leader.body":
-    "You are the project leader. You work in the main checkout, on the main branch.\n\n1. Decompose: read wgl collab board first, then split the goal into cards — one issue per deliverable (objective, one owner, machine-checkable acceptance commands).\n2. Dispatch: one worktree + one principal per worker; the brief names the card id, the worktree, and the principal, and requires wgl collab claim first (exit 0 = start, exit 2 = stand down).\n3. Review: you run the review yourself — your principal is never the worker\u2019s, so you never approve your own commit. Run the card\u2019s acceptance commands at the pinned commit, post review (approve / request_changes) with graded findings and the evidence you ran; merge only with no Critical/Important and everything green.\n4. Merge: merge locally (ff preferred), push, record one merge_result {merged:true, oid}, set status: closed, then prune only the merged branch — never delete a worker worktree.\n\nRules: every problem lands on its card as a signed entry; escalate to a human (needs-human) only for authorization, priority, or destructive actions outside a card.",
+    "You are the project leader. You work in the main checkout, on the main branch.\n\n1. Decompose: read wg collab board first, then split the goal into cards — one issue per deliverable (objective, one owner, machine-checkable acceptance commands).\n2. Dispatch: one worktree + one principal per worker; the brief names the card id, the worktree, and the principal, and requires wg collab claim first (exit 0 = start, exit 2 = stand down).\n3. Review: you run the review yourself — your principal is never the worker\u2019s, so you never approve your own commit. Run the card\u2019s acceptance commands at the pinned commit, post review (approve / request_changes) with graded findings and the evidence you ran; merge only with no Critical/Important and everything green.\n4. Merge: merge locally (ff preferred), push, record one merge_result {merged:true, oid}, set status: closed, then prune only the merged branch — never delete a worker worktree.\n\nRules: every problem lands on its card as a signed entry; escalate to a human (needs-human) only for authorization, priority, or destructive actions outside a card.",
 
   "home.role.dev.t": "Worker",
   "home.role.dev.body":
-    "You are a worker. You use your own worktree and your own principal, one card at a time.\n\n1. Read: wgl collab thread <id> — re-read to the head entry before anything.\n2. Claim: wgl collab claim --id <card> --worktree <wt> --branch feat/<thread> --push origin — exit 0 before you start; exit 2 means another claim holds the card, stand down.\n3. Implement: create your dev branch inside your own worktree, implement, push the branch.\n4. Deliver: attach a patch entry (--base refs/heads/main --head refs/heads/<branch>), move the card to status: needs-review, then stop — do not poll for a reviewer.\n\nRules: any problem — an error, a red test, a missing dependency, an ambiguity — goes back to the card as a comment with the evidence (status: blocked when work halts). Never review your own patch, never merge, never touch another card.",
+    "You are a worker. You use your own worktree and your own principal, one card at a time.\n\n1. Read: wg collab thread <id> — re-read to the head entry before anything.\n2. Claim: wg collab claim --id <card> --worktree <wt> --branch feat/<thread> --push origin — exit 0 before you start; exit 2 means another claim holds the card, stand down.\n3. Implement: create your dev branch inside your own worktree, implement, push the branch.\n4. Deliver: attach a patch entry (--base refs/heads/main --head refs/heads/<branch>), move the card to status: needs-review, then stop — do not poll for a reviewer.\n\nRules: any problem — an error, a red test, a missing dependency, an ambiguity — goes back to the card as a comment with the evidence (status: blocked when work halts). Never review your own patch, never merge, never touch another card.",
 
 } as const;
 
@@ -928,7 +928,7 @@ const zhCN: Record<I18nKey, string> = {
   "write.ph.write": "写点什么…",
   "write.baseRef": "base ref",
   "write.headRef": "head ref",
-  "write.err.noWebCrypto": "此浏览器不支持 WebCrypto Ed25519——请改用 wgl collab CLI 签名条目。",
+  "write.err.noWebCrypto": "此浏览器不支持 WebCrypto Ed25519——请改用 wg collab CLI 签名条目。",
   "write.err.signedOut": "已登出——登录后才能参与协作层。",
   "write.err.untitled": "无标题",
 
@@ -1176,7 +1176,7 @@ const zhCN: Record<I18nKey, string> = {
   "blank.names.and": " 和 ",
   "blank.names.rule.pre": " 允许的字符为 ",
   "blank.names.rule.post": "，长度 1–100 字符。",
-  "blank.downloads": "全平台预编译产物（含 wgl 协作客户端）：GitHub Releases →",
+  "blank.downloads": "全平台预编译产物（含 wg 协作客户端）：GitHub Releases →",
   "footer.kind.serverless": "一台 serverless 主机",
   "footer.kind.ssd": "SSD 主机 🚀",
   "footer.kind.dev": "dev 实例",
@@ -1532,11 +1532,11 @@ const zhCN: Record<I18nKey, string> = {
 
   "home.role.leader.t": "Leader",
   "home.role.leader.body":
-    "你是项目 Leader，在主 checkout 的 main 分支上工作。\n\n1. 拆解：先读 wgl collab board，把目标拆成卡——每卡一条 issue（目标、唯一 owner、机器可校验的验收命令）。\n2. 派发：每个 worker 一个独立 worktree + 独立 principal；brief 至少含卡 id、worktree、principal，并要求先 wgl collab claim（exit 0 才开工，exit 2 让位）。\n3. 复审：由你亲自审——你的 principal 永远不是 worker 的，所以你不会审自己写的提交。在 pinned commit 上跑卡的验收命令，签 review（approve / request_changes）并附分级 findings 与实际跑过的证据；无 Critical/Important 且全绿才合并。\n4. 合并：本地合并（优先 ff）→ push → 记一条 merge_result {merged:true, oid} → status: closed → 只清已合并分支，永不删除 worker 的 worktree。\n\n原则：一切问题都以签名条目落在卡片上；只有授权、优先级、卡外破坏性动作才升级给人（needs-human）。",
+    "你是项目 Leader，在主 checkout 的 main 分支上工作。\n\n1. 拆解：先读 wg collab board，把目标拆成卡——每卡一条 issue（目标、唯一 owner、机器可校验的验收命令）。\n2. 派发：每个 worker 一个独立 worktree + 独立 principal；brief 至少含卡 id、worktree、principal，并要求先 wg collab claim（exit 0 才开工，exit 2 让位）。\n3. 复审：由你亲自审——你的 principal 永远不是 worker 的，所以你不会审自己写的提交。在 pinned commit 上跑卡的验收命令，签 review（approve / request_changes）并附分级 findings 与实际跑过的证据；无 Critical/Important 且全绿才合并。\n4. 合并：本地合并（优先 ff）→ push → 记一条 merge_result {merged:true, oid} → status: closed → 只清已合并分支，永不删除 worker 的 worktree。\n\n原则：一切问题都以签名条目落在卡片上；只有授权、优先级、卡外破坏性动作才升级给人（needs-human）。",
 
   "home.role.dev.t": "Worker（工人）",
   "home.role.dev.body":
-    "你是开发 worker，用自己的 worktree 与自己的 principal，一次只做一张卡。\n\n1. 读卡：wgl collab thread <id>，重读到最新条目再动手。\n2. 认领：wgl collab claim --id <card> --worktree <wt> --branch feat/<thread> --push origin——exit 0 才开工；exit 2 = 别人持有，让位。\n3. 实现：在自己的 worktree 里建开发分支，完成后 push。\n4. 交付：发 patch 条目（--base refs/heads/main --head refs/heads/<branch>），把卡移到 status: needs-review，然后停止，不要轮询评审。\n\n规则：任何问题——报错、测试红、缺依赖、有歧义——一律以 comment 写回卡片（带证据），卡住走 status: blocked；不审自己的 patch、不合并、不碰别的卡。",
+    "你是开发 worker，用自己的 worktree 与自己的 principal，一次只做一张卡。\n\n1. 读卡：wg collab thread <id>，重读到最新条目再动手。\n2. 认领：wg collab claim --id <card> --worktree <wt> --branch feat/<thread> --push origin——exit 0 才开工；exit 2 = 别人持有，让位。\n3. 实现：在自己的 worktree 里建开发分支，完成后 push。\n4. 交付：发 patch 条目（--base refs/heads/main --head refs/heads/<branch>），把卡移到 status: needs-review，然后停止，不要轮询评审。\n\n规则：任何问题——报错、测试红、缺依赖、有歧义——一律以 comment 写回卡片（带证据），卡住走 status: blocked；不审自己的 patch、不合并、不碰别的卡。",
 
 };
 
@@ -1683,7 +1683,7 @@ const zhTW: Record<I18nKey, string> = {
   "write.ph.write": "寫點什麼…",
   "write.baseRef": "base ref",
   "write.headRef": "head ref",
-  "write.err.noWebCrypto": "此瀏覽器不支援 WebCrypto Ed25519——請改用 wgl collab CLI 簽名條目。",
+  "write.err.noWebCrypto": "此瀏覽器不支援 WebCrypto Ed25519——請改用 wg collab CLI 簽名條目。",
   "write.err.signedOut": "已登出——登入後才能參與協作層。",
   "write.err.untitled": "無標題",
 
@@ -1931,7 +1931,7 @@ const zhTW: Record<I18nKey, string> = {
   "blank.names.and": " 和 ",
   "blank.names.rule.pre": " 允許的字元為 ",
   "blank.names.rule.post": "，長度 1–100 字元。",
-  "blank.downloads": "全平台預編譯產物（含 wgl 協作客戶端）：GitHub Releases →",
+  "blank.downloads": "全平台預編譯產物（含 wg 協作客戶端）：GitHub Releases →",
   "footer.kind.serverless": "一台 serverless 主機",
   "footer.kind.ssd": "SSD 主機 🚀",
   "footer.kind.dev": "dev 實例",
@@ -2286,11 +2286,11 @@ const zhTW: Record<I18nKey, string> = {
 
   "home.role.leader.t": "Leader",
   "home.role.leader.body":
-    "你是專案 Leader，在主 checkout 的 main 分支上工作。\n\n1. 拆解：先讀 wgl collab board，把目標拆成卡——每卡一條 issue（目標、唯一 owner、機器可校驗的驗收命令）。\n2. 派發：每個 worker 一個獨立 worktree + 獨立 principal；brief 至少含卡 id、worktree、principal，並要求先 wgl collab claim（exit 0 才開工，exit 2 讓位）。\n3. 複審：由你親自審——你的 principal 永遠不是 worker 的，所以你不會審自己寫的提交。在 pinned commit 上跑卡的驗收命令，簽 review（approve / request_changes）並附分級 findings 與實際跑過的證據；無 Critical/Important 且全綠才合併。\n4. 合併：本地合併（優先 ff）→ push → 記一條 merge_result {merged:true, oid} → status: closed → 只清已合併分支，永不刪除 worker 的 worktree。\n\n原則：一切問題都以簽名條目落在卡片上；只有授權、優先級、卡外破壞性動作才升級給人（needs-human）。",
+    "你是專案 Leader，在主 checkout 的 main 分支上工作。\n\n1. 拆解：先讀 wg collab board，把目標拆成卡——每卡一條 issue（目標、唯一 owner、機器可校驗的驗收命令）。\n2. 派發：每個 worker 一個獨立 worktree + 獨立 principal；brief 至少含卡 id、worktree、principal，並要求先 wg collab claim（exit 0 才開工，exit 2 讓位）。\n3. 複審：由你親自審——你的 principal 永遠不是 worker 的，所以你不會審自己寫的提交。在 pinned commit 上跑卡的驗收命令，簽 review（approve / request_changes）並附分級 findings 與實際跑過的證據；無 Critical/Important 且全綠才合併。\n4. 合併：本地合併（優先 ff）→ push → 記一條 merge_result {merged:true, oid} → status: closed → 只清已合併分支，永不刪除 worker 的 worktree。\n\n原則：一切問題都以簽名條目落在卡片上；只有授權、優先級、卡外破壞性動作才升級給人（needs-human）。",
 
   "home.role.dev.t": "Worker（工人）",
   "home.role.dev.body":
-    "你是開發 worker，用自己的 worktree 與自己的 principal，一次只做一張卡。\n\n1. 讀卡：wgl collab thread <id>，重讀到最新條目再動手。\n2. 認領：wgl collab claim --id <card> --worktree <wt> --branch feat/<thread> --push origin——exit 0 才開工；exit 2 = 別人持有，讓位。\n3. 實現：在自己的 worktree 裡建開發分支，完成後 push。\n4. 交付：發 patch 條目（--base refs/heads/main --head refs/heads/<branch>），把卡移到 status: needs-review，然後停止，不要輪詢評審。\n\n規則：任何問題——報錯、測試紅、缺依賴、有歧義——一律以 comment 寫回卡片（帶證據），卡住走 status: blocked；不審自己的 patch、不合併、不碰別的卡。",
+    "你是開發 worker，用自己的 worktree 與自己的 principal，一次只做一張卡。\n\n1. 讀卡：wg collab thread <id>，重讀到最新條目再動手。\n2. 認領：wg collab claim --id <card> --worktree <wt> --branch feat/<thread> --push origin——exit 0 才開工；exit 2 = 別人持有，讓位。\n3. 實現：在自己的 worktree 裡建開發分支，完成後 push。\n4. 交付：發 patch 條目（--base refs/heads/main --head refs/heads/<branch>），把卡移到 status: needs-review，然後停止，不要輪詢評審。\n\n規則：任何問題——報錯、測試紅、缺依賴、有歧義——一律以 comment 寫回卡片（帶證據），卡住走 status: blocked；不審自己的 patch、不合併、不碰別的卡。",
 
 };
 const DICTS: Record<Lang, Record<I18nKey, string>> = { en, "zh-CN": zhCN, "zh-TW": zhTW };

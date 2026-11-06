@@ -12,7 +12,7 @@
 //! serves a host, not one checkout) and reads through the store rather than a
 //! local clone.
 //!
-//! **The surface is read-only.** The D1 write tools moved to `wgl mcp` (D70),
+//! **The surface is read-only.** The D1 write tools moved to `wg mcp` (D70),
 //! which takes entries the caller already signed; this process never holds a
 //! collaborator's key (D64).
 

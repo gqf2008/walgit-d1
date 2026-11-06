@@ -2,7 +2,7 @@
 //! subscribe to (D64).
 //!
 //! Two kinds, one vocabulary: these are the URIs `web/SKILL.md` documents.
-//! (The collaboration board/thread resources moved to `wgl mcp` in D70.)
+//! (The collaboration board/thread resources moved to `wg mcp` in D70.)
 //!
 //! | URI | What it answers |
 //! |---|---|
@@ -13,7 +13,7 @@
 //! one bounded task per URI that reads the repository's refs-level seq every
 //! `mcp.subscribe_interval` and emits `notifications/resources/updated` when it
 //! changes. The seq is a conditional `manifest.pb` GET (or a 304) — the same
-//! observation lane `git ls-remote` and `wgl collab watch` use, at
+//! observation lane `git ls-remote` and `wg collab watch` use, at
 //! at-least-once semantics: the notification means "re-read", never "here is the
 //! delta", so a dropped or coalesced event costs nothing.
 

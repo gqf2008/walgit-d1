@@ -50,7 +50,7 @@ unverified = false # 可选：true 时只收"至少含 1 条未验签条目"的�
 
 ## 使用
 
-- 预览未提交的列定义：`wgl collab board --board <file> --repo <checkout> [--format text|markdown|json]`
+- 预览未提交的列定义：`wg collab board --board <file> --repo <checkout> [--format text|markdown|json]`
 - 默认看板：仓库未定义时用内置四列（open / merged / closed / other；other 兜底承接一切中间工作态）+ 排序默认值。
 
 ## 示例

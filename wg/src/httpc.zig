@@ -1,4 +1,4 @@
-//! A thin HTTP wrapper over `std.http.Client` for wgl's two HTTP lanes:
+//! A thin HTTP wrapper over `std.http.Client` for wg's two HTTP lanes:
 //! the host registry (`/api/v1/principals`, §4.4) and the artifact size
 //! preflight (D1-CI §8.2).
 //!

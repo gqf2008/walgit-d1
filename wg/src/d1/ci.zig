@@ -598,7 +598,7 @@ pub const RunEntry = struct {
 };
 
 /// Every run in the log, by id ascending (the BTreeMap order), as of `now`
-/// (§7.1). The one aggregation behind `wgl ci status`, the collab report's CI
+/// (§7.1). The one aggregation behind `wg ci status`, the collab report's CI
 /// section and the SPA's thread display.
 pub fn collect_runs(alloc: std.mem.Allocator, entries: []const EntryRef, principals: *const Principals, now: i64) ![]RunEntry {
     // distinct ids, sorted

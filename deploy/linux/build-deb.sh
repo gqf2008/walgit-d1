@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build-deb.sh — assemble a .deb from prebuilt binaries (dpkg-deb only, no cargo).
 # Usage: deploy/linux/build-deb.sh <bin-dir> <version>
-#   bin-dir: directory with walgit, walgit-server, walgit-tray, wgl (release or debug)
+#   bin-dir: directory with walgit, walgit-server, walgit-tray, wg (release or debug)
 #   version: e.g. 0.2.0 (a leading 'v' is stripped)
 # Output: walgit_<version>_amd64.deb in the current directory.
 set -euo pipefail
@@ -11,7 +11,7 @@ VERSION="${2:?usage: build-deb.sh <bin-dir> <version>}"
 VERSION="${VERSION#v}"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-for b in walgit walgit-server walgit-tray wgl; do
+for b in walgit walgit-server walgit-tray wg; do
     [ -x "$BIN_DIR/$b" ] || { echo "missing binary: $BIN_DIR/$b" >&2; exit 1; }
 done
 [ -f "$REPO_ROOT/walgit.example.toml" ] || { echo "missing walgit.example.toml" >&2; exit 1; }
@@ -26,7 +26,7 @@ PKG="$(mktemp -d)"
 trap 'rm -rf "$PKG"' EXIT
 mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/walgit" "$PKG/usr/share/applications"
 
-cp "$BIN_DIR"/walgit "$BIN_DIR"/walgit-server "$BIN_DIR"/walgit-tray "$BIN_DIR"/wgl "$PKG/usr/bin/"
+cp "$BIN_DIR"/walgit "$BIN_DIR"/walgit-server "$BIN_DIR"/walgit-tray "$BIN_DIR"/wg "$PKG/usr/bin/"
 cp "$REPO_ROOT/walgit.example.toml" "$PKG/usr/share/walgit/"
 # The D43 unconfigured template: postinst initializes ~/.walgit state for the
 # installing user. Programs stay in /usr/bin; no binary is copied into $HOME.

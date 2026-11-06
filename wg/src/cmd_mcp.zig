@@ -1,15 +1,15 @@
-//! `wgl mcp` — the collaboration MCP surface, served over **stdio JSON-RPC**
+//! `wg mcp` — the collaboration MCP surface, served over **stdio JSON-RPC**
 //! (D70). The host's `/mcp` keeps the lanes that need host knowledge
 //! (`repo_*`, `wal_ls`); the D1 collaboration tools and resources live here,
-//! over the same `refs/collab/*` aggregation every other wgl command reads.
+//! over the same `refs/collab/*` aggregation every other wg command reads.
 //!
-//! Contract (see `skills/wgl/SKILL.md` §7):
+//! Contract (see `skills/wg/SKILL.md` §7):
 //! * stdout carries **only** JSON-RPC messages, one per line; logs go to stderr.
 //! * stdio EOF exits 0 after stopping the subscription poller.
 //! * requests are handled serially (the local refs are not concurrently safe);
 //!   only the best-effort subscription poller runs beside the loop.
 //! * every read fetches `refs/collab/{inbox,meta}` first (`git fetch --prune`,
-//!   the same lane `wgl collab claim` step 1 uses) and **fails closed** when
+//!   the same lane `wg collab claim` step 1 uses) and **fails closed** when
 //!   that fails; `fresh=false` (per call) or `--no-fetch` (process) reads the
 //!   cached refs and reports `_meta.fetched_at` instead.
 //! * `collab_publish` takes an entry the caller already signed, checks its
@@ -217,12 +217,12 @@ pub fn run(c: *Ctx, p: *args.Parsed) !u8 {
     const remote = p.get("remote", "origin");
     const interval = p.u64_of("subscribe-interval", DEFAULT_SUBSCRIBE_INTERVAL_SECS) catch return error.BadFlagValue;
     if (interval < MIN_SUBSCRIBE_INTERVAL_SECS) {
-        std.debug.print("wgl mcp: --subscribe-interval must be >= {d}s (D55: each tick is one refs read per subscription)\n", .{MIN_SUBSCRIBE_INTERVAL_SECS});
+        std.debug.print("wg mcp: --subscribe-interval must be >= {d}s (D55: each tick is one refs read per subscription)\n", .{MIN_SUBSCRIBE_INTERVAL_SECS});
         return error.BadFlagValue;
     }
     const max_subs = p.u64_of("max-subscriptions", DEFAULT_MAX_SUBSCRIPTIONS) catch return error.BadFlagValue;
     if (max_subs < 1) {
-        std.debug.print("wgl mcp: --max-subscriptions must be >= 1\n", .{});
+        std.debug.print("wg mcp: --max-subscriptions must be >= 1\n", .{});
         return error.BadFlagValue;
     }
 
@@ -241,10 +241,10 @@ pub fn run(c: *Ctx, p: *args.Parsed) !u8 {
     _ = util.now_ts();
     server.poller = std.Thread.spawn(.{}, pollLoop, .{&server}) catch null;
     if (server.poller == null) {
-        std.debug.print("wgl mcp: could not start the subscription poller; subscriptions will not notify\n", .{});
+        std.debug.print("wg mcp: could not start the subscription poller; subscriptions will not notify\n", .{});
     }
     const code = serveLoop(&server) catch |err| blk: {
-        std.debug.print("wgl mcp: {t}\n", .{err});
+        std.debug.print("wg mcp: {t}\n", .{err});
         break :blk 1;
     };
     server.stop.store(true, .release);
@@ -404,7 +404,7 @@ fn initializeResult(a: std.mem.Allocator, protocol: []const u8) Value {
     jsonio.obj_put(&res, a, "listChanged", .{ .bool = true });
     jsonio.obj_put(&caps, a, "resources", .{ .object = res });
     var info = jsonio.new_object();
-    jsonio.obj_put(&info, a, "name", .{ .string = "wgl" });
+    jsonio.obj_put(&info, a, "name", .{ .string = "wg" });
     jsonio.obj_put(&info, a, "version", .{ .string = util.version });
     var o = jsonio.new_object();
     jsonio.obj_put(&o, a, "protocolVersion", .{ .string = protocol });
@@ -415,7 +415,7 @@ fn initializeResult(a: std.mem.Allocator, protocol: []const u8) Value {
 }
 
 const INSTRUCTIONS =
-    \\wgl is the collaboration MCP surface of a walgit checkout. It reads and
+    \\wg is the collaboration MCP surface of a walgit checkout. It reads and
     \\writes the repository's D1 layer (`refs/collab/*`) locally.
     \\
     \\Rules that cost a wrong call if skipped:
@@ -428,9 +428,9 @@ const INSTRUCTIONS =
     \\* `collab_register` (optional `force`) registers this worktree
     \\  identity's public key. A different existing key is refused unless
     \\  forced — rotation makes every past entry by that principal unverified.
-    \\  Run `wgl collab join --principal <name>` first.
+    \\  Run `wg collab join --principal <name>` first.
     \\* Claiming a card is read board -> publish `card_claim` -> re-read board
-    \\  (`wgl collab claim` does exactly this); a live claim by someone else
+    \\  (`wg collab claim` does exactly this); a live claim by someone else
     \\  means stand down, not start work.
     \\* Subscriptions are polls: an update notification means "re-read", never
     \\  "here is the diff"
@@ -466,8 +466,8 @@ fn toolDescription(k: ToolKind) []const u8 {
         .collab_thread => "One collab thread: parent-ordered entries with per-entry verification and `broken_refs` (references this checkout cannot resolve), plus the PR view and merge-rule verdict when the thread carries a `patch`.",
         .collab_report => "Read-only dashboard over refs/collab/*: threads, PR status, verification health, CI runs and per-actor/per-kind activity.",
         .ci_status => "CI runs of the checkout (`docs/D1_CI_PROTOCOL.md` §8.3): every run the ledger carries, with attempts, live claim winner, state and effective conclusion. One run with `id`. Claim/report with signed `ci_claim`/`ci_result` entries through `collab_publish`.",
-        .collab_publish => "Publish one **already signed** collab entry to refs/collab/inbox/<actor>/<uuid>. Build and sign it with your own key (`wgl collab entry` does both). `actor` must be this worktree's identity principal. The signature is NOT checked on write — aggregation verifies it, so re-read the thread and confirm `verified: true`. The `status=done` gate is enforced here (the same rule as `wgl collab entry`).",
-        .collab_register => "Register this worktree identity's public key at refs/collab/meta/principals/<principal> and push it. Optional `force` (default false): a different already-registered key is refused unless forced, because rotating makes every past entry by that principal unverified. Identity missing => refused; run `wgl collab join --principal <name>` first.",
+        .collab_publish => "Publish one **already signed** collab entry to refs/collab/inbox/<actor>/<uuid>. Build and sign it with your own key (`wg collab entry` does both). `actor` must be this worktree's identity principal. The signature is NOT checked on write — aggregation verifies it, so re-read the thread and confirm `verified: true`. The `status=done` gate is enforced here (the same rule as `wg collab entry`).",
+        .collab_register => "Register this worktree identity's public key at refs/collab/meta/principals/<principal> and push it. Optional `force` (default false): a different already-registered key is refused unless forced, because rotating makes every past entry by that principal unverified. Identity missing => refused; run `wg collab join --principal <name>` first.",
     };
 }
 
@@ -520,7 +520,7 @@ fn toolSchema(a: std.mem.Allocator, k: ToolKind) Value {
         .collab_register => {
             var fp = jsonio.new_object();
             jsonio.obj_put(&fp, a, "type", .{ .string = "boolean" });
-            jsonio.obj_put(&fp, a, "description", .{ .string = "rotate an already-registered, different key (default false). Rotation makes every past signature by this principal unverified; prefer an explicit `wgl collab principal-register`." });
+            jsonio.obj_put(&fp, a, "description", .{ .string = "rotate an already-registered, different key (default false). Rotation makes every past signature by this principal unverified; prefer an explicit `wg collab principal-register`." });
             jsonio.obj_put(&props, a, "force", .{ .object = fp });
         },
     }
@@ -729,7 +729,7 @@ fn toolCiStatus(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap, fresh: 
 }
 
 /// `{"repo": "<owner>/<repo>", "runs": [RunView…]}` — the host
-/// `GET …/api-browser/collab/ci[?id=]` shape, not the `wgl ci status` wrapper
+/// `GET …/api-browser/collab/ci[?id=]` shape, not the `wg ci status` wrapper
 /// (which carries `now` instead of `repo`).
 fn ciStatusJson(a: std.mem.Allocator, repo_id: []const u8, runs: []const ci.RunEntry, want_id: ?[]const u8) ![]const u8 {
     var runs_json = util.List(u8).init(a);
@@ -775,11 +775,11 @@ fn loadAgg(s: *Server, a: std.mem.Allocator) !Agg {
     const reader = collabreader.Reader.init(a, s.c.io, s.repo);
     const loaded = try reader.load(a);
     const rules = collabreader.load_merge_rules(a, s.c.io, s.repo, null) catch |e| {
-        std.debug.print("wgl mcp: merge rules document is invalid — fail closed ({t})\n", .{e});
+        std.debug.print("wg mcp: merge rules document is invalid — fail closed ({t})\n", .{e});
         return error.BadRules;
     };
     const board_def = collabreader.load_board_def(a, s.c.io, s.repo, null) catch |e| {
-        std.debug.print("wgl mcp: board definition is invalid — fail closed ({t})\n", .{e});
+        std.debug.print("wg mcp: board definition is invalid — fail closed ({t})\n", .{e});
         return error.BadBoard;
     };
     return .{ .loaded = loaded, .rules = rules, .board_def = board_def };
@@ -1038,7 +1038,7 @@ fn hexDigit(c: u8) ?u8 {
 /// Decode `%XX` escapes in a resource URI path segment (a generic client
 /// percent-encodes `@`, `-`, etc.). `+` is not a space in a path. An
 /// incomplete or non-hex escape is not the resource it appears to be: `null`,
-/// which the callers turn into "not a wgl collab resource URI".
+/// which the callers turn into "not a wg collab resource URI".
 fn percentDecode(a: std.mem.Allocator, s: []const u8) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, s, '%') == null) return s;
     var out = util.List(u8).init(a);
@@ -1104,7 +1104,7 @@ fn resourceRead(s: *Server, a: std.mem.Allocator, uri: []const u8, fresh: bool) 
     if (maybeFetch(s, a, fresh)) |m| {
         // `maybeFetch` returns an owned message; carry it as an error the
         // handler can print verbatim.
-        std.debug.print("wgl mcp: {s}\n", .{m});
+        std.debug.print("wg mcp: {s}\n", .{m});
         return error.FetchFailed;
     }
     const agg = try loadAgg(s, a);
@@ -1184,9 +1184,9 @@ fn handleResourceRead(s: *Server, a: std.mem.Allocator, id: Value, params: Value
     s.git_mutex.unlock(s.c.io);
     const ans = answer catch |e| {
         switch (e) {
-            error.BadUri => writeRpcError(s, a, id, -32602, "not a wgl collab resource URI"),
+            error.BadUri => writeRpcError(s, a, id, -32602, "not a wg collab resource URI"),
             error.NoThread => writeRpcError(s, a, id, -32602, "no such collab thread"),
-            error.FetchFailed => writeRpcError(s, a, id, -32603, "cannot fetch refs/collab/* — fail closed (start `wgl mcp --no-fetch` to read the cached refs)"),
+            error.FetchFailed => writeRpcError(s, a, id, -32603, "cannot fetch refs/collab/* — fail closed (start `wg mcp --no-fetch` to read the cached refs)"),
             else => writeRpcError(s, a, id, -32603, std.fmt.allocPrint(a, "resource read failed: {t}", .{e}) catch "resource read failed"),
         }
         return;
@@ -1222,7 +1222,7 @@ fn handleSubscribe(s: *Server, a: std.mem.Allocator, id: Value, params: Value) v
         },
     };
     if (parseResourceUri(a, uri) == null) {
-        writeRpcError(s, a, id, -32602, "not a wgl collab resource URI");
+        writeRpcError(s, a, id, -32602, "not a wg collab resource URI");
         return;
     }
     s.git_mutex.lockUncancelable(s.c.io);
@@ -1233,7 +1233,7 @@ fn handleSubscribe(s: *Server, a: std.mem.Allocator, id: Value, params: Value) v
     const ans = answer catch |e| {
         switch (e) {
             error.NoThread => writeRpcError(s, a, id, -32602, "no such collab thread"),
-            error.FetchFailed => writeRpcError(s, a, id, -32603, "cannot fetch refs/collab/* — fail closed (start `wgl mcp --no-fetch` to read the cached refs)"),
+            error.FetchFailed => writeRpcError(s, a, id, -32603, "cannot fetch refs/collab/* — fail closed (start `wg mcp --no-fetch` to read the cached refs)"),
             else => writeRpcError(s, a, id, -32603, std.fmt.allocPrint(a, "subscribe failed: {t}", .{e}) catch "subscribe failed"),
         }
         return;
@@ -1420,7 +1420,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
         else => return .{ .invalid = "`entry` must be an object or its JSON text" },
     };
     // Preserve the client's bytes when it sent the signed entry as text: the
-    // blob oid must equal the one `wgl collab entry` wrote, or the same entry
+    // blob oid must equal the one `wg collab entry` wrote, or the same entry
     // is duplicated (and any `related`/`depends_on` citing that oid breaks).
     const blob_bytes: []const u8 = switch (entry_arg) {
         .string => |text| text,
@@ -1437,7 +1437,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
 
     const kind = parsed.kind;
     const body = parsed.body;
-    // The done gate (§7.5): identical to `wgl collab entry` / the thin API.
+    // The done gate (§7.5): identical to `wg collab entry` / the thin API.
     if (std.mem.eql(u8, kind, "status")) {
         const st = switch (body) {
             .object => |bo| switch (bo.get("status") orelse .null) {
@@ -1459,7 +1459,7 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
             }
             const ordered = collab.thread(a, group.items) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
             collab.validate_status_transition(a, ordered, loaded.principals) catch {
-                return .{ .out = .{ .err = "status transition rejected: transition → done requires the thread at needs-review with a verified non-author approve (D1_PROTOCOL §7.5); if the reviewer's key lives only in the host registry, run `wgl collab principal-fetch` and retry" } };
+                return .{ .out = .{ .err = "status transition rejected: transition → done requires the thread at needs-review with a verified non-author approve (D1_PROTOCOL §7.5); if the reviewer's key lives only in the host registry, run `wg collab principal-fetch` and retry" } };
             };
         }
     }
@@ -1505,10 +1505,10 @@ fn toolRegister(s: *Server, a: std.mem.Allocator, force: bool) ToolCall {
         return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot fetch refs/collab/meta before registering {s} ({s}): {s}", .{ ident.principal, @errorName(e), detail }) catch "cannot fetch before registering" } };
     };
     const registered = cmd_collab.registered_public_key(s.c, s.repo, ident.principal) catch {
-        return .{ .out = .{ .err = std.fmt.allocPrint(a, "the registration for {s} is malformed (public_key missing or not a string); run `wgl collab principal-register` explicitly", .{ident.principal}) catch "bad registration" } };
+        return .{ .out = .{ .err = std.fmt.allocPrint(a, "the registration for {s} is malformed (public_key missing or not a string); run `wg collab principal-register` explicitly", .{ident.principal}) catch "bad registration" } };
     };
     if (rotationRefused(registered, public_key, force)) {
-        return .{ .out = .{ .err = std.fmt.allocPrint(a, "principal {s} is already registered with a different public key; rotating makes every past signature by this principal unverified — re-run with force:true, or rotate explicitly: `wgl collab principal-register --principal {s} --key <key> --push <remote>`", .{ ident.principal, ident.principal }) catch "rotation refused" } };
+        return .{ .out = .{ .err = std.fmt.allocPrint(a, "principal {s} is already registered with a different public key; rotating makes every past signature by this principal unverified — re-run with force:true, or rotate explicitly: `wg collab principal-register --principal {s} --key <key> --push <remote>`", .{ ident.principal, ident.principal }) catch "rotation refused" } };
     }
     const result = cmd_collab.publish_principal(s.c, s.repo, ident.principal, public_key, s.remote) catch |e| {
         const detail = gitErrorDetail(e);
@@ -1520,7 +1520,7 @@ fn toolRegister(s: *Server, a: std.mem.Allocator, force: bool) ToolCall {
     return .{ .out = .{ .ok = .{ .text = jsonio.to_string_pretty(a, .{ .object = v }), .fresh = false, .fetched_at = fetchedAt(s) } } };
 }
 
-/// `collab_register` must not silently rotate: the same guard `wgl collab
+/// `collab_register` must not silently rotate: the same guard `wg collab
 /// join` applies (§4.3). Rotation makes every past entry by the principal
 /// unverified, and the log is append-only.
 fn rotationRefused(registered: ?[]const u8, next: []const u8, force: bool) bool {
@@ -1536,7 +1536,7 @@ fn localIdentity(s: *Server, a: std.mem.Allocator) !identity.Identity {
 
 fn identityError(a: std.mem.Allocator, e: anyerror) []const u8 {
     const hint = switch (e) {
-        error.IdentityReadFailed => "this worktree has no D1 identity — run `wgl collab join --principal <name>` first",
+        error.IdentityReadFailed => "this worktree has no D1 identity — run `wg collab join --principal <name>` first",
         error.IdentityBad => "the worktree identity file is malformed — fix or rebind it before publishing",
         else => "cannot read this worktree's identity",
     };
@@ -1594,7 +1594,7 @@ fn publishErrorText(a: std.mem.Allocator, e: anyerror) []const u8 {
         error.EmptyField => "`entry.kind` and `entry.actor` must not be empty",
         error.ActorNotRefnameSafe => "`entry.actor` is not a refname-safe segment",
         error.ActorMismatch => "`entry.actor` is not this worktree's identity principal — publish as the principal whose key you hold",
-        error.MissingSig => "`entry.sig` is empty — sign the canonical bytes with your own key (`wgl collab entry` does both)",
+        error.MissingSig => "`entry.sig` is empty — sign the canonical bytes with your own key (`wg collab entry` does both)",
         error.BadSig => "`entry.sig` is not `ed25519:` + a base64 64-byte signature",
         error.OutOfMemory => "entry is too large to inspect",
         else => "entry rejected",
@@ -1881,7 +1881,7 @@ test "ci_status answers the host shape {repo, runs}, optionally filtered by id" 
     const all = try std.json.parseFromSliceLeaky(Value, a, try ciStatusJson(a, "acme/widgets", runs, null), .{});
     try std.testing.expectEqualStrings("acme/widgets", all.object.get("repo").?.string);
     try std.testing.expectEqual(@as(usize, 2), all.object.get("runs").?.array.items.len);
-    // `now` never appears: this is the host wrapper, not `wgl ci status`.
+    // `now` never appears: this is the host wrapper, not `wg ci status`.
     try std.testing.expect(all.object.get("now") == null);
 
     const one = try std.json.parseFromSliceLeaky(Value, a, try ciStatusJson(a, "acme/widgets", runs, "ci-run-2"), .{});

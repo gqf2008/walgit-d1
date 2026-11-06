@@ -160,7 +160,7 @@ pub fn md_cell(alloc: std.mem.Allocator, s: []const u8) []u8 {
 pub fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch fmt;
-    std.debug.print("wgl: {s}\n", .{msg});
+    std.debug.print("wg: {s}\n", .{msg});
     std.process.exit(1);
 }
 
