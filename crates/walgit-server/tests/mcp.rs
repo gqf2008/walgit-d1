@@ -14,17 +14,15 @@
 //! repository: a client can `initialize`, list tools/resources/templates, read a
 //! pushed repository through the tools and through a resource, hold one SSE
 //! stream, be notified when a subscription's version moves, and end the session.
-//! The write tools are exercised for the property that matters most — a key that
-//! is not the caller's actor's key is refused *before* anything is published,
-//! because the collab log is append-only — plus one real signed round trip that
-//! lands in the thread a client then reads back as a resource.
+//! The surface is read-only (D70): the D1 collaboration tools and resources
+//! moved to `wgl mcp`, and this suite asserts they are gone rather than
+//! silently answering through an old path.
 
 mod harness;
 
 use std::time::Duration;
 
 use anyhow::Result;
-use base64::Engine as _;
 use harness::{Server, TestRepo, git_in};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -262,8 +260,10 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
     let head = git_in(&src, &["rev-parse", "main"])?.trim().to_string();
     let sid = initialize(&server).await?;
 
-    // tools/list carries the read surface and the one pass-through write tool
-    // tool at all (D49: `tools/call` cannot reach what `tools/list` hides).
+    // tools/list carries the host's read surface. Collaboration moved to
+    // `wgl mcp` (D70), so none of those names may reappear here (D49: a call
+    // cannot reach what `tools/list` hides, and the list must not advertise a
+    // removed tool).
     let tools = call(&server, &sid, "tools/list", json!({})).await?;
     let names: Vec<&str> = tools["tools"]
         .as_array()
@@ -271,10 +271,12 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    for expected in ["repo_list", "repo_refs", "collab_board", "wal_ls"] {
+    for expected in ["repo_list", "repo_refs", "wal_ls"] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
-    assert!(names.contains(&"collab_publish"), "{names:?}");
+    for gone in ["collab_board", "collab_thread", "collab_report", "ci_status", "collab_publish", "collab_register"] {
+        assert!(!names.contains(&gone), "removed tool still advertised: {gone}: {names:?}");
+    }
 
     // The repositories this host serves.
     let listed = call(&server, &sid, "tools/call", json!({"name": "repo_list", "arguments": {}})).await?;
@@ -292,10 +294,10 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
     let text = refs["content"][0]["text"].as_str().expect("text content");
     assert!(text.contains(&head), "repo_refs: {text}");
 
-    // The resource lane names the four kinds and their grammar.
+    // The resource lane names the two remaining kinds and their grammar.
     let templates = call(&server, &sid, "resources/templates/list", json!({})).await?;
     let templates = templates["resourceTemplates"].as_array().expect("templates");
-    assert_eq!(templates.len(), 4, "{templates:?}");
+    assert_eq!(templates.len(), 2, "{templates:?}");
     assert_eq!(templates[0]["uriTemplate"], "walgit://refs/{owner}/{repo}");
 
     // `resources/list` names the pushed repository; `resources/read` reads it.
@@ -307,7 +309,7 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
         .filter_map(|r| r["uri"].as_str())
         .collect();
     assert!(uris.contains(&"walgit://refs/t/mcp"), "{uris:?}");
-    assert!(uris.contains(&"walgit://collab/board/t/mcp"), "{uris:?}");
+    assert!(!uris.iter().any(|u| u.starts_with("walgit://collab/")), "{uris:?}");
 
     let read = call(
         &server,
@@ -334,7 +336,7 @@ async fn a_client_reads_a_pushed_repository_through_tools_and_resources() -> Res
         serde_json::from_str(wal["contents"][0]["text"].as_str().expect("contents"))?;
     assert!(wal["head_seq"].as_u64().unwrap_or(0) >= 1, "{wal}");
 
-    // A URI that is not one of the four kinds is a request error, not a panic.
+    // A URI that is not one of the two kinds is a request error, not a panic.
     let (_, _, body) = post(
         &server,
         &json!({"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": "http://example.com/x"}}),
@@ -381,7 +383,7 @@ async fn wait_for_updated(url: &str, sid: &str, budget: Duration) -> bool {
 async fn a_subscription_pushes_a_notification_when_the_refs_move() -> Result<()> {
     let server = Server::start_with_tweak(|cfg| {
         // The floor a subscription may poll at (D55: one conditional manifest
-        // read per tick, the same lane `walgit collab watch` uses).
+        // read per tick, the same lane `wgl collab watch` uses).
         cfg.mcp.subscribe_interval = Duration::from_secs(1);
     })
     .await?;
@@ -445,102 +447,6 @@ async fn a_subscription_pushes_a_notification_when_the_refs_move() -> Result<()>
     Ok(())
 }
 
-/// The version must move iff the resource's body would change
-/// (`walgit-mcp-resource-version-churn-20261101`): a push that touches no
-/// collab ref must not wake a card watcher, and a card's own write must.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_card_subscription_ignores_writes_that_did_not_touch_the_card() -> Result<()> {
-    let server = Server::start_with_tweak(|cfg| {
-        cfg.mcp.subscribe_interval = Duration::from_secs(1);
-    })
-    .await?;
-    server.put_repo("t", "quiet").await?;
-    let src = push_repo(&server, "t", "quiet", 1)?;
-    let sid = initialize(&server).await?;
-
-    // A card, published the way an agent publishes one.
-    let root = publish_entry(&server, &sid, "t/quiet", "quiet-card", "quiet", None).await?;
-
-    let thread_uri = "walgit://collab/thread/t/quiet/quiet-card";
-    let board_uri = "walgit://collab/board/t/quiet";
-    for uri in [thread_uri, board_uri] {
-        let _ = call(&server, &sid, "resources/subscribe", json!({ "uri": uri })).await?;
-    }
-
-    let url = format!("{}/mcp", server.base_url);
-    let quiet_url = url.clone();
-    let reader_sid = sid.clone();
-    let quiet_reader = tokio::spawn(async move {
-        wait_for_updated(&quiet_url, &reader_sid, Duration::from_secs(4)).await
-    });
-
-    // A push moves `refs/heads/main` (and the WAL seq) but no collab ref, so
-    // neither watch may fire. This was the churn: `seq:<n>` as every resource's
-    // version woke every card watcher for every `ci-artifacts` blob.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    std::fs::write(src.join("f0_0.txt"), b"unrelated\n")?;
-    git_in(&src, &["add", "-A"])?;
-    git_in(&src, &["-c", "commit.gpgsign=false", "commit", "-qm", "unrelated"])?;
-    git_in(&src, &["push", "-q", "origin", "main"])?;
-
-    let woke = tokio::time::timeout(Duration::from_secs(30), quiet_reader).await??;
-    assert!(!woke, "a push that touched no collab ref woke a card subscriber");
-
-    // The card's own write does wake it.
-    let reader_sid = sid.clone();
-    let reader =
-        tokio::spawn(async move { wait_for_updated(&url, &reader_sid, Duration::from_secs(30)).await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    publish_entry(&server, &sid, "t/quiet", "quiet-card", "second", Some(&root)).await?;
-    let woke = tokio::time::timeout(Duration::from_secs(40), reader).await??;
-    assert!(woke, "a write to the watched card sent no notification");
-    Ok(())
-}
-
-/// Publish one `issue` entry for `id` as the anonymous caller (the harness's
-/// default `auth.mode = none` makes `anon` the writer).
-async fn publish_entry(
-    server: &Server,
-    sid: &str,
-    repo: &str,
-    id: &str,
-    title: &str,
-    parent: Option<&str>,
-) -> Result<String> {
-    // A follow-up chains to the thread's tip; only a root entry is `parent: ""`
-    // (`docs/D1_PROTOCOL.md` §5) — two roots are two threads, not one card.
-    let entry = json!({
-        "version": 1,
-        "kind": "issue",
-        "id": id,
-        "actor": "anon",
-        "ts": 1_700_000_000,
-        "parent": parent.unwrap_or_default(),
-        "body": { "title": title },
-        "sig": "ed25519:AAAA"
-    });
-    let answer = call(
-        server,
-        sid,
-        "tools/call",
-        json!({
-            "name": "collab_publish",
-            "arguments": { "repo": repo, "entry": entry }
-        }),
-    )
-    .await?;
-    assert!(
-        answer.get("isError") != Some(&json!(true)),
-        "collab_publish refused: {answer}"
-    );
-    let text = answer["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let published: Value = serde_json::from_str(&text)?;
-    Ok(published["oid"].as_str().unwrap_or_default().to_string())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn token_mode_answers_a_bearer_only_challenge() -> Result<()> {
     let server = Server::start_with_tweak(|cfg| {
@@ -600,255 +506,6 @@ async fn token_mode_answers_a_bearer_only_challenge() -> Result<()> {
     Ok(())
 }
 
-// ------------------------------------------------------- the write surface ---
-
-/// Register `principal` → `public_key` in the repository's collab registry
-/// (`refs/collab/meta/principals/<p>`, a JSON blob — `docs/D1_PROTOCOL.md`
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_write_is_an_entry_the_client_signed_and_the_host_only_forwards() -> Result<()> {
-    // `token` mode, because a write is authorized as *the caller*: with
-    // `mode = none` every request is `anon` and the API refuses any entry whose
-    // actor is not the caller. The host holds no key: the entry arrives signed.
-    let token = "worker-s3cret";
-    let server = Server::start_with_tweak(move |cfg| {
-        cfg.server.auth.mode = walgit_config::AuthMode::Token;
-        cfg.server.auth.anonymous_read = false;
-        cfg.server.auth.tokens = vec![walgit_config::StaticToken {
-            principal: "worker".into(),
-            token: token.into(),
-            token_env: None,
-            write: true,
-            admin: true,
-        }];
-    })
-    .await?;
-
-    // Create + push as `worker` (the URL userinfo is how git answers the 401
-    // challenge: §1.3 / issue #79).
-    let put = reqwest::Client::new()
-        .put(format!("{}/t/write", server.base_url))
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await?;
-    assert!(put.status().is_success(), "{}", put.status());
-    let url = server.repo_url_with_userinfo("t", "write", "worker", token);
-    let src = TestRepo::synthetic(1, 1)?;
-    git_in(&src, &["remote", "add", "origin", &url])?;
-    git_in(&src, &["push", "-q", "origin", "main"])?;
-
-    // The identity is the client's all the way down: the test is the signer.
-    let seed = [7u8; 32];
-    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let public_key =
-        base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
-    let sid = initialize_as(&server, Some(token)).await?;
-    let bearer = Some(token);
-
-    let tools = call_as(&server, &sid, "tools/list", json!({}), bearer).await?;
-    let names: Vec<&str> = tools["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
-    // One write tool, always advertised: whether it may write is the API's
-    // answer (403 for a caller without write), not a property of the table.
-    assert!(names.contains(&"collab_publish"), "{names:?}");
-    assert!(names.contains(&"collab_register"), "{names:?}");
-    assert!(!names.contains(&"collab_entry"), "{names:?}");
-
-    // Identity first, over MCP: the tool is `POST …/api-browser/collab/principal`, and
-    // the endpoint refuses a principal the credential does not name.
-    let other = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_register", "arguments": {
-            "repo": "t/write", "principal": "someone-else", "public_key": &public_key,
-        }}),
-        bearer,
-    )
-    .await?;
-    assert_eq!(other["isError"], true, "{other}");
-    let registered = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_register", "arguments": {
-            "repo": "t/write", "principal": "worker", "public_key": &public_key,
-        }}),
-        bearer,
-    )
-    .await?;
-    assert_ne!(registered["isError"], true, "{registered}");
-    let text = registered["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("refs/collab/meta/principals/worker"), "{text}");
-
-    // A real signed entry lands in the thread …
-    let issue = signed_entry(&key, "issue", "card-1", "worker", json!({
-        "title": "first card",
-        "acceptance": "it reads back",
-    }));
-    let written = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_publish", "arguments": {"repo": "t/write", "entry": &issue}}),
-        bearer,
-    )
-    .await?;
-    assert_ne!(written["isError"], true, "{written}");
-    let text = written["content"][0]["text"].as_str().expect("text");
-    // The answer is the API's own (`{oid, ref, seq}`), unchanged.
-    let published: Value = serde_json::from_str(text)?;
-    assert!(published["oid"].is_string(), "{text}");
-    assert!(
-        published["ref"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("refs/collab/inbox/worker/"),
-        "{text}"
-    );
-
-    // … and is what a resource read returns, verified.
-    let read = call_as(
-        &server,
-        &sid,
-        "resources/read",
-        json!({"uri": "walgit://collab/thread/t/write/card-1"}),
-        bearer,
-    )
-    .await?;
-    let thread: Value =
-        serde_json::from_str(read["contents"][0]["text"].as_str().expect("contents"))?;
-    let entries = thread["entries"].as_array().expect("entries");
-    assert_eq!(entries.len(), 1, "{thread}");
-    assert_eq!(entries[0]["entry"]["kind"], "issue");
-    assert_eq!(entries[0]["principal"], "worker");
-    assert_eq!(entries[0]["verified"], true, "{thread}");
-    assert!(entries[0]["oid"].is_string(), "{thread}");
-
-    // A claim is another signed entry (the JSON-text form of `entry`) — and a
-    // **root** one: `docs/D1_PROTOCOL.md` §8.4 makes a non-root `card_claim`
-    // malformed, i.e. visible but never a winner, so parenting it on the head
-    // would silently disable the convergence it exists for.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs()
-        .cast_signed();
-    let claim = signed_entry_at(&key, now, "card_claim", "card-1", "worker", json!({
-        "ttl": 300,
-        "worktree": "wt-1",
-        "branch": "feat/card-1",
-        "work": "read the tests",
-    }));
-    let claimed = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_publish", "arguments": {
-            "repo": "t/write",
-            "entry": serde_json::to_string(&claim)?,
-        }}),
-        bearer,
-    )
-    .await?;
-    assert_ne!(claimed["isError"], true, "{claimed}");
-    // … and the board projects it: a well-formed claim is the card's owner.
-    let board = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_board", "arguments": {"repo": "t/write"}}),
-        bearer,
-    )
-    .await?;
-    let board: Value =
-        serde_json::from_str(board["content"][0]["text"].as_str().expect("text"))?;
-    let card = board["columns"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|column| column["cards"].as_array().into_iter().flatten())
-        .find(|card| card["id"] == "card-1")
-        .unwrap_or_else(|| panic!("card-1 missing from {board}"));
-    assert_eq!(card["owner"], "worker", "{board}");
-    assert_eq!(card["status"], "in-progress", "{board}");
-
-    // Writing as somebody else is refused by the host before anything is
-    // appended: an entry whose actor is not the caller has no author.
-    let forged = signed_entry(&key, "comment", "card-1", "someone-else", json!({"body": "hi"}));
-    let refused = call_as(
-        &server,
-        &sid,
-        "tools/call",
-        json!({"name": "collab_publish", "arguments": {"repo": "t/write", "entry": &forged}}),
-        bearer,
-    )
-    .await?;
-    assert_eq!(refused["isError"], true, "{refused}");
-    // "Refused" has to mean "not appended": the check is the ledger, not the
-    // envelope — an implementation that appends and then errors would pass a
-    // bare `isError` assertion.
-    let read = call_as(
-        &server,
-        &sid,
-        "resources/read",
-        json!({"uri": "walgit://collab/thread/t/write/card-1"}),
-        bearer,
-    )
-    .await?;
-    let thread: Value =
-        serde_json::from_str(read["contents"][0]["text"].as_str().expect("contents"))?;
-    assert_eq!(
-        thread["entries"].as_array().map(Vec::len),
-        Some(2),
-        "the refused write appended an entry: {thread}"
-    );
-    Ok(())
-}
-
-/// A signed collab entry, the shape `walgit collab entry` produces: the client
-/// owns the key, the canonical bytes and the signature.
-fn signed_entry(
-    key: &ed25519_dalek::SigningKey,
-    kind: &str,
-    id: &str,
-    actor: &str,
-    body: Value,
-) -> Value {
-    signed_entry_at(key, 1_760_000_000, kind, id, actor, body)
-}
-
-/// The same entry stamped at `ts`. A `card_claim` needs this: its TTL is at most
-/// a day, so an entry signed with a fixed past timestamp is already expired and
-/// can never be the live winner the convergence is about.
-fn signed_entry_at(
-    key: &ed25519_dalek::SigningKey,
-    ts: i64,
-    kind: &str,
-    id: &str,
-    actor: &str,
-    body: Value,
-) -> Value {
-    use walgit_wal::collab::{sign_entry, Entry};
-    let mut entry = Entry {
-        version: 1,
-        kind: kind.to_string(),
-        id: id.to_string(),
-        actor: actor.to_string(),
-        ts,
-        parent: String::new(),
-        refs: None,
-        body,
-        sig: String::new(),
-    };
-    entry.sig = sign_entry(&mut entry, key);
-    serde_json::to_value(entry).expect("entry")
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_repository_that_does_not_exist_is_a_tool_error_not_a_crash() -> Result<()> {
     let server = Server::start().await?;
@@ -886,18 +543,12 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
         .iter()
         .filter_map(|t| t["name"].as_str().map(str::to_string))
         .collect();
-    // The two writes need a signed entry / a key, so this read sweep skips them.
-    assert!(names.iter().any(|n| n == "collab_publish"), "{names:?}");
-    assert!(names.iter().any(|n| n == "collab_register"), "{names:?}");
-
     for name in &names {
         let arguments = match name.as_str() {
-            // The write tools' own tests cover them.
-            "collab_publish" | "collab_register" => continue,
             "repo_list" => json!({}),
             "repo_owners" => json!({"owner": "t"}),
-            "repo_refs" | "collab_board" | "collab_report" | "ci_status" | "wal_ls"
-            | "repo_overview" | "repo_tasks" | "repo_ops" | "repo_policy" | "repo_settings" => {
+            "repo_refs" | "wal_ls" | "repo_overview" | "repo_tasks" | "repo_ops"
+            | "repo_policy" | "repo_settings" => {
                 json!({"repo": "t/all"})
             }
 
@@ -911,7 +562,6 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
             "repo_commit" => json!({"repo": "t/all", "sha": &head}),
             // Same arguments as `repo_merge_base`: two revisions.
             "repo_diff" | "repo_merge_base" => json!({"repo": "t/all", "from": &head, "to": &head}),
-            "collab_thread" => json!({"repo": "t/all", "id": "no-such-thread"}),
             other => anyhow::bail!("the tool table advertised `{other}` with no case in this test"),
         };
         let out = call(
@@ -921,12 +571,6 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
             json!({"name": name, "arguments": arguments}),
         )
         .await?;
-        // A missing thread is a tool *error* by design — but it must be one,
-        // not an empty success that reads as "the thread has no entries".
-        if name == "collab_thread" {
-            assert_eq!(out["isError"], true, "a missing thread must be an error: {out}");
-            continue;
-        }
         assert_ne!(out["isError"], true, "{name}: {out}");
         let text = out["content"][0]["text"].as_str().unwrap_or_default();
         assert!(!text.is_empty(), "{name} answered with nothing: {out}");
@@ -951,11 +595,9 @@ async fn every_advertised_read_tool_answers_for_a_pushed_repository() -> Result<
                 assert!(!text.contains("collab_fold_key"), "a host-only key leaked: {text}");
                 assert!(!text.contains("collab_fold_principal"), "a host-only key leaked: {text}");
             }
-            "ci_status" => assert!(text.contains("\"runs\""), "{name}: {text}"),
             "wal_ls" => assert!(text.contains("\"entries\""), "{name}: {text}"),
-            "collab_board" => assert!(text.contains("\"columns\""), "{name}: {text}"),
             // These answer an object; the sweep above already proved it parses.
-            "repo_overview" | "repo_ops" | "repo_tasks" | "repo_policy" | "collab_report" => {
+            "repo_overview" | "repo_ops" | "repo_tasks" | "repo_policy" => {
                 assert!(text.contains('{'), "{name}: {text}");
             }
             _ => {}

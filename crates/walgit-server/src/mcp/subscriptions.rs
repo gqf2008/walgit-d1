@@ -40,14 +40,6 @@ use crate::AppState;
 pub struct Mcp {
     subs: parking_lot::Mutex<HashMap<Key, Subscription>>,
     generation: AtomicU64,
-    /// `owner/repo` → the board projection its versions are computed from, at
-    /// the seq it was built. Shared by every subscriber of that repository, so
-    /// the aggregation is paid once per WAL move rather than once per tick.
-    ///
-    /// Bounded by [`MCP_PROJECTIONS_MAX`]: a board document is what it is
-    /// (183 KiB on a 4000-entry repository), and an instance may be asked about
-    /// many repositories.
-    projections: parking_lot::Mutex<HashMap<String, CachedProjection>>,
 }
 
 /// `(principal, session, uri)`.
@@ -64,61 +56,7 @@ struct Subscription {
     abort: Option<tokio::task::AbortHandle>,
 }
 
-/// Cached board projections an instance keeps: enough that a fleet of
-/// subscribers across a handful of repositories never rebuilds, few enough that
-/// `/mcp` cannot grow into a second copy of every board it was ever asked about.
-const MCP_PROJECTIONS_MAX: usize = 32;
-
-struct CachedProjection {
-    built_at: std::time::Instant,
-    projection: Arc<resources::Projection>,
-}
-
 impl Mcp {
-    /// The cached projection for this repository, when it is still current.
-    pub(super) fn projection(&self, repo: &str, collab: u64) -> Option<Arc<resources::Projection>> {
-        self.projections
-            .lock()
-            .get(repo)
-            .filter(|c| c.projection.collab == collab)
-            .map(|c| c.projection.clone())
-    }
-
-    /// Install a freshly built projection and return it (the builder hands back
-    /// the same `Arc`, so a racing rebuild cannot hand callers two answers).
-    pub(super) fn remember_projection(
-        &self,
-        repo: String,
-        projection: Arc<resources::Projection>,
-    ) -> Arc<resources::Projection> {
-        let mut cached = self.projections.lock();
-        if cached.len() >= MCP_PROJECTIONS_MAX && !cached.contains_key(&repo) {
-            // Drop the longest-idle entries first: everything here is a pure
-            // function of (seq, repository), so dropping one costs a rebuild and
-            // nothing else.
-            let ttl = std::time::Duration::from_mins(10);
-            cached.retain(|_, c| c.built_at.elapsed() < ttl);
-            while cached.len() >= MCP_PROJECTIONS_MAX {
-                let Some(oldest) = cached
-                    .iter()
-                    .min_by_key(|(_, c)| c.built_at)
-                    .map(|(k, _)| k.clone())
-                else {
-                    break;
-                };
-                cached.remove(&oldest);
-            }
-        }
-        cached.insert(
-            repo,
-            CachedProjection {
-                built_at: std::time::Instant::now(),
-                projection: projection.clone(),
-            },
-        );
-        projection
-    }
-
     /// How many subscriptions are live (tests assert the reap).
     #[cfg_attr(not(test), allow(dead_code, reason = "asserted by the tests"))]
     pub fn len(&self) -> usize {

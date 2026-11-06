@@ -193,39 +193,6 @@ pub fn defs() -> Vec<Tool> {
             schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
         },
         Tool {
-            name: Kind::CollabBoard.name(),
-            description: "The D1 work-unit board (threads projected under the repo's board definition). \
-                          Read-only: moving a card is a signed `status` entry.",
-                schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
-        },
-        Tool {
-            name: Kind::CollabThread.name(),
-            description: "One collab thread: parent-ordered entries with per-entry signature verification.",
-                schema: schema(&json!({
-                    "repo": {"type": "string", "description": REPO_ARG},
-                    "id": {"type": "string", "description": "thread id"},
-                }), &json!(["repo", "id"])),
-        },
-        Tool {
-            name: Kind::CollabReport.name(),
-            description: "Read-only dashboard over refs/collab/*: threads, PR status, verification health, activity.",
-                schema: schema(&json!({"repo": {"type": "string", "description": REPO_ARG}}), &json!(["repo"])),
-        },
-        Tool {
-            name: Kind::CiStatus.name(),
-            description: "CI runs of a repository (`docs/D1_CI_PROTOCOL.md` §8.3): every run the \
-                          collab ledger carries, with its attempts, the live claim winner, the state \
-                          (pending | claimed | stale | done) and the effective conclusion. One run \
-                          with `id`. Claiming and reporting are ordinary entries — publish \
-                          `kind: \"ci_claim\"` / `kind: \"ci_result\"` through `collab_publish`; the \
-                          runner work itself (clone, build, artifacts) stays on git + HTTP, never \
-                          over MCP.",
-                schema: schema(&json!({
-                    "repo": {"type": "string", "description": REPO_ARG},
-                    "id": {"type": "string", "description": "one run id"},
-                }), &json!(["repo"])),
-        },
-        Tool {
             name: Kind::WalLs.name(),
             description: "WAL entries of a repository (the append-only source of truth), seq-ordered. \
                           `head_seq` is what a resource subscription's version reports.",
@@ -236,43 +203,6 @@ pub fn defs() -> Vec<Tool> {
                 }), &json!(["repo"])),
         },
     ];
-    out.push(Tool {
-        name: Kind::CollabPublish.name(),
-        description: "Publish one **already signed** collab entry — the MCP face of \
-                      `POST /{owner}/{repo}/api/collab/entries`. Build the entry, sign its canonical \
-                      bytes with your own principal key (`walgit collab entry` does both, and so does \
-                      any ed25519 signer over `walgit_wal::collab::sign_entry`), then hand it here \
-                      verbatim. The host refuses an `actor` that is not the authenticated caller and \
-                      appends it to `refs/collab/inbox/<actor>/<uuid>`; nothing is re-signed and no \
-                      key is held here. **The signature is not checked on write** — it is verified \
-                      when the ledger is aggregated, so the entry lands even if it does not verify \
-                      (nothing can be retracted). Read the thread back (`collab_thread`) and confirm \
-                      `verified: true` right after publishing; if it is false the key registered for \
-                      `actor` is not the one you signed with. Rules the board reads: a thread needs an `issue` to be a card; a \
-                      claim is a `card_claim` entry (then re-read the board to see who won — a \
-                      later claim by someone else inside the TTL means stand down); `patch` carries \
-                      base/head refs; only verified `approve` reviews count for the merge rule.",
-        schema: schema(&json!({
-                "repo": {"type": "string", "description": REPO_ARG},
-                "entry": {
-                    "type": ["object", "string"],
-                    "description": "the signed entry (an object, or its JSON text): {version, kind, id, actor, ts, parent, refs?, body, sig}",
-                },
-            }), &json!(["repo", "entry"])),
-    });
-    out.push(Tool {
-        name: Kind::CollabRegister.name(),
-        description: "Register (or rotate) **your own** principal's public key in this repository: \
-                      `{principal, public_key}` with `principal` = the authenticated caller. \
-                      `walgit collab join` does this for a CLI user; an agent with no checkout uses \
-                      this once, before its first entry, or after rotating its key. The private key \
-                      never travels — only the public half.",
-        schema: schema(&json!({
-            "repo": {"type": "string", "description": REPO_ARG},
-            "principal": {"type": "string", "description": "your own principal (must be the caller)"},
-            "public_key": {"type": "string", "description": "base64 ed25519 public key (32 bytes)"},
-        }), &json!(["repo", "principal", "public_key"])),
-    });
     out
 }
 
@@ -300,10 +230,6 @@ enum Kind {
     RepoCommits,
     RepoCommit,
     RepoDiff,
-    CollabBoard,
-    CollabThread,
-    CollabReport,
-    CiStatus,
     RepoMergeBase,
     RepoOverview,
     RepoBlame,
@@ -312,12 +238,10 @@ enum Kind {
     RepoPolicy,
     RepoSettings,
     WalLs,
-    CollabPublish,
-    CollabRegister,
 }
 
 /// Every tool, in advertisement order.
-const ALL: [Kind; 23] = [
+const ALL: [Kind; 17] = [
     Kind::RepoList,
     Kind::RepoOwners,
     Kind::RepoRefs,
@@ -334,13 +258,7 @@ const ALL: [Kind; 23] = [
     Kind::RepoOps,
     Kind::RepoPolicy,
     Kind::RepoSettings,
-    Kind::CollabBoard,
-    Kind::CollabThread,
-    Kind::CollabReport,
-    Kind::CiStatus,
     Kind::WalLs,
-    Kind::CollabPublish,
-    Kind::CollabRegister,
 ];
 
 impl Kind {
@@ -359,10 +277,6 @@ impl Kind {
             Self::RepoCommits => "repo_commits",
             Self::RepoCommit => "repo_commit",
             Self::RepoDiff => "repo_diff",
-            Self::CollabBoard => "collab_board",
-            Self::CollabThread => "collab_thread",
-            Self::CollabReport => "collab_report",
-            Self::CiStatus => "ci_status",
             Self::RepoMergeBase => "repo_merge_base",
             Self::RepoOverview => "repo_overview",
             Self::RepoBlame => "repo_blame",
@@ -371,17 +285,7 @@ impl Kind {
             Self::RepoPolicy => "repo_policy",
             Self::RepoSettings => "repo_settings",
             Self::WalLs => "wal_ls",
-            Self::CollabPublish => "collab_publish",
-            Self::CollabRegister => "collab_register",
         }
-    }
-
-    /// Whether this tool changes anything. One answer, in the dispatch table:
-    /// the advertisement test reads it, and it is the only place a new write
-    /// tool has to be declared besides its dispatch arm.
-    #[cfg(test)]
-    fn write(self) -> bool {
-        matches!(self, Self::CollabPublish | Self::CollabRegister)
     }
 
     fn parse(name: &str) -> Option<Self> {
@@ -410,7 +314,8 @@ pub fn validate_arguments(spec: &Tool, args: &Value) -> Result<(), ToolError> {
             )));
         }
         // `type` is either a name or a list of them (JSON Schema allows the
-        // list: `collab_publish.entry` is an object *or* its JSON text).
+        // list form; no current tool needs it, but the validator must not be
+        // a weaker parser than the schema it advertises).
         let mut declared: Vec<&str> = Vec::new();
         match field.get("type") {
             Some(Value::String(one)) => declared.push(one),
@@ -616,34 +521,6 @@ async fn run(
             ]);
             p(format!("/{}/{}/api/diff{}", enc(&owner), enc(&repo), q)).await
         }
-        Kind::CollabBoard => {
-            let (owner, repo) = repo_arg(args)?;
-            p(format!("/{}/{}/api/collab/board", enc(&owner), enc(&repo))).await
-        }
-        Kind::CollabThread => {
-            let (owner, repo) = repo_arg(args)?;
-            let id = str_arg(args, "id").ok_or_else(|| ToolError::invalid("`id` is required"))?;
-            p(format!(
-                "/{}/{}/api/collab/threads/{}",
-                enc(&owner),
-                enc(&repo),
-                enc(id)
-            ))
-            .await
-        }
-        Kind::CollabReport => {
-            let (owner, repo) = repo_arg(args)?;
-            p(format!("/{}/{}/api/collab/report", enc(&owner), enc(&repo))).await
-        }
-        Kind::CiStatus => {
-            let (owner, repo) = repo_arg(args)?;
-            let mut path = format!("/{}/{}/api/collab/ci", enc(&owner), enc(&repo));
-            if let Some(id) = args.get("id").and_then(Value::as_str) {
-                path.push_str("?id=");
-                path.push_str(&enc(id));
-            }
-            p(path).await
-        }
         Kind::RepoMergeBase => {
             let (owner, repo) = repo_arg(args)?;
             let from = str_arg(args, "from").ok_or_else(|| ToolError::invalid("`from` is required"))?;
@@ -712,98 +589,12 @@ async fn run(
                 .map_err(|e| ToolError::Execution(e.to_string()))?;
             Ok(page.to_json(&format!("{owner}/{repo}")))
         }
-        Kind::CollabPublish => {
-            let (owner, repo) = repo_arg(args)?;
-            publish(st, headers, principal, &owner, &repo, args).await
-        }
-        Kind::CollabRegister => {
-            let (owner, repo) = repo_arg(args)?;
-            register(st, headers, principal, &owner, &repo, args).await
-        }
     }
-}
-
-/// `collab_publish`: hand a client-signed entry to the host's own collab API.
-///
-/// Everything a write needs is already on that side — the write credential,
-/// `actor == caller`, the `done` gate, the policy and the size cap — so this is
-/// a POST and nothing else. **The signature is not checked on write**: it is
-/// verified when entries are aggregated (`is_verified`), because an entry and
-/// the `principal-register` that names its key may land in either order, and
-/// the git-push lane cannot check it at all. An entry that does not verify
-/// therefore lands in the log and never counts. Accepting the entry as an object *or* as its JSON text is the one
-/// affordance: a tool argument that must stay a string (a signature over
-/// canonical bytes is easy to mangle through a formatter) has to be allowed to
-/// travel as text.
-async fn publish(
-    st: &Arc<AppState>,
-    headers: &HeaderMap,
-    principal: &str,
-    owner: &str,
-    repo: &str,
-    args: &Value,
-) -> Result<Value, ToolError> {
-    let entry = match args.get("entry") {
-        Some(Value::String(text)) => {
-            serde_json::from_str(text).map_err(|e| ToolError::invalid(format!("`entry` is not JSON: {e}")))?
-        }
-        Some(v @ Value::Object(_)) => v.clone(),
-        Some(_) => return Err(ToolError::invalid("`entry` must be an object or its JSON text")),
-        None => return Err(ToolError::invalid("`entry` is required")),
-    };
-    Call::new(st, headers, principal)
-        .post(
-            &format!("/{}/{}/api/collab/entries", enc(owner), enc(repo)),
-            &json!({ "entry": entry }),
-        )
-        .await
-        .map_err(|e| ToolError::Execution(e.message))
-}
-
-/// `collab_register`: name your own principal's public key in this repository.
-///
-/// The same POST the API answers, so the two guards stay on that side — the
-/// credential must be a write credential, and `principal` must be the caller's
-/// own. Only the public half travels; the seed stays with the identity (D58).
-async fn register(
-    st: &Arc<AppState>,
-    headers: &HeaderMap,
-    principal: &str,
-    owner: &str,
-    repo: &str,
-    args: &Value,
-) -> Result<Value, ToolError> {
-    let name = str_arg(args, "principal")
-        .ok_or_else(|| ToolError::invalid("`principal` is required"))?;
-    let public_key = str_arg(args, "public_key")
-        .ok_or_else(|| ToolError::invalid("`public_key` is required"))?;
-    Call::new(st, headers, principal)
-        .post(
-            &format!("/{}/{}/api/collab/principal", enc(owner), enc(repo)),
-            &json!({ "principal": name, "public_key": public_key }),
-        )
-        .await
-        .map_err(|e| ToolError::Execution(e.message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_the_collab_writes_are_write_tier() {
-        // The surface is a projection of a read-mostly API: two endpoints write,
-        // and neither holds anything of yours — one takes an entry the client
-        // already signed, the other takes your own public key. Read from the
-        // dispatch table itself — a name-prefix filter would keep passing if a
-        // third write tool were added under a different prefix.
-        let writing: Vec<&str> = Kind::ALL
-            .into_iter()
-            .filter(|k| (*k).write())
-            .map(Kind::name)
-            .collect();
-        assert_eq!(writing, ["collab_publish", "collab_register"]);
-    }
 
     #[test]
     fn every_schema_declares_an_object_and_its_required_fields() {
@@ -849,21 +640,6 @@ mod tests {
         assert!(repo_arg(&json!({"repo": "acme/we/x"})).is_err());
         assert!(repo_arg(&json!({"repo": "/x"})).is_err());
         assert!(repo_arg(&json!({})).is_err());
-    }
-
-    #[test]
-    fn the_entry_argument_travels_as_an_object_or_its_text() {
-        // A signed entry is easy to mangle through a formatter, so both forms
-        // are allowed; anything else is a wrong request, not a failed tool.
-        let tool = defs().into_iter().find(|t| t.name == "collab_publish").expect("tool");
-        assert!(validate_arguments(&tool, &json!({"repo": "o/r", "entry": {"sig": "s"}})).is_ok());
-        assert!(validate_arguments(&tool, &json!({"repo": "o/r", "entry": "{\"sig\":\"s\"}"})).is_ok());
-        assert!(validate_arguments(&tool, &json!({"repo": "o/r", "entry": 7})).is_err());
-        assert!(validate_arguments(&tool, &json!({"repo": "o/r"})).is_err());
-        // The entry's own fields are opaque to the schema: only `entry` and
-        // `repo` are declared, so the host's API stays the one parser.
-        let props = tool.schema["properties"].as_object().expect("properties");
-        assert_eq!(props.len(), 2, "{props:?}");
     }
 
     #[test]
