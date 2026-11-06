@@ -105,13 +105,19 @@ pub fn b64_decode(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     return out;
 }
 
-/// Unix seconds — the entry `ts` clock.
+/// Unix seconds — the entry `ts` clock. The wall clock is process-global;
+/// the Threaded driver here backs `std.time.timestamp`'s replacement.
+var clock_threaded: ?std.Io.Threaded = null;
 pub fn now_ts() i64 {
-    return std.time.timestamp();
+    if (clock_threaded == null) {
+        clock_threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    }
+    const ts = std.Io.Timestamp.now(clock_threaded.?.io(), .real);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_s));
 }
 
 pub fn esc(alloc: std.mem.Allocator, s: []const u8) []u8 {
-    var out = std.ArrayList(u8).init(alloc);
+    var out: List(u8) = .init(alloc);
     for (s) |c| {
         switch (c) {
             '&' => out.append_slice("&amp;") catch @panic("oom"),
@@ -128,7 +134,7 @@ pub fn esc(alloc: std.mem.Allocator, s: []const u8) []u8 {
 pub fn md_cell(alloc: std.mem.Allocator, s: []const u8) []u8 {
     const escaped = esc(alloc, s);
     defer alloc.free(escaped);
-    var out = std.ArrayList(u8).init(alloc);
+    var out: List(u8) = .init(alloc);
     var i: usize = 0;
     while (i < escaped.len) {
         if (escaped[i] == '|') {

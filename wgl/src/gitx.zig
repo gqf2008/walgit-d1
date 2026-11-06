@@ -50,6 +50,20 @@ pub fn run(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []
     return .{ .stdout = res.stdout, .stderr = res.stderr, .exit_code = code };
 }
 
+/// Run a fully-formed argv (already starting with `git`) — for callers
+/// that build the command themselves (`push`).
+pub fn run_args(alloc: std.mem.Allocator, io: Io, argv: []const []const u8) Error!Out {
+    const res = std.process.run(alloc, io, .{ .argv = argv }) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.SpawnFailed,
+    };
+    const code: ?u8 = switch (res.term) {
+        .exited => |c| c,
+        else => null,
+    };
+    return .{ .stdout = res.stdout, .stderr = res.stderr, .exit_code = code };
+}
+
 /// Run git and return stdout, or `error.GitFailed` with `last_stderr` set.
 pub fn run_ok(alloc: std.mem.Allocator, io: Io, repo: ?[]const u8, argv: []const []const u8) Error![]u8 {
     const out = try run(alloc, io, repo, argv);
@@ -102,8 +116,8 @@ pub fn write_blob(alloc: std.mem.Allocator, io: Io, repo: []const u8, content: [
     {
         var wbuf: [4096]u8 = undefined;
         var w = child.stdin.?.writer(io, &wbuf);
-        w.writeAll(content) catch return error.GitFailed;
-        w.flush() catch return error.GitFailed;
+        w.interface.writeAll(content) catch return error.GitFailed;
+        w.interface.flush() catch return error.GitFailed;
     }
     child.stdin.?.close(io);
     child.stdin = null;
@@ -157,6 +171,7 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
     var full: util.List([]const u8) = .init(alloc);
     defer full.deinit();
     try full.append_slice(&.{ "git", "-C", repo, "push" });
+    // (full is the complete argv; run_args does not prepend)
     if (opts.atomic) try full.append("--atomic");
     for (opts.leases) |lease| {
         const spec = std.fmt.allocPrint(alloc, "--force-with-lease={s}", .{lease}) catch return error.OutOfMemory;
@@ -165,7 +180,11 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
     }
     try full.append(remote);
     try full.append_slice(opts.refspecs);
-    _ = try run_ok(alloc, io, null, full.items);
+    const out = try run_args(alloc, io, full.items);
+    if (!out.ok()) {
+        last_stderr = std.mem.trim(u8, out.stderr, " \t\r\n");
+        return error.GitFailed;
+    }
 }
 
 /// The watch/gc fetch: entries and meta only — deliberately NOT
@@ -359,8 +378,8 @@ pub fn credential_fill(alloc: std.mem.Allocator, io: Io, repo: []const u8, url: 
     {
         var wbuf: [4096]u8 = undefined;
         var w = child.stdin.?.writer(io, &wbuf);
-        w.print("protocol={s}\nhost={s}\npath={s}\n\n", .{ parsed.scheme, parsed.host, parsed.path }) catch {};
-        w.flush() catch {};
+        w.interface.print("protocol={s}\nhost={s}\npath={s}\n\n", .{ parsed.scheme, parsed.host, parsed.path }) catch {};
+        w.interface.flush() catch {};
     }
     child.stdin.?.close(io);
     child.stdin = null;

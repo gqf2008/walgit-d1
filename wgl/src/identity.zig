@@ -25,7 +25,7 @@ pub fn ref_segment(label: []const u8, s: []const u8) SegmentError!void {
 /// newline). `--key` is a file path, never the key material (§4.1: passing
 /// content would echo the private key into the terminal on error).
 pub fn read_signing_key(alloc: std.mem.Allocator, io: Io, path: []const u8) !SigningKey {
-    var dir = std.fs.cwd();
+    var dir = std.Io.Dir.cwd();
     const raw = dir.readFileAlloc(io, path, alloc, .limited(1 << 20)) catch return error.KeyReadFailed;
     defer alloc.free(raw);
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
@@ -56,7 +56,7 @@ pub fn read_identity_at(alloc: std.mem.Allocator, io: Io, dir: []const u8) !Iden
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const path = std.fs.path.join(arena, &.{ dir, "identity" }) catch return error.OutOfMemory;
-    var d = std.fs.cwd();
+    var d = std.Io.Dir.cwd();
     const raw = d.readFileAlloc(io, path, arena, .limited(1 << 20)) catch return error.IdentityReadFailed;
     const v = std.json.parseFromSliceLeaky(std.json.Value, arena, raw, .{}) catch return error.IdentityBad;
     const o = switch (v) {
@@ -109,7 +109,7 @@ pub fn resolve_identity(alloc: std.mem.Allocator, io: Io, repo: []const u8, prin
     {
         const id_path = std.fs.path.join(alloc, &.{ dir, "identity" }) catch return error.OutOfMemory;
         defer alloc.free(id_path);
-        var d = std.fs.cwd();
+        var d = std.Io.Dir.cwd();
         if (d.access(io, id_path, .{}) catch error.FileNotFound) |_| {
             identity = read_identity_at(alloc, io, dir) catch null;
         } else |_| {}
@@ -141,35 +141,45 @@ pub fn write_private_file(alloc: std.mem.Allocator, io: Io, path: []const u8, by
     if (std.fs.path.dirname(path)) |parent| {
         make_private_dir(alloc, io, parent) catch {};
     }
-    var d = std.fs.cwd();
-    const f = d.createFile(io, path, .{ .truncate = true, .mode = 0o600 }) catch return error.WriteFailed;
+    var d = std.Io.Dir.cwd();
+    const f = d.createFile(io, path, .{ .truncate = true, .permissions = @enumFromInt(0o600) }) catch return error.WriteFailed;
     defer f.close(io);
     f.writeStreamingAll(io, bytes) catch return error.WriteFailed;
     f.sync(io) catch {};
-    // An existing file was created with its old mode; enforce 0600.
-    f.chmod(io, 0o600) catch {};
+    // An existing file was created with its old mode; enforce 0600 via the
+    // chmod lane when the platform exposes it on the directory handle's file.
+    if (@hasDecl(std.Io.File, "chmod")) {
+        f.chmod(io, 0o600) catch {};
+    } else if (@import("builtin").os.tag != .windows) {
+        // POSIX fallback: chmod(2) on the path.
+        const c_path = alloc.allocSentinel(u8, path.len, 0) catch return;
+        @memcpy(c_path, path);
+        defer alloc.free(c_path);
+        _ = std.c.chmod(c_path.ptr, 0o600);
+    }
 }
 
 /// `0700` on the identity/keys directories.
 pub fn make_private_dir(alloc: std.mem.Allocator, io: Io, dir: []const u8) !void {
     _ = alloc;
-    var d = std.fs.cwd();
-    d.createDirPathOpen(io, dir, .{}) catch |e| switch (e) {
+    var d = std.Io.Dir.cwd();
+    if (d.createDirPathOpen(io, dir, .{})) |_| {} else |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return error.WriteFailed,
-    };
+    }
     // best-effort chmod; on failure the 0600 files still protect the seed
-    const f = d.openDir(io, dir, .{}) catch return;
-    var dd = f;
-    defer dd.close(io);
-    dd.chmod(io, 0o700) catch {};
+    var f = d.openDir(io, dir, .{}) catch return;
+    defer f.close(io);
+    if (@hasDecl(std.Io.Dir, "chmod")) {
+        f.chmod(io, 0o700) catch {};
+    }
 }
 
 /// 16 random bytes hex — the inbox `<entry-seg>` (§3.1: any unique
 /// refname-safe segment is legal; this reproduces the CLI's shape).
-pub fn entry_uuid(alloc: std.mem.Allocator) []u8 {
+pub fn entry_uuid(alloc: std.mem.Allocator, io: Io) []u8 {
     var b: [16]u8 = undefined;
-    std.crypto.random.bytes(&b);
+    io.random(&b);
     return util.to_hex(alloc, &b);
 }
 

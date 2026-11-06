@@ -62,7 +62,8 @@ pub fn scheduled_run_id(alloc: std.mem.Allocator, task: []const u8, repo_ref: []
     try buf.append(0x1f);
     try buf.append_slice(commit);
     try buf.append(0x1f);
-    try buf.writer().print("{d}", .{slot_epoch});
+    const slot_text = std.fmt.allocPrint(alloc, "{d}", .{slot_epoch}) catch return error.OutOfMemory;
+    try buf.append_slice(slot_text);
     return std.fmt.allocPrint(alloc, "ci-{x:0>16}", .{fnv1a64(buf.items)});
 }
 
