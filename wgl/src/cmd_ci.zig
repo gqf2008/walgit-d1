@@ -1438,3 +1438,46 @@ fn ci_run(c: *Ctx, p: *args.Parsed) !u8 {
         c.io.sleep(std.Io.Duration.fromSeconds(@intCast(interval)), .real) catch {};
     }
 }
+
+// ---- tests -----------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "run_view_json renders a real claim without dangling" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env = std.process.Environ.Map.init(arena);
+    var ctx = Ctx{ .alloc = arena, .io = undefined, .env = &env };
+
+    const sk = entry_mod.SigningKey.generateDeterministic(@splat(5)) catch unreachable;
+    var o = jsonio.new_object();
+    jsonio.obj_put(&o, arena, "task", .{ .string = "test" });
+    jsonio.obj_put(&o, arena, "ref", .{ .string = "refs/heads/main" });
+    jsonio.obj_put(&o, arena, "commit", .{ .string = "c0ffee" });
+    jsonio.obj_put(&o, arena, "ttl", .{ .integer = 300 });
+    jsonio.obj_put(&o, arena, "attempt", .{ .integer = 1 });
+    var e = entry_mod.Entry{
+        .version = 1,
+        .kind = ci.CI_CLAIM_KIND,
+        .id = "ci-abc",
+        .actor = "ci-bot",
+        .ts = 1_000,
+        .parent = "",
+        .refs = null,
+        .body = .{ .object = o },
+        .sig = "",
+    };
+    entry_mod.sign_entry(arena, &e, sk);
+    const bytes = entry_mod.entry_json(arena, &e, true);
+    const oid = entry_mod.git_blob_oid(arena, bytes, .sha1);
+
+    var principals = entry_mod.Principals.init(arena);
+    try principals.put("ci-bot", entry_mod.public_key_b64(arena, sk));
+
+    const er = entry_mod.EntryRef{ .oid = oid, .principal = "ci-bot", .entry = e };
+    const view = (try ci.run_view(arena, "ci-abc", &.{er}, &principals, 1_100)) orelse return error.NoView;
+    const text = try run_view_json(&ctx, &view);
+    try testing.expect(std.mem.indexOf(u8, text, "ci-abc") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"state\":\"claimed\"") != null);
+}

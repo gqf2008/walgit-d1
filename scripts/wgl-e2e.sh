@@ -23,7 +23,10 @@ W="$wgl_bin"
 
 rust_bin="${WALGIT_BIN:-}"
 if [ -z "$rust_bin" ]; then
-    for cand in "$root/target/debug/walgit" "$root/target/release/walgit"                 "$(dirname "$root")/walgit/target/debug/walgit"                 "$(dirname "$(dirname "$root")")/walgit/target/release/walgit"; do
+    for cand in "$root/target/debug/walgit" \
+                "$root/target/release/walgit" \
+                "$(dirname "$(dirname "$root")")/target/debug/walgit" \
+                "$(dirname "$(dirname "$root")")/target/release/walgit"; do
         if [ -x "$cand" ]; then rust_bin="$cand"; break; fi
     done
 fi
@@ -105,6 +108,31 @@ step "wgl ci validate parses a ci.toml"
 mkdir -p "$a/.walgit"
 printf 'version = 1\n\n[[task]]\nname = "test"\ncommand = "true"\n' > "$a/.walgit/ci.toml"
 ( cd "$a" && "$W" ci validate >/dev/null ) || fail "ci validate"
+
+step "the runner executes a real task end-to-end (claim → run → result)"
+# Commit the ci.toml so the runner finds it at the tested commit, then run one
+# pass as a CI principal: self-registers, claims, executes in a detached
+# worktree, publishes the signed result.
+( cd "$a" && git add .walgit/ci.toml && git commit -q -m 'ci: add the test task' \
+    && git push -q origin main ) || fail "pushing the ci.toml commit"
+ci_key="$tmp/ci-bot.key"
+printf '0707070707070707070707070707070707070707070707070707070707070707' > "$ci_key"
+( cd "$a" && "$W" ci run --once --actor ci-bot --key "$ci_key" --claim-ttl 300 ) \
+    >/dev/null 2>&1 || fail "ci run"
+( cd "$b" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
+ci_state="$( cd "$b" && "$W" ci status --format json | python3 -c 'import json,sys
+runs=json.load(sys.stdin)["runs"]
+hits=[r for r in runs if r["id"].startswith("ci-") and r["task"]=="test"]
+print(hits[0]["state"] if hits else "none")' )"
+[ "$ci_state" = "done" ] || fail "the ci run did not settle: state=$ci_state"
+ci_conclusion="$( cd "$b" && "$W" ci status --format json | python3 -c 'import json,sys
+runs=json.load(sys.stdin)["runs"]
+hits=[r for r in runs if r["id"].startswith("ci-") and r["task"]=="test"]
+print((hits[0].get("conclusion") or "none"))' )"
+[ "$ci_conclusion" = "success" ] || fail "the ci task did not succeed: $ci_conclusion"
+ci_log="$( cd "$a" && "$W" ci log 2>/dev/null )"; [ "$?" = 0 ] || fail "ci log"
+ci_status_text="$( cd "$b" && "$W" ci status 2>/dev/null | grep -c 'done' || true )"
+[ "${ci_status_text:-0}" -ge 1 ] || fail "ci status text does not show the done run"
 
 step "cross-implementation: the Rust aggregation must agree on the board hash"
 if [ -n "$have_rust" ]; then

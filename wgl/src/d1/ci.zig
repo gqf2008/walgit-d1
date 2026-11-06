@@ -471,14 +471,12 @@ pub fn run_view(alloc: std.mem.Allocator, id: []const u8, entries: []const Entry
         claims: util.List(CiClaim),
         results: util.List(CiResult),
     };
-    var attempts = util.List(Attempt).init(alloc);
-    defer {
-        for (attempts.items) |*a| {
-            a.claims.deinit();
-            a.results.deinit();
-        }
-        attempts.deinit();
-    }
+    // The attempt lists' buffers are arena allocations the returned views
+    // borrow — only the outer slice is freed here. Freeing the inner lists
+    // would rewind the arena and turn the claims/results the caller still
+    // reads into garbage (the Rust original moved ownership instead).
+    var attempts: util.List(Attempt) = util.List(Attempt).init(alloc);
+    defer attempts.deinit();
     var unverified: usize = 0;
     var last_ts: i64 = 0;
     var seen = false;
