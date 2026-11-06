@@ -144,7 +144,8 @@ jobs:
         timeout-minutes: 10
         run: |
           set -eo pipefail
-          just wgl-test
+          # wgl-test already runs inside the fast tier (`just test`); this
+          # step is the transport e2e the retired CLI suites owned.
           just wgl-e2e
       # Rerun once on failure: sim has known-flaky cases (base_rebuild; list in docs/WORKING_RULES.md);
       # a second failure is a regression. The rate cannot be read off this step: the
