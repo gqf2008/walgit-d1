@@ -126,6 +126,28 @@ decode each segment.
   sha (walgit maps git's "Not a valid object name", "not a tree object",
   "unknown revision", "bad revision", "does not exist" to 404); `5xx` for
   server faults. No JSON error envelope.
+- **Transient store failures are `503` + `Retry-After: 15`** (cc-ai-store-503):
+  a transport error, timeout, upstream 5xx or throttle from the object store
+  is classified retryable in `walgit-store` and must reach the client as
+  "try again" — a `500` tells git clients (and SDKs that copy the same rule)
+  the failure is permanent, so an outage of the bucket turned every push and
+  fetch into a hard failure. The same mapping applies to the git smart HTTP
+  lane (`info/refs`, receive/upload-pack) and to `/mcp` tools, which forward
+  this router's answer unchanged. Non-retryable store errors keep the existing
+  `500` and carry no `Retry-After`; `4xx` semantics are untouched.
+- **Push has a status boundary**: once a push negotiates `side-band-64k` (the
+  normal case) the receive-pack response is committed as `200` when streaming
+  starts. A transient failure *after* that point cannot become a `503`: it is
+  reported on the sideband as `remote: walgit: service unavailable — retry the
+  push: …` and git exits non-zero. Treat that sentence (not the HTTP status) as
+  the retry signal; the `503 + Retry-After` contract above applies only while
+  the request is still at advertisement/sync, before the stream opens.
+- **Signed URLs never reach the client**: a store error may quote the presigned
+  URL it failed to fetch, whose query string carries `X-Amz-Credential` /
+  `X-Amz-Signature` / `x-id=…`. The response body (and the `remote: …` line a
+  git client prints from a receive-pack refusal) redacts every URL's query
+  string and fragment: scheme+host+path survive — enough to identify the
+  object, never enough to fetch it.
 - **Null safety**: every array field MUST be `[]` when empty, never `null`
   (the UI calls `.length`/`.map` directly).
 - **Timestamps**: RFC 3339 strings (`%aI`/`%cI`), e.g.
@@ -969,6 +991,14 @@ between the two lanes. `crates/walgit-server/src/mcp/tools.rs` writes the
 endpoint path for each tool; these two tables are the audit — the first that no
 read is missing, the second that every omission is a decision rather than an
 oversight.
+
+**Errors are the router's errors.** A tool whose inner call fails reports the
+API's own message (never a re-worded one): a wrong *request* is a `-32602`
+JSON-RPC error, a tool that ran and failed is `isError` content the model reads.
+JSON-RPC has no HTTP status field, so `ApiError`'s status travels appended to
+the sentence (`… (503)`). A transient store failure is therefore visible to a
+model as `service unavailable … (503)` here and as `503 + Retry-After: 15` on
+the HTTP lanes — one classification, two transports (§2).
 
 **The collaboration face moved (D70).** The D1 tools and `walgit://collab/*`
 resources are served by the standalone `wg mcp` client over stdio, against a

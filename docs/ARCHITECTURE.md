@@ -143,7 +143,7 @@ Every request: conditional GET of `manifest.pb` (skippable for `wal.freshness_tt
 | **Objects** | Serve when the pack set fits `cache.max_bytes`, else Refs + **remote reader** → `ObjectAccess::{Local,Remote}` | web API object endpoints |
 Long syncs register as tasks (`materialize`, `remote-index`) and stream progress; pack work runs on the **bulk
 runtime** and never takes the refs phase's lock (D19). `check_fits` refuses to pull a pack set that cannot fit
-(TooLarge → 503 / pkt ERR with the bundle-uri fix). Local disk is a bounded LRU (`cache.max_bytes`,
+(TooLarge → 500 / pkt ERR with the bundle-uri fix; it is not retryable). Local disk is a bounded LRU (`cache.max_bytes`,
 `evict_idle_after`) in budget mode, watermark eviction in disk mode (D25).
 
 ### 2.4 Getting the most out of the WAL (the strategies)

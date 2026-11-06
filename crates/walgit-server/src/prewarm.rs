@@ -167,7 +167,7 @@ async fn warm(st: &Arc<AppState>, repo: &str) -> Result<String, String> {
             Ok(s)
         }
         Err(e) => {
-            task.finish_err(500, e.clone());
+            task.finish_err(500, crate::error::redact_url_queries(&e));
             Err(e)
         }
     }
