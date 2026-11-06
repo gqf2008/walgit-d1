@@ -49,6 +49,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -73,7 +78,8 @@ jobs:
         run: scripts/check-release-changelog-filter.sh
       # #137's structural anti-drift guard, generalized to every crate by #141:
       # the filesystem (crates/*/tests/*.rs) is the truth, the justfile's lane
-      # variables (SERVER_TESTS / CLI_TESTS / WILDCARD_TEST_PKGS) are the claim;
+      # variables (SERVER_TESTS / WILDCARD_TEST_PKGS; the wgl lanes are
+      # anchored recipe lines) are the claim;
       # scripts/suite-guard.sh is the one script (runnable identically on a
       # laptop) that goes red on an unregistered suite, on a vacuous glob/empty
       # lane (#140's fix), or on a recipe line that stops interpolating its
@@ -127,25 +133,19 @@ jobs:
             echo "a listed suite ran 0 tests on ubuntu — a platform gate hid it (#137); the lines above name the binary"
             exit 1
           fi
-      # The walgit-cli integration suites (D1 CI runner + collab CLI) — the
-      # first execution lane these ever had (#141: compiled on both legs, run
-      # nowhere). Ubuntu-only; the per-file platform seams that bar a windows
-      # lane are argued at the justfile's CLI_TESTS. Measured: 8 tests, 13–34 s
-      # of run (two laptop measurements) + link of the two test binaries —
-      # timeout-minutes guards the lane. No built-in rerun: this set
-      # has no flake history yet, and a step that adds one MUST name itself in
-      # the summary job's rerun_once regex in the same commit. The zero-test
-      # assertion (#137's "registered means executed") keeps a future cfg-gate
-      # from shrinking it silently.
-      - name: CLI integration suites
+      # The wgl client (D69): the collaboration families live in the standalone
+      # Zig module now; its unit/golden tests and the transport e2e (register →
+      # push → second clone aggregates → claim race → fold equality → the Rust
+      # cross-check) run in place of the retired CLI suites. zig is pinned at
+      # 0.17.0 (wgl/build.zig.zon). No built-in rerun: no flake history yet, and
+      # a step that adds one MUST name itself in the summary job's rerun_once
+      # regex in the same commit.
+      - name: wgl client lanes
         timeout-minutes: 10
         run: |
           set -eo pipefail
-          just test-cli 2>&1 | tee cli-integration.log
-          if grep -n '^running 0 tests' cli-integration.log; then
-            echo "a registered CLI suite ran 0 tests on ubuntu — a platform gate hid it (#137 shape, #141); the lines above name the binary"
-            exit 1
-          fi
+          just wgl-test
+          just wgl-e2e
       # Rerun once on failure: sim has known-flaky cases (base_rebuild; list in docs/WORKING_RULES.md);
       # a second failure is a regression. The rate cannot be read off this step: the
       # rerun is why #138 had to count first-pass reds in the logs instead.
@@ -203,6 +203,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - name: Create the rustfs bucket
         run: |
           for _ in $(seq 1 30); do
@@ -256,6 +261,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - name: First-batch contract models
         env:
           WALGIT_TLC_JOBS: 1
@@ -289,6 +299,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - run: just clippy
 
   e2e:
@@ -304,6 +319,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -348,6 +368,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # wgl (D69) pins zig 0.17.0 in wgl/build.zig.zon; the action resolves the
+      # matching tarball so the lane never rides the runner image's zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
