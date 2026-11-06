@@ -1569,7 +1569,7 @@ test "card claims: unverified and malformed claims never own a card" {
 
     const alice = kp(11);
     const bob = kp(12);
-    const principals = principals_of(arena, &.{ .{ .name = "alice", .seed = 11 } });
+    const principals = principals_of(arena, &.{.{ .name = "alice", .seed = 11 }});
     const rules = MergeRules{};
     const board_def = try default_board(arena);
 

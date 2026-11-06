@@ -42,7 +42,7 @@ pub fn request(alloc: std.mem.Allocator, io: Io, method: Method, url: []const u8
         return err;
     };
     return .{
-        .status = @intFromEnum(res.status),
+        .status = @backingInt(res.status),
         .body = try alloc.dupe(u8, aw.written()),
     };
 }

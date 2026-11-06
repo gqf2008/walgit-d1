@@ -194,10 +194,9 @@ pub fn push(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const 
 /// verifying in long-lived checkouts (§11.1).
 pub fn fetch_collab(alloc: std.mem.Allocator, io: Io, repo: []const u8, remote: []const u8) Error!void {
     _ = try run_ok(alloc, io, repo, &.{
-        "fetch",                     "-q",
-        "--prune",                   remote,
-        "+refs/collab/inbox/*:refs/collab/inbox/*",
-        "+refs/collab/meta/*:refs/collab/meta/*",
+        "fetch",                                    "-q",
+        "--prune",                                  remote,
+        "+refs/collab/inbox/*:refs/collab/inbox/*", "+refs/collab/meta/*:refs/collab/meta/*",
     });
 }
 

@@ -113,7 +113,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) ParseError!*Table {
             const array = std.mem.startsWith(u8, line, "[[");
             const close: []const u8 = if (array) "]]" else "]";
             const end = std.mem.indexOf(u8, line, close) orelse return error.Syntax;
-            const name = std.mem.trim(u8, line[if (array) 2 else 1 .. end], " \t");
+            const name = std.mem.trim(u8, line[if (array) 2 else 1..end], " \t");
             if (name.len == 0 or std.mem.indexOfScalar(u8, name, '[') != null) return error.Syntax;
             current = root;
             var it = std.mem.splitScalar(u8, name, '.');

@@ -32,18 +32,18 @@ pub fn dispatch(c: *Ctx, action: []const u8, rest: []const []const u8) u8 {
         specs = &.{ S{ .name = "repo" }, S{ .name = "file" } };
     } else if (eq(action, "run")) {
         specs = &.{
-            S{ .name = "repo" },      S{ .name = "remote" },
-            S{ .name = "actor" },     S{ .name = "key" },
-            S{ .name = "once", .boolean = true },
-            S{ .name = "interval" },  S{ .name = "claim-ttl" },
-            S{ .name = "task" },      S{ .name = "state" },
+            S{ .name = "repo" },                  S{ .name = "remote" },
+            S{ .name = "actor" },                 S{ .name = "key" },
+            S{ .name = "once", .boolean = true }, S{ .name = "interval" },
+            S{ .name = "claim-ttl" },             S{ .name = "task" },
+            S{ .name = "state" },
         };
     } else if (eq(action, "status")) {
         specs = &.{ S{ .name = "repo" }, S{ .name = "format" } };
     } else if (eq(action, "log") or eq(action, "artifacts")) {
         specs = &.{
-            S{ .name = "repo" },  S{ .name = "remote" },
-            S{ .name = "run" },   S{ .name = "out" },
+            S{ .name = "repo" }, S{ .name = "remote" },
+            S{ .name = "run" },  S{ .name = "out" },
         };
     }
     var p = args.parse(c.alloc, rest, specs) catch |err| switch (err) {
@@ -249,7 +249,7 @@ fn claim_array(c: *Ctx, out: *util.List(u8), claims: []const ci.CiClaim) !void {
 
 fn claim_json(c: *Ctx, claim: *const ci.CiClaim) ![]u8 {
     return std.fmt.allocPrint(c.alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"ttl_secs\":{d},\"attempt\":{d}}}", .{
-        quoted(c, claim.oid),   quoted(c, claim.actor), claim.ts,     quoted(c, claim.task),
+        quoted(c, claim.oid),      quoted(c, claim.actor),  claim.ts,       quoted(c, claim.task),
         quoted(c, claim.repo_ref), quoted(c, claim.commit), claim.ttl_secs, claim.attempt,
     });
 }
@@ -257,10 +257,10 @@ fn claim_json(c: *Ctx, claim: *const ci.CiClaim) ![]u8 {
 fn result_json(c: *Ctx, r: *const ci.CiResult) ![]u8 {
     var out: util.List(u8) = .init(c.alloc);
     out.append_slice(try std.fmt.allocPrint(c.alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"attempt\":{d},\"claim\":{s},\"conclusion\":\"{s}\",\"exit_code\":", .{
-        quoted(c, r.oid),          quoted(c, r.actor),
-        r.ts,                      quoted(c, r.task),
-        quoted(c, r.repo_ref),     quoted(c, r.commit),
-        r.attempt,                 quoted(c, r.claim),
+        quoted(c, r.oid),      quoted(c, r.actor),
+        r.ts,                  quoted(c, r.task),
+        quoted(c, r.repo_ref), quoted(c, r.commit),
+        r.attempt,             quoted(c, r.claim),
         r.conclusion.as_str(),
     })) catch @panic("oom");
     if (r.exit_code) |code| {
@@ -287,7 +287,7 @@ fn result_json(c: *Ctx, r: *const ci.CiResult) ![]u8 {
         for (r.artifacts, 0..) |*a, i| {
             if (i > 0) out.append(',') catch @panic("oom");
             out.append_slice(try std.fmt.allocPrint(c.alloc, "{{\"name\":{s},\"path\":{s},\"sha256\":{s},\"bytes\":{d},\"url\":{s}}}", .{
-                quoted(c, a.name), quoted(c, a.path), quoted(c, a.sha256), a.bytes,
+                quoted(c, a.name),                       quoted(c, a.path), quoted(c, a.sha256), a.bytes,
                 if (a.url) |u| quoted(c, u) else "null",
             })) catch @panic("oom");
         }
@@ -485,9 +485,9 @@ fn ci_artifacts(c: *Ctx, p: *args.Parsed) !u8 {
 // ---- the runner (§4–§9) ---------------------------------------------------------------------
 
 const BASE_ENV_ALLOW = [_][]const u8{
-    "PATH",          "HOME",    "TMPDIR", "TEMP",
-    "TMP",           "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC",
-    "PATHEXT",       "USERPROFILE",
+    "PATH",    "HOME",        "TMPDIR",      "TEMP",
+    "TMP",     "SYSTEMROOT",  "SYSTEMDRIVE", "COMSPEC",
+    "PATHEXT", "USERPROFILE",
 };
 const LOG_CAPTURE_MAX: usize = 16 * 1024 * 1024;
 const LOG_SUMMARY_MAX: usize = 4096;

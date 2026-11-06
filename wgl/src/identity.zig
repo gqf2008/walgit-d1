@@ -142,7 +142,7 @@ pub fn write_private_file(alloc: std.mem.Allocator, io: Io, path: []const u8, by
         make_private_dir(alloc, io, parent) catch {};
     }
     var d = std.Io.Dir.cwd();
-    const f = d.createFile(io, path, .{ .truncate = true, .permissions = @enumFromInt(0o600) }) catch return error.WriteFailed;
+    const f = d.createFile(io, path, .{ .truncate = true, .permissions = @fromBackingInt(@intCast(0o600)) }) catch return error.WriteFailed;
     defer f.close(io);
     f.writeStreamingAll(io, bytes) catch return error.WriteFailed;
     f.sync(io) catch {};
