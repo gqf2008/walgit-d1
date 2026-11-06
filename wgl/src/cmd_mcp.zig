@@ -17,8 +17,10 @@
 //!   `refs/collab/inbox/<actor>/<uuid>`. Signatures are verified at aggregation
 //!   time, never on write (D64 §write path) — and a raw `git push` can bypass
 //!   every local check (D1_PROTOCOL §7.5).
-//! * `collab_register` has **no arguments**: it names this worktree identity's
-//!   public key at `refs/collab/meta/principals/<principal>` and pushes it.
+//! * `collab_register` (`force?`) names this worktree identity's public key
+//!   at `refs/collab/meta/principals/<principal>` and pushes it. A different
+//!   already-registered key is refused unless `force:true`; rotation makes
+//!   every past entry by that principal unverified.
 
 const std = @import("std");
 const args = @import("args.zig");
@@ -423,8 +425,10 @@ const INSTRUCTIONS =
     \\* `collab_publish` takes an entry you already signed with your own key.
     \\  `actor` must be this worktree's identity principal; the signature is
     \\  checked when entries are aggregated, never on write.
-    \\* `collab_register` takes no arguments and registers this worktree
-    \\  identity's public key. Run `wgl collab join --principal <name>` first.
+    \\* `collab_register` (optional `force`) registers this worktree
+    \\  identity's public key. A different existing key is refused unless
+    \\  forced — rotation makes every past entry by that principal unverified.
+    \\  Run `wgl collab join --principal <name>` first.
     \\* Claiming a card is read board -> publish `card_claim` -> re-read board
     \\  (`wgl collab claim` does exactly this); a live claim by someone else
     \\  means stand down, not start work.
@@ -463,7 +467,7 @@ fn toolDescription(k: ToolKind) []const u8 {
         .collab_report => "Read-only dashboard over refs/collab/*: threads, PR status, verification health, CI runs and per-actor/per-kind activity.",
         .ci_status => "CI runs of the checkout (`docs/D1_CI_PROTOCOL.md` §8.3): every run the ledger carries, with attempts, live claim winner, state and effective conclusion. One run with `id`. Claim/report with signed `ci_claim`/`ci_result` entries through `collab_publish`.",
         .collab_publish => "Publish one **already signed** collab entry to refs/collab/inbox/<actor>/<uuid>. Build and sign it with your own key (`wgl collab entry` does both). `actor` must be this worktree's identity principal. The signature is NOT checked on write — aggregation verifies it, so re-read the thread and confirm `verified: true`. The `status=done` gate is enforced here (the same rule as `wgl collab entry`).",
-        .collab_register => "Register this worktree identity's public key at refs/collab/meta/principals/<principal> and push it. Takes no arguments. Identity missing => refused; run `wgl collab join --principal <name>` first.",
+        .collab_register => "Register this worktree identity's public key at refs/collab/meta/principals/<principal> and push it. Optional `force` (default false): a different already-registered key is refused unless forced, because rotating makes every past entry by that principal unverified. Identity missing => refused; run `wgl collab join --principal <name>` first.",
     };
 }
 
