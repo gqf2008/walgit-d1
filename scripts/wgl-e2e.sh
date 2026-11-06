@@ -167,7 +167,7 @@ timeout = "1s"
 
 [[task]]
 name = "race"
-command = "sleep 2"
+command = "sleep 3"
 EOF
 ( cd "$a" && git add .walgit/ci.toml && git commit -q -m 'ci: add timeout and race tasks' \
     && git push -q origin main ) || fail "pushing the timeout/race ci.toml"
