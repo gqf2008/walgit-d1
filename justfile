@@ -122,7 +122,7 @@ wgl-test:
     cd wgl && zig build test
 
 wgl-e2e:
-    scripts/wgl-e2e.sh
+    bash scripts/wgl-e2e.sh
 
 # Every crate whose whole tests/ directory runs through a single `--tests`
 # invocation — no per-suite registration (a file added there runs the moment it
