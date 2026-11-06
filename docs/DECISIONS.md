@@ -1,4 +1,4 @@
-# walgit — decisions in force (D1–D68)
+# walgit — decisions in force (D1–D70)
 
 > Split out of `AGENTS.md` on 2026-11-05. **Append, never silently change:** a
 > decision that no longer holds is superseded by a later entry that says so in
@@ -828,3 +828,53 @@
     `wgl collab claim` is unchanged (0 won / 2 stand-down / 1 error). Amends
     D68's "next major release" schedule (done early, replacement first) and
     D62's retire-a-principal pointer (`wgl collab principal-revoke`).
+
+- **D70** **The collaboration MCP face moves from the host's `/mcp` to `wgl mcp`
+  (stdio); the host keeps `repo_*` and `wal_ls` (2026-11-06, cc-ai-wgl-mcp).**
+  This is the agent surface D64 described, split by what each side can honestly
+  read. `wgl mcp --repo <checkout> [--remote origin]` serves JSON-RPC over
+  **stdio** (one message per line; stdout carries nothing else, logs go to
+  stderr, stdin EOF exits 0) with:
+  - tools `collab_board`, `collab_thread` (`{id, entries:[{oid, principal,
+    verified, entry, broken_refs}], pr}`), `collab_report`, `ci_status`
+    (`{repo, runs}` with optional `id`), the one write tool `collab_publish`
+    (an entry the caller **already signed**; structure checked, `actor` must be
+    this worktree's identity principal, pushed to
+    `refs/collab/inbox/<actor>/<uuid>`) and `collab_register` (**no arguments**:
+    this worktree identity's public key to `refs/collab/meta/principals/<p>`);
+  - resources `walgit://collab/board` and `walgit://collab/thread/<id>`, with
+    `resources/list|templates/list|read|subscribe|unsubscribe`. Subscriptions
+    are in-process polls (`--subscribe-interval`, default 5 s, `--max-subscriptions`,
+    default 32), never a held request (D55).
+  **Freshness is the point of the split.** Every read fetches
+  `refs/collab/{inbox,meta}` first (`git fetch --prune`, exactly `wgl collab
+  claim` step 1) and **fails closed** when that fails; `fresh:false` (per call)
+  or `--no-fetch` (process) reads the cached refs and reports
+  `_meta.fetched_at`. Without this, a worker that had not fetched could see no
+  owner and duplicate the work §8.4 exists to prevent.
+  **Caller and write checks.** The caller is `<git-dir>/walgit/identity` —
+  one identity per worktree (D58/D59/D62). `collab_publish` checks structure
+  (`kind`/`id`/`actor`/signature prefix and 64-byte ed25519 shape), refuses
+  `actor != caller`, and enforces the `status=done` gate locally after a fetch
+  (the same rule as `wgl collab entry` and the thin API). **It does not verify
+  the signature on write**: an entry and the registration naming its key may
+  land in either order, and the git lane cannot check it — aggregation verifies
+  (`docs/D1_PROTOCOL.md` §4.5). A raw `git push` bypasses every local check;
+  these are discipline, not a security boundary (§7.5, §14).
+  **Order (no dual authority).** `wgl mcp` landed and passed shape acceptance
+  first, then the host `/mcp` lost its D1 tools and `walgit://collab/*`
+  resources in the same change; the MCP-only projection/board-version cache was
+  deleted rather than merely unadvertised. `repo_*` and `wal_ls` remain because
+  they need host knowledge (registry, placement, remote reader, freshness).
+  **D64 relationship (controlled exception).** D64's target was a *second
+  implementation of the same data path* — the retired stdio adapter proxied the
+  CLI/host. `wgl mcp` is not that: reads aggregate the checkout's own
+  `refs/collab/*` offline and writes are receive-pack pushes, while `/mcp`
+  projects the host's HTTP API. With the old face gone, the agent MCP face has
+  one implementation again. The thin API and the SPA still aggregate
+  server-side, so "double read" disappears only on the agent MCP face, not
+  globally — the client and server deliberately cross-check each other in
+  `scripts/wgl-e2e.sh`.
+  **Supersedes** D69's sentence that "the server keeps … the MCP collab tools"
+  and D64's D1 tool/resource list; the rest of D69 stands. D64's auth, transport
+  and subscription rules still govern the remaining host surface.

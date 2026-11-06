@@ -301,13 +301,14 @@ serve_via = "proxy"               # "proxy" | "signed_url"
 signed_url_ttl = "1h"
 max_object_bytes = "16GiB"
 
-[mcp]                              # the Model Context Protocol served at POST|GET|DELETE /mcp (Streamable HTTP, D64):
-                                   # tools over this host's own JSON API, resources over the WAL, and one SSE stream
-                                   # per session for `notifications/resources/updated`. In-memory sessions only.
-                                   # No key of any kind lives here: the one writing tool (`collab_publish`) takes an
-                                   # entry the client already signed, so signing stays with the identity (D58).
+[mcp]                              # the host's Model Context Protocol at POST|GET|DELETE /mcp (Streamable HTTP, D64):
+                                   # read-only tools over this host's own JSON API (`repo_*`, `wal_ls`), resources
+                                   # over the refs/WAL, and one SSE stream per session for
+                                   # `notifications/resources/updated`. In-memory sessions only. The D1
+                                   # collaboration tools/resources moved to the standalone `wgl mcp` (stdio,
+                                   # D70) — this block does not configure them.
 subscribe_interval = "5s"         # one resource subscription = one conditional manifest read per repo per tick;
-                                   # >= 1s (D55: the same refs-level lane `walgit collab watch` uses)
+                                   # >=1s (D55: the same refs-level lane `wgl collab watch` uses)
 max_subscriptions = 32             # live subscriptions per caller (principal), across that caller's sessions
 session_ttl = "30m"               # an MCP session with no request and no open SSE stream is dropped after this
                                    # (rmcp's session keep-alive; the session's subscriptions go with it)

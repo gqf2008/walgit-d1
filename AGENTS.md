@@ -1,7 +1,7 @@
 # AGENTS.md — 通用协作框架 + 本仓项目章程入口
 
 > **先读 [`docs/CHARTER.md`](docs/CHARTER.md)** —— 那是本仓库的项目协作章程
-> （角色、派工、验收门禁、tracker 约定、D1–D69 决定链的引用）。本文件是通用
+> （角色、派工、验收门禁、tracker 约定、D1–D70 决定链的引用）。本文件是通用
 > 协作框架；两者冲突时以 `docs/CHARTER.md` 与全局规则（`~/.claude/CLAUDE.md`、
 > `~/.agents/rules/`）为准，安全、授权、删除类规则以全局最高。
 
@@ -21,7 +21,7 @@
 | 评审方式 `<REVIEW_CMD/流程>` | Leader 审查 + **另一位 principal** 的 verified `approve`（`merge_rule_eval`，CHARTER §2/§7） |
 | 定时推进间隔 `<TICK_INTERVAL>` | 无定时器（D55）：`wgl collab watch --once` 挂监督者或外部 timer |
 | 决策辅助模型 `<DECISION_MODEL>` | `Jev`（`jev-decision` 技能；仅用于 §6 列出的重大非确定性判断，确定性门禁永远是命令） |
-| 跨团队 tracker `<TRACKER>` | 本仓 D1 协作层：`refs/collab/*` 卡片（经 `/mcp` 或 `wgl collab`）；镜像的 GitHub Issues 已停用（D46）——§7 的 tracker 流程以 D1 卡片执行 |
+| 跨团队 tracker `<TRACKER>` | 本仓 D1 协作层：`refs/collab/*` 卡片（经 `wgl mcp`（stdio）或 `wgl collab`）；镜像的 GitHub Issues 已停用（D46）——§7 的 tracker 流程以 D1 卡片执行 |
 
 ## 1. 角色
 
@@ -139,8 +139,10 @@ just web-test        # SPA 改动时；另跑 just web-build
   2. 成员在独立 worktree 开发；提交信息引用卡片线程 id。
   3. 方案/接口变更、延期与风险在卡片留痕；需人类拍板的写 `needs-human`。
   4. 验收标准满足、卡片 `status: closed`（带 `merge_result`）后，分支才算交付。
-- **工具**：`/mcp`（`collab_board` / `collab_thread` / `collab_publish`）或
-  `wgl collab`，两者是同一事实源的两种车道。
+- **工具**：`wgl mcp`（stdio：`collab_board` / `collab_thread` /
+  `collab_report` / `ci_status` / `collab_publish` / `collab_register` 与
+  `walgit://collab/*` 资源）或 `wgl collab`，两者是同一事实源的两种车道。
+  宿主 `/mcp` 只保留仓库读工具（`repo_*`、`wal_ls`），协作面不再在那里（D70）。
 - **安全**：卡片与条目中不得粘贴密钥、令牌、用户隐私；日志与配置必须脱敏。
 
 ## 8. 软件工程纪律
@@ -162,4 +164,4 @@ just web-test        # SPA 改动时；另跑 just web-build
 
 见 [`docs/CHARTER.md`](docs/CHARTER.md) §10（一个事实一个家）。快速入口：
 `GOAL.md`（为什么）→ `docs/ARCHITECTURE.md`（是什么）→ `docs/CHARTER.md`
-（怎么协作）→ `docs/DECISIONS.md`（为什么是这样，D1–D69，append-only）。
+（怎么协作）→ `docs/DECISIONS.md`（为什么是这样，D1–D70，append-only）。

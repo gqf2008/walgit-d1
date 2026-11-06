@@ -4,11 +4,14 @@ Context: **the wire contract of the JSON API + SDK** (D15/D20/D26/D27/D68), norm
 anyone changing `crates/walgit-server/src/web/*`.
 
 > **Deprecated module (D68, 2026-11-02).** This contract is maintained for the bundled UI and the SDK it
-> ships, and because `/mcp` projects these exact handlers. It is no longer a surface to design for: new
-> agent-facing capability goes into the MCP tools, and this document is not the place to describe it.
+> ships, and because the host `/mcp` projects these exact handlers. It is no longer a surface to design
+> for: new agent-facing capability goes into an MCP tool, and this document is not the place to describe
+> it.
 
-> **Agents do not use this document** (D67/D68). The agent-facing interface is MCP at `/mcp`
-> (`web/SKILL.md`); these routes are what `/mcp` projects, and what the bundled UI and the SDK call.
+> **Agents do not use this document** (D67/D68/D70). The agent-facing interface is split: the host
+> `/mcp` (`web/SKILL.md`) serves the repository reads (`repo_*`, `wal_ls`), and `wgl mcp` (stdio, in a
+> checkout) serves the D1 collaboration tools and resources. These routes are what the host projects
+> and what the bundled UI and the SDK call.
 > Since D68 there is exactly **one** repository HTTP lane — `/{owner}/{repo}/api-browser/…`. The older
 > `/{owner}/{repo}/api/…` lane is **not served** (404): keeping it would be a second public contract to drift
 > from the MCP projection. A bearer token works on `api-browser` exactly as it did on the old lane, so an SDK
@@ -22,7 +25,7 @@ of §1) can serve the built UI unchanged; nothing in `web/src` depends on
 walgit internals except the optional `overview`/`ops`/`tasks` endpoints.
 
 ```
-https://git.example.com/mcp                            agents        MCP over Streamable HTTP (D64/D67/D68) — the agent interface
+https://git.example.com/mcp                            agents        MCP over Streamable HTTP (D64/D67/D68) — repo reads; collaboration is `wgl mcp` (D70)
 https://git.example.com/{owner}/{repo}/api-browser/…    repo JSON     the one repository lane: a bearer token, the session cookie, or both
 https://git.example.com/api/v1                         non-repo      discovery, me, authenticate, owners (+ /api-browser/v1/me|authenticate)
 https://git.example.com/repos.js                       the SDK       window.repos — permanent URL on every host
@@ -957,14 +960,21 @@ upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, 
 
 ## 5a. The MCP projection (`/mcp`, D64)
 
-Every repo-scoped read above is also reachable as an MCP tool, because `/mcp`
-calls this same router in-process (`Call::inner()` → `tower::ServiceExt::oneshot`)
-with the caller's own credential. That is a hard requirement, not a convenience:
-a tool answer and an HTTP answer are the same answer, so placement (D30),
-freshness and `actor == caller` cannot drift between the two lanes.
-`crates/walgit-server/src/mcp/tools.rs` writes the endpoint path for each tool;
-these two tables are the audit — the first that no read is missing, the second
-that every omission is a decision rather than an oversight.
+Every repo-scoped read above is also reachable as a host MCP tool, because
+`/mcp` calls this same router in-process (`Call::inner()` →
+`tower::ServiceExt::oneshot`) with the caller's own credential. That is a hard
+requirement, not a convenience: a tool answer and an HTTP answer are the same
+answer, so placement (D30), freshness and `actor == caller` cannot drift
+between the two lanes. `crates/walgit-server/src/mcp/tools.rs` writes the
+endpoint path for each tool; these two tables are the audit — the first that no
+read is missing, the second that every omission is a decision rather than an
+oversight.
+
+**The collaboration face moved (D70).** The D1 tools and `walgit://collab/*`
+resources are served by the standalone `wgl mcp` client over stdio, against a
+checkout's own `refs/collab/*` (it aggregates locally and fetches first). The
+host `/mcp` keeps `repo_*` and `wal_ls`; the thin API below still serves the
+browser and the SPA, and those endpoints keep their shapes.
 
 | Endpoint | Tool |
 |---|---|
@@ -984,12 +994,6 @@ that every omission is a decision rather than an oversight.
 | `GET …/api-browser/tasks` | `repo_tasks` |
 | `GET …/api-browser/policy` | `repo_policy` |
 | `GET …/api-browser/settings/effective` | `repo_settings` (TOML, wrapped as `{"toml": …}`) |
-| `GET …/api-browser/collab/board` | `collab_board` |
-| `GET …/api-browser/collab/threads/{id}` | `collab_thread` |
-| `GET …/api-browser/collab/report` | `collab_report` |
-| `GET …/api-browser/collab/ci` | `ci_status` |
-| `POST …/api-browser/collab/entries` | `collab_publish` (payload = an entry the client already signed) |
-| `POST …/api-browser/collab/principal` | `collab_register` (the caller's own public key) |
 | *(none — `RepoHandle::read_log` over the WAL, refs-level)* | `wal_ls` (the retained log: `from`/`to` echo the requested window, `to` is a bound, `more` = newer entries exist, `folded_through` = the seq a checkpoint folded; it is provenance, not a route) |
 
 **Not exposed, on purpose:**

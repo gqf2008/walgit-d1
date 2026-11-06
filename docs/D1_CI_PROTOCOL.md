@@ -392,8 +392,8 @@ done    : effective 存在                               → Settled(conclusion)
   （text/markdown/json）与 `wgl collab report` 的 CI 段、SPA 线程时间线的红绿徽标 +
   日志摘要，全部消费同一聚合——多端同源，无第二套语义。
 - **宿主面（D66）**：`GET …/api-browser/collab/ci[?id=<run>]` 直接序列化 `collect_runs`（`{repo, runs}`），
-  MCP 的 `ci_status` 就是它的投影。**认领与回报不新增工具**：它们是条目
-  （`kind: ci_claim` / `kind: ci_result`），经 `collab_publish`（或 HTTP `POST …/api-browser/collab/entries`、
+  `wgl mcp` 的 `ci_status` 就是它的投影（D70：协作工具已迁出宿主 `/mcp`）。**认领与回报不新增工具**：它们是条目
+  （`kind: ci_claim` / `kind: ci_result`），经 `wgl mcp` 的 `collab_publish`（或 HTTP `POST …/api-browser/collab/entries`、
   或直推 `refs/collab/inbox/*`）发布——三条车道同一个 oid。跑活那一半（clone、构建、工件上传）永远
   在 git + `…/api-browser/collab/ci-artifacts/<sha256>` 上：字节不过 MCP。
 - **与看板的边界**（D1 ⑥）：纯 CI 线程（只含 `ci_claim`/`ci_result`）不投影成看板卡片
