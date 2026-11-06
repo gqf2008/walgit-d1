@@ -249,6 +249,55 @@ assert entries[0]["entry"]["sig"].startswith("ed25519:"), thread
 print("   write path: foreign actor and unsigned entry refused; golden vector published and verified")
 PYW
 
+step "MCP done gate: needs-review + verified non-author approve, then a refusal once done"
+# Build the §7.5 precondition through the ordinary CLI: status needs-review,
+# a patch by alice, a verified approve by bob. The signed done entry itself is
+# produced without --push (the CLI applies the same gate), then handed to
+# `collab_publish`, which must fetch, apply the same rule and accept it.
+# The golden-vector step above rotated alice's published key; restore this
+# checkout's own key so the entries signed below aggregate as verified.
+alice_key="$(git -C "$m_a" rev-parse --absolute-git-dir)/walgit/keys/alice.ed25519"
+( cd "$m_a" && "$W" collab principal-register --principal alice --key "$alice_key" --push origin >/dev/null ) \
+    || fail "restoring alice's key for the done-gate check"
+m_head="$( cd "$m_a" && "$W" collab thread-heads | python3 -c 'import json,sys; print(json.load(sys.stdin)["cc-mcp-card"])' )"
+m_head="$( cd "$m_a" && "$W" collab entry --kind status --id cc-mcp-card --actor alice --parent "$m_head" \
+    --body '{"status":"needs-review"}' --push origin | awk '{print $2}' )"
+m_head="$( cd "$m_a" && "$W" collab entry --kind patch --id cc-mcp-card --actor alice --parent "$m_head" \
+    --base refs/heads/main --head refs/heads/feat-mcp --body '{"message":"mcp gate"}' --push origin | awk '{print $2}' )"
+( cd "$m_b" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
+( cd "$m_b" && "$W" collab entry --kind review --id cc-mcp-card --actor bob --parent "$m_head" \
+    --body '{"decision":"approve"}' --push origin >/dev/null ) || fail "bob's approve"
+( cd "$m_a" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
+m_head="$( cd "$m_a" && "$W" collab thread-heads | python3 -c 'import json,sys; print(json.load(sys.stdin)["cc-mcp-card"])' )"
+done_ref_oid="$( cd "$m_a" && "$W" collab entry --kind status --id cc-mcp-card --actor alice --parent "$m_head" \
+    --body '{"status":"done","work":"shipped via mcp"}' )"
+done_oid="$(printf '%s' "$done_ref_oid" | awk '{print $2}')"
+done_entry="$(git -C "$m_a" cat-file -p "$done_oid")"
+done_out="$tmp/mcp-done.json"
+python3 - "$done_entry" > "$tmp/mcp-done.ndjson" <<'PYD'
+import json, sys
+entry = sys.argv[1]
+for i in (1, 2):
+    print(json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                      "params": {"name": "collab_publish", "arguments": {"entry": entry}}}))
+print(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                  "params": {"name": "collab_thread", "arguments": {"id": "cc-mcp-card", "fresh": False}}}))
+PYD
+( cd "$m_a" && "$W" mcp --repo . --remote origin ) < "$tmp/mcp-done.ndjson" >"$done_out" 2>"$tmp/mcp-done.err" \
+    || fail "wgl mcp done-gate round trip failed"
+python3 - "$done_out" <<'PYD'
+import json, sys
+msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if isinstance(m, dict)}
+assert not msgs[1]["result"].get("isError"), msgs[1]
+assert msgs[2]["result"].get("isError") is True, msgs[2]
+thread = json.loads(msgs[3]["result"]["content"][0]["text"])
+last = thread["entries"][-1]
+assert last["entry"]["kind"] == "status", last
+assert last["entry"]["body"]["status"] == "done", last
+assert last["verified"] is True, last
+print("   done gate: approved thread published; the now-done thread refuses another done")
+PYD
+
 step "ci timeout: a hung task settles as timeout and the runner returns"
 cat > "$a/.walgit/ci.toml" <<'EOF'
 version = 1
@@ -381,6 +430,13 @@ EOF
     git -C "$srv" commit -q --allow-empty -m init
     git -C "$srv" remote add origin "$base/acme/widgets.git"
     git -C "$srv" push -q origin main || fail "push to the real server"
+    # Fixed HEAD (review condition 3): the host's board reads the repository
+    # HEAD, so the checkout compared against it must be on that same commit.
+    # Both sides here are the `main` tip; assert it instead of assuming it.
+    [ "$(git -C "$srv" symbolic-ref --short HEAD)" = "main" ] \
+        || fail "the compared checkout is not on main; the board comparison needs one HEAD"
+    [ "$(git -C "$srv" rev-parse HEAD)" = "$(git -C "$srv" rev-parse refs/heads/main)" ] \
+        || fail "the compared checkout HEAD is not the main tip"
     ( cd "$srv" && "$W" collab join --principal alice --push origin >/dev/null ) || fail "server join"
     srv_issue="$( cd "$srv" && "$W" collab entry --kind issue --id cc-srv-card --actor alice \
         --body '{"title":"server card"}' --push origin | awk '{print $2}' )"
