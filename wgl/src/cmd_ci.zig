@@ -114,7 +114,10 @@ fn ci_status(c: *Ctx, p: *args.Parsed) !u8 {
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const loaded = try reader.load(c.alloc);
     const now = util.now_ts();
-    const runs = try ci.collect_runs(c.alloc, loaded.entries, loaded.principals, now);
+    // The retired ci_cmd read only the ci-kind slice (§7.1) — one aggregation,
+    // never a second answer.
+    const ci_slice = try ci.ci_entries(c.alloc, loaded.entries);
+    const runs = try ci.collect_runs(c.alloc, ci_slice, loaded.principals, now);
     if (eq(format, "json")) {
         c.stdout_line(try runs_json(c, now, runs));
         return 0;
@@ -312,7 +315,8 @@ fn latest_effective_result(c: *Ctx, repo: []const u8, remote: []const u8, run_id
     const reader = collabreader.Reader.init(c.alloc, c.io, repo);
     const loaded = try reader.load(c.alloc);
     const now = util.now_ts();
-    const runs = try ci.collect_runs(c.alloc, loaded.entries, loaded.principals, now);
+    const ci_slice = try ci.ci_entries(c.alloc, loaded.entries);
+    const runs = try ci.collect_runs(c.alloc, ci_slice, loaded.principals, now);
     var view: ?*const ci.RunView = null;
     if (run_id) |id| {
         for (runs) |*kv| {
