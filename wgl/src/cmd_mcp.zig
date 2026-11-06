@@ -666,6 +666,15 @@ fn toolCiStatus(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap, fresh: 
     const ci_slice = ci.ci_entries(a, agg.loaded.entries) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
     const runs = ci.collect_runs(a, ci_slice, agg.loaded.principals, util.now_ts()) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
     const repo_id = repoId(s, a);
+    const compact = ciStatusJson(a, repo_id, runs, want_id) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
+    const text = prettyFromJson(a, compact) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
+    return .{ .out = .{ .ok = .{ .text = text, .fresh = fresh, .fetched_at = fetchedAt(s) } } };
+}
+
+/// `{"repo": "<owner>/<repo>", "runs": [RunView…]}` — the host
+/// `GET …/api-browser/collab/ci[?id=]` shape, not the `wgl ci status` wrapper
+/// (which carries `now` instead of `repo`).
+fn ciStatusJson(a: std.mem.Allocator, repo_id: []const u8, runs: []const ci.RunEntry, want_id: ?[]const u8) ![]const u8 {
     var runs_json = util.List(u8).init(a);
     runs_json.append('[') catch @panic("oom");
     var first = true;
@@ -675,7 +684,7 @@ fn toolCiStatus(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap, fresh: 
         }
         if (!first) runs_json.append(',') catch @panic("oom");
         first = false;
-        const one = cmd_ci.run_view_json(a, &kv.view) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
+        const one = try cmd_ci.run_view_json(a, &kv.view);
         runs_json.append_slice(one) catch @panic("oom");
     }
     runs_json.append(']') catch @panic("oom");
@@ -685,8 +694,7 @@ fn toolCiStatus(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap, fresh: 
     out.append_slice(",\"runs\":") catch @panic("oom");
     out.append_slice(runs_json.items) catch @panic("oom");
     out.append('}') catch @panic("oom");
-    const text = prettyFromJson(a, out.items) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
-    return .{ .out = .{ .ok = .{ .text = text, .fresh = fresh, .fetched_at = fetchedAt(s) } } };
+    return out.items;
 }
 
 fn aggError(a: std.mem.Allocator, e: anyerror) []const u8 {
@@ -1624,6 +1632,128 @@ test "the resource URI grammar is the two collab resources" {
     try std.testing.expectEqualStrings("card-1", t.thread);
     try std.testing.expect(parseResourceUri("walgit://refs/acme/x") == null);
     try std.testing.expect(parseResourceUri("walgit://collab/thread/") == null);
+}
+
+test "fresh policy: the per-call argument wins over the process default" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const o = struct {
+        fn with(al: std.mem.Allocator, v: Value) std.json.ObjectMap {
+            var m = jsonio.new_object();
+            jsonio.obj_put(&m, al, "fresh", v);
+            return m;
+        }
+    }.with;
+    var srv = Server{
+        .c = undefined,
+        .repo = ".",
+        .remote = "origin",
+        .fresh_default = true,
+        .interval_ms = 1000,
+        .max_subs = 1,
+        .subs = undefined,
+    };
+    try std.testing.expect(freshFor(&srv, jsonio.new_object()));
+    srv.fresh_default = false;
+    try std.testing.expect(!freshFor(&srv, jsonio.new_object()));
+    try std.testing.expect(freshFor(&srv, o(a, .{ .bool = true })));
+    try std.testing.expect(!freshFor(&srv, o(a, .{ .bool = false })));
+}
+
+test "ci_status answers the host shape {repo, runs}, optionally filtered by id" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const body = try std.json.parseFromSliceLeaky(Value, a,
+        \\{"task":"test","ref":"refs/heads/main","commit":"c0ffee","ttl":300,"attempt":1}
+    , .{});
+    const entries = [_]entry_mod.EntryRef{
+        .{ .oid = "0123456789abcdef0123456789abcdef01234567", .principal = "ci", .entry = .{
+            .version = 1, .kind = "ci_claim", .id = "ci-run-1", .actor = "ci", .ts = 1_000,
+            .parent = "", .refs = null, .body = body, .sig = "",
+        } },
+        .{ .oid = "89abcdef0123456789abcdef0123456789abcdef01", .principal = "ci", .entry = .{
+            .version = 1, .kind = "ci_claim", .id = "ci-run-2", .actor = "ci", .ts = 2_000,
+            .parent = "", .refs = null, .body = body, .sig = "",
+        } },
+    };
+    var principals = entry_mod.Principals.init(a);
+    const ci_slice = try ci.ci_entries(a, &entries);
+    const runs = try ci.collect_runs(a, ci_slice, &principals, 2_000);
+
+    const all = try std.json.parseFromSliceLeaky(Value, a, try ciStatusJson(a, "acme/widgets", runs, null), .{});
+    try std.testing.expectEqualStrings("acme/widgets", all.object.get("repo").?.string);
+    try std.testing.expectEqual(@as(usize, 2), all.object.get("runs").?.array.items.len);
+    // `now` never appears: this is the host wrapper, not `wgl ci status`.
+    try std.testing.expect(all.object.get("now") == null);
+
+    const one = try std.json.parseFromSliceLeaky(Value, a, try ciStatusJson(a, "acme/widgets", runs, "ci-run-2"), .{});
+    const list = one.object.get("runs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("ci-run-2", list[0].object.get("id").?.string);
+}
+
+test "collab_thread carries the PR view when the thread has a patch" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var principals = entry_mod.Principals.init(a);
+    const mk = struct {
+        fn entry(al: std.mem.Allocator, kind: []const u8, oid: []const u8, ts: i64, parent: []const u8, body_json: []const u8, base: ?[]const u8, head: ?[]const u8) entry_mod.EntryRef {
+            const body = std.json.parseFromSliceLeaky(Value, al, body_json, .{}) catch unreachable;
+            return .{ .oid = oid, .principal = "alice", .entry = .{
+                .version = 1, .kind = kind, .id = "pr-card", .actor = "alice", .ts = ts,
+                .parent = parent, .refs = if (base == null and head == null) null else .{ .base = base, .head = head },
+                .body = body, .sig = "",
+            } };
+        }
+    }.entry;
+    const entries = [_]entry_mod.EntryRef{
+        mk(a, "issue", "1111111111111111111111111111111111111111", 10, "", "{\"title\":\"pr\"}", null, null),
+        mk(a, "patch", "2222222222222222222222222222222222222222", 20, "1111111111111111111111111111111111111111", "{\"message\":\"x\"}", "refs/heads/feat", "refs/heads/feat"),
+        mk(a, "review", "3333333333333333333333333333333333333333", 30, "2222222222222222222222222222222222222222", "{\"decision\":\"approve\"}", null, null),
+    };
+    const v = try threadValue(a, "pr-card", &entries, &principals, &collab.MergeRules{});
+    try std.testing.expectEqual(@as(usize, 3), v.object.get("entries").?.array.items.len);
+    const pr = v.object.get("pr").?.object;
+    try std.testing.expectEqualStrings("pr-card", pr.get("pr").?.object.get("id").?.string);
+    try std.testing.expectEqualStrings("refs/heads/feat", pr.get("pr").?.object.get("base").?.string);
+    try std.testing.expectEqualStrings("open", pr.get("pr").?.object.get("status").?.string);
+    // merge evaluation rides along: the base is unprotected, so allowed.
+    try std.testing.expect(pr.get("merge").?.object.get("allowed").?.bool);
+    try std.testing.expectEqual(@as(usize, 1), pr.get("pr").?.object.get("reviews").?.array.items.len);
+}
+
+test "report value is the host shape: pair arrays, no host-only keys" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var threads = [_]collab.ReportThread{.{ .id = "t1", .title = "T", .entries = 2, .verified = 1, .last_ts = 5, .kinds = blk: {
+        var kinds = [_][]const u8{ "issue", "status" };
+        break :blk kinds[0..];
+    } }};
+    var prs = [_]collab.ReportPr{.{ .id = "t1", .title = "T", .base = "refs/heads/main", .head = "refs/heads/feat", .status = "open", .approvals = 0, .merge_allowed = false, .merge_reason = "needs approvals" }};
+    var by_actor = [_]collab.Report.Count{.{ .key = "alice", .n = 2 }};
+    var by_kind = [_]collab.Report.Count{.{ .key = "issue", .n = 1 }};
+    const report = collab.Report{
+        .threads = threads[0..],
+        .prs = prs[0..],
+        .runs = &.{},
+        .total_entries = 2,
+        .verified_entries = 1,
+        .unverified_entries = 1,
+        .missing_principals = 1,
+        .by_actor = by_actor[0..],
+        .by_kind = by_kind[0..],
+    };
+    const v = try reportValue(a, &report);
+    const compact = jsonio.to_string(a, v);
+    // `by_actor` is a `[[key, n], …]` pair array (Rust's Vec<(String, usize)>).
+    try std.testing.expect(std.mem.indexOf(u8, compact, "\"by_actor\":[[\"alice\",2]]") != null);
+    const pr = v.object.get("prs").?.array.items[0].object;
+    try std.testing.expectEqualStrings("refs/heads/main", pr.get("base").?.string);
+    try std.testing.expectEqual(@as(i64, 0), pr.get("approvals").?.integer);
 }
 
 test "repo id comes from the remote URL, and a local path falls back" {

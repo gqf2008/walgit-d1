@@ -373,7 +373,7 @@ EOF
     } | ( cd "$srv" && "$W" mcp --repo . --remote origin ) >"$mcp_json" 2>"$tmp/srv-mcp.err" \
         || fail "wgl mcp against the real server"
 
-    if python3 - "$base" "$mcp_json" <<'PYEOF'
+    if python3 - "$base" "$mcp_json" 2>"$tmp/compare.err" <<'PYEOF'
 import json, re, sys, urllib.request
 
 base, path = sys.argv[1], sys.argv[2]
@@ -420,6 +420,7 @@ PYEOF
     then
         :
     elif [ -n "$explicit_server" ]; then
+        cat "$tmp/compare.err" >&2 || true
         fail "the walgit-server under test ($server_bin) disagrees with wgl mcp"
     else
         echo "   (the auto-detected walgit-server is older than a compared endpoint — explicit skip; set WALGIT_SERVER_BIN to the build under test)"
