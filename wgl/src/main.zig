@@ -8,6 +8,12 @@ const entry = @import("d1/entry.zig");
 const collab = @import("d1/collab.zig");
 const ci = @import("d1/ci.zig");
 const snapshot = @import("d1/snapshot.zig");
+const gitx = @import("gitx.zig");
+const toml = @import("toml.zig");
+const identity = @import("identity.zig");
+const boarddef = @import("boarddef.zig");
+const ciconfig = @import("ciconfig.zig");
+const cron = @import("cron.zig");
 const jsonio = @import("jsonio.zig");
 const util = @import("util.zig");
 
@@ -15,6 +21,12 @@ comptime {
     _ = collab;
     _ = ci;
     _ = snapshot;
+    _ = gitx;
+    _ = toml;
+    _ = identity;
+    _ = boarddef;
+    _ = ciconfig;
+    _ = cron;
 }
 
 pub fn main(init: std.process.Init) !u8 {
