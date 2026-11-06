@@ -1,7 +1,7 @@
 # walgit — working rules
 
 > Split out of `AGENTS.md` on 2026-11-05. These are the rules behind the
-> charter's acceptance gates (`AGENTS.md` §3) and the test tiers CI runs.
+> charter's acceptance gates (`docs/CHARTER.md` §3 / root `AGENTS.md` §3) and the test tiers CI runs.
 > The no-backwards-compatibility banner applies to every change:
 
 > **No backwards compatibility (pre-1.0).** We owe nothing to previous shapes of this system. Do not keep

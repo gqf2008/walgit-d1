@@ -1,223 +1,165 @@
-# AGENTS.md — collaboration charter for this repository
+# AGENTS.md — 通用协作框架 + 本仓项目章程入口
 
-This file is the **charter**: who does what, how work is dispatched, what it must pass before it
-merges, and where every other document lives (§10). It is deliberately short. The system manual is
-`docs/ARCHITECTURE.md`, the decision log is `docs/DECISIONS.md`, the detail behind each gate is
-`docs/WORKING_RULES.md`, and release mechanics are `docs/RELEASE.md`.
+> **先读 [`docs/CHARTER.md`](docs/CHARTER.md)** —— 那是本仓库的项目协作章程
+> （角色、派工、验收门禁、tracker 约定、D1–D69 决定链的引用）。本文件是通用
+> 协作框架；两者冲突时以 `docs/CHARTER.md` 与全局规则（`~/.claude/CLAUDE.md`、
+> `~/.agents/rules/`）为准，安全、授权、删除类规则以全局最高。
 
-Reading order: `GOAL.md` (what we want) → `docs/ARCHITECTURE.md` (what the system is) → this file
-(how the team works) → `docs/DECISIONS.md` (why it is the way it is, consulted per decision).
+## 0. 参数表
 
-> **No backwards compatibility (pre-1.0).** Change the shape and delete the old shape in the same
-> change — no aliases, shims, deprecated routes/keys/fields. Only bucket formats (WAL, manifest, log,
-> checkpoint protos) stay append-only and replayable. Full text: `docs/WORKING_RULES.md`.
-
-## 0. Parameters
-
-| Parameter | Value |
+| 参数 | 值 |
 | --- | --- |
-| Project | `walgit` — object-store-backed git host (Rust workspace + React SPA) |
-| Repository root | the checkout you are in |
-| Main branch (`<MAIN_BRANCH>`) | `main` |
-| Member worktrees (`<WORKTREE_ROOT>`) | `.worktrees/<unit>` — a worktree is an identity, never removed (D62) |
-| Member branches (`<BRANCH_PREFIX>`) | `feat/<thread>`, created inside the member's worktree, one per card |
-| Build (`<BUILD_CMD>`) | `cargo build --workspace --all-targets`; SPA `just web-build` |
-| Check (`<CHECK_CMD>`) | `just warnings`, `just clippy`; SPA `pnpm run build` (oxlint `--deny-warnings` + tsc) |
-| Test (`<TEST_CMD>`) | `just test`; SPA `just web-test` |
-| Integration (`<INTEGRATION_CMD>`) | `just wgl-e2e`, `just e2e`, `just sim`; everything at once is `just ci` |
-| Review (`<REVIEW_CMD/流程>`) | leader review + a verified `approve` from a principal other than the author (`merge_rule_eval`) |
-| Rhythm (`<TICK_INTERVAL>`) | no timers: `wgl collab watch --once` under a supervisor or a timer (D55) |
-| Decision model (`<DECISION_MODEL>`) | none — deterministic gates are commands, judgment calls are the leader's |
-| Tracker (`<TRACKER>`) | the D1 collaboration layer: `refs/collab/*`, read and written over `/mcp` (`docs/D1_PROTOCOL.md`) |
+| 项目名 `<PROJECT>` | walgit — 对象桶为唯一事实源的 Git 宿主（Rust workspace + React SPA + 独立 Zig 客户端 `wgl/`） |
+| 仓库根 `<REPO_ROOT>` | 本检出根目录 |
+| 主分支 `<MAIN_BRANCH>` | `main` |
+| 成员 worktree 根 `<WORKTREE_ROOT>` | `.worktrees/<unit>`（worktree 是身份，永不删除——见 CHARTER D62） |
+| 成员分支前缀 `<BRANCH_PREFIX>` | `feat/<thread>`（每卡一分支，成员 worktree 内创建） |
+| 构建命令 `<BUILD_CMD>` | `cargo build --workspace --all-targets`；SPA `just web-build`；wgl 客户端 `cd wgl && zig build`（zig 0.17.0） |
+| 检查命令 `<CHECK_CMD>` | `just warnings`（零 rustc 警告）、`just clippy`（`-D warnings`）；SPA `pnpm run build`（oxlint `--deny-warnings` + tsc） |
+| 测试命令 `<TEST_CMD>` | `just test`（lib/bins + 通配 crate + server 集成 + `wgl-test`）；SPA `just web-test` |
+| 集成测试 `<INTEGRATION_CMD>` | `just wgl-e2e`（wgl 传输端到端）、`just e2e`（smart HTTP 对真 git）、`just sim`（故障注入集群）；全跑 `just ci` |
+| 评审方式 `<REVIEW_CMD/流程>` | Leader 审查 + **另一位 principal** 的 verified `approve`（`merge_rule_eval`，CHARTER §2/§7） |
+| 定时推进间隔 `<TICK_INTERVAL>` | 无定时器（D55）：`wgl collab watch --once` 挂监督者或外部 timer |
+| 决策辅助模型 `<DECISION_MODEL>` | `Jev`（`jev-decision` 技能；仅用于 §6 列出的重大非确定性判断，确定性门禁永远是命令） |
+| 跨团队 tracker `<TRACKER>` | 本仓 D1 协作层：`refs/collab/*` 卡片（经 `/mcp` 或 `wgl collab`）；镜像的 GitHub Issues 已停用（D46）——§7 的 tracker 流程以 D1 卡片执行 |
 
-## 1. Roles
+## 1. 角色
 
-### Leader (one per project)
+### Leader（架构师兼项目负责人）
 
-- Owns the decomposition: turns a goal into cards (`issue` entries) with **machine-checkable**
-  acceptance criteria, and keeps the board honest.
-- Dispatches each unowned card to a worker and supervises it (launch, timeout, budget, restart, log).
-- Reviews the worker's patch, merges, pushes, and records `merge_result` plus `status: closed`.
-- Escalates to the human for ambiguity, authorization or external input — never guesses.
-- **Does not write the patch it reviews.** A leader that wrote a commit is not its reviewer; that
-  card's review goes to another worker's principal, or the work waits for a second principal (D59).
+- 架构设计与技术方案决策
+- 任务拆解、派工与节奏管理
+- 代码/设计审查
+- 验收与合并分支
+- 必要时与人类沟通、请求决策
 
-### Worker (one per card)
+**原则上 Leader 不写代码。** 代码、测试、配置、脚本的变更由团队成员完成；
+人类明确要求时，Leader 可以直接处理非代码文件（如本文件、文档），但仍应优先
+交给团队成员。（项目加严约定：写了自己补丁的 Leader 不得再审查它——CHARTER D59。）
 
-- Works in **its own worktree and its own identity**: `.worktrees/<unit>`, branch `feat/<thread>`,
-  key at `<git-dir>/walgit/keys/<principal>.ed25519` (D58/D59/D62). One card, one owner, one worktree.
-- Claims before working: read the board, publish a `card_claim`, re-read the board; if someone else
-  holds a live claim, stand down (`docs/D1_PROTOCOL.md` §8.4).
-- Reports **every problem to its card** — an error, a red test, a missing dependency, an ambiguity —
-  as a signed `comment`, or `status: blocked` when it halts the work (D62). The card is the only
-  report channel: never the console alone, never a side chat.
-- **Does not spawn sub-agents**, does not push to `main`, does not merge.
+### 团队成员（子代理）
 
-The set of surviving worktrees is the team's physical roster: retiring a principal is
-`wgl collab principal-revoke`, never `git worktree remove` (D62).
+- 以**子代理**形式工作，每个成员拥有独立的 git worktree 与分支。
+- worktree 位于 `<WORKTREE_ROOT>/<unit>`，不得放在项目目录之外；分支命名
+  `<BRANCH_PREFIX><unit>`。worktree 是协作身份，**永不删除**（退休 principal
+  用 `wgl collab principal-revoke`，CHARTER D62）。
+- 只在自身 worktree 内工作，不直接修改主工作区或其他成员的工作区；**先 claim
+  再动手**（`wgl collab claim`，退出 2 = stand down 不得开工——CHARTER §8.4）。
+- 完成后必须提交，并在最终报告给出：分支名、commit SHA、改动摘要、
+  运行的命令与结果、风险或未验证项；每个问题都以签名 comment/status 写回卡片。
+- 成员不得再派生下级子代理，避免任务失控；不 push main、不合并。
 
-## 2. Delivery flow
+## 2. 交付流程
 
-1. **File the card** — an `issue` root entry: title, body, owner, and acceptance criteria that a
-   command (or a reviewer with the diff) can decide. Pure backlog with no owner is still written as a
-   card with `status: blocked` / `needs-human`; a thread with no `status` entry shows as unassigned.
-2. **Claim it** — `card_claim` with `{ttl?, worktree, branch, work}`; duplicate claims are legal,
-   duplicate *execution* is not — the board's `owner` after your publish is the verdict.
-3. **Work** in your own worktree/branch; keep `status` current (`in-progress`, `blocked`,
-   `needs-human`), and put the live worktree/branch/work context on it.
-4. **Hand to review** — `status: needs-review` with the branch and commit evidence on the card.
-5. **Review** — a principal other than the author judges the diff against the card's acceptance and
-   publishes a `review` with severity-tagged findings (`file:line` + failure scenario).
-6. **Merge** — no Critical/Important finding **and** all acceptance green ⇒ the leader merges
-   (local merge → push → one `merge_result` + `status: closed`). Minor does not block. Anything else
-   routes back to the worker as `in-progress`, or to a fixer; genuine ambiguity goes to `needs-human`.
+1. Leader 在 `<MAIN_BRANCH>` 上维护可构建、可测试的基线。
+2. Leader 拆解任务并创建 worktree/分支派工；任务边界必须互不重叠；每张卡有
+   机器可判定的验收标准（CHARTER §2 的派工模板）。
+3. 成员在各自 worktree 内实现、自测、提交（小提交、Conventional Commits、
+   每个 commit 可构建）。
+4. Leader 审查 diff 与设计，按验收标准逐项验证；findings 带 `file:line` 与
+   失败场景。
+5. 通过后由 Leader 以 `--no-ff` 合并（合并后删除已合并分支；worktree 保留），
+   推送并在卡片落 `merge_result` + `status: closed`；未通过则附具体失败信息
+   退回返工。
+6. 以**可交付**为目标：文档、测试、示例配置与实现同等重要。
 
-Moving a card is one signed `status` entry, never a board write; the projection re-derives columns
-from the entries.
+## 3. 验收标准
 
-## 3. Acceptance gates (before any merge)
+合并任何分支前，Leader 至少执行（与 CHARTER §3 同源）：
 
 ```bash
-just warnings      # zero rustc warnings
-just clippy        # -D warnings
-just test          # fast tier: lib/bins, wildcard crates, server integration
-just wgl-test      # the wgl client's zig unit/golden tests
-just wgl-e2e       # the wgl transport e2e (register→push→aggregate→claim→fold)
-just e2e           # smart HTTP against real git
-just sim           # fault-injected cluster over one truth store
-just web-test      # SPA unit tests; plus `pnpm run build` for oxlint + tsc
+just warnings        # 零 rustc 警告
+just clippy          # -D warnings
+just test            # 快速层（含 wgl-test）
+just wgl-e2e         # wgl 传输端到端
+just e2e             # smart HTTP 对真实 git
+just sim             # 故障注入集群
+just web-test        # SPA 改动时；另跑 just web-build
 ```
 
-A change touching `smart.rs`, receive/upload-pack, publish, sync, leases, checkpoints or bundles
-also carries a round-trip note per `docs/ROUNDTRIPS.md`. A change touching the SPA also passes
-`just web-build`. A release runs all of the above as `just ci`.
+并通过以下检查：
 
-Blocking, on top of the commands:
+- 不破坏对外契约（协议格式、公开 API、配置项、工具 schema）；协议改到桶通道的
+  按被删面名 `docs/ROUNDTRIPS.md` 补往返注记；
+- 审查发现的 Critical/Important 问题已修复，或有明确、可接受的处置结论；
+- 新增配置项同步更新 `walgit.example.toml`、`docs/CONTRACT.md` 与示例；
+  用户可见面（CLI/MCP/工作流）同批更新 `web/SKILL.md`、`skills/*/SKILL.md` 且
+  `scripts/check-skill-covers-cli.sh` 保持绿；
+- 新增行为有测试；修复缺陷有回归测试；不删除、跳过或削弱测试来换绿；
+- 日志只写 stderr，标准输出不被调试信息污染；无凭据、无硬编码主机。
 
-- new behaviour has tests; a defect fix has a regression test;
-- no deleted, skipped or weakened test to make the pipeline green;
-- a user-visible surface (CLI command/flag, MCP tool/resource, workflow) updates `web/SKILL.md` and
-  `skills/walgit/SKILL.md` in the same change, and `scripts/check-skill-covers-cli.sh` stays green;
-- cross-crate contracts, config keys and protocol docs move with the code (`docs/CONTRACT.md`,
-  `walgit.example.toml`);
-- the clippy gate is part of the merge bar even while CI keeps its job `continue-on-error`
-  (`docs/WORKING_RULES.md`).
+## 4. 推进节奏
 
-## 4. Rhythm
+- 本仓**无定时器**（D55）：Leader 以读板推进——`wgl collab watch --once` 挂在
+  监督者或外部 timer 下；若一轮无新进展，只汇报状态，不重复派发相同任务。
 
-There is no scheduler. The leader advances the board by reading it — `wgl collab watch` under a
-supervisor, or `--once` under a timer — and by dispatching what is unowned. Instance state is local
-and disposable; durable truth is `refs/collab/*`. A held, long-polling "wait until something
-changes" request is not an option: refs-level polling is the observation surface (D55). If a pass
-finds nothing new, report status; do not re-dispatch the same card.
+## 5. 沟通与权限
 
-## 5. Communication and permissions
+- 卡片是记录：决策、阻塞、红测试与例外都以签名条目写在 `refs/collab/*` 的
+  卡片上，过程闲聊不入卡。
+- 影响交付方向、需要人类拍板的问题，Leader 直接向人类提问，不自行假设。
+- **不要求在对话中粘贴密钥**。凭据统一放在约定的密钥存放位置（macOS Keychain、
+  环境变量、私有凭据仓库），由人类配置后再通知验收。
+- 对外的真实联调、发布、推送远端（`github` 镜像）、发版 tag、删仓库等外向或
+  不可逆操作，需要人类确认后进行（`docs/RELEASE.md` 是发布路径）。
+- 删除文件、强制推送、改写历史等难以恢复的操作，先确认再执行。
 
-- The card is the record. Decisions, blockers, red tests and exceptions go there as signed entries;
-  process chatter stays out of it.
-- Outward or irreversible acts need the human first: pushing to `github`, cutting a release tag,
-  deleting a repository, forcing history (`docs/RELEASE.md` has the release path).
-- **No credentials in the conversation, the repository, a card, a commit or a command line.** The
-  tokens this project needs already live in their own places (the private `sqb-private` repository,
-  the macOS Keychain, environment variables); reference them, never copy them.
-- Deletion, force-push and history rewriting are confirmed before execution.
+## 6. 决策辅助（Jev）
 
-## 6. Tracker and cross-team work
+项目使用 **Jev**（`jev-decision` 技能）作为独立第三方决策参考。
 
-The tracker is the D1 collaboration layer (`refs/collab/*`), not GitHub: the mirror's Issues, Wiki,
-Projects and Discussions are disabled (D46). Read and write it over `/mcp` (`collab_board`,
-`collab_thread`, `collab_publish`, …); `wgl collab …` is the scripting form of the same lanes (D69).
+- **适用范围**：重大且非确定性的判断——架构方案取舍、分支合并/退回、风险等级、
+  优先级排序、是否接受某项变更。
+- **不适用**：构建、测试、验签、格式校验、权限门禁等确定性校验必须由代码/命令完成，
+  不得用模型替代（CHARTER §0：确定性门禁是命令，判断是 Leader 的）。
+- **调用方式**：优先使用 `jev-decision` 技能
+  （`~/.agents/skills/jev-decision/scripts/jev.py` 的 `choice` / `score` / `noul`
+  子命令；若会话配置了 jev MCP，则使用对应工具）。MCP 方式先跑 `jev_health`，
+  区分网络问题与模型拒绝；一次请求尽量合并多个问题以降低输入 token 成本。
+- **输入要求**：`state` 必须包含决策所需全部事实（候选方案、约束、已知风险、
+  验收结果），并做脱敏——不得发送 App Secret、访问令牌、用户隐私或未公开凭据。
+- **效力定位**：Jev 输出只是**独立第三方参考**，不是决定。Leader 保留最终决定权，
+  并必须在决策记录（`docs/DECISIONS.md` 或卡片签名条目）写明：问题、Jev 的
+  答案/概率/confidence、最终决定及理由。Jev 不能覆盖人类指令、全局安全规则或
+  确定性门禁。
+- **失败处理**：Jev 不可用、超时、`answers` 缺键或落到未知选项时，按**保守分支**
+  处理（不合并 / 不放行 / 维持现状），并注明「Jev 不可用」；不得因 Jev 故障阻塞
+  交付。必须由人类拍板的决策，直接向人类提问。
+- **成本与幂等**：按输入 token 计费；同一决策不要反复调用，结果按输入摘要缓存。
+  不打印 key，key 的解析顺序遵循 `jev-decision` 技能文档。
 
-Cross-team or cross-repository work is a card too: background, expected result, acceptance,
-owner/team, deadline and links in the body; state changes as `status` entries with a note. Releases
-are a separate, human-driven act — see `docs/RELEASE.md` (D57: refs reach GitHub by hand, and the
-mirror is never a resident loop).
+## 7. 跨团队协同：以卡片为准
 
-## 7. Engineering discipline
+- **适用场景**：涉及其他团队、仓库、外部贡献者，或需跨团队排期与验收的工作。
+- **唯一事实源**：每个跨团队请求开一张 D1 卡片（`refs/collab/*` 的 `issue`
+  条目；镜像的 GitHub Issues 已停用，D46），至少写清：背景、期望结果、验收
+  标准、负责人/团队、截止时间、相关链接（分支、commit、卡片线程）。
+- **流程**：
+  1. Leader 创建或指派卡片，指定 owner；状态变化以 `status` 条目留痕。
+  2. 成员在独立 worktree 开发；提交信息引用卡片线程 id。
+  3. 方案/接口变更、延期与风险在卡片留痕；需人类拍板的写 `needs-human`。
+  4. 验收标准满足、卡片 `status: closed`（带 `merge_result`）后，分支才算交付。
+- **工具**：`/mcp`（`collab_board` / `collab_thread` / `collab_publish`）或
+  `wgl collab`，两者是同一事实源的两种车道。
+- **安全**：卡片与条目中不得粘贴密钥、令牌、用户隐私；日志与配置必须脱敏。
 
-The short version; `docs/WORKING_RULES.md` is the authority.
+## 8. 软件工程纪律
 
-- Small commits, one logical change each, Conventional Commits, each commit buildable.
-- `main` is protected: code lands through a member branch and a merge, never by a direct commit.
-- Quality gates (§3) run before the merge; a red gate blocks, it is never rerouted.
-- Review is by a different principal; findings name `file:line` and the failure scenario.
-- Contracts (protocol, API, config keys, tool schemas) change together with their docs and examples;
-  breaking ones need the human.
-- New dependencies need a reason; no new auth paths; no `LIST` on a hot path; no silent long work.
-- The bucket is the repository — everything else is a cache or a reader of the log
-  (`docs/ARCHITECTURE.md` §3).
-
-## 8. Dispatch template (the leader copies this onto a card)
-
-```markdown
-你是本项目团队成员（worker）。仓库：<REPO_ROOT>。
-工作区/分支（已建好）：.worktrees/<unit>，分支 feat/<thread>。
-先读 GOAL.md、docs/ARCHITECTURE.md，以及 docs/DECISIONS.md 中与本任务相关的条目。
-只在该 worktree 内改动；不 push main、不合并、不派生下级代理；先 claim 再动手。
-
-## 卡片
-<thread id、标题、机器可判定的验收标准>
-
-## 边界
-<要做什么；明确不做什么；不重叠其他成员的文件>
-
-## 验收
-just warnings / just clippy / just test（改到 SPA 加 just web-test；改到 git 协议加 just e2e）。
-新增行为有测试，修复缺陷有回归测试。
-
-## 交付
-先把状态和问题写进卡片（签名 comment / status），再报告：
-分支、commit SHA、改动摘要、红→绿证据、运行的命令与结果、剩余风险。
-```
+- 小提交、单逻辑变更、Conventional Commits、每个 commit 可构建。
+- `main` 受保护：变更走成员分支 + 合并，绝不直推。
+- 质量门禁（§3）在合并前跑；红门即阻塞，绝不绕行。
+- 评审由不同 principal 做；findings 带 `file:line` 与失败场景。
+- 契约（协议、API、配置键、工具 schema）与文档、示例同批变更；破坏性的先过人类。
+- 新依赖要有理由；不加新认证路径；热路径不 `LIST`；不做无声长任务。
+- 桶即仓库——其余一切是缓存或日志的读者（`docs/ARCHITECTURE.md` §3）。
 
 ## 9. Definition of Done
 
-A branch may merge only when:
+见 [`docs/CHARTER.md`](docs/CHARTER.md) §9（逐项核对表）。合并后 Leader 在卡片
+落 `merge_result` + `status: closed`，或把阻塞写上卡。
 
-- [ ] the target behaviour is implemented and nothing outside the card's boundary moved;
-- [ ] every gate in §3 is green (including the suites the diff's area demands);
-- [ ] new/changed behaviour has tests; a defect has a regression test;
-- [ ] docs, examples and config keys that the change touches are updated in the same change;
-- [ ] no credential, no debug output on a standard channel, no hard-coded host;
-- [ ] review completed by another principal, Critical/Important findings resolved or explicitly
-      dispositioned;
-- [ ] commits are small, conventional and each buildable;
-- [ ] the card carries `merge_result` + `status: closed`, or the blocker is on the card.
+## 10. 文档地图
 
-## 10. Document map (one home per fact — link, don't duplicate)
-
-| Doc | Who / when to read it |
-|---|---|
-| `GOAL.md` | Everyone, first. What walgit is for, the acceptance table, what we do not optimise for. |
-| `docs/ARCHITECTURE.md` | Everyone. Constraints §1, the WAL §2, the principles a PR is judged against §3. |
-| `AGENTS.md` (this) | Everyone. The charter: roles, delivery, gates, rhythm, tracker, document map. |
-| `docs/DECISIONS.md` | Anyone changing a shape or asking "why is it like this". Every decision in force (D1–D68), append-only. |
-| `docs/WORKING_RULES.md` | Anyone running a gate. Test tiers, known-flaky list, clippy/warnings bar, no-backwards-compat banner. |
-| `docs/RELEASE.md` | Anyone pushing anywhere or cutting a release: remotes, credentials policy, CI signals, the GitHub mirror. |
-| `README.md` | The introduction: why (the Cursor lineage), what it does, how it works briefly, running it, invariants. |
-| `.github/copilot-instructions.md` | AI coding agents working in this repository (GitHub web/IDE): pointers, workflow, CI reading. |
-| `docs/BUNDLE_URI_DESIGN.md` | Anyone touching bundles, the scheduler, base rebuilds, or big-repo clone/fetch UX. Design of record; normative config in §4. |
-| `docs/WINDOWS.md` | Developing on a Windows host: prerequisites, test surface, `dev-store` equivalent, NTFS symlink coverage. |
-| `docs/TRAY_LINUX_BACKEND.md` | Anyone touching the tray's Linux backend, the glib/gtk dependency chain, or the Dependabot glib advisory. |
-| `docs/ROUNDTRIPS.md` | **Anyone touching a protocol that talks to the bucket** (publish, sync, checkpoints, compaction/leases, bundles, remote reader, store backends). Round trips are the cost model; correct is not sufficient. |
-| `docs/spec/README.md` | Anyone running `just spec` or auditing the WAL contract: bounded TLA+ models, the contract map, and the open gaps. |
-| `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
-| `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
-| `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
-| `docs/D1_CI_PROTOCOL.md` | Anyone touching the decentralized CI protocol: the `walgit ci` runner, `ci_claim`/`ci_result` entries, or the CI aggregation. |
-| `docs/D1_PROTOCOL.md` | Anyone touching the D1 collaboration layer: identities, refs layout, entry schema/canonical signing, verification, aggregation, the board projection, the D45 fold, claims (§8.4), observation lanes. |
-| `docs/D1_COLLAB_DESIGN.md` | Design background and progress history of the D1 layer (current normative rules are in `docs/D1_PROTOCOL.md`). |
-| `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
-| `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
-| `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
-| `web/API.md` | UI/SDK authors and anyone changing `web/*.rs`. Wire contract, caching rules, SSE envelope, tasks, prefix-first lanes. |
-| `web/sdk/README.md` | Users of `repos.js`. |
-| `web/README.md` | Frontend engineers changing the React SPA, Vite build, SDK adapter, static assets, loading states. |
-| `walgit.example.toml` | Every config key with its default and a comment. Change it with the code. |
-| `walgit.standalone.toml` | The one-machine shape: `walgit-server --config walgit.standalone.toml` → `https://walgit.localhost:8080/`. |
-| `deploy/nginx.conf.example` | An optional nginx in front; documents the `X-Accel-Redirect` byte-offload contract. |
-| `deploy/tray/` | The tray app for a local deployment (macOS ships it inside the DMG): start/stop, update detection, click-to-upgrade. |
-| `deploy/windows/` | The Windows installer (Inno Setup): per-user install, autostart; built into releases by `release.yml`. |
-| `deploy/linux/` | The linux `.deb` assembly; built into releases by `release.yml`, validated on every PR by `ci.yml`. |
-| `deploy/tray/macos/build-dmg.sh` | The macOS release DMG pipeline, run by `release.yml` and reproducible locally. |
-| `Containerfile`, `flake.nix` | An OCI image; a Nix package, image and devshell. |
+见 [`docs/CHARTER.md`](docs/CHARTER.md) §10（一个事实一个家）。快速入口：
+`GOAL.md`（为什么）→ `docs/ARCHITECTURE.md`（是什么）→ `docs/CHARTER.md`
+（怎么协作）→ `docs/DECISIONS.md`（为什么是这样，D1–D69，append-only）。

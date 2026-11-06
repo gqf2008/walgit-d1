@@ -1,6 +1,6 @@
 # walgit — architecture: constraints, the WAL, principles
 
-> Split out of `AGENTS.md` on 2026-11-05. `AGENTS.md` is now the collaboration
+> Split out of `AGENTS.md` on 2026-11-05. `AGENTS.md` is now the generic collaboration framework and `docs/CHARTER.md` the project-specific
 > charter; this file is the system manual. Section numbers §1–§3 are preserved
 > verbatim, so a reference like `docs/ARCHITECTURE.md §2.3` resolves to the
 > same text it always did. Decision ids (`D1`…`D68`) live in

@@ -249,7 +249,7 @@ fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     // `Path::new("walgit.toml").parent()` is `Some("")`, not `None` — the
     // empty component must resolve to the working directory (PR #136 review
     // B1). Without this, every bare relative `--config` name (the documented
-    // shape, AGENTS.md §10: `--config walgit.standalone.toml`) failed the
+    // shape, docs/CHARTER.md §10: `--config walgit.standalone.toml`) failed the
     // post-rename sync on `File::open("")` — after the rename had already
     // landed, so the save was reported 500 while the file was written.
     let parent = path
@@ -926,7 +926,7 @@ backend = \"memory\"
     }
 
     /// B1 regression (PR #136 review): `--config walgit.toml` — a **bare
-    /// relative name** — is a documented shape (AGENTS.md §10:
+    /// relative name** — is a documented shape (docs/CHARTER.md §10:
     /// `--config walgit.standalone.toml`). Its `Path::parent()` is
     /// `Some("")`, not `None`; before the fix the post-rename parent fsync
     /// failed on `File::open("")` with ENOENT *after the rename had

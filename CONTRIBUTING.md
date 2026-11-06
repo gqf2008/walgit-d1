@@ -1,6 +1,6 @@
 # Contributing
 
-动手前先读 [AGENTS.md](AGENTS.md)（协作章程：角色、派工、验收、合并）
+动手前先读 [AGENTS.md](AGENTS.md)（协作框架）与 [docs/CHARTER.md](docs/CHARTER.md)（项目章程：角色、派工、验收、合并）
 以及 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（架构：约束、WAL、原则）—— 本文件只是路标。
 
 ## 环境

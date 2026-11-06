@@ -120,7 +120,7 @@ git fetch origin '+refs/collab/*:refs/collab/*'
   macOS 签名+公证 DMG 由 `deploy/tray/macos/build-dmg.sh` 在 CI 之外构建后上传 Release。
 
 **工程与治理** — 上游没有这些；本分叉按 agent 协作的方式补上：
-issue/PR 模板与批次化流程、`AGENTS.md` 协作章程、CI 分级（fast tier / e2e /
+issue/PR 模板与批次化流程、`AGENTS.md` 协作框架 + `docs/CHARTER.md` 项目章程、CI 分级（fast tier / e2e /
 windows fast tier）、CodeQL、Dependabot、`code review` 与发布规范、Windows 开发
 runbook（`docs/WINDOWS.md`）等。
 
@@ -129,7 +129,7 @@ runbook（`docs/WINDOWS.md`）等。
 - `docs/USER_GUIDE.md` — 面向人类的完整使用手册（协作层怎么用）。
 - `docs/D1_PROTOCOL.md` — D1 协作层规范；`docs/D1_COLLAB_DESIGN.md`（设计背景）、`docs/D1_CI_PROTOCOL.md`（CI 子协议）。
 - `docs/BOARD.md`、`docs/POLICY.md` — 看板 / 推送策略。
-- `AGENTS.md` — 协作章程（角色、派工、验收、合并）；架构在 `docs/ARCHITECTURE.md`，设计决策在 `docs/DECISIONS.md`。
+- `AGENTS.md` — 通用协作框架；[`docs/CHARTER.md`](docs/CHARTER.md) — 项目章程（角色、派工、验收、合并）；架构在 `docs/ARCHITECTURE.md`，设计决策在 `docs/DECISIONS.md`。
 - `GOAL.md` — 上游的验收目标（本分叉保持其内核语义不变）。
 
 ### 与上游的关系

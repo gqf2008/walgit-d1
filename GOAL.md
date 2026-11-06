@@ -1,7 +1,7 @@
 # GOAL — what walgit is for
 
 Context: for everyone (humans and agents) working on this repository. Read this before `docs/ARCHITECTURE.md`. This page
-is **what we want**; `docs/ARCHITECTURE.md` is **what the system is**, and `AGENTS.md` is **how the team works**. When a choice is not obviously right, come back here
+is **what we want**; `docs/ARCHITECTURE.md` is **what the system is**, and `AGENTS.md` + `docs/CHARTER.md` are **how the team works**. When a choice is not obviously right, come back here
 and ask: which option serves this goal better?
 
 ## The one sentence

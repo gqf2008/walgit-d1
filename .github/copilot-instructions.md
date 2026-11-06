@@ -2,7 +2,7 @@
 
 walgit is a git server (one binary in front of an object store) with a WAL-backed
 storage engine, developed as an **agent-native collaboration platform**. Read
-the charter and the architecture before touching anything: `AGENTS.md` (roles,
+the charter and the architecture before touching anything: `AGENTS.md` + `docs/CHARTER.md` (roles,
 dispatch, acceptance gates, document map), `docs/ARCHITECTURE.md` (constraints §1,
 WAL design §2, principles §3), `docs/DECISIONS.md` (every decision in force, D1–D68),
 then `GOAL.md` for what it is for, `CONTRIBUTING.md` for the workflow. These
