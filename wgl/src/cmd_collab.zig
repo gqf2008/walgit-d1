@@ -133,7 +133,7 @@ pub fn thread(c: *Ctx, p: *args.Parsed) !u8 {
 }
 
 /// An entry as a json! value would serialize it (struct → sorted BTreeMap).
-fn entry_value(alloc: std.mem.Allocator, e: *const Entry) Value {
+pub fn entry_value(alloc: std.mem.Allocator, e: *const Entry) Value {
     var o = jsonio.new_object();
     jsonio.obj_put(&o, alloc, "version", .{ .integer = e.version });
     jsonio.obj_put(&o, alloc, "kind", .{ .string = e.kind });
@@ -592,7 +592,7 @@ const PublishResult = struct { ref_name: []const u8, oid: []const u8 };
 /// Write/replace the registration blob and its ref (§4.3). Rotation pushes
 /// a forced refspec (`+`): the update is a forced one by construction — the
 /// signer rotated the key — and the ref points at a blob, not a commit.
-fn publish_principal(c: *Ctx, repo: []const u8, principal: []const u8, public_key: []const u8, push: ?[]const u8) !PublishResult {
+pub fn publish_principal(c: *Ctx, repo: []const u8, principal: []const u8, public_key: []const u8, push: ?[]const u8) !PublishResult {
     var o = jsonio.new_object();
     jsonio.obj_put(&o, c.alloc, "version", .{ .integer = 1 });
     jsonio.obj_put(&o, c.alloc, "principal", .{ .string = principal });
