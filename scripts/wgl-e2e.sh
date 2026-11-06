@@ -71,14 +71,14 @@ step "register two principals through receive-pack"
 
 step "issue → status → patch chain (alice), pushed"
 issue_oid="$( cd "$a" && "$W" collab entry --kind issue --id cc-e2e-demo --actor alice \
-    --body '{"title":"the demo card"}' --push origin | awk '{print $2}' ))"
+    --body '{"title":"the demo card"}' --push origin | awk '{print $2}' )"
 [ -n "$issue_oid" ] || fail "issue entry produced no oid"
 status_oid="$( cd "$a" && "$W" collab entry --kind status --id cc-e2e-demo --actor alice \
     --parent "$issue_oid" --body '{"status":"in-progress","worktree":"wt-a","branch":"feat/a"}' \
-    --push origin | awk '{print $2}' ))"
+    --push origin | awk '{print $2}' )"
 patch_oid="$( cd "$a" && "$W" collab entry --kind patch --id cc-e2e-demo --actor alice \
     --parent "$status_oid" --base refs/heads/main --head refs/heads/feat/a \
-    --body '{"message":"the change"}' --push origin | awk '{print $2}' ))"
+    --body '{"message":"the change"}' --push origin | awk '{print $2}' )"
 [ -n "$patch_oid" ] || fail "patch entry produced no oid"
 
 step "the second clone aggregates and verifies offline"
