@@ -1566,12 +1566,26 @@ test "thread value carries the host shape: id, ordered entries, broken_refs, pr"
     const issue_body = try std.json.parseFromSliceLeaky(Value, a, "{\"title\":\"the card\"}", .{});
     const entries = [_]entry_mod.EntryRef{
         .{ .oid = "1111111111111111111111111111111111111111", .principal = "alice", .entry = .{
-            .version = 1, .kind = "issue", .id = "card-1", .actor = "alice", .ts = 10, .parent = "",
-            .refs = null, .body = issue_body, .sig = "",
+            .version = 1,
+            .kind = "issue",
+            .id = "card-1",
+            .actor = "alice",
+            .ts = 10,
+            .parent = "",
+            .refs = null,
+            .body = issue_body,
+            .sig = "",
         } },
         .{ .oid = "2222222222222222222222222222222222222222", .principal = "alice", .entry = .{
-            .version = 1, .kind = "comment", .id = "card-1", .actor = "alice", .ts = 20, .parent = "1111111111111111111111111111111111111111",
-            .refs = null, .body = try std.json.parseFromSliceLeaky(Value, a, "{\"related\":[\"deadbeef\"]}", .{}), .sig = "",
+            .version = 1,
+            .kind = "comment",
+            .id = "card-1",
+            .actor = "alice",
+            .ts = 20,
+            .parent = "1111111111111111111111111111111111111111",
+            .refs = null,
+            .body = try std.json.parseFromSliceLeaky(Value, a, "{\"related\":[\"deadbeef\"]}", .{}),
+            .sig = "",
         } },
     };
     const v = try threadValue(a, "card-1", &entries, &principals, &collab.MergeRules{});
@@ -1592,10 +1606,24 @@ test "board version is the Rust witness+claim rule" {
     const a = arena_state.allocator();
     var cards = util.List(collab.BoardCard).init(a);
     try cards.append(.{
-        .id = "card-1", .title = "", .prose = "", .actor = "", .status = "open", .owner = "",
-        .worktree = "", .branch = "", .work = "", .created_ts = 0, .last_ts = 0,
-        .entries = 0, .verified = 0, .unverified = 0, .kinds = &.{}, .last_oid = "abc123",
-        .merge = null, .claim = null,
+        .id = "card-1",
+        .title = "",
+        .prose = "",
+        .actor = "",
+        .status = "open",
+        .owner = "",
+        .worktree = "",
+        .branch = "",
+        .work = "",
+        .created_ts = 0,
+        .last_ts = 0,
+        .entries = 0,
+        .verified = 0,
+        .unverified = 0,
+        .kinds = &.{},
+        .last_oid = "abc123",
+        .merge = null,
+        .claim = null,
     });
     var columns = [_]collab.BoardColumn{.{ .name = "open", .cards = cards.items }};
     const board = collab.Board{ .columns = &columns };
@@ -1613,10 +1641,24 @@ test "board version is the Rust witness+claim rule" {
     columns[0].cards = cards.items;
     var with_claim_cards = util.List(collab.BoardCard).init(a);
     try with_claim_cards.append(.{
-        .id = "card-1", .title = "", .prose = "", .actor = "", .status = "in-progress", .owner = "bob",
-        .worktree = "", .branch = "", .work = "", .created_ts = 0, .last_ts = 0,
-        .entries = 0, .verified = 0, .unverified = 0, .kinds = &.{}, .last_oid = "abc123",
-        .merge = null, .claim = .{ .state = "claimed", .oid = "x", .actor = "bob", .ts = 90, .ttl = 30, .expires_at = 120 },
+        .id = "card-1",
+        .title = "",
+        .prose = "",
+        .actor = "",
+        .status = "in-progress",
+        .owner = "bob",
+        .worktree = "",
+        .branch = "",
+        .work = "",
+        .created_ts = 0,
+        .last_ts = 0,
+        .entries = 0,
+        .verified = 0,
+        .unverified = 0,
+        .kinds = &.{},
+        .last_oid = "abc123",
+        .merge = null,
+        .claim = .{ .state = "claimed", .oid = "x", .actor = "bob", .ts = 90, .ttl = 30, .expires_at = 120 },
     });
     var claim_columns = [_]collab.BoardColumn{.{ .name = "open", .cards = with_claim_cards.items }};
     const claim_board = collab.Board{ .columns = &claim_columns };
@@ -1670,12 +1712,26 @@ test "ci_status answers the host shape {repo, runs}, optionally filtered by id" 
     , .{});
     const entries = [_]entry_mod.EntryRef{
         .{ .oid = "0123456789abcdef0123456789abcdef01234567", .principal = "ci", .entry = .{
-            .version = 1, .kind = "ci_claim", .id = "ci-run-1", .actor = "ci", .ts = 1_000,
-            .parent = "", .refs = null, .body = body, .sig = "",
+            .version = 1,
+            .kind = "ci_claim",
+            .id = "ci-run-1",
+            .actor = "ci",
+            .ts = 1_000,
+            .parent = "",
+            .refs = null,
+            .body = body,
+            .sig = "",
         } },
         .{ .oid = "89abcdef0123456789abcdef0123456789abcdef01", .principal = "ci", .entry = .{
-            .version = 1, .kind = "ci_claim", .id = "ci-run-2", .actor = "ci", .ts = 2_000,
-            .parent = "", .refs = null, .body = body, .sig = "",
+            .version = 1,
+            .kind = "ci_claim",
+            .id = "ci-run-2",
+            .actor = "ci",
+            .ts = 2_000,
+            .parent = "",
+            .refs = null,
+            .body = body,
+            .sig = "",
         } },
     };
     var principals = entry_mod.Principals.init(a);
@@ -1703,9 +1759,15 @@ test "collab_thread carries the PR view when the thread has a patch" {
         fn entry(al: std.mem.Allocator, kind: []const u8, oid: []const u8, ts: i64, parent: []const u8, body_json: []const u8, base: ?[]const u8, head: ?[]const u8) entry_mod.EntryRef {
             const body = std.json.parseFromSliceLeaky(Value, al, body_json, .{}) catch unreachable;
             return .{ .oid = oid, .principal = "alice", .entry = .{
-                .version = 1, .kind = kind, .id = "pr-card", .actor = "alice", .ts = ts,
-                .parent = parent, .refs = if (base == null and head == null) null else .{ .base = base, .head = head },
-                .body = body, .sig = "",
+                .version = 1,
+                .kind = kind,
+                .id = "pr-card",
+                .actor = "alice",
+                .ts = ts,
+                .parent = parent,
+                .refs = if (base == null and head == null) null else .{ .base = base, .head = head },
+                .body = body,
+                .sig = "",
             } };
         }
     }.entry;

@@ -273,9 +273,9 @@ fn result_json(alloc: std.mem.Allocator, r: *const ci.CiResult) ![]u8 {
     var out: util.List(u8) = .init(alloc);
     out.append_slice(try std.fmt.allocPrint(alloc, "{{\"oid\":{s},\"actor\":{s},\"ts\":{d},\"task\":{s},\"repo_ref\":{s},\"commit\":{s},\"attempt\":{d},\"claim\":{s},\"conclusion\":\"{s}\",\"exit_code\":", .{
         quoted(alloc, r.oid),      quoted(alloc, r.actor),
-        r.ts,                  quoted(alloc, r.task),
+        r.ts,                      quoted(alloc, r.task),
         quoted(alloc, r.repo_ref), quoted(alloc, r.commit),
-        r.attempt,             quoted(alloc, r.claim),
+        r.attempt,                 quoted(alloc, r.claim),
         r.conclusion.as_str(),
     })) catch @panic("oom");
     if (r.exit_code) |code| {
