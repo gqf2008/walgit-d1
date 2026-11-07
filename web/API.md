@@ -134,17 +134,30 @@ decode each segment.
   `500` and carry no `Retry-After`; `4xx` semantics are untouched.
 - **Push has a status boundary**: once a push negotiates `side-band-64k` (the
   normal case) the receive-pack response is committed as `200` when streaming
-  starts. A transient failure *after* that point cannot become a `503`: it is
-  reported on the sideband as `remote: walgit: service unavailable — retry the
-  push: …` and git exits non-zero. Treat that sentence (not the HTTP status) as
-  the retry signal; the `503 + Retry-After` contract above applies only while
-  the request is still at advertisement/sync, before the stream opens.
+  starts. A transient failure *after* that point cannot become a `503`, so it
+  is reported on the sideband and git exits non-zero. The sentence depends on
+  how far the push got: a failure while the instance syncs its local copy
+  prints `remote: walgit: service unavailable — retry the push: …`, while a
+  failure after the sync, while publishing, prints
+  `remote: walgit: service unavailable: publish failed: …` (the `ApiError`
+  body — it carries no `retry the push` suffix). Treat either
+  `service unavailable` sentence (not the HTTP status) as the retry signal;
+  the `503 + Retry-After` contract above applies only while the request is
+  still at advertisement/sync, before the stream opens.
+- **Narrated fetches have the same boundary**: when the fetch response is
+  already streaming (the repo is being materialized), a transient failure is a
+  band-3 error line, `remote error: walgit: service unavailable — retry the
+  fetch: …` — git dies on the first band-3 packet, so the whole sentence is
+  sent in one packet. A fetch before the stream opens gets the ordinary
+  `503 + Retry-After`; a zero-`have` fetch of a repo configured to require
+  bundle-uri gets the bundle-uri recipe instead.
 - **Signed URLs never reach the client**: a store error may quote the presigned
   URL it failed to fetch, whose query string carries `X-Amz-Credential` /
-  `X-Amz-Signature` / `x-id=…`. The response body (and the `remote: …` line a
-  git client prints from a receive-pack refusal) redacts every URL's query
-  string and fragment: scheme+host+path survive — enough to identify the
-  object, never enough to fetch it.
+  `X-Amz-Signature` / `x-id=…`. The response body, the SSE `error`/`notice`
+  packets, task records (`GET …/tasks`, `GET …/tasks/{id}`), and the `remote:
+  …` line a git client prints from a receive-pack refusal all redact every
+  URL's query string and fragment: scheme+host+path survive — enough to
+  identify the object, never enough to fetch it.
 - **Null safety**: every array field MUST be `[]` when empty, never `null`
   (the UI calls `.length`/`.map` directly).
 - **Timestamps**: RFC 3339 strings (`%aI`/`%cI`), e.g.

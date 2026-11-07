@@ -1378,6 +1378,13 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Whether an environment key belongs to the removed `[mcp]` table (D72).
+/// `WALGIT__MCP` itself and `WALGIT__MCP__*` children qualify; a longer
+/// first segment (`WALGIT__MCPFOO`) is an unrelated unknown key.
+fn is_legacy_mcp_override(key: &str) -> bool {
+    key == "WALGIT__MCP" || key.starts_with("WALGIT__MCP__")
+}
+
 impl Config {
     pub fn parse(toml_text: &str) -> Result<Config> {
         // Read path: the document alone is not the whole config — a host may
@@ -1453,8 +1460,10 @@ impl Config {
         for (k, why) in &ignored {
             // The removed `[mcp]` overrides are reported on stderr inside
             // `apply_env_report`: `parse` runs before `tracing_init`, so a
-            // tracing warn here would be dropped on the serve path.
-            if k.starts_with("WALGIT__MCP") {
+            // tracing warn here would be dropped on the serve path. Match the
+            // exact table or a nested key only: `WALGIT__MCPFOO` is an unknown
+            // key like any other and must still be warned about.
+            if is_legacy_mcp_override(k) {
                 continue;
             }
             tracing::warn!(key = %k, reason = %why, "ignoring {k}: unknown in this build");
@@ -2023,6 +2032,17 @@ mod tests {
             "{ignored:?}"
         );
         assert!(cfg.mcp.is_none());
+    }
+
+    /// The stderr suppression in `apply_env` matches the removed table's
+    /// exact keys only: a same-prefix stranger (`WALGIT__MCPFOO`) is an
+    /// ordinary unknown override and must still be warned about.
+    #[test]
+    fn only_the_removed_mcp_table_is_treated_as_legacy() {
+        assert!(super::is_legacy_mcp_override("WALGIT__MCP"));
+        assert!(super::is_legacy_mcp_override("WALGIT__MCP__SESSION_TTL"));
+        assert!(!super::is_legacy_mcp_override("WALGIT__MCPFOO"));
+        assert!(!super::is_legacy_mcp_override("WALGIT__MCPFOO__X"));
     }
 
     #[test]

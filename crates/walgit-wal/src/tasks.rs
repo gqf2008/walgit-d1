@@ -389,6 +389,14 @@ impl Tasks {
         outcome: Result<(String, Option<serde_json::Value>), (u16, String)>,
         repo_tx: Option<&ProgressTx>,
     ) -> TaskRecord {
+        // The one exit for every client-visible task sentence: the record's
+        // `summary`, the SSE terminal `error` packet and the band-2 `remote:`
+        // line all read this outcome, and a walked store error may quote a
+        // presigned URL.
+        let outcome = match outcome {
+            Ok((summary, value)) => Ok((crate::redact_url_queries(&summary), value)),
+            Err((status, message)) => Err((status, crate::redact_url_queries(&message))),
+        };
         let record = {
             let mut rec = state.record.lock();
             rec.finished = Some(now_rfc3339());
@@ -506,5 +514,50 @@ impl Tasks {
         self.recent(repo)
             .into_iter()
             .find(|r| r.kind == kind && r.ok.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store error may quote a presigned URL. Every client-visible form of a
+    /// task sentence (record summary, SSE terminal error, replay/notice packet,
+    /// and the band-2 narration read from the same record) must lose the query
+    /// string while keeping scheme+host+path.
+    #[test]
+    fn a_failed_task_redacts_signed_urls_on_every_surface() {
+        const SIGNED: &str = "https://bucket.example/repos/t/r/bundles/list.pb?X-Amz-Signature=deadbeef&x-id=GetObject";
+        let clean = |text: &str| {
+            assert!(!text.contains("X-Amz-"), "signed parameter leaked: {text}");
+            assert!(!text.contains("x-id="), "signed parameter leaked: {text}");
+            assert!(
+                text.contains("https://bucket.example/repos/t/r/bundles/list.pb"),
+                "scheme+host+path must survive: {text}"
+            );
+        };
+
+        let tasks = Tasks::new();
+        let Begin::Started(handle) = tasks.begin("t/r", "fsck", HashMap::new(), None) else {
+            panic!("a fresh registry must start the task");
+        };
+        let id = handle.id();
+        handle.notice(format!("download failed: {SIGNED}"));
+        let record = handle.finish_err(503, format!("store failed: {SIGNED}"));
+        clean(&record.summary);
+
+        let state = tasks.get(&id).expect("the task record exists");
+        clean(&state.record().summary);
+        clean(&state.record().log_tail[0]);
+        match state.outcome().expect("the task has an outcome") {
+            Err((503, message)) => clean(&message),
+            other => panic!("expected the terminal error, got {other:?}"),
+        }
+
+        // The SSE stream serializes exactly these values: the task record, the
+        // replayed notice packets and the terminal error.
+        let (replay, _, _) = state.attach();
+        clean(&serde_json::to_string(&replay).expect("replay packets serialize"));
+        clean(&serde_json::to_string(&state.record()).expect("the record serializes"));
     }
 }
