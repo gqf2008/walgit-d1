@@ -2118,6 +2118,53 @@ async fn a_policy_read_classifies_a_policy_store_outage() -> TestResult {
     Ok(())
 }
 
+/// Task records and their SSE stream are client-visible: a store error that
+/// quotes a presigned URL must reach both with the query string (and fragment)
+/// redacted, keeping scheme+host+path (cc-ai-err-redact follow-up).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_task_redacts_signed_urls_on_the_record_and_sse() -> TestResult {
+    const SIGNED: &str = "https://bucket.example/repos/t/redact/bundles/list.pb?X-Amz-Signature=deadbeef&x-id=GetObject";
+    let server = Server::start().await?;
+    let clean = |text: &str| {
+        assert!(!text.contains("X-Amz-"), "signed parameter leaked: {text}");
+        assert!(!text.contains("x-id="), "signed parameter leaked: {text}");
+        assert!(
+            text.contains("https://bucket.example/repos/t/redact/bundles/list.pb"),
+            "scheme+host+path must survive: {text}"
+        );
+    };
+
+    let tasks = server.state.registry.tasks();
+    let walgit_wal::tasks::Begin::Started(handle) =
+        tasks.begin("t/redact", "fsck", std::collections::HashMap::new(), None)
+    else {
+        anyhow::bail!("a fresh task kind must start");
+    };
+    let id = handle.id();
+    handle.notice(format!("download failed: {SIGNED}"));
+    let _ = handle.finish_err(503, format!("store failed: {SIGNED}"));
+
+    // The JSON task list carries the record (summary + log tail).
+    let (status, text, _) = get(&server, "/t/redact/api-browser/tasks").await?;
+    anyhow::ensure!(status.is_success(), "task list: {status} {text}");
+    clean(&text);
+
+    // The SSE stream replays the notice and sends the terminal error packet.
+    let (status, text, _) = get_h(
+        &server,
+        &format!("/t/redact/api-browser/tasks/{id}"),
+        &[("Accept", "text/event-stream")],
+    )
+    .await?;
+    anyhow::ensure!(status.is_success(), "task SSE: {status} {text}");
+    anyhow::ensure!(
+        text.contains("event: error"),
+        "the terminal packet must be the error: {text}"
+    );
+    clean(&text);
+    Ok(())
+}
+
 /// The effective-settings handler syncs the manifest before answering; a
 /// retryable manifest failure must stay the same 503 class (cc-ai-store-503
 /// review findings 1 and 2).

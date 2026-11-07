@@ -100,7 +100,10 @@ impl Reporter {
     /// event in the current span (the task.run span on task futures), so a
     /// trace tells the same story the client was told.
     pub fn notice(&self, text: impl Into<String>) {
-        let text = text.into();
+        // Client-visible (SSE `notice`, and the band-2 narration a push/fetch
+        // streams) and logged: a store error quoted here may carry a
+        // presigned URL, so redact at the one exit.
+        let text = crate::redact_url_queries(&text.into());
         tracing::debug!(narration = "notice", "{text}");
         self.send(Progress::notice(text));
     }

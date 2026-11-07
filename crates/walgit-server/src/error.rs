@@ -50,12 +50,13 @@ impl ApiError {
 impl ApiError {
     /// The plain-text body / SSE `error` packet message.
     ///
-    /// Every client-visible form of an error goes through here (the HTTP body,
-    /// the SSE `error` packet, and the `walgit: …` line a receive-pack refusal
-    /// puts on the sideband for `git` to print), so this is the one place that
-    /// guarantees a store's presigned URL never leaves the process: the query
-    /// string carries `X-Amz-Credential` / `X-Amz-Signature` and is removed,
-    /// scheme+host+path are kept (they name the object without granting it).
+    /// Every client-visible form of an `ApiError` goes through here (the HTTP
+    /// body, the SSE `error` packet, and the `walgit: …` line a receive-pack
+    /// refusal puts on the sideband for `git` to print). Task records and
+    /// progress packets take the same [`redact_url_queries`] exit inside
+    /// `walgit-wal`, so no client-visible text carries a signed URL's query
+    /// string; scheme+host+path are kept (they name the object without
+    /// granting it).
     pub fn message(&self) -> String {
         redact_url_queries(&self.raw_message())
     }
@@ -78,53 +79,13 @@ impl ApiError {
     }
 }
 
-/// Remove the query string (and fragment) from every `scheme://…` URL in
-/// `msg`, keeping scheme, host and path.
-///
-/// No regex dependency: scan for `://`, then copy until whitespace or a quote/
-/// angle bracket, dropping everything from the first `?` or `#` in that token.
-/// URLs in prose are usually parenthesised (`reqwest`'s Display prints
-/// `for url (https://…)`); a closing `)` inside the dropped tail disappears
-/// with it, which is cosmetic and never leaves a signed parameter behind.
-/// Text that is not a URL is copied untouched (a bare `?` in a sentence stays).
-pub(crate) fn redact_url_queries(msg: &str) -> String {
-    let mut out = String::with_capacity(msg.len());
-    let mut chars = msg.char_indices().peekable();
-    while let Some((_, c)) = chars.next() {
-        // `:` followed by `//` starts a URL; the scheme itself was copied by
-        // earlier iterations of this loop.
-        if c == ':' {
-            let mut look = chars.clone();
-            let slashes =
-                matches!(look.next(), Some((_, '/'))) && matches!(look.next(), Some((_, '/')));
-            if slashes {
-                out.push_str("://");
-                chars.next();
-                chars.next();
-                let mut dropping = false;
-                while let Some(&(_, c)) = chars.peek() {
-                    if is_url_terminator(c) {
-                        break;
-                    }
-                    chars.next();
-                    if c == '?' || c == '#' {
-                        dropping = true;
-                    }
-                    if !dropping {
-                        out.push(c);
-                    }
-                }
-                continue;
-            }
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn is_url_terminator(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>')
-}
+/// One redaction for every client-visible form of an error (the HTTP body,
+/// the SSE `error` packet, a task record and the `walgit: …` line a
+/// receive-pack refusal puts on the sideband): scheme+host+path survive,
+/// the query string (`X-Amz-Credential` / `X-Amz-Signature` / `x-id=…`) does
+/// not. Lives in `walgit-wal` because task records and progress packets are
+/// built there; the server shares the same implementation.
+pub(crate) use walgit_wal::redact_url_queries;
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
