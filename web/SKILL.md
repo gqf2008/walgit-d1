@@ -3,11 +3,12 @@
 walgit is a git smart-HTTP server whose repositories live in an object store:
 hosts are disposable caches, the bucket is the repository. Collaboration
 (issues, PRs, boards) and CI are **inside the repository** — signed entries on
-`refs/collab/*`. This file teaches an AI agent to discover, read, and write
-repositories on **this host** with plain git and **MCP** (`<host>/mcp`) — the
-two interfaces that carry the work. The `walgit` binary is for the local, privileged acts (keys, fold, host
-operations), never a second way to talk to the host. No interactive steps
-anywhere.
+`refs/collab/*`. This file teaches an AI agent to discover, read, and write repositories on
+**this host** with plain git (repository bytes, refs, history) and **`wg mcp`**
+(stdio, collaboration) — the two interfaces that carry the work. The host
+serves no MCP endpoint (D72). The `walgit` binary is for the local, privileged
+acts (keys, fold, host operations), never a second way to talk to the host. No
+interactive steps anywhere.
 
 ## Quick start — identity → roles → worktree → collaboration
 
@@ -29,8 +30,8 @@ chmod 600 "$(git -C "$checkout" rev-parse --git-dir)/walgit/keys/<principal>.ed2
 
 ```sh
 # 2. register the public key. `join` writes this worktree's seed + identity
-#    pointer and publishes the key in one step (D70: collaboration needs a
-#    checkout now — the host /mcp no longer carries the collab tools):
+#    pointer and publishes the key in one step (D70/D72: collaboration needs a
+#    checkout; the host serves no MCP endpoint):
 wg collab join --repo "$checkout" --principal "<proj>-worker-1" --push origin
 ```
 
@@ -208,70 +209,52 @@ ledger is aggregated, so read the thread back and require `verified: true`.
 `wg collab entry` builds and signs one if you would rather not implement §5.3 yourself; browsers
 already have it in the SDK.
 
-## MCP — repository reads on the host, collaboration through `wg mcp`
+## MCP — collaboration through `wg mcp`; repository reads through git
 
-There are **two** MCP surfaces since D70, split by what each side can read.
+The host serves no MCP endpoint any more (D72 removed the D64 host surface).
+Two interfaces carry the work: **git** for repository bytes, refs and history,
+and **`wg mcp`** (stdio) for collaboration.
 
-### Host MCP (`<host>/mcp`) — repository and WAL reads
+### Repository reads — plain git
 
-Every host serves MCP itself at **`<host>/mcp`** — Streamable HTTP, no local
-process to spawn. Point a client at the URL and give it the same credential you
-give git:
+Every read below uses git's own credential (a bearer token or a credential
+helper), exactly as an ordinary clone does:
 
-```jsonc
-// token mode / a robot: a bearer
-{ "url": "https://<host>/mcp",
-  "headers": { "Authorization": "Bearer <token>" } }
-// oidc: a walgit access token works the same way (`/_auth/tokens`)
+```sh
+# branches and tags, without a clone
+git ls-remote --heads --tags https://<host>/<owner>/<repo>.git
+
+# a thin clone: no blobs until checked out, no working tree
+git clone --filter=blob:none --no-checkout https://<host>/<owner>/<repo>.git repo
+git -C repo fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+# ... or a shallow clone when only the tip matters
+git clone --depth=1 --filter=blob:none --no-checkout https://<host>/<owner>/<repo>.git repo-tip
+
+# one file at one revision, without checking anything out
+printf '%s\n' 'HEAD:path/to/file' | git -C repo cat-file --batch
+
+# history, difference, blame, and the history of one path
+git -C repo log --oneline --decorate -n 20 <rev>
+git -C repo diff <from>..<to> -- <path>
+git -C repo blame <rev> -- <path>
+git -C repo log --follow -p -- <path>
 ```
 
-Write the bearer as `${WALGIT_TOKEN}` where the client expands `${VAR}` (Claude
-Code's `.mcp.json` does, with `${VAR:-default}`); a client that expands nothing
-sends the placeholder as literal text, so paste the token there instead.
+`git cat-file --batch` answers a stream: write one `<rev>:<path>` (or a bare
+object id) per line and read the `<oid> <type> <size>` header followed by the
+bytes. That is the recipe for a blob without a checkout; `git show <rev>:<path>`
+is fine for one small file. A revision is anything git resolves (`HEAD`,
+`HEAD~3`, a full or abbreviated sha, a branch or tag).
 
-The transport is the MCP session lane: `POST /mcp` for JSON-RPC (answered with
-one `application/json` or `text/event-stream` message — send
-`Accept: application/json, text/event-stream`), `GET /mcp` with the
-`Mcp-Session-Id` handed back by `initialize` holds the notification stream, and
-`DELETE /mcp` ends the session. A missing or expired credential is a real 401
-with a `Bearer` challenge (never `Basic`: `/mcp` is browser-reachable).
-
-Tools (all **read-only** — every read the host's own API answers, so freshness
-and placement are identical to the UI):
-
-| | |
-|---|---|
-| repository | `repo_list`, `repo_owners`, `repo_overview`, `repo_refs`, `repo_resolve`, `repo_tree`, `repo_blob`, `repo_commits`, `repo_commit`, `repo_diff`, `repo_merge_base`, `repo_blame` |
-| host state | `wal_ls`, `repo_tasks`, `repo_ops`, `repo_policy`, `repo_settings` |
-
-A revision argument is `rev`; `repo_commits` accepts `ref` and `rev` (same
-meaning, and a CLI-style `HEAD~3` resolves). `wal_ls` reads the retained log
-by `from`/`to` (1-based seqs): `from` alone reads a page from there, `{repo}`
-alone reads the newest page, and an explicit `to` is a **bound**, not a hint.
-`more` means newer entries exist than the window you asked for; `folded_through`
-is the seq a checkpoint folded, and a window older than what
-`maintenance.retention_wal` kept comes back empty *for that reason* rather than
-silently. `repo_settings` answers the **effective** settings as TOML
-(`{"toml": …}`); `repo_ops` lists the maintenance operations and their
-parameters but starting one is an operator act; `repo_policy` and
-`repo_settings` are read-only.
-
-Resources: `resources/list`, `resources/templates/list`, then
-`resources/read`/`subscribe` on `walgit://refs/<o>/<r>` and
-`walgit://wal/<o>/<r>?from=<seq>`. `refs` is the repository-wide view: a
-subscription to it *is* watching the whole repository. A version moves **iff**
-that resource's body would (`seq:<n>`); a
-`notifications/resources/updated` carries only the `uri` — always
-`resources/read`, compare `_meta.version`, and treat the event as a trigger to
-re-read. Subscriptions are server-side polling of a refs-level read,
-best-effort and per-instance (D52): after a restart, read once and keep the
-version as your cursor.
+Host maintenance views (`ops`, `tasks`, `settings`, `policy`) are not git:
+they stay on the existing HTTP API and the `walgit` CLI. There is no agent MCP
+projection of them (D72).
 
 ### `wg mcp` — the collaboration surface (stdio)
 
-The D1 tools and `walgit://collab/*` resources are **not** on `/mcp` any more.
-They read the checkout's own `refs/collab/*` and write through git, so they are
-served by the standalone client in a checkout:
+The D1 tools and `walgit://collab/*` resources are served by the standalone
+client over stdio. They read the checkout's own `refs/collab/*` and write
+through git:
 
 ```sh
 wg mcp --repo <checkout> [--remote origin]   # stdio JSON-RPC; stdout is only JSON-RPC
@@ -344,7 +327,7 @@ write `walgit`, and let `PATH` name the one entry.
 ## Host operations
 
 The `walgit` binary is the machine's own tool: it runs the host, edits its
-configuration, and holds the keys. It is not the agent lane (that is git + `wg mcp` for collaboration and the host `/mcp` for repository reads)
+configuration, and holds the keys. It is not the agent lane (that is git for repository reads and `wg mcp` for collaboration)
 and not a second way to talk to this host. Global:
 `--config` (default `~/.walgit/walgit.toml`, env `WALGIT_CONFIG`); in zsh wrap
 it in a shell function, never `W="walgit …"; $W …`. `walgit serve` runs the
@@ -363,7 +346,7 @@ out. It cannot mint or revoke `wgt_…` access tokens: those come from
 `session_secret`.
 
 **Not the agent lane, and documented by `--help` rather than here:**
-`walgit repo …` (a shell front for the same reads the MCP tools answer),
+`walgit repo …` (a shell front for the same JSON reads the host's API and the UI answer),
 `wg collab …` (`entry`/`claim`/`watch`/`gc` — the scripting forms of the
 lanes above; `join`/`principal-register`/`principal-revoke` are the operator
 forms of identity; `gc` is the manual fold, D66) and `wg ci …` (the CI
@@ -460,9 +443,8 @@ serialize units that touch the same files/schema.
 ### 0c. Staying live — the watch loop
 
 The server never pushes (D46/D55); the lane is a **subscription plus a
-re-read**. Subscribe to the resources that cover a project — on the host
-`/mcp`: `walgit://refs/<owner>/<repo>` (every git action and inbox write); in
-`wg mcp`: `walgit://collab/board` (the whole projection), or
+re-read**. Subscribe to the resources that cover a project in `wg mcp`:
+`walgit://collab/board` (the whole projection), or
 `walgit://collab/thread/<id>` when one card is all you follow (its version is
 that card's tip, so unrelated writes do not wake you) — then on
 `notifications/resources/updated` read the resource, compare `_meta.version`

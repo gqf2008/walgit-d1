@@ -8,7 +8,6 @@ import { Markdown } from "../components/Markdown";
 import { enableCollabKey } from "../components/CollabWrite";
 import { CollabKeyStatus } from "../components/CollabKeyStatus";
 import { AgentFlow } from "../components/AgentFlow";
-import { McpSetup } from "../components/McpSetup";
 import { signCanonical } from "../collab";
 import { useI18n, statusLabel } from "../i18n";
 
@@ -44,8 +43,8 @@ function fmtTime(ts: number): string {
  *
  * The board projection is also a function of the wall clock — a `card_claim`
  * TTL expiring changes no ref (docs/D1_PROTOCOL.md §8.4) — so the views are
- * revalidated on a floor even when the digest is unchanged, mirroring the MCP
- * board probe's 60 s recompute floor.
+ * revalidated on a floor even when the digest is unchanged: the board
+ * projection's own 60 s recompute floor.
  */
 const BOARD_REFRESH_FLOOR_MS = 60_000;
 
@@ -236,7 +235,6 @@ export function CollabBoardPage() {
           <Box>
             <div className="pad muted">{t("board.noCards")}</div>
           </Box>
-          <McpSetup full={full} />
         </>
       ) : (
         <div className="board-grid">

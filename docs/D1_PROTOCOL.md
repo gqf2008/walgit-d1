@@ -27,7 +27,7 @@
 > | 薄 API 写路径 + 服务端聚合 | `crates/walgit-server/src/web/api.rs`（`collab_*`、`collab_load`） |
 > | host 注册表服务端 | `crates/walgit-server/src/web/v1.rs`（`/api/v1/principals`） |
 > | SDK（canonical / 签名 / post） | `web/sdk/repos.ts` |
-> | MCP 面（工具 + `walgit://` 资源 + 订阅） | `crates/walgit-server/src/mcp/`（`/mcp`，D64；说明见 `web/SKILL.md`） |
+> | MCP 面（工具 + `walgit://` 资源 + 订阅） | `wg/`（`wg mcp`，stdio；D70/D72；说明见 `skills/wg/SKILL.md`） |
 >
 > 一致性验收锚点（§16 列全）：`crates/walgit-wal/src/collab.rs` 的内嵌测试、
 > `crates/walgit-cli/tests/collab_e2e.rs`、`crates/walgit-server/tests/web_api.rs` 的
@@ -757,14 +757,13 @@ D46：服务端不推送事件；事实源是 ref 变化与 WAL。至少一次�
   `seq + 1`（或定义为「下一条待读」）。
 - **HTTP SSE**：`text/event-stream` 信封，best-effort（可能丢包）；要无损 push 语义必须自建
   sidecar 从 pull 车道转发（D46）。
-- **MCP 面（D70 起分两处）**：宿主 `/mcp`（Streamable HTTP，D64）只保留**宿主自己的 JSON
-  API** 的仓库读面 —— `repo_*` 与 `wal_ls`，资源 `walgit://refs/<o>/<r>`、
-  `walgit://wal/<o>/<r>{?from}`；订阅是服务端 refs 级轮询、best-effort（同 D52，不是持久推送）。
-  协作面（`collab_board`/`collab_thread`/`collab_report`/`ci_status`/`collab_publish`/
-  `collab_register` 与 `walgit://collab/*`）在独立的 **`wg mcp`**（stdio JSON-RPC），
-  聚合的是 checkout 自己的 `refs/collab/*`：读前默认 `git fetch --prune`（失败即 fail
-  closed），写是把客户端**已签名**条目 push 成收件箱 ref。字节不过 MCP（clone/fetch/push 仍走
-  git/bundle-uri）。表见 §12.1；实现 `crates/walgit-server/src/mcp/` 与 `wg/src/cmd_mcp.zig`。
+- **MCP 面（D70/D72）**：宿主不再提供 MCP 端点（D72 删除了 D64 的宿主读面，仓库读取统一走
+  git：`ls-remote`/`fetch`/`clone --filter`/`cat-file --batch`/`log`/`diff`/`blame`）。
+  协作面在独立的 **`wg mcp`**（stdio JSON-RPC）：`collab_board`/`collab_thread`/
+  `collab_report`/`ci_status`/`collab_publish`/`collab_register` 与
+  `walgit://collab/*` 资源；聚合的是 checkout 自己的 `refs/collab/*`：读前默认
+  `git fetch --prune`（失败即 fail closed），写是把客户端**已签名**条目 push 成收件箱 ref。
+  字节不过 MCP（clone/fetch/push 仍走 git/bundle-uri）。表见 §12.1；实现 `wg/src/cmd_mcp.zig`。
 
 ### 11.3 去重与幂等（汇总）
 

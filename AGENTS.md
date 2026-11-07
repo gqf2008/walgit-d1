@@ -83,7 +83,7 @@ just web-test        # SPA 改动时；另跑 just web-build
   按被删面名 `docs/ROUNDTRIPS.md` 补往返注记；
 - 审查发现的 Critical/Important 问题已修复，或有明确、可接受的处置结论；
 - 新增配置项同步更新 `walgit.example.toml`、`docs/CONTRACT.md` 与示例；
-  用户可见面（CLI/MCP/工作流）同批更新 `web/SKILL.md`、`skills/*/SKILL.md` 且
+  用户可见面（CLI/`wg mcp`/工作流）同批更新 `web/SKILL.md`、`skills/*/SKILL.md` 且
   `scripts/check-skill-covers-cli.sh` 保持绿；
 - 新增行为有测试；修复缺陷有回归测试；不删除、跳过或削弱测试来换绿；
 - 日志只写 stderr，标准输出不被调试信息污染；无凭据、无硬编码主机。
@@ -142,7 +142,8 @@ just web-test        # SPA 改动时；另跑 just web-build
 - **工具**：`wg mcp`（stdio：`collab_board` / `collab_thread` /
   `collab_report` / `ci_status` / `collab_publish` / `collab_register` 与
   `walgit://collab/*` 资源）或 `wg collab`，两者是同一事实源的两种车道。
-  宿主 `/mcp` 只保留仓库读工具（`repo_*`、`wal_ls`），协作面不再在那里（D70）。
+  仓库读取走 git（`ls-remote` / `fetch` / `clone --filter` / `cat-file --batch` /
+  `log` / `diff` / `blame`）；宿主不提供 MCP 端点（D72）。
 - **安全**：卡片与条目中不得粘贴密钥、令牌、用户隐私；日志与配置必须脱敏。
 
 ## 8. 软件工程纪律

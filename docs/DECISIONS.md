@@ -911,3 +911,43 @@
   rename lands before the first release that would have carried `wgl`, so no
   published asset or persisted identifier is broken; `WALGIT_*` variables,
   `.walgit/` paths and `refs/walgit/*` keep the product name.
+
+- **D72** **The host no longer serves MCP: repository reads are plain git, and
+  collaboration is `wg mcp` (2026-11-07, cc-ai-rm-host-mcp).** D64 put an MCP
+  endpoint on the host (`POST|GET|DELETE /mcp`, `crates/walgit-server/src/mcp/`,
+  a Streamable-HTTP projection of the host's own JSON read API) and D70 kept
+  `repo_*`/`wal_ls` there after moving collaboration to `wgl mcp` (since D71,
+  `wg mcp`). This removes that endpoint and the whole `[mcp]` configuration
+  (`subscribe_interval`, `max_subscriptions`, `session_ttl`): the host is a
+  server, and a read interface for agents does not need to be re-implemented on
+  top of it when git already is the read interface.
+  - **Repository reads are git.** `git ls-remote --heads --tags`, `fetch`,
+    `clone --filter=blob:none`, `cat-file --batch`, `log`, `diff` and `blame`
+    cover discovery, refs, single blobs, history and metadata with no second
+    contract to drift. A host API exists for the bundled UI and the SDK
+    (`/{owner}/{repo}/api-browser/…`), not for agents.
+  - **Collaboration stays where D70 put it.** `wg mcp` (stdio, against a
+    checkout's own `refs/collab/*`) and `wg collab` are unchanged; their tools,
+    resources, freshness and signing rules are untouched by this decision.
+  - **Host maintenance views stay.** `ops`, `tasks`, `settings` and `policy`
+    remain on the existing HTTP API and the `walgit` CLI: they are host facts,
+    not repository reads, and D70 never moved them.
+  - **Upgrade compatibility.** A `walgit.toml` written before D72 may still
+    carry `[mcp]`. The loader accepts the table, drops it and prints one clear
+    warning on stderr (and reports `WALGIT__MCP__*` overrides as ignored), so
+    an existing host still boots; the section can then be deleted. The old path
+    answers 404 for every method — a tombstone route shadows the SPA's
+    `/{owner}` page route, which would otherwise answer it with the shell — and
+    CORS no longer treats it as an API path.
+  - **Tests pin the removal**: `POST|GET|DELETE` on the old path are 404, a
+    preflight/response carries no CORS grant for it, the `/api/v1` discovery
+    index does not advertise MCP, and a residual `[mcp]` section (file or
+    environment) parses and validates. The MCP suite and this surface's
+    projection tests were deleted with the feature; they are not a weakening
+    of coverage.
+  - **Supersedes** the host-endpoint half of D64 (its auth/transport/
+    subscription rules no longer have a host surface to govern; `wg mcp`'s own
+    transport rules in D70/D71 stand) and the sentence in D70 that "the host
+    keeps `repo_*` and `wal_ls`". The rest of D64, D67, D70 and D71 stands:
+    in particular, agents are still told one interface family per job — git for
+    repository reads, `wg mcp` for collaboration.

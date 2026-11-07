@@ -51,7 +51,7 @@ credential with no UI to fix it.
 ## CLI cheat sheet page (`/commands`, D61)
 
 `pages/CommandsPage.tsx` renders the everyday CLI set (first contact, board reads,
-claim/entries, repository reads, `collab watch` / MCP, CI, diagnostics) in workflow
+claim/entries, repository reads, `collab watch` / `wg mcp`, CI, diagnostics) in workflow
 order. It is **static and data-free** — a projection of `walgit --help`, not of any
 repository — so it needs no SDK lane and no API. Each row is a `<code>` block plus a
 copy button (clipboard first, text selection as the fallback). The route is a

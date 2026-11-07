@@ -8,6 +8,8 @@ D1–D69 决定链的引用），与本框架冲突时以章程与全局规则�
 规则一律不改写在这里。
 当前已知与规则不符的现实（agent 不要误判）：
 
+- 宿主不提供 MCP 端点、也没有 `[mcp]` 配置（D72）：仓库读取走 git，协作面在
+  `wg mcp` / `wg collab`；旧配置残留 `[mcp]` 会被忽略并告警，不影响启动。
 - `clippy -D warnings` 工作区门禁已全绿（issue #1 清偿，2026-09-03）；CI 的 clippy
   job 不再是 known-red——ruleset 将其列入 required checks 前，红即该 PR 引入回归、
   按约定阻塞合并。

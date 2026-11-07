@@ -1,20 +1,19 @@
-# The API: repository-prefix lane, one SDK, MCP for agents
+# The API: repository-prefix lane, one SDK
 
 Context: **the wire contract of the JSON API + SDK** (D15/D20/D26/D27/D68), normative, for UI/SDK/site authors and for
 anyone changing `crates/walgit-server/src/web/*`.
 
 > **Deprecated module (D68, 2026-11-02).** This contract is maintained for the bundled UI and the SDK it
-> ships, and because the host `/mcp` projects these exact handlers. It is no longer a surface to design
-> for: new agent-facing capability goes into an MCP tool, and this document is not the place to describe
-> it.
+> ships. It is no longer a surface to design for: agents read repository data with plain git (D72), and
+> this document is not the place to describe a new agent-facing capability.
 
-> **Agents do not use this document** (D67/D68/D70). The agent-facing interface is split: the host
-> `/mcp` (`web/SKILL.md`) serves the repository reads (`repo_*`, `wal_ls`), and `wg mcp` (stdio, in a
-> checkout) serves the D1 collaboration tools and resources. These routes are what the host projects
-> and what the bundled UI and the SDK call.
+> **Agents do not use this document** (D67/D68/D70/D72). Repository reads are plain git
+> (`web/SKILL.md`), and `wg mcp` (stdio, in a checkout) serves the D1 collaboration tools and
+> resources. These routes are what the bundled UI and the SDK call; the retired host MCP projection
+> went with D72.
 > Since D68 there is exactly **one** repository HTTP lane — `/{owner}/{repo}/api-browser/…`. The older
-> `/{owner}/{repo}/api/…` lane is **not served** (404): keeping it would be a second public contract to drift
-> from the MCP projection. A bearer token works on `api-browser` exactly as it did on the old lane, so an SDK
+> `/{owner}/{repo}/api/…` lane is **not served** (404): keeping it would be a second public contract to
+> drift from. A bearer token works on `api-browser` exactly as it did on the old lane, so an SDK
 > or script only needs the segment changed. Caching rules (§2a), SSE envelope (§2b), tasks (§2c) apply to
 every endpoint.
 
@@ -25,7 +24,6 @@ of §1) can serve the built UI unchanged; nothing in `web/src` depends on
 walgit internals except the optional `overview`/`ops`/`tasks` endpoints.
 
 ```
-https://git.example.com/mcp                            agents        MCP over Streamable HTTP (D64/D67/D68) — repo reads; collaboration is `wg mcp` (D70)
 https://git.example.com/{owner}/{repo}/api-browser/…    repo JSON     the one repository lane: a bearer token, the session cookie, or both
 https://git.example.com/api/v1                         non-repo      discovery, me, authenticate, owners (+ /api-browser/v1/me|authenticate)
 https://git.example.com/repos.js                       the SDK       window.repos — permanent URL on every host
@@ -132,8 +130,7 @@ decode each segment.
   "try again" — a `500` tells git clients (and SDKs that copy the same rule)
   the failure is permanent, so an outage of the bucket turned every push and
   fetch into a hard failure. The same mapping applies to the git smart HTTP
-  lane (`info/refs`, receive/upload-pack) and to `/mcp` tools, which forward
-  this router's answer unchanged. Non-retryable store errors keep the existing
+  lane (`info/refs`, receive/upload-pack). Non-retryable store errors keep the existing
   `500` and carry no `Retry-After`; `4xx` semantics are untouched.
 - **Push has a status boundary**: once a push negotiates `side-band-64k` (the
   normal case) the receive-pack response is committed as `200` when streaming
@@ -980,65 +977,16 @@ upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, 
   `PUT|DELETE …/policy`, `POST …/ops/{op}`. Content moves over git
   (`git-receive-pack`) and LFS, never through JSON.
 
-## 5a. The MCP projection (`/mcp`, D64)
+## 5a. Agent access (D72)
 
-Every repo-scoped read above is also reachable as a host MCP tool, because
-`/mcp` calls this same router in-process (`Call::inner()` →
-`tower::ServiceExt::oneshot`) with the caller's own credential. That is a hard
-requirement, not a convenience: a tool answer and an HTTP answer are the same
-answer, so placement (D30), freshness and `actor == caller` cannot drift
-between the two lanes. `crates/walgit-server/src/mcp/tools.rs` writes the
-endpoint path for each tool; these two tables are the audit — the first that no
-read is missing, the second that every omission is a decision rather than an
-oversight.
-
-**Errors are the router's errors.** A tool whose inner call fails reports the
-API's own message (never a re-worded one): a wrong *request* is a `-32602`
-JSON-RPC error, a tool that ran and failed is `isError` content the model reads.
-JSON-RPC has no HTTP status field, so `ApiError`'s status travels appended to
-the sentence (`… (503)`). A transient store failure is therefore visible to a
-model as `service unavailable … (503)` here and as `503 + Retry-After: 15` on
-the HTTP lanes — one classification, two transports (§2).
-
-**The collaboration face moved (D70).** The D1 tools and `walgit://collab/*`
-resources are served by the standalone `wg mcp` client over stdio, against a
-checkout's own `refs/collab/*` (it aggregates locally and fetches first). The
-host `/mcp` keeps `repo_*` and `wal_ls`; the thin API below still serves the
-browser and the SPA, and those endpoints keep their shapes.
-
-| Endpoint | Tool |
-|---|---|
-| `GET /services/api/owners`, `…/owners/{owner}` | `repo_owners` |
-| *(none — reads the store's repository list directly)* | `repo_list` |
-| `GET …/api-browser/refs`, `refs/{kind}` | `repo_refs` (`kind` = head\|branches\|tags\|all\|collab) |
-| `GET …/api-browser/refs/name/{rest}`, `resolve[/{rest}]` | `repo_resolve` |
-| `GET …/api-browser/tree/{rest}` | `repo_tree` |
-| `GET …/api-browser/blob/{rest}` | `repo_blob` |
-| `GET …/api-browser/commits` | `repo_commits` |
-| `GET …/api-browser/commit/{sha}` | `repo_commit` |
-| `GET …/api-browser/diff` | `repo_diff` |
-| `GET …/api-browser/merge-base` | `repo_merge_base` |
-| `GET …/api-browser/blame/{rest}` | `repo_blame` |
-| `GET …/api-browser/overview` | `repo_overview` |
-| `GET …/api-browser/ops` | `repo_ops` (listing only) |
-| `GET …/api-browser/tasks` | `repo_tasks` |
-| `GET …/api-browser/policy` | `repo_policy` |
-| `GET …/api-browser/settings/effective` | `repo_settings` (TOML, wrapped as `{"toml": …}`) |
-| *(none — `RepoHandle::read_log` over the WAL, refs-level)* | `wal_ls` (the retained log: `from`/`to` echo the requested window, `to` is a bound, `more` = newer entries exist, `folded_through` = the seq a checkpoint folded; it is provenance, not a route) |
-
-**Not exposed, on purpose:**
-
-| Endpoint | Why |
-|---|---|
-| `GET …/api-browser/archive/{rest}`, `GET\|HEAD …/api-browser/collab/ci-artifacts/{sha256}` | bytes. They are a download lane (Range, ETag); an MCP `tools/call` answers text, and a base64 body would be a second, worse transport. A client that needs them fetches the URL. |
-| `GET …/api-browser/tasks/{id}` | server-sent events: the narration of *this node's* task, resumed by `Last-Event-ID`. A tool call has no stream to resume; poll `repo_tasks`. |
-| `POST …/api-browser/ops/{op}` | starts a maintenance operation. Long, mutating, and an operator decision (D22): listing is an agent question, starting is not. |
-| `PUT\|DELETE …/api-browser/policy`, `…/api-browser/settings*` | admin credential (D24). The reads are tools, the writes are the storage/settings editor's. |
-| `PUT\|DELETE /{o}/{r}[.git]` | creating or deleting a repository is an admin act, not a tool call. |
-
-`docs/DECISIONS.md D67 draws the other half of this boundary: the agent guides
-(`/SKILL.md`, the ops skill) describe git and `/mcp` only — the HTTP surface
-stays documented here, for browsers, the SDK and edges.
+The host serves no MCP endpoint any more: D72 removed the D64 projection and
+its `[mcp]` configuration. Agents read repository state with plain **git** —
+`ls-remote --heads --tags`, `fetch`, filtered/blobless clones, `cat-file
+--batch`, `log`, `diff`, `blame` — and collaborate over `wg mcp` (stdio) or
+`wg collab`, against a checkout's own `refs/collab/*`. Host maintenance views
+(`ops`, `tasks`, `settings`, `policy`) stay on this HTTP API and the `walgit`
+CLI. The tool/endpoint audit tables that lived here went with the projection;
+a second read lane was exactly the drift D68 and D72 end.
 
 ## 6. Minimal conformance checklist
 

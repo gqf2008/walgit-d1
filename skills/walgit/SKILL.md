@@ -75,40 +75,48 @@ configured for.
   gets *re-spawned* mid-install no longer blocks the upgrade — but stopping them first is still the
   clean path (a stopped lane also comes back on the **new** binary instead of the renamed old one).
 
-## 3. MCP — two surfaces (D70)
+## 3. MCP — collaboration through `wg mcp`; repository reads through git (D70/D72)
 
 Since D69 the `collab` / `ci` / `principal` command families live in the
 standalone **`wg`** client. Since D70 the collaboration MCP face moved with
-them: the host serves **repository and WAL reads**, and `wg mcp` serves
-**collaboration**, over a checkout's own `refs/collab/*`.
+them, and since D72 the host serves no MCP endpoint at all: repository reads
+are plain git, and `wg mcp` serves **collaboration** over a checkout's own
+`refs/collab/*`.
 
-### 3a. Host MCP (`<host>/mcp`) — read-only repository state
+### 3a. Repository reads — plain git
 
-Streamable HTTP (D64); the URL takes the same credential git uses:
+No local process and no host MCP surface: use the same credential git uses, and
+these recipes run as-is.
 
-```jsonc
-{ "url": "https://<host>/mcp", "headers": { "Authorization": "Bearer <token>" } }
+```sh
+# branches and tags, without a clone
+git ls-remote --heads --tags https://<host>/<owner>/<repo>.git
+
+# a thin clone: no blobs until checked out, no working tree
+git clone --filter=blob:none --no-checkout https://<host>/<owner>/<repo>.git repo
+git -C repo fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+# ... or a shallow clone when only the tip matters
+git clone --depth=1 --filter=blob:none --no-checkout https://<host>/<owner>/<repo>.git repo-tip
+
+# one file at one revision, without checking anything out
+printf '%s\n' 'HEAD:path/to/file' | git -C repo cat-file --batch
+
+# history, difference, blame, and the history of one path
+git -C repo log --oneline --decorate -n 20 <rev>
+git -C repo diff <from>..<to> -- <path>
+git -C repo blame <rev> -- <path>
+git -C repo log --follow -p -- <path>
 ```
 
-`POST /mcp` carries JSON-RPC (`Accept: application/json, text/event-stream` is
-required by the transport); `GET /mcp` with the `Mcp-Session-Id` from
-`initialize` holds the notification stream; `DELETE /mcp` ends the session. A bad
-credential is a real 401 with a `Bearer` challenge. Tools: `repo_list`,
-`repo_owners`, `repo_overview`, `repo_refs`, `repo_resolve`, `repo_tree`,
-`repo_blob`, `repo_commits`, `repo_commit`, `repo_diff`, `repo_merge_base`,
-`repo_blame`, `repo_tasks`, `repo_ops`, `repo_policy`, `repo_settings`,
-`wal_ls`. All read-only. Resources: `walgit://refs/<owner>/<repo>` (the
-repository-wide lane) and `walgit://wal/<owner>/<repo>?from=<seq>`, with
-`resources/subscribe` as per-instance best-effort polling (D52).
-
-```jsonc
-{"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
- "params":{"uri":"walgit://refs/acme/repo"}}
-```
+`git cat-file --batch` reads one `<rev>:<path>` (or bare object id) per line
+and answers `<oid> <type> <size>` followed by the bytes. Host maintenance views
+(`ops`, `tasks`, `settings`, `policy`) stay on the HTTP API and the `walgit`
+CLI; they are not git.
 
 ### 3b. Collaboration MCP (`wg mcp`, stdio)
 
-The D1 tools/resources are **not** on `/mcp` any more. In a checkout:
+The D1 tools/resources live in the standalone client; the host has no MCP
+endpoint (D72). In a checkout:
 
 ```sh
 wg mcp --repo <checkout> [--remote origin] \
