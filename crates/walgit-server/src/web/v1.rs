@@ -231,12 +231,11 @@ pub(crate) fn origin_allowed(cfg: &walgit_config::Config, origin: &str) -> bool 
 }
 
 const CORS_HEADERS: &str = "Authorization, Content-Type, Accept, If-None-Match, X-Requested-With, \
-Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID, X-Walgit-Authorization, X-Walgit-Capabilities";
+Last-Event-ID, X-Walgit-Authorization, X-Walgit-Capabilities";
 const CORS_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, OPTIONS";
-// `Mcp-Session-Id` is not a safelisted response header: without it a
-// cross-origin browser client cannot read the session id `initialize` answers
-// with, and every later request would 400.
-const CORS_EXPOSE: &str = "ETag, Cache-Control, Content-Type, Location, Mcp-Session-Id";
+// `ETag` and `Location` are not safelisted response headers: a cross-origin
+// browser client needs them to revalidate and to follow a created resource.
+const CORS_EXPOSE: &str = "ETag, Cache-Control, Content-Type, Location";
 
 /// CORS for `/api*`: only origins in `server.cors_origins` get credentials;
 /// preflights are answered here (unauthenticated — a preflight carries no
