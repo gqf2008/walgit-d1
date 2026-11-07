@@ -1,7 +1,7 @@
 //! `wg mcp` — the collaboration MCP surface, served over **stdio JSON-RPC**
-//! (D70). The host's `/mcp` keeps the lanes that need host knowledge
-//! (`repo_*`, `wal_ls`); the D1 collaboration tools and resources live here,
-//! over the same `refs/collab/*` aggregation every other wg command reads.
+//! (D70). The host serves no MCP endpoint (D72): repository reads are plain
+//! git, and the D1 collaboration tools and resources live here, over the same
+//! `refs/collab/*` aggregation every other wg command reads.
 //!
 //! Contract (see `skills/wg/SKILL.md` §7):
 //! * stdout carries **only** JSON-RPC messages, one per line; logs go to stderr.

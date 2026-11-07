@@ -99,7 +99,7 @@ Blocking, on top of the commands:
 
 - new behaviour has tests; a defect fix has a regression test;
 - no deleted, skipped or weakened test to make the pipeline green;
-- a user-visible surface (CLI command/flag, MCP tool/resource, workflow) updates `web/SKILL.md` and
+- a user-visible surface (CLI command/flag, `wg mcp` tool/resource, workflow) updates `web/SKILL.md` and
   `skills/walgit/SKILL.md` in the same change, and `scripts/check-skill-covers-cli.sh` stays green;
 - cross-crate contracts, config keys and protocol docs move with the code (`docs/CONTRACT.md`,
   `walgit.example.toml`);
@@ -131,8 +131,8 @@ The tracker is the D1 collaboration layer (`refs/collab/*`), not GitHub: the mir
 Projects and Discussions are disabled (D46). Read and write it over **`wg mcp`** (stdio:
 `collab_board`, `collab_thread`, `collab_report`, `ci_status`, `collab_publish`,
 `collab_register`, and the `walgit://collab/*` resources) or `wg collab …`, the scripting form of
-the same lanes (D69/D70). The host's `/mcp` keeps only the repository reads (`repo_*`) and
-`wal_ls`.
+the same lanes (D69/D70). Repository reads are plain git — `ls-remote`, `fetch`, filtered
+clones, `cat-file --batch`, `log`, `diff`, `blame`; the host serves no MCP endpoint (D72).
 
 Cross-team or cross-repository work is a card too: background, expected result, acceptance,
 owner/team, deadline and links in the body; state changes as `status` entries with a note. Releases

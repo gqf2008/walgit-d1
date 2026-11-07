@@ -510,6 +510,18 @@ pub fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Push a fresh synthetic repository to `owner/repo` through the live server,
+/// returning the source checkout (the shape store-outage tests seed with).
+pub fn push_repo(server: &Server, owner: &str, repo: &str, commits: usize) -> Result<TestRepo> {
+    let src = TestRepo::synthetic(commits, 1)?;
+    git_in(
+        &src.dir,
+        &["remote", "add", "origin", &server.repo_url(owner, repo)],
+    )?;
+    git_in(&src.dir, &["push", "-q", "origin", "main"])?;
+    Ok(src)
+}
+
 /// `git <first> | git <second>` without a POSIX shell: the suite also runs on
 /// Windows, where spawning `/bin/sh` simply fails. Collects the first
 /// process's whole output, then feeds it to the second through its stdin — a

@@ -92,10 +92,10 @@ jobs:
       # binary and exit green.
       - name: Integration suite lists are complete
         run: bash scripts/suite-guard.sh
-      # Keep the agent-facing guide in lockstep with the user-visible CLI and
-      # MCP flags. The script extracts the surface from --help and fails on
-      # undocumented commands/flags; its exemption table has explicit reasons.
-      - name: SKILL covers CLI and MCP
+      # Keep the agent-facing guide in lockstep with the user-visible CLI.
+      # The script extracts the surface from --help and fails on undocumented
+      # commands; its exemption table has explicit reasons.
+      - name: SKILL covers the CLI
         run: |
           cargo build -q -p walgit-cli --bin walgit
           bash scripts/check-skill-covers-cli.sh

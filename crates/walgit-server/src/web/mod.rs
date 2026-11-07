@@ -87,11 +87,10 @@ fn is_data_lane(path: &str) -> bool {
     if path.starts_with("/api/")
         || path.starts_with("/services/api/")
         || path.starts_with("/_auth/")
-        || path.starts_with("/mcp/")
     {
         return true;
     }
-    if matches!(path, "/mcp" | "/metrics") {
+    if path == "/metrics" {
         return true;
     }
     // A repository's own surface, every lane: `/{o}/{r}/api…`, `…/api-browser…`.
@@ -275,7 +274,6 @@ mod shell_tests {
             "/acme/mono/api/tree/HEAD",
             "/acme/mono.git/info/refs",
             "/acme/mono.git/git-upload-pack",
-            "/mcp",
             "/metrics",
         ] {
             assert!(

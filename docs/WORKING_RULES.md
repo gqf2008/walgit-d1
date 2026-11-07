@@ -16,14 +16,14 @@
 - **No backwards compatibility (pre-1.0, banner at top):** change the shape and delete the old one in the same
   commit — no aliases, shims, deprecated routes/keys/fields. Only bucket formats (WAL, manifest, log, checkpoint
   protos) stay append-only/replayable.
-- **New user-visible surface ships with SKILL.md documentation.** Any new CLI subcommand/flag, MCP
+- **New user-visible surface ships with SKILL.md documentation.** Any new CLI subcommand/flag, `wg mcp`
   method/resource/flag, or user-visible workflow must update the public `web/SKILL.md` and the shipped ops skill
   `skills/walgit/SKILL.md` in the same change (or the ops skill must point to the web guide when the detail belongs
-  there). `scripts/check-skill-covers-cli.sh` is the machine guard for CLI/MCP coverage; a PR that cannot explain
-  the new surface there is not mergeable. The guard covers top-level CLI commands only (the `walgit mcp` flag half
-  went with the adapter, D64); nested subcommands/flags and the MCP surface — tools, resource URIs,
-  `resources/templates/list` — still require review discipline, because they are the host's `/mcp` contract, not
-  a CLI to walk.
+  there). `scripts/check-skill-covers-cli.sh` is the machine guard for CLI coverage; a PR that cannot explain
+  the new surface there is not mergeable. The guard covers top-level CLI commands only (the old `walgit mcp` adapter
+  half went with D64); nested subcommands/flags and `wg mcp`'s tool/resource surface still
+  require review discipline, because they are the client's contract, not a CLI to walk. The host's
+  own MCP endpoint was removed in D72.
 - Keep this file current: append decisions with a number and a date; never delete history, replace it with the
   decision that superseded it.
 - **Never block the async runtime**: no blocking git/fs work (repack, midx, commit-graph, gix reopen, large

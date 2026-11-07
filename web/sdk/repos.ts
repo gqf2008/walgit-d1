@@ -652,8 +652,9 @@ export class ReposClient {
   /**
    * Always `/api-browser` (D68). `/{owner}/{repo}/api` is not served any more:
    * `api-browser` is the one HTTP lane, and it is the *same handlers*, so a
-   * bearer token works there exactly as it did on the old lane. Agents talk to
-   * `/mcp` instead; `lane` still decides how the credential travels.
+   * bearer token works there exactly as it did on the old lane. Agents read
+   * repository data with plain git (D72); `lane` still decides how the
+   * credential travels.
    */
   get lanePrefix(): "/api-browser" {
     return "/api-browser";

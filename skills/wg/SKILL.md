@@ -131,9 +131,9 @@ that references them, and publishes a signed `ci_result`.
 
 ## 7. MCP (stdio) — the collaboration surface for agents (D70)
 
-The host's `/mcp` no longer carries the D1 tools or `walgit://collab/*`
-resources; `wg mcp` serves them over **stdio JSON-RPC** against a checkout's
-own `refs/collab/*` (D70). stdout carries one JSON-RPC message per line and
+The host serves no MCP endpoint (D72; it once carried the D1 tools and
+`walgit://collab/*` resources, D64/D70). `wg mcp` serves them over **stdio
+JSON-RPC** against a checkout's own `refs/collab/*` (D70). stdout carries one JSON-RPC message per line and
 nothing else; logs go to stderr; stdin EOF exits 0. Requests are handled
 serially (one worktree = one agent lane = one process).
 

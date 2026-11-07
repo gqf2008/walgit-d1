@@ -49,7 +49,6 @@ const en = {
   "collab.noThreads": "No threads yet — post the first entry above.",
   "collab.noPrs": "No patches.",
 
-  // MCP box on the collab pages (D64): the host serves MCP itself at /mcp.
   "gate.title": "This host needs a token",
   "gate.lede":
     "It does not answer anonymous reads. Paste a token from `server.auth.tokens` (or a `wgt_…` access token) — it is kept for this tab only and sent as `Authorization: Bearer`, the same credential git uses.",
@@ -60,9 +59,6 @@ const en = {
   "gate.bad": "That token was not accepted.",
   "gate.forbidden": "The token is valid, but this account is not allowed here.",
   "gate.note": "Nothing is stored on disk: closing the tab forgets it.",
-  "mcp.title": "MCP (served by this host)",
-  "mcp.brief":
-    "This host serves MCP over Streamable HTTP at {endpoint}. Point your MCP client there; this repository exposes {refs} (refs), {wal} (the retained log) and {board} (the collab board) for resources/read and resources/subscribe.",
   "collab.byActor": "By actor",
   "collab.byKind": "By kind",
   "collab.th.title": "title",
@@ -752,8 +748,8 @@ const en = {
   "cmds.s5.lead": "The server never pushes events (D46). Build the wake-up yourself: collab watch invokes your command once per new or changed ref.",
   "cmds.s5.hook": "The signed entry JSON arrives on stdin with WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED. Filter self-echo by ACTOR, ignore VERIFIED=false, park the event and return — keep long work out of the hook.",
   "cmds.s5.once": "One pass and exit: the shape a timer wants. A resident loop needs a supervisor that restarts it.",
-  "cmds.s5.mcp": "MCP is served by the host itself at /mcp (Streamable HTTP), so nothing runs locally. Register the URL with your token; writes go through collab_publish, which takes an entry you already signed.",
-  "cmds.s5.uris": "Two subscriptions cover a project. notifications/resources/updated carries only the uri, so always resources/read and compare _meta.version.",
+  "cmds.s5.mcp": "Collaboration is served over stdio by `wg mcp` inside a checkout (D70/D72); the host runs nothing. Reads fetch refs/collab/{inbox,meta} first and fail closed; writes go through collab_publish, which takes an entry you already signed.",
+  "cmds.s5.uris": "`walgit://collab/board` and `walgit://collab/thread/<id>` cover a project. notifications/resources/updated carries only the uri, so always resources/read and compare _meta.version.",
   "cmds.s6.t": "Decentralized CI",
   "cmds.s6.lead": "No CI logic on the server: the tested commit's .walgit/ci.toml declares the tasks and the runner is a client.",
   "cmds.s6.run": "Subscribe, claim with ci_claim, execute and publish signed results. Simultaneous claims are a legal race; exactly one result is effective.",
@@ -761,7 +757,7 @@ const en = {
   "cmds.s7.t": "Diagnostics",
   "cmds.s7.lead": "Read the WAL when you need the server's own view; follow a task when you need to see where it is.",
   "cmds.s7.global": "Global: --config (default ~/.walgit/walgit.toml, env WALGIT_CONFIG). In zsh wrap it in a shell function (see web/SKILL.md), never W='walgit …'; $W ….",
-  "cmds.footer": "Commands follow walgit v0.9.8 --help. Normative text: web/SKILL.md §0a–§0e and skills/walgit/SKILL.md §5. Destructive operations (GC, compaction, import, settings and policy writes) are not MCP tools.",
+  "cmds.footer": "Commands follow walgit v0.9.8 --help. Normative text: web/SKILL.md §0a–§0e and skills/walgit/SKILL.md §5. Destructive operations (GC, compaction, import, settings and policy writes) are not `wg mcp` tools.",
   // Home redesign (2026-10-23): one sentence, a SKILL.md lead, two role prompts (leader, worker).
   "home.oneline":
     "walgit · D1 is walgit with a collaboration protocol added: issues, PRs, boards and CI are signed entries inside the repository itself — there is no server-side database.",
@@ -813,7 +809,6 @@ const zhCN: Record<I18nKey, string> = {
   "collab.noThreads": "还没有讨论串——在上方发布第一条条目。",
   "collab.noPrs": "还没有补丁。",
 
-  // Collab 页面的 MCP 说明（D64）：托管方自己提供 /mcp。
   "gate.title": "这台 walgit 需要口令",
   "gate.lede":
     "它不允许匿名读取。填入 `server.auth.tokens` 里的 token（或 `wgt_…` 访问令），只用在这个标签页里，作为 `Authorization: Bearer` 发送——和 git 用的是同一个凭据。",
@@ -824,9 +819,6 @@ const zhCN: Record<I18nKey, string> = {
   "gate.bad": "这个 token 不被接受。",
   "gate.forbidden": "token 有效，但这个账号在此不被允许。",
   "gate.note": "不会写入磁盘：关掉标签页就忘掉。",
-  "mcp.title": "MCP（由本服务器提供）",
-  "mcp.brief":
-    "本机通过 Streamable HTTP 在 {endpoint} 提供 MCP。把 MCP 客户端指向它即可：本仓库暴露 {refs}（refs）、{wal}（保留的日志）、{board}（协作看板），都可读、可订阅。",
   "collab.byActor": "按签名者",
   "collab.byKind": "按类型",
   "collab.th.title": "标题",
@@ -1508,8 +1500,8 @@ const zhCN: Record<I18nKey, string> = {
   "cmds.s5.lead": "服务端不推事件（D46）。醒不醒自己建：collab watch 对每条新增或变更的 ref 调一次你的命令。",
   "cmds.s5.hook": "签名条目 JSON 走 stdin，另带 WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED。按 ACTOR 过滤自回声，VERIFIED=false 不当真；钩子只 park 事件就返回，别在里面干长活。",
   "cmds.s5.once": "跑一遍就退出：定时器要的形态。常驻循环要交给会重启它的东西。",
-  "cmds.s5.mcp": "MCP 由服务器自己提供（/mcp，Streamable HTTP），本地不需要跑任何进程。填 URL 加 token 即可；写入走 collab_publish，交给它的条目要你自己先签好名。",
-  "cmds.s5.uris": "两个订阅覆盖一个项目。notifications/resources/updated 只带 uri，必须 resources/read 并比对 _meta.version。",
+  "cmds.s5.mcp": "协作面由 checkout 里的 `wg mcp` 走 stdio 提供（D70/D72），宿主机上不跑进程。读会先 fetch refs/collab/{inbox,meta}，失败即 fail closed；写入走 collab_publish，交给它的条目要你自己先签好名。",
+  "cmds.s5.uris": "`walgit://collab/board` 与 `walgit://collab/thread/<id>` 覆盖一个项目。notifications/resources/updated 只带 uri，必须 resources/read 并比对 _meta.version。",
   "cmds.s6.t": "去中心化 CI",
   "cmds.s6.lead": "服务端没有 CI 逻辑：受测提交的 .walgit/ci.toml 声明任务，runner 是客户端。",
   "cmds.s6.run": "订阅、用 ci_claim 认领、执行、发布签名结果。并发认领是合法赛跑，只有一个结果生效。",
@@ -1517,7 +1509,7 @@ const zhCN: Record<I18nKey, string> = {
   "cmds.s7.t": "排查",
   "cmds.s7.lead": "需要服务端自己的视角就读 WAL；需要看任务卡在哪就跟任务报文。",
   "cmds.s7.global": "全局：--config（默认 ~/.walgit/walgit.toml，env WALGIT_CONFIG）。zsh 里用函数包一层（见 web/SKILL.md），不要 W='walgit …'; $W …。",
-  "cmds.footer": "命令以 walgit v0.9.8 的 --help 为准。规范文本：web/SKILL.md §0a–§0e、skills/walgit/SKILL.md §5。破坏性操作（GC、压缩、导入、settings/policy 写）不在 MCP 工具表里。",
+  "cmds.footer": "命令以 walgit v0.9.8 的 --help 为准。规范文本：web/SKILL.md §0a–§0e、skills/walgit/SKILL.md §5。破坏性操作（GC、压缩、导入、settings/policy 写）不在 `wg mcp` 的工具表里。",
 
   // 首页重设计（2026-10-23）：一句话 + SKILL.md 引读 + 两个角色提示词（leader、worker）。
   "home.oneline":
@@ -1568,7 +1560,6 @@ const zhTW: Record<I18nKey, string> = {
   "collab.noThreads": "還沒有討論串——在上方發佈第一條條目。",
   "collab.noPrs": "還沒有補丁。",
 
-  // Collab 頁面的 MCP 說明（D64）：託管方自己提供 /mcp。
   "gate.title": "這台 walgit 需要口令",
   "gate.lede":
     "它不允許匿名讀取。填入 `server.auth.tokens` 裡的 token（或 `wgt_…` 存取令），只用於這個分頁，以 `Authorization: Bearer` 送出——和 git 用的是同一個憑證。",
@@ -1579,9 +1570,6 @@ const zhTW: Record<I18nKey, string> = {
   "gate.bad": "這個 token 不被接受。",
   "gate.forbidden": "token 有效，但這個帳號在此不被允許。",
   "gate.note": "不會寫入磁碟：關掉分頁就忘掉。",
-  "mcp.title": "MCP（由本伺服器提供）",
-  "mcp.brief":
-    "本機透過 Streamable HTTP 在 {endpoint} 提供 MCP。把 MCP 客戶端指向它即可：本倉庫暴露 {refs}（refs）、{wal}（保留的日誌）、{board}（協作看板），都可讀、可訂閱。",
   "collab.byActor": "按簽署者",
   "collab.byKind": "按類型",
   "collab.th.title": "標題",
@@ -2263,8 +2251,8 @@ const zhTW: Record<I18nKey, string> = {
   "cmds.s5.lead": "伺服器不推事件（D46）。醒不醒自己建：collab watch 對每條新增或變更的 ref 呼叫一次你的指令。",
   "cmds.s5.hook": "簽名條目 JSON 走 stdin，另帶 WALGIT_COLLAB_REF/KIND/THREAD/ACTOR/VERIFIED。依 ACTOR 過濾自回聲，VERIFIED=false 不當真；鉤子只 park 事件就返回，別在裡面做長工作。",
   "cmds.s5.once": "跑一遍就結束：計時器要的形態。常駐迴圈要交給會重啟它的東西。",
-  "cmds.s5.mcp": "MCP 由伺服器自己提供（/mcp，Streamable HTTP），本機不需跑任何行程。填 URL 加 token 即可；寫入走 collab_publish，交給它的條目要你自己先簽好名。",
-  "cmds.s5.uris": "兩個訂閱涵蓋一個專案。notifications/resources/updated 只帶 uri，必須 resources/read 並比對 _meta.version。",
+  "cmds.s5.mcp": "協作面由 checkout 裡的 `wg mcp` 走 stdio 提供（D70/D72），伺服器主機上不跑行程。讀會先 fetch refs/collab/{inbox,meta}，失敗即 fail closed；寫入走 collab_publish，交給它的條目要你自己先簽好名。",
+  "cmds.s5.uris": "`walgit://collab/board` 與 `walgit://collab/thread/<id>` 涵蓋一個專案。notifications/resources/updated 只帶 uri，必須 resources/read 並比對 _meta.version。",
   "cmds.s6.t": "去中心化 CI",
   "cmds.s6.lead": "伺服器沒有 CI 邏輯：受測提交的 .walgit/ci.toml 宣告任務，runner 是客戶端。",
   "cmds.s6.run": "訂閱、用 ci_claim 認領、執行、發布簽名結果。並行認領是合法競賽，只有一個結果生效。",
@@ -2272,7 +2260,7 @@ const zhTW: Record<I18nKey, string> = {
   "cmds.s7.t": "排查",
   "cmds.s7.lead": "需要伺服器自己的視角就讀 WAL；需要看任務卡在哪就跟任務封包。",
   "cmds.s7.global": "全域：--config（預設 ~/.walgit/walgit.toml，env WALGIT_CONFIG）。zsh 裡用函式包一層（見 web/SKILL.md），不要 W='walgit …'; $W …。",
-  "cmds.footer": "指令以 walgit v0.9.8 的 --help 為準。規範文本：web/SKILL.md §0a–§0e、skills/walgit/SKILL.md §5。破壞性操作（GC、壓縮、匯入、settings/policy 寫）不在 MCP 工具表裡。",
+  "cmds.footer": "指令以 walgit v0.9.8 的 --help 為準。規範文本：web/SKILL.md §0a–§0e、skills/walgit/SKILL.md §5。破壞性操作（GC、壓縮、匯入、settings/policy 寫）不在 `wg mcp` 的工具表裡。",
   // 首頁重設計（2026-10-23）：一句話 + SKILL.md 導讀 + 五個角色提示詞。
   "home.oneline":
     "walgit · D1 是加入了協作協議的 walgit：issue、PR、看板與 CI 都是倉庫裡的一條條簽名條目，沒有伺服器資料庫。",

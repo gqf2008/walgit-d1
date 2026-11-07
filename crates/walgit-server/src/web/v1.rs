@@ -5,8 +5,8 @@
 //! Lanes (D27) are a segment *after* the repository prefix:
 //! * `/{o}/{r}/api-browser/…` — the one repository lane (D68): the bundled UI and
 //!   the SDK, authenticated by the session cookie and/or a bearer token;
-//! * `/{o}/{r}/api/…` — **not served** (D68): agents reach the same data through
-//!   `/mcp`, which calls these handlers in-process.
+//! * `/{o}/{r}/api/…` — **not served** (D68): the bundled UI and the SDK use
+//!   `api-browser`; agents read repository data with plain git (D72).
 //!
 //! Same handlers; lanes differ by credential handling and CORS, never by a
 //! rewrite. Non-repo: `/api/v1` (discovery), `/api/v1/me`, `/api/v1/authenticate`
@@ -231,12 +231,11 @@ pub(crate) fn origin_allowed(cfg: &walgit_config::Config, origin: &str) -> bool 
 }
 
 const CORS_HEADERS: &str = "Authorization, Content-Type, Accept, If-None-Match, X-Requested-With, \
-Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID, X-Walgit-Authorization, X-Walgit-Capabilities";
+Last-Event-ID, X-Walgit-Authorization, X-Walgit-Capabilities";
 const CORS_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, OPTIONS";
-// `Mcp-Session-Id` is not a safelisted response header: without it a
-// cross-origin browser client cannot read the session id `initialize` answers
-// with, and every later request would 400.
-const CORS_EXPOSE: &str = "ETag, Cache-Control, Content-Type, Location, Mcp-Session-Id";
+// `ETag` and `Location` are not safelisted response headers: a cross-origin
+// browser client needs them to revalidate and to follow a created resource.
+const CORS_EXPOSE: &str = "ETag, Cache-Control, Content-Type, Location";
 
 /// CORS for `/api*`: only origins in `server.cors_origins` get credentials;
 /// preflights are answered here (unauthenticated — a preflight carries no
@@ -295,13 +294,11 @@ pub async fn cors(State(st): State<Arc<AppState>>, req: Request<Body>, next: Nex
     resp
 }
 
-/// Where CORS applies (D27): the non-repo `/api*` and `/api-browser*` roots,
-/// the repo lane `/{o}/{r}/api-browser(/…)?`, and `/mcp` (D64 — its preflight
-/// and its response headers are this one policy, not a second copy). Never the
-/// SPA pages, git, auth.
+/// Where CORS applies (D27): the non-repo `/api*` and `/api-browser*` roots
+/// and the repo lane `/{o}/{r}/api-browser(/…)?`. Never the SPA pages, git,
+/// auth.
 pub fn is_cors_api_path(path: &str) -> bool {
-    path == "/mcp"
-        || path == "/api"
+    path == "/api"
         || path.starts_with("/api/")
         || path == API_BROWSER
         || path.starts_with("/api-browser/")
@@ -378,7 +375,6 @@ async fn discovery(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             "GET  /api/v1/authenticate   (also /api-browser/v1/me|authenticate for the browser lane)",
             "GET|PUT /api/v1/store        (admin — redacted storage snapshot / edit the config file, #127)",
             "POST /api/v1/store/test      (admin — probe a candidate without persisting)",
-            "-- agents: MCP at /mcp (Streamable HTTP) — the interface, and a projection of the routes below (D64/D68) --",
             "-- repository routes live under the repository (D27), on one HTTP lane: /{owner}/{repo}/api-browser/… (D68) --",
             "GET|PUT|DELETE /{owner}/{repo}/api-browser",
             "GET  /{owner}/{repo}/api-browser/refs",
@@ -629,9 +625,8 @@ mod tests {
         // surface either — nothing answers it, a preflight included.
         assert!(!is_cors_api_path("/acme/monorepo/api"));
         assert!(!is_cors_api_path("/acme/monorepo/api/refs"));
-        // `/mcp` uses this one policy for its preflight and its response
-        // headers (D64/D23: one implementation, never a second copy).
-        assert!(is_cors_api_path("/mcp"));
+        // D72: the removed host MCP endpoint is not a CORS surface either.
+        assert!(!is_cors_api_path("/mcp"));
         assert!(!is_cors_api_path("/acme/monorepo/settings")); // SPA
         assert!(!is_cors_api_path("/acme/monorepo.git/info/refs"));
         assert!(!is_cors_api_path("/_auth/check"));

@@ -301,18 +301,6 @@ serve_via = "proxy"               # "proxy" | "signed_url"
 signed_url_ttl = "1h"
 max_object_bytes = "16GiB"
 
-[mcp]                              # the host's Model Context Protocol at POST|GET|DELETE /mcp (Streamable HTTP, D64):
-                                   # read-only tools over this host's own JSON API (`repo_*`, `wal_ls`), resources
-                                   # over the refs/WAL, and one SSE stream per session for
-                                   # `notifications/resources/updated`. In-memory sessions only. The D1
-                                   # collaboration tools/resources moved to the standalone `wg mcp` (stdio,
-                                   # D70) — this block does not configure them.
-subscribe_interval = "5s"         # one resource subscription = one conditional manifest read per repo per tick;
-                                   # >=1s (D55: the same refs-level lane `wg collab watch` uses)
-max_subscriptions = 32             # live subscriptions per caller (principal), across that caller's sessions
-session_ttl = "30m"               # an MCP session with no request and no open SSE stream is dropped after this
-                                   # (rmcp's session keep-alive; the session's subscriptions go with it)
-
 # Where a repository's history lives when it is not (all) here. Usually a per-repo setting
 # (`walgit repo settings set owner/name` → `[upstream] …`); one token for both services.
 [upstream]

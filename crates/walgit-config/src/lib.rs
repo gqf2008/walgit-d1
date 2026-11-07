@@ -27,47 +27,11 @@ pub struct Config {
     /// Links to the systems around a repository (per repo via settings).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-    /// The MCP surface this instance serves at `/mcp` (D64).
-    #[serde(default)]
-    pub mcp: McpConfig,
-}
-
-/// The MCP (Model Context Protocol) surface served by this instance at `/mcp`
-/// over Streamable HTTP (D64). The endpoint is always mounted and is a
-/// projection of the JSON API a human uses, with the caller's own credential:
-/// every tool is one endpoint, and the single **write** tool (`collab_publish`)
-/// is the ordinary `POST …/api/collab/entries` — it takes an entry the client
-/// has already signed. This process holds no collaborator's key, so signing
-/// stays where the identity is (D58).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct McpConfig {
-    /// Poll interval of one resource subscription (`notifications/resources/
-    /// updated`). One conditional manifest read per subscribed repo per tick:
-    /// at least 1 s, default 5 s — the same at-least-once lane `wg collab
-    /// watch` uses (D55), never a held request.
-    #[serde(with = "humantime_serde")]
-    pub subscribe_interval: Duration,
-    /// Cap on live subscriptions **per caller** (principal), across that
-    /// caller's sessions — the unit the poller cost is spent in (one poll per
-    /// subscription per `subscribe_interval`).
-    pub max_subscriptions: usize,
-    /// An MCP session with no request and no open SSE stream for this long is
-    /// dropped (memory-only state; a restart loses nothing else). Handed to
-    /// rmcp's `LocalSessionManager` as its `keep_alive`, so the transport itself
-    /// reaps the session, its subscriptions with it.
-    #[serde(with = "humantime_serde")]
-    pub session_ttl: Duration,
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        McpConfig {
-            subscribe_interval: Duration::from_secs(5),
-            max_subscriptions: 32,
-            session_ttl: Duration::from_mins(30),
-        }
-    }
+    /// Removed in D72 (the host no longer serves an MCP endpoint). Kept only
+    /// so a `walgit.toml` written before D72 still boots: the table is accepted
+    /// and ignored with a warning. Delete the `[mcp]` section.
+    #[serde(default, skip_serializing)]
+    pub mcp: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1456,6 +1420,16 @@ impl Config {
     fn from_toml(toml_text: &str) -> Result<Config> {
         let mut cfg: Config = toml::from_str(toml_text).context("parsing walgit.toml")?;
         cfg.cache.dir = expand_tilde(&cfg.cache.dir);
+        if cfg.mcp.take().is_some() {
+            // `from_toml` runs before the tracing subscriber exists on the
+            // serve path, so a `tracing::warn!` here would be dropped; stderr
+            // is the one channel that always reaches the operator.
+            eprintln!(
+                "walgit: warning: ignoring the [mcp] section: this build no longer serves an \
+                 MCP endpoint (D72). Repository reads go through git; collaboration goes \
+                 through `wg mcp`. Delete the section from walgit.toml."
+            );
+        }
         Ok(cfg)
     }
 
@@ -1477,6 +1451,12 @@ impl Config {
     pub fn apply_env(&mut self, vars: impl Iterator<Item = (String, String)>) -> Result<()> {
         let ignored = self.apply_env_report(vars)?;
         for (k, why) in &ignored {
+            // The removed `[mcp]` overrides are reported on stderr inside
+            // `apply_env_report`: `parse` runs before `tracing_init`, so a
+            // tracing warn here would be dropped on the serve path.
+            if k.starts_with("WALGIT__MCP") {
+                continue;
+            }
             tracing::warn!(key = %k, reason = %why, "ignoring {k}: unknown in this build");
         }
         Ok(())
@@ -1503,6 +1483,14 @@ impl Config {
             vars_seen.push(k.clone());
             let path: Vec<String> = rest.split("__").map(str::to_ascii_lowercase).collect();
             if path.is_empty() || path.iter().any(std::string::String::is_empty) {
+                continue;
+            }
+            if path.first().is_some_and(|head| head == "mcp") {
+                let why = "the [mcp] section was removed in D72; the host serves no MCP endpoint";
+                // Same channel and timing as the file-level warning: `parse`
+                // runs before `tracing_init`, so this must reach stderr now.
+                eprintln!("walgit: warning: ignoring {k}: {why}");
+                ignored.push((k, why.into()));
                 continue;
             }
             // Apply into a copy and type-check it alone: a bad/unknown key is
@@ -1588,20 +1576,6 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.store.bucket.is_empty(), "store.bucket must be set");
-        // D64: a subscription is a poller, so its floor is the cost model.
-        anyhow::ensure!(
-            self.mcp.subscribe_interval >= Duration::from_secs(1),
-            "mcp.subscribe_interval must be >= 1s (each tick is one conditional manifest read per \
-             subscribed repo; omit the key for the 5s default)"
-        );
-        anyhow::ensure!(
-            self.mcp.max_subscriptions >= 1,
-            "mcp.max_subscriptions must be >= 1"
-        );
-        anyhow::ensure!(
-            !self.mcp.session_ttl.is_zero(),
-            "mcp.session_ttl must be > 0 (an idle MCP session is dropped after it)"
-        );
         // D66: the fold signs its snapshot, so the pair is all-or-nothing and
         // the key must be the seed the registry names. Half a pair would plan a
         // unit that can only fail.
@@ -2013,6 +1987,42 @@ mod tests {
         let text = toml::to_string(&c).unwrap();
         let back = Config::parse(&text).unwrap();
         assert_eq!(back.store.bucket, c.store.bucket);
+    }
+
+    /// D72 removed the host MCP surface, but a `walgit.toml` written before
+    /// that decision may still carry `[mcp]`. It must not stop the host: the
+    /// table is ignored (with a stderr warning) rather than rejected by
+    /// `deny_unknown_fields`.
+    #[test]
+    fn a_residual_mcp_section_is_ignored_not_fatal() {
+        let text = "[store]\nbucket = \"b\"\n[mcp]\nsubscribe_interval = \"0s\"\n\
+                    max_subscriptions = 0\nsession_ttl = \"0s\"\n";
+        let cfg = Config::parse(text).expect("a pre-D72 [mcp] section must still boot");
+        assert_eq!(cfg.store.bucket, "b");
+        assert!(
+            cfg.mcp.is_none(),
+            "the legacy table is dropped, not retained"
+        );
+    }
+
+    /// The environment lane of the same compatibility: a stale
+    /// `WALGIT__MCP__*` override is reported as ignored instead of silently
+    /// reappearing in the struct.
+    #[test]
+    fn a_residual_mcp_env_override_is_reported_ignored() {
+        let mut cfg = Config::default();
+        let ignored = cfg
+            .apply_env_report(
+                vec![("WALGIT__MCP__SESSION_TTL".to_string(), "0s".to_string())].into_iter(),
+            )
+            .unwrap();
+        assert!(
+            ignored
+                .iter()
+                .any(|(k, why)| k == "WALGIT__MCP__SESSION_TTL" && why.contains("D72")),
+            "{ignored:?}"
+        );
+        assert!(cfg.mcp.is_none());
     }
 
     #[test]

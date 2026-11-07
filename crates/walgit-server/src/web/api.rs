@@ -1,13 +1,12 @@
 //! Read-only JSON API for the web UI (`web/API.md`, v2 contract).
 //!
 //! **Deprecated (D68, 2026-11-02).** This module is not an interface anyone
-//! should build on any more: the agent-facing surface is MCP
-//! (`crate::mcp`, `/mcp`, D64), which is a projection of these handlers, and the
-//! only remaining caller is the bundled UI plus the SDK behind it. It stays
-//! because the SPA reads through it, `/api` is already unserved (one lane:
-//! `api-browser`), and the MCP tools dispatch into exactly these waiters — but
-//! the next major release merges it into the internal lane it has become. New
-//! features belong in the MCP projection and in `web/SKILL.md`, not here.
+//! should build on any more: the only remaining caller is the bundled UI plus
+//! the SDK behind it. It stays because the SPA reads through it and `/api` is
+//! already unserved (one lane: `api-browser`), but the next major release
+//! merges it into the internal lane it has become. Agents read repository data
+//! with plain git (D72); new features belong in the HTTP lane and in
+//! `web/SKILL.md`, not in a second projection here.
 //!
 //! Two URL classes: ref-dependent (`refs`, `refs/{branches,tags,all,collab}`,
 //! `refs/name/{rest}`, `resolve`, name-addressed tree/blob/commits/commit)
@@ -270,11 +269,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// Route prefixes of the repo-scoped JSON API (D27, D68): the lane sits
 /// *after* the repository prefix. No lane-first forms, no aliases (banner).
 ///
-/// One lane, not two: `/{owner}/{repo}/api` is **not served** — agents reach
-/// this data through `/mcp` (which calls these same handlers in-process), the
-/// bundled UI and the SDK through `api-browser`. Keeping the old lane alive
-/// "for compatibility" would leave a second public contract to drift from the
-/// MCP projection, which is exactly what D68 ends.
+/// One lane, not two: `/{owner}/{repo}/api` is **not served** — the bundled UI
+/// and the SDK use `api-browser`, and agents read repository data with plain
+/// git (D72). Keeping the old lane alive "for compatibility" would leave a
+/// second public contract to drift, which is exactly what D68 ends.
 pub const REPO_API_BASES: [&str; 1] = ["/{owner}/{repo}/api-browser"];
 fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError::NotFound(msg.into())
@@ -353,7 +351,7 @@ async fn open(
     st.registry.open(&id).await.map_err(|e| match e {
         walgit_wal::WalError::NotFound => not_found("repository"),
         // A cold registry's first read of `manifest.pb` is where the incident's
-        // MCP lane 500'd: the coordinated store error must stay classified
+        // JSON lane 500'd: the coordinated store error must stay classified
         // (503 + Retry-After), not collapse into the catch-all.
         _ => crate::smart::wal_err(&e),
     })
@@ -1181,8 +1179,8 @@ struct CollabPrincipalPost {
 /// Shared by every surface that can create such a segment or name a principal
 /// for one: the collab API (`collab_entries`, `collab_principal`) and
 /// `walgit token add` — so what a client is allowed to name, and what an
-/// operator is allowed to configure, cannot drift apart. (The D1 MCP write
-/// face lives in `wg mcp` now, D70; its `collab_register` writes this ref
+/// operator is allowed to configure, cannot drift apart. (The D1 write face
+/// lives in `wg mcp` now, D70; its `collab_register` writes this ref
 /// over git, where receive-pack policy applies the same segment rule.)
 pub fn ref_segment_ok(s: &str) -> bool {
     !s.is_empty()
@@ -2235,7 +2233,7 @@ async fn collab_ci_artifact_size(
 /// and effective conclusion. The same aggregation core (`walgit_wal::ci`) the
 /// CLI's `wg ci status` and the report's CI section use, serialized once —
 /// so `wg mcp`'s `ci_status` (D70) is this answer, not a second
-/// implementation; the host `/mcp` does not serve it.
+/// implementation; the host no longer serves an MCP endpoint (D72).
 #[derive(serde::Deserialize)]
 struct CiRunsQuery {
     id: Option<String>,

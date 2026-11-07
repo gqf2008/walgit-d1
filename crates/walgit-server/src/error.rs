@@ -60,12 +60,6 @@ impl ApiError {
         redact_url_queries(&self.raw_message())
     }
 
-    /// `message (status)` — the sentence shape an MCP `isError` result or a
-    /// JSON-RPC error uses, where there is no HTTP status field to carry it.
-    pub fn message_with_status(&self) -> String {
-        format!("{} ({})", self.message(), self.status().as_u16())
-    }
-
     /// The message before URL redaction. Logs deliberately go through
     /// [`Self::message`] too: a signed URL is not worth keeping in a log line,
     /// and the host/path/status is all an operator needs to find the failure.
@@ -198,8 +192,8 @@ impl From<walgit_store::StoreError> for ApiError {
 /// (`Store` directly and `CoordError::Store` from the CAS/read helpers) and the
 /// server used to classify only the first, so a failed manifest read — which is
 /// a coordinated read — fell into the `wal: {e}` 500 catch-all. Transient
-/// failures now answer 503 + Retry-After on every lane (git smart HTTP, the
-/// JSON API, and therefore MCP, which forwards the same router per D64).
+/// failures now answer 503 + Retry-After on every lane (git smart HTTP and the
+/// JSON API).
 /// `TooLarge` is *not* transient (re-pulling cannot shrink the pack set), so it
 /// keeps the 500 mapping; the smart lanes still answer it with the bundle-uri
 /// pkt ERR where the protocol allows a readable remedy.
@@ -438,15 +432,6 @@ mod tests {
         assert_eq!(
             ApiError::from(&BundleError::NoRefs).status(),
             StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    #[test]
-    fn message_with_status_is_the_mcp_sentence_shape() {
-        let e = ApiError::ServiceUnavailable("object store: io".into());
-        assert_eq!(
-            e.message_with_status(),
-            "service unavailable: object store: io (503)"
         );
     }
 

@@ -17,8 +17,10 @@ mod harness;
 
 type TestResult = anyhow::Result<()>;
 use anyhow::Context;
-use harness::{Server, TestRepo, git, git_in};
+use harness::{Server, TestRepo, git, git_in, push_repo};
 use std::io::Write;
+use walgit_store::fault::FaultPlan;
+use walgit_store::memory::MemoryStore;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -3581,3 +3583,111 @@ async fn empty_pack_push_is_refused_with(check_connectivity: bool) -> TestResult
 }
 
 
+
+/// A manifest read that fails as `Retryable` (the shape a transport error,
+/// timeout, upstream 5xx or throttle takes).
+fn manifest_outage() -> FaultPlan {
+    FaultPlan {
+        p_err_before: 1.0,
+        only_keys: Some(vec!["manifest".into()]),
+        ..Default::default()
+    }
+}
+
+/// cc-ai-store-503: a retryable store failure on the git smart HTTP lane must
+/// be `503 + Retry-After: 15`, not the 500 a git client treats as permanent.
+/// The warm handle (`sync_refs`) and the cold registry (`registry.open`) are
+/// different code paths, so both are exercised.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transient_store_failure_is_503_on_git_reads() -> TestResult {
+    let mem = MemoryStore::shared();
+
+    // Warm: this instance's repo handle is cached, so arming the link hits
+    // `sync_refs`.
+    let (warm, warm_link) = Server::start_with_link(mem.clone(), |_| {}).await?;
+    warm.put_repo("t", "outage").await?;
+    push_repo(&warm, "t", "outage", 1)?;
+    warm_link.set(manifest_outage());
+
+    let url = format!(
+        "{}/t/outage.git/info/refs?service=git-upload-pack",
+        warm.base_url
+    );
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "warm git read"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("15"),
+        "a 503 must say when to retry"
+    );
+
+    // Cold: a fresh registry/cache over the same store. The first read is
+    // `registry.open`, which used to swallow the coordinated store error into
+    // a 500 before the cc-ai-store-503 fix.
+    let (cold, cold_link) = Server::start_with_link(mem, |_| {}).await?;
+    cold_link.set(manifest_outage());
+
+    let url = format!(
+        "{}/t/outage.git/info/refs?service=git-upload-pack",
+        cold.base_url
+    );
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "cold git read"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("15")
+    );
+    Ok(())
+}
+
+/// A push failure that lands after the 200 stream opened (side-band-64k) is a
+/// sideband refusal, not a 503 — and its sentence keeps the transient class
+/// (`service unavailable … retryable store error`) and carries no signed URL
+/// (cc-ai-store-503 finding 4). The fault is keyed to the publish's log write
+/// so advertisement and the post-open sync stay healthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_that_loses_the_store_is_a_retryable_sideband_refusal() -> TestResult {
+    let (server, link) = Server::start_with_link(MemoryStore::shared(), |_| {}).await?;
+    server.put_repo("t", "push-outage").await?;
+    let src = push_repo(&server, "t", "push-outage", 1)?;
+
+    std::fs::write(src.dir.join("next.txt"), b"next\n")?;
+    git_in(&src.dir, &["add", "."])?;
+    git_in(&src.dir, &["commit", "-q", "-m", "next"])?;
+
+    link.set(FaultPlan {
+        p_err_before: 1.0,
+        only_keys: Some(vec!["log/".into()]),
+        ..Default::default()
+    });
+
+    let out = Command::new("git")
+        .current_dir(&src.dir)
+        .args(["push", "origin", "main"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "push must fail: {stderr}");
+    assert!(stderr.contains("remote:"), "no remote message: {stderr}");
+    assert!(
+        stderr.to_lowercase().contains("service unavailable"),
+        "the sideband sentence must keep the transient classification: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("retryable store error"),
+        "the refusal must name the retryable classification: {stderr}"
+    );
+    assert!(!stderr.contains("X-Amz-"), "leaked signed URL: {stderr}");
+    Ok(())
+}
