@@ -131,10 +131,9 @@ impl AppState {
     }
 }
 
-/// The host MCP endpoint removed in D72. Spelled from pieces so the
-/// product-reference grep stays clean; the route exists only as a 404
-/// tombstone (see [`router`]).
-const REMOVED_MCP_PATH: &str = concat!("/", "mcp");
+/// The host MCP endpoint removed in D72. Kept only as a 404 tombstone so the
+/// SPA's `/{owner}` page route cannot answer it with the shell (see [`router`]).
+const REMOVED_MCP_PATH: &str = "/mcp";
 
 /// Every method on [`REMOVED_MCP_PATH`] is a plain 404 — never the SPA shell
 /// the `/{owner}` page route would otherwise serve.

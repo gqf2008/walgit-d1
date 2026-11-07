@@ -625,9 +625,8 @@ mod tests {
         // surface either — nothing answers it, a preflight included.
         assert!(!is_cors_api_path("/acme/monorepo/api"));
         assert!(!is_cors_api_path("/acme/monorepo/api/refs"));
-        // D72: the removed host MCP endpoint is not a CORS surface either
-        // (spelled without the literal path so it stays out of product docs).
-        assert!(!is_cors_api_path(concat!("/", "mcp")));
+        // D72: the removed host MCP endpoint is not a CORS surface either.
+        assert!(!is_cors_api_path("/mcp"));
         assert!(!is_cors_api_path("/acme/monorepo/settings")); // SPA
         assert!(!is_cors_api_path("/acme/monorepo.git/info/refs"));
         assert!(!is_cors_api_path("/_auth/check"));

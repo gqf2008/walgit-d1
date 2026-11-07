@@ -944,7 +944,8 @@
     index does not advertise MCP, and a residual `[mcp]` section (file or
     environment) parses and validates. The MCP suite and this surface's
     projection tests were deleted with the feature; they are not a weakening
-    of coverage.
+    of coverage, and the non-MCP store-error classification tests that lived
+    in that file moved to `tests/e2e.rs` and `tests/web_api.rs`.
   - **Supersedes** the host-endpoint half of D64 (its auth/transport/
     subscription rules no longer have a host surface to govern; `wg mcp`'s own
     transport rules in D70/D71 stand) and the sentence in D70 that "the host

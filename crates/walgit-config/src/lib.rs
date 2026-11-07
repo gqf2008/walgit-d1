@@ -1451,6 +1451,12 @@ impl Config {
     pub fn apply_env(&mut self, vars: impl Iterator<Item = (String, String)>) -> Result<()> {
         let ignored = self.apply_env_report(vars)?;
         for (k, why) in &ignored {
+            // The removed `[mcp]` overrides are reported on stderr inside
+            // `apply_env_report`: `parse` runs before `tracing_init`, so a
+            // tracing warn here would be dropped on the serve path.
+            if k.starts_with("WALGIT__MCP") {
+                continue;
+            }
             tracing::warn!(key = %k, reason = %why, "ignoring {k}: unknown in this build");
         }
         Ok(())
@@ -1480,10 +1486,11 @@ impl Config {
                 continue;
             }
             if path.first().is_some_and(|head| head == "mcp") {
-                ignored.push((
-                    k,
-                    "the [mcp] section was removed in D72; the host serves no MCP endpoint".into(),
-                ));
+                let why = "the [mcp] section was removed in D72; the host serves no MCP endpoint";
+                // Same channel and timing as the file-level warning: `parse`
+                // runs before `tracing_init`, so this must reach stderr now.
+                eprintln!("walgit: warning: ignoring {k}: {why}");
+                ignored.push((k, why.into()));
                 continue;
             }
             // Apply into a copy and type-check it alone: a bad/unknown key is
