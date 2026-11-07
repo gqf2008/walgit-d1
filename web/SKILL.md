@@ -398,6 +398,7 @@ collaboration client at <https://github.com/gqf2008/walgit-d1/releases/latest>:
 | windows | `walgit-setup-<version>.exe` (installs `wg.exe` next to `walgit.exe`) |
 | macOS | `walgit-<version>-<arch>.dmg` — signed + notarized (`wg` inside) |
 | wg only | `wg-x86_64-linux.tar.gz`, `wg-aarch64-linux.tar.gz`, `wg-x86_64-windows.zip`, `wg-aarch64-macos.zip`, `wg-x86_64-macos.zip` |
+| wg only (macOS pkg) | `wg-aarch64-macos.pkg`, `wg-x86_64-macos.pkg` — installs `/usr/local/bin/wg`, signed + notarized |
 
 The `wg` asset names carry no version, so
 `releases/latest/download/<asset>` is a stable link.

@@ -131,10 +131,8 @@ runbook（`docs/WINDOWS.md`）等。
 - `docs/BOARD.md`、`docs/POLICY.md` — 看板 / 推送策略。
 - **下载**：[GitHub Releases](https://github.com/gqf2008/walgit-d1/releases/latest)
   提供全平台产物——linux `.deb`、Windows 安装器、macOS DMG（签名+公证），以及独立协作客户端
-  `wg` 的按平台二进制包（`wg-<arch>-<os>.tar.gz|zip`，macOS 包签名并公证）。
-- **下载**：[GitHub Releases](https://github.com/gqf2008/walgit-d1/releases/latest)
-  提供全平台产物——linux `.deb`、Windows 安装器、macOS DMG（签名+公证），以及独立协作客户端
-  `wg` 的按平台二进制包（`wg-<arch>-<os>.tar.gz|zip`，macOS 包签名并公证）。
+  `wg` 的按平台二进制包（`wg-<arch>-<os>.tar.gz|zip`，macOS 包签名并公证）与
+  macOS 安装包（`wg-<arch>-macos.pkg`，装到 `/usr/local/bin/wg`，签名并公证）。
 - `AGENTS.md` — 通用协作框架；[`docs/CHARTER.md`](docs/CHARTER.md) — 项目章程（角色、派工、验收、合并）；架构在 `docs/ARCHITECTURE.md`，设计决策在 `docs/DECISIONS.md`。
 - `GOAL.md` — 上游的验收目标（本分叉保持其内核语义不变）。
 

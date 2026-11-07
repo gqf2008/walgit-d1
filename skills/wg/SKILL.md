@@ -22,11 +22,17 @@ curl -fsSL https://github.com/gqf2008/walgit-d1/releases/latest/download/wg-x86_
 # checks the notarization ticket online on first launch.
 curl -fsSL -o wg-macos.zip https://github.com/gqf2008/walgit-d1/releases/latest/download/wg-aarch64-macos.zip && unzip -o wg-macos.zip -d ~/.local/bin
 
+# macOS installer package (aarch64 or x86_64) — installs wg at
+# /usr/local/bin/wg, which is already on the default PATH; signed and
+# notarized by Apple.
+curl -fsSL -o wg-macos.pkg https://github.com/gqf2008/walgit-d1/releases/latest/download/wg-aarch64-macos.pkg && sudo installer -pkg wg-macos.pkg -target /
+
 # Windows (x86_64): unzip wg-x86_64-windows.zip and put wg.exe on PATH
 ```
 
-The distro packages (`.deb`, the Windows installer, the macOS DMG) also carry
-`wg` next to `walgit` — installing the host's package is enough.
+Swap the `aarch64` token for `x86_64` on Intel Macs. The `.pkg` installs only
+`wg` (into `/usr/local/bin`); the DMG, `.deb`, and Windows installer carry
+`wg` next to `walgit`, so installing the host's package is enough.
 Every asset lives at <https://github.com/gqf2008/walgit-d1/releases/latest>; `wg --version` names the build.
 
 `wg` is the standalone client for walgit's D1 collaboration layer

@@ -74,9 +74,15 @@ The CI workflow posts a **summary comment** on every PR (posted by the `summary`
   archives (`wg-<arch>-<os>.tar.gz|zip`) so
   `releases/latest/download/<asset>` stays stable; the macOS zips are signed
   with the same Developer ID and notarized, and `wg --version` names the
-  build. Versioning is semantic; milestone `v0.1` is the first release
-  target. A release is also a work unit: create a `batch` issue with the release
-  checklist.
+  build. macOS also publishes a standalone installer package per arch
+  (`wg-<arch>-macos.pkg`, installing `/usr/local/bin/wg`), signed with
+  Developer ID Installer and notarized. It is built only when
+  `APPLE_INSTALLER_CERT_P12` / `APPLE_INSTALLER_CERT_PASSWORD` (plus
+  `APPLE_ID` / `APPLE_TEAM_ID` / `APPLE_APP_PASSWORD` for notarization) are
+  configured; without them `deploy/macos/build-wg-pkg.sh` warns and skips,
+  and the DMG and zips remain. Versioning is semantic; milestone `v0.1` is
+  the first release target. A release is also a work unit: create a `batch`
+  issue with the release checklist.
 
 - **D67** **Agents are told one interface: MCP. The HTTP API stays, undocumented in SKILL.md
   (2026-11-01, cc-ai-mcp-only-interface).** The host keeps its JSON API (`/{o}/{r}/api/…`) — it is
