@@ -456,7 +456,7 @@ fn principal_of(row: &InlineTable) -> Option<&str> {
 
 /// A principal name travels into URLs, log lines, `X-Walgit-Principal`, ref
 /// paths (`refs/collab/inbox/<actor>/…`), `<principal>.ed25519` key file names
-/// and the MCP write gate, so it is held to **the** ref-segment rule the server
+/// and `wg mcp`'s write gate, so it is held to **the** ref-segment rule the server
 /// applies (`walgit_server::web::api::ref_segment_ok`) rather than a looser copy
 /// of it — a name this accepts is a name every one of those accepts.
 fn check_principal(principal: &str) -> Result<()> {

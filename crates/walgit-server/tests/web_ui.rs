@@ -246,7 +246,6 @@ async fn a_token_only_host_still_serves_the_shell_so_a_browser_can_enter_a_token
         "/api/v1/owners",
         "/api/v1/me",
         "/api/nowhere/api-browser/refs",
-        "/mcp",
         "/metrics",
     ] {
         assert_eq!(

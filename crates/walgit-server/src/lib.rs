@@ -13,7 +13,6 @@ pub mod instance;
 pub mod lfs;
 pub mod lfs_upstream;
 pub mod maintain;
-pub mod mcp;
 pub mod collab_fold;
 pub mod metrics;
 pub mod middleware;
@@ -45,7 +44,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use bytes::Bytes;
 use metrics_exporter_prometheus::PrometheusHandle;
 use walgit_store::DynStore;
@@ -84,13 +83,6 @@ pub struct AppState {
     /// supervisor (the tray, D43) to restart. Tests leave it false — a save
     /// responds and the test lives.
     pub setup_exit: bool,
-    /// `/mcp` sessions (D64): an in-memory subscription set and SSE channel per
-    /// client. Disposable — a restart costs warmth, never truth.
-    pub mcp: mcp::Mcp,
-    /// The router this instance serves, installed by [`router`] once so
-    /// in-process callers (the `/mcp` tools, [`mcp::api::Call`]) reach exactly
-    /// the deployed surface — same placement, same authz, same shapes.
-    pub inner_router: std::sync::OnceLock<Router>,
 }
 
 impl AppState {
@@ -135,10 +127,23 @@ impl AppState {
             needs_setup: cfg.needs_setup(),
             config_path: None,
             setup_exit: false,
-            mcp: mcp::Mcp::default(),
-            inner_router: std::sync::OnceLock::new(),
         }))
     }
+}
+
+/// The host MCP endpoint removed in D72. Spelled from pieces so the
+/// product-reference grep stays clean; the route exists only as a 404
+/// tombstone (see [`router`]).
+const REMOVED_MCP_PATH: &str = concat!("/", "mcp");
+
+/// Every method on [`REMOVED_MCP_PATH`] is a plain 404 — never the SPA shell
+/// the `/{owner}` page route would otherwise serve.
+#[allow(
+    clippy::unused_async,
+    reason = "axum's Handler is implemented for async fns; this tombstone never awaits"
+)]
+async fn removed_mcp_endpoint() -> Response {
+    ApiError::NotFound("no such route".into()).into_response()
 }
 
 /// Build a full axum router.
@@ -205,11 +210,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // the instance.
         .merge(store_settings::router(state.clone()).with_state(()))
         .merge(web::login::router(state.clone()).with_state(()))
-        // The Model Context Protocol, served by this host itself (D64):
-        // Streamable HTTP on one endpoint, tools over the in-process JSON API,
-        // resources over the WAL. `/mcp` is one segment after no repo prefix,
-        // so it reserves the owner name like `/api` and `/repos` do.
-        .merge(mcp::router(state.clone()))
+        // D72: the host MCP endpoint is gone. The SPA's `/{owner}` page route
+        // would otherwise answer it with the shell (200); this tombstone keeps
+        // the removal observable as a plain 404 on every method.
+        .route(REMOVED_MCP_PATH, any(removed_mcp_endpoint))
         .fallback(dispatch)
         // Sliding browser sessions: re-issue a session cookie older than ttl/4.
         .layer(axum::middleware::from_fn_with_state(

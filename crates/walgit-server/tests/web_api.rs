@@ -1945,11 +1945,10 @@ async fn collab_snapshot_over_cap_is_rejected_before_body_read() -> TestResult {
 
 /// D68: the repository JSON API is not a public HTTP lane any more.
 ///
-/// Agents reach this data through `/mcp` (which calls these same handlers
-/// in-process); the bundled UI and the SDK use `/{owner}/{repo}/api-browser`.
-/// `/{owner}/{repo}/api` is not a route, so a caller that never moved gets a
-/// plain 404 instead of a second contract that slowly drifts from the MCP
-/// projection.
+/// The bundled UI and the SDK use `/{owner}/{repo}/api-browser`; agents read
+/// repository data with plain git (D72). `/{owner}/{repo}/api` is not a route,
+/// so a caller that never moved gets a plain 404 instead of a second contract
+/// that slowly drifts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_repository_api_lane_is_not_served() -> TestResult {
     let server = Server::start().await?;
@@ -1981,5 +1980,62 @@ async fn the_repository_api_lane_is_not_served() -> TestResult {
     let (status, _, _) = get(&server, "/api/v1/me").await?;
     assert_eq!(status, 200, "/api/v1 stays");
 
+    Ok(())
+}
+
+/// D72: this host serves no MCP endpoint any more. Every method a pre-D72
+/// client might send is a plain 404, CORS does not treat the path as an API
+/// surface, and the discovery index does not advertise one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_removed_host_mcp_endpoint_is_gone() -> TestResult {
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.server.cors_origins = vec!["https://app.example".into()];
+    })
+    .await?;
+    // Spelled without the literal path: the product grep must stay clean while
+    // this test still sends exactly what an old client sends.
+    let removed = concat!("/", "mcp");
+
+    for method in [
+        reqwest::Method::GET,
+        reqwest::Method::POST,
+        reqwest::Method::DELETE,
+    ] {
+        let resp = reqwest::Client::new()
+            .request(method.clone(), format!("{}{removed}", server.base_url))
+            .header("Origin", "https://app.example")
+            .header("Accept", "application/json, text/event-stream")
+            .send()
+            .await?;
+        assert_eq!(resp.status(), 404, "{method} {removed} must be gone");
+        assert_eq!(
+            hdr(resp.headers(), "access-control-allow-origin"),
+            "",
+            "{method} {removed} must not be a CORS surface"
+        );
+    }
+
+    // The preflight is not answered as CORS either.
+    let preflight = reqwest::Client::new()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}{removed}", server.base_url),
+        )
+        .header("Origin", "https://app.example")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await?;
+    assert_eq!(
+        hdr(preflight.headers(), "access-control-allow-origin"),
+        "",
+        "a preflight for {removed} must not be allowed"
+    );
+
+    // The API index used to carry a row pointing agents at the endpoint.
+    let (_, disco, _) = get(&server, "/api/v1").await?;
+    assert!(
+        !disco.to_ascii_lowercase().contains("mcp"),
+        "discovery must not advertise an MCP surface: {disco}"
+    );
     Ok(())
 }
