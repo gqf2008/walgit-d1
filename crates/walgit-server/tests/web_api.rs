@@ -2165,6 +2165,43 @@ async fn a_failed_task_redacts_signed_urls_on_the_record_and_sse() -> TestResult
     Ok(())
 }
 
+/// cc-ai-store-503 follow-up: rendering the bundle list is a store read
+/// underneath (`ops::read_list`), so a retryable failure there must be the same
+/// `503 + Retry-After: 15` class as every other lane — the old private helper
+/// turned it into a bare 500. The fault is a truncated `get` body: the `head`
+/// probe that decides the list version still succeeds, so the failing call is
+/// exactly the render's `read_list`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bundle_list_render_classifies_a_store_outage() -> TestResult {
+    let (server, link) = Server::start_with_link(MemoryStore::shared(), |_| {}).await?;
+    server.put_repo("t", "bundles").await?;
+    push_repo(&server, "t", "bundles", 1)?;
+    server.build_bundle("t", "bundles", "weekly").await?;
+
+    link.set(FaultPlan {
+        p_truncate: 1.0,
+        only_keys: Some(vec!["bundles/list.pb".into()]),
+        ..Default::default()
+    });
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/t/bundles.git/bundles/list", server.base_url))
+        .send()
+        .await?;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "bundle list read"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("15")
+    );
+    Ok(())
+}
+
 /// The effective-settings handler syncs the manifest before answering; a
 /// retryable manifest failure must stay the same 503 class (cc-ai-store-503
 /// review findings 1 and 2).

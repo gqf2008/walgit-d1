@@ -83,7 +83,7 @@ pub async fn list(
         .bundles
         .render_list(&route.id, &base, filter.as_deref(), fulls)
         .await
-        .map_err(|e| bundle_err(&e))?;
+        .map_err(|e| ApiError::from(&e))?;
     match text {
         Some(t) => {
             st.caches
@@ -151,9 +151,6 @@ pub async fn object(
         },
     )
     .await
-}
-fn bundle_err(e: &walgit_bundle::BundleError) -> ApiError {
-    ApiError::Internal(format!("bundle: {e}"))
 }
 
 /// Full bundle = header ∘ the single tier-2 base pack, refs from the checkpoint
