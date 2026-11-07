@@ -265,16 +265,24 @@ jobs:
           export WG_BIN="$PWD/wg/wg-$( [ "$(uname -m)" = "arm64" ] && echo aarch64 || echo x86_64 )"
           ./deploy/tray/macos/build-dmg.sh "$version"
 
-      - name: Sign, notarize, and package the wg macOS binaries
+      - name: Sign, notarize, and package the wg macOS binaries (.zip and .pkg)
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          # Developer ID Installer identity for productsign. When these two
+          # secrets are absent the package step warns and skips, so a release
+          # without them still carries the DMG and the signed zips.
+          APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
           CODESIGN_KEYCHAIN: ${{ runner.temp }}/walgit-signing.keychain-db
           CODESIGN_KEYCHAIN_PASSWORD: walgit-ci-signing
           WALGIT_IDENTITY: ${{ steps.signing.outputs.identity }}
+          NOTARY_S3_ACCELERATION: '0'
         run: |
           set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          [ -n "$version" ] || { echo "missing release version" >&2; exit 1; }
           mkdir -p wg-dist
           for arch in aarch64 x86_64; do
             security unlock-keychain -p "$CODESIGN_KEYCHAIN_PASSWORD" "$CODESIGN_KEYCHAIN"
@@ -287,6 +295,13 @@ jobs:
             codesign --force --options runtime --timestamp \
               --keychain "$CODESIGN_KEYCHAIN" --sign "$WALGIT_IDENTITY" "$stage/wg"
             codesign --verify --strict --verbose=2 "$stage/wg"
+            # Standalone installer package (installs wg at /usr/local/bin/wg).
+            # It reuses the Developer ID Application-signed binary so the pkg
+            # can be notarized; without the Installer certificate secrets the
+            # script warns and skips, leaving the DMG and zip as the published
+            # macOS artifacts.
+            WALGIT_PKG_ARCH="$arch" \
+              ./deploy/macos/build-wg-pkg.sh "$stage/wg" "$version" wg-dist
             # A bare binary cannot be stapled; the ticket binds to the zip's
             # contents and Gatekeeper checks it online at first launch.
             (cd "$stage" && zip -q "../wg-$arch-macos.zip" wg)
@@ -304,6 +319,9 @@ jobs:
           done
           rm -f wg/wg-aarch64 wg/wg-x86_64
 
+      # wg-dist/ holds both the per-arch zips and, when the Installer
+      # certificate is configured, the two signed+notarized .pkg installers.
+      # The release job attaches everything downloaded under artifacts/*.
       - name: Upload the wg macOS binaries
         uses: actions/upload-artifact@v4
         with:
