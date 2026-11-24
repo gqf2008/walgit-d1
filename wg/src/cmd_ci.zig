@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const args = @import("args.zig");
 const ci = @import("d1/ci.zig");
 const entry_mod = @import("d1/entry.zig");
+const collab_d1 = @import("d1/collab.zig");
 const ciconfig = @import("ciconfig.zig");
 const cron = @import("cron.zig");
 const gitx = @import("gitx.zig");
@@ -902,6 +903,29 @@ const Runner = struct {
 
     /// Sign an entry into the runner's inbox and push it (§5 write path).
     fn publish(self: *const Runner, kind: []const u8, id: []const u8, parent: []const u8, body: std.json.Value) ![]const u8 {
+        // **C25**: a non-empty `parent` (only `ci_result` → its `ci_claim`) must
+        // be visible before the blob is written. In the normal pass the claim
+        // was just written locally, so the first check hits; after a restart
+        // where the claim lives only on the remote, one bounded fetch runs
+        // before the verdict — and a still-invisible parent fails closed with a
+        // readable reason (never a silent success or a silent drop).
+        if (parent.len > 0) {
+            const reader = collabreader.Reader.init(self.c.alloc, self.c.io, self.repo);
+            var verdict: collab_d1.ParentVerdict = blk: {
+                const loaded = reader.load(self.c.alloc) catch return error.LoadFailed;
+                break :blk reader.parentVerdict(self.c.alloc, &loaded, parent);
+            };
+            if (verdict != .ok) {
+                // The claim may not have been fetched into this checkout yet.
+                gitx.fetch_collab_bounded(self.c.alloc, self.c.io, self.repo, self.remote) catch {};
+                const loaded = reader.load(self.c.alloc) catch return error.LoadFailed;
+                verdict = reader.parentVerdict(self.c.alloc, &loaded, parent);
+            }
+            if (verdict != .ok) {
+                std.debug.print("wg: ci: {s} parent {s} is still not visible after fetching {s}: {s}\n", .{ kind, parent, self.remote, collab_d1.parent_rejected_text(verdict) });
+                return error.ParentInvisible;
+            }
+        }
         var e = Entry{
             .version = 1,
             .kind = kind,
@@ -1636,8 +1660,12 @@ test "concurrent stdout and stderr drains keep both streams" {
 
     // Both pipes are written concurrently; under the old shared-Capture
     // design this is exactly the interleaving that corrupted the list.
+    // Windows note: `cmd /C for` starts at 0 here and emits CRLF, so the
+    // assertions below match line content without the terminator (this test
+    // never passed on Windows before: the old range was (1,1,4000), i.e. no
+    // `out-0` line at all).
     const command: []const []const u8 = if (builtin.os.tag == .windows)
-        &.{ "cmd", "/C", "for /L %i in (1,1,4000) do @(echo out-%i & echo err-%i 1>&2)" }
+        &.{ "cmd", "/C", "for /L %i in (0,1,3999) do @(echo out-%i & echo err-%i 1>&2)" }
     else
         &.{ "sh", "-c", "i=0; while [ $i -lt 4000 ]; do echo out-$i; echo err-$i >&2; i=$((i+1)); done" };
     var child = try std.process.spawn(io, .{
@@ -1665,10 +1693,10 @@ test "concurrent stdout and stderr drains keep both streams" {
     const merged = mergeCaptures(arena, &out_state.capture, &err_state.capture, true, true);
     try testing.expect(!merged.truncated);
     // The complete tails of both streams survive.
-    try testing.expect(std.mem.indexOf(u8, merged.log, "out-3999\n") != null);
-    try testing.expect(std.mem.indexOf(u8, merged.log, "err-3999\n") != null);
+    try testing.expect(std.mem.indexOf(u8, merged.log, "out-3999") != null);
+    try testing.expect(std.mem.indexOf(u8, merged.log, "err-3999") != null);
     // Deterministic merge order: stdout, then stderr.
-    const out_at = std.mem.indexOf(u8, merged.log, "out-0\n").?;
-    const err_at = std.mem.indexOf(u8, merged.log, "err-0\n").?;
+    const out_at = std.mem.indexOf(u8, merged.log, "out-0").?;
+    const err_at = std.mem.indexOf(u8, merged.log, "err-0").?;
     try testing.expect(out_at < err_at);
 }

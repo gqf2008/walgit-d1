@@ -81,6 +81,23 @@ patch_oid="$( cd "$a" && "$W" collab entry --kind patch --id cc-e2e-demo --actor
     --body '{"message":"the change"}' --push origin | awk '{print $2}' )"
 [ -n "$patch_oid" ] || fail "patch entry produced no oid"
 
+step "an invisible parent is refused before any ref exists (C25)"
+inbox_local_before="$(git -C "$a" for-each-ref 'refs/collab/inbox/*' | wc -l | tr -d ' ')"
+inbox_origin_before="$(git -C "$origin" for-each-ref 'refs/collab/inbox/*' | wc -l | tr -d ' ')"
+unknown_parent="$(printf 'a%.0s' $(seq 40))"
+if ( cd "$a" && "$W" collab entry --kind comment --id cc-e2e-demo --actor alice         --parent "$unknown_parent" --body '{"text":"orphan"}' --push origin ) >/dev/null 2>"$tmp/bad-parent.err"; then
+    fail "an unknown parent was accepted"
+fi
+grep -q "parent is not a visible collab entry" "$tmp/bad-parent.err"     || fail "unknown-parent refusal lacks the readable reason: $(cat "$tmp/bad-parent.err")"
+if ( cd "$a" && "$W" collab entry --kind comment --id cc-e2e-demo --actor alice         --parent deadbeef --body '{"text":"short"}' --push origin ) >/dev/null 2>"$tmp/short-parent.err"; then
+    fail "a short parent was accepted (short ids must never be resolved)"
+fi
+grep -q "parent is not a full-length lowercase object id" "$tmp/short-parent.err"     || fail "non-canonical-parent refusal lacks the readable reason: $(cat "$tmp/short-parent.err")"
+inbox_local_after="$(git -C "$a" for-each-ref 'refs/collab/inbox/*' | wc -l | tr -d ' ')"
+inbox_origin_after="$(git -C "$origin" for-each-ref 'refs/collab/inbox/*' | wc -l | tr -d ' ')"
+[ "$inbox_local_after" = "$inbox_local_before" ]     || fail "a refused publish created a local inbox ref ($inbox_local_before -> $inbox_local_after)"
+[ "$inbox_origin_after" = "$inbox_origin_before" ]     || fail "a refused publish pushed an inbox ref ($inbox_origin_before -> $inbox_origin_after)"
+
 step "the second clone aggregates and verifies offline"
 ( cd "$b" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
 a_hash="$( cd "$a" && "$W" collab board --format hash )"
@@ -122,6 +139,12 @@ after="$( cd "$b" && "$W" collab board --format hash )"
 step "watch --once reports the snapshot move"
 watch_out="$( cd "$b" && "$W" collab watch --once 2>/dev/null | grep -c snapshot || true )"
 [ "${watch_out:-0}" -ge 1 ] || fail "watch did not surface the snapshot event"
+
+step "an append after the fold is allowed: the snapshot record vouches for the parent (C25)"
+( cd "$a" && "$W" collab entry --kind status --id cc-e2e-demo --actor alice     --parent "$status_oid" --body '{"status":"needs-review","note":"post-fold append"}'     --push origin >/dev/null ) || fail "a parent carried by the folded snapshot was refused"
+( cd "$b" && git fetch -q origin '+refs/collab/*:refs/collab/*' )
+post_fold_head="$( cd "$a" && "$W" collab thread-heads | python3 -c 'import json,sys; print(json.load(sys.stdin)["cc-e2e-demo"])' )"
+[ -n "$post_fold_head" ] || fail "the post-fold append is not in the thread"
 
 step "wg ci validate parses a ci.toml"
 mkdir -p "$a/.walgit"
