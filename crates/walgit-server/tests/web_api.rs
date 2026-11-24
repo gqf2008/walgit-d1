@@ -2235,3 +2235,99 @@ async fn a_settings_read_classifies_a_manifest_outage() -> TestResult {
     );
     Ok(())
 }
+
+/// C25: the thin API rejects a `parent` no reader can resolve. A well-formed
+/// but invisible oid used to be accepted and turned into the orphan root of its
+/// thread; short/uppercase ids are refused instead of being guessed.
+///
+/// Teeth: the tail case must still pass (the check cannot reject valid appends);
+/// each rejection must leave no new inbox ref behind (fail-closed **before** the
+/// publish, not after).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collab_thin_api_rejects_invisible_parent() -> TestResult {
+    let server = Server::start_with_tweak(|c| {
+        c.server.auth.mode = walgit_config::AuthMode::Token;
+        c.server.auth.anonymous_read = false;
+        c.server.auth.tokens = vec![walgit_config::StaticToken {
+            principal: "alice".into(),
+            token: "alice-token".into(),
+            token_env: None,
+            write: true,
+            admin: false,
+        }];
+    })
+    .await?;
+    let client = reqwest::Client::new();
+    let put = client
+        .put(format!("{}/o/r", server.base_url))
+        .bearer_auth("alice-token")
+        .send()
+        .await?;
+    assert!(put.status().is_success() || put.status() == reqwest::StatusCode::CONFLICT);
+    let url = format!("{}/o/r/api-browser/collab/entries", server.base_url);
+    let post = |entry: serde_json::Value| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            client
+                .post(&url)
+                .bearer_auth("alice-token")
+                .json(&serde_json::json!({ "entry": entry }))
+                .send()
+                .await
+        }
+    };
+    let mut root = serde_json::json!({
+        "version": 1, "kind": "issue", "id": "c25", "actor": "alice",
+        "ts": 1_786_500_000, "parent": "", "body": {"title": "root"},
+        "sig": "ed25519:AAAA"
+    });
+    let resp = post(root.clone()).await?;
+    assert_eq!(resp.status(), 200, "root posts");
+    let body: serde_json::Value = resp.json().await?;
+    let root_oid = body["oid"].as_str().expect("oid").to_string();
+
+    // Visible parent (inbox tail) must keep working.
+    let child = serde_json::json!({
+        "version": 1, "kind": "comment", "id": "c25", "actor": "alice",
+        "ts": 1_786_500_001, "parent": root_oid, "body": {"note": "child"},
+        "sig": "ed25519:BBBB"
+    });
+    let resp = post(child).await?;
+    assert_eq!(resp.status(), 200, "a tail parent is visible");
+
+    // Invisible (well-formed, nothing names it), short, and uppercase parents.
+    for (parent, needle) in [
+        ("0".repeat(40), "not a visible collab entry"),
+        ("deadbeef".to_string(), "full-length lowercase"),
+        ("A".repeat(40), "full-length lowercase"),
+    ] {
+        root["parent"] = serde_json::Value::String(parent.clone());
+        root["ts"] = serde_json::Value::from(1_786_500_002i64);
+        let resp = post(root.clone()).await?;
+        assert_eq!(resp.status(), 400, "parent {parent:?} must be rejected");
+        let text = resp.text().await?;
+        assert!(
+            text.contains("parent rejected") && text.contains(needle),
+            "diagnostic for {parent:?}: {text}"
+        );
+    }
+
+    // Fail-closed before the write: still exactly two inbox refs (root + child).
+    let (st, text, _) = get_h(
+        &server,
+        "/o/r/api-browser/refs/collab",
+        &[("Authorization", "Bearer alice-token")],
+    )
+    .await?;
+    assert_eq!(st, 200);
+    let r: serde_json::Value = serde_json::from_str(&text)?;
+    let inbox = r["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["name"].as_str().is_some_and(|n| n.starts_with("refs/collab/inbox/")))
+        .count();
+    assert_eq!(inbox, 2, "rejected posts leave no ref: {}", r["refs"]);
+    Ok(())
+}

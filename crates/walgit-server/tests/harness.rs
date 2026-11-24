@@ -76,6 +76,24 @@ impl Server {
         Self::start_with_cfg(self.store.clone(), tempfile::tempdir()?, tweak).await
     }
 
+    /// `start_sibling_with` on a fresh fault-injecting link, so the sibling's
+    /// store requests can be counted (`link.stats().ops`): the measurement lane
+    /// for a remote-serving front that must not share the parent's cache.
+    pub async fn start_sibling_with_link(
+        &self,
+        tweak: impl FnOnce(&mut Config),
+    ) -> Result<(Self, Arc<walgit_store::fault::FaultStore>)> {
+        let link =
+            walgit_store::fault::FaultStore::new(self.store.clone(), "test-sibling-link", 11);
+        let dyn_store: DynStore = link.clone();
+        let cache = tempfile::tempdir()?;
+        let dir = cache.path().to_path_buf();
+        let server =
+            Self::start_with_dyn(self.store.clone(), dyn_store, dir, Some(cache), tweak, |_| {})
+                .await?;
+        Ok((server, link))
+    }
+
     /// A given memory store and a **caller-owned** cache dir: the caller keeps
     /// the `TempDir`, so the cache survives dropping this server — the building
     /// block for "fresh process, wiped bucket, leftover cache.dir" tests.
