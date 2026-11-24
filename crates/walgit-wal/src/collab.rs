@@ -6,7 +6,7 @@
 //! the server's collab API.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -284,6 +284,82 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Snapshot, String> {
         return Err(format!("collab snapshot: kind {:?} is not collab_snapshot", snap.kind));
     }
     Ok(snap)
+}
+
+/// Why a `parent` was rejected by [`parent_visible`] (C25). Separate variants
+/// so callers and tests can pin the reason, not just the failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentRejected {
+    /// Not a full-length lowercase object id in the repository's hash format
+    /// (sha1 40 / sha256 64). Short ids are deliberately not resolved: the
+    /// ambiguity of "which object did the author mean" is what the C24 gate
+    /// found people typing wrong by hand.
+    NotCanonicalOid,
+    /// Well-formed id, but neither an inbox ref nor a validated snapshot
+    /// record names it — a parent nobody can read back.
+    Unknown,
+}
+
+impl std::fmt::Display for ParentRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCanonicalOid => write!(
+                f,
+                "parent is not a full-length lowercase object id (sha1: 40 hex chars, sha256: 64)"
+            ),
+            Self::Unknown => write!(
+                f,
+                "parent is not a visible collab entry (absent from refs/collab/inbox/* or the \
+                 folded snapshot's validated records); fetch refs/collab/* before publishing"
+            ),
+        }
+    }
+}
+
+/// Whether `parent` names a **visible** collab entry (C25): the empty string
+/// (root) is always allowed; otherwise it must be a full-length lowercase oid
+/// that either an inbox ref points at, or a snapshot record carries — and the
+/// snapshot record only counts after passing [`SnapshotRecord::entry_ref`]
+/// (`docs/D1_PROTOCOL.md` §9.2: a record's declared oid must be recomputable
+/// from its bytes; "it appears in the snapshot" is not trust).
+///
+/// Checking refs alone would reject a legitimate append after a fold (the
+/// parent then lives only inside the snapshot — §6.1's original reason for the
+/// write-side gap); checking the snapshot's declared `oid` alone would trust
+/// bytes the reader itself refuses to trust.
+pub fn parent_visible<S: std::hash::BuildHasher>(
+    parent: &str,
+    inbox_oids: &HashSet<String, S>,
+    snapshot: Option<&Snapshot>,
+    format: ObjectFormat,
+) -> Result<(), ParentRejected> {
+    if parent.is_empty() {
+        return Ok(());
+    }
+    if !is_canonical_oid(parent, format) {
+        return Err(ParentRejected::NotCanonicalOid);
+    }
+    if inbox_oids.contains(parent) {
+        return Ok(());
+    }
+    if let Some(snap) = snapshot
+        && snap
+            .entries
+            .iter()
+            .any(|rec| rec.oid == parent && rec.entry_ref(format).is_some())
+    {
+        return Ok(());
+    }
+    Err(ParentRejected::Unknown)
+}
+
+/// Full-length lowercase hex in the repository's object format.
+fn is_canonical_oid(oid: &str, format: ObjectFormat) -> bool {
+    let want = match format {
+        ObjectFormat::Sha1 => 40,
+        ObjectFormat::Sha256 => 64,
+    };
+    oid.len() == want && oid.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// The canonical bytes the snapshot's signature covers: the document without
@@ -3392,5 +3468,147 @@ mod golden_tests {
         e.sig = sign_entry(&mut e, &sk);
         assert_eq!(e.sig, format!("ed25519:{GOLDEN_SIG_B64}"));
         assert!(verify_entry(&e, GOLDEN_PUB_B64).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod parent_visibility_tests {
+    use super::*;
+
+    fn signed(actor: &str, parent: &str, key: &SigningKey) -> Entry {
+        let mut e = Entry {
+            version: 1,
+            kind: "comment".into(),
+            id: "c25".into(),
+            actor: actor.into(),
+            ts: 1_760_000_000,
+            parent: parent.into(),
+            refs: None,
+            body: serde_json::json!({"note": "x"}),
+            sig: String::new(),
+        };
+        e.sig = sign_entry(&mut e, key);
+        e
+    }
+
+    fn record(format: ObjectFormat, entry: &Entry, oid_override: Option<&str>) -> SnapshotRecord {
+        let json = serde_json::to_string(entry).expect("serialize entry");
+        let oid = oid_override
+            .map_or_else(|| git_blob_oid(json.as_bytes(), format), str::to_string);
+        SnapshotRecord {
+            oid,
+            principal: entry.actor.clone(),
+            json,
+        }
+    }
+
+    fn snapshot(records: Vec<SnapshotRecord>) -> Snapshot {
+        Snapshot {
+            version: 1,
+            kind: "collab_snapshot".into(),
+            actor: "alice".into(),
+            ts: 1_760_000_000,
+            entries: records,
+            complete: true,
+            dropped_entries: 0,
+            sig: String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_parent_is_root_and_allowed() {
+        let inbox: HashSet<String> = HashSet::new();
+        assert_eq!(parent_visible("", &inbox, None, ObjectFormat::Sha1), Ok(()));
+    }
+
+    #[test]
+    fn parent_in_inbox_is_visible() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let e = signed("alice", "", &key);
+        let json = serde_json::to_string(&e).expect("serialize");
+        let oid = git_blob_oid(json.as_bytes(), ObjectFormat::Sha1);
+        let inbox: HashSet<String> = [oid.clone()].into_iter().collect();
+        assert_eq!(
+            parent_visible(&oid, &inbox, None, ObjectFormat::Sha1),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn parent_in_snapshot_is_visible_and_mismatched_record_is_not() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let e = signed("alice", "", &key);
+        let good = record(ObjectFormat::Sha1, &e, None);
+        let good_oid = good.oid.clone();
+        let mut bad = record(ObjectFormat::Sha1, &e, None);
+        bad.oid = "0".repeat(40);
+        let bad_oid = bad.oid.clone();
+        let snap = snapshot(vec![good, bad]);
+        let empty: HashSet<String> = HashSet::new();
+        assert_eq!(
+            parent_visible(&good_oid, &empty, Some(&snap), ObjectFormat::Sha1),
+            Ok(()),
+            "a validated snapshot record makes its parent visible"
+        );
+        assert_eq!(
+            parent_visible(&bad_oid, &empty, Some(&snap), ObjectFormat::Sha1),
+            Err(ParentRejected::Unknown),
+            "the declared oid does not hash its bytes: the record is not trusted, so the parent is not visible"
+        );
+    }
+
+    #[test]
+    fn unknown_parent_is_rejected() {
+        let inbox: HashSet<String> = HashSet::new();
+        assert_eq!(
+            parent_visible(&"a".repeat(40), &inbox, None, ObjectFormat::Sha1),
+            Err(ParentRejected::Unknown)
+        );
+    }
+
+    #[test]
+    fn non_canonical_parent_is_rejected() {
+        let inbox: HashSet<String> = ["deadbeef".to_string()].into_iter().collect();
+        assert_eq!(
+            parent_visible("deadbeef", &inbox, None, ObjectFormat::Sha1),
+            Err(ParentRejected::NotCanonicalOid),
+            "short ids are never resolved"
+        );
+        let upper = "A".repeat(40);
+        assert_eq!(
+            parent_visible(&upper, &inbox, None, ObjectFormat::Sha1),
+            Err(ParentRejected::NotCanonicalOid),
+            "uppercase is not canonical"
+        );
+        assert_eq!(
+            parent_visible(&"a".repeat(64), &inbox, None, ObjectFormat::Sha1),
+            Err(ParentRejected::NotCanonicalOid),
+            "length is the repository's hash format"
+        );
+        let sha256 = "a".repeat(64);
+        assert_eq!(
+            parent_visible(&sha256, &inbox, None, ObjectFormat::Sha256),
+            Err(ParentRejected::Unknown),
+            "64 hex is well-formed under sha256 (unknown, not malformed)"
+        );
+    }
+
+    #[test]
+    fn truncated_snapshot_does_not_vouch_for_dropped_parents() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let e = signed("alice", "", &key);
+        let dropped_oid = git_blob_oid(
+            serde_json::to_string(&e).expect("serialize").as_bytes(),
+            ObjectFormat::Sha1,
+        );
+        let mut snap = snapshot(vec![]);
+        snap.complete = false;
+        snap.dropped_entries = 1;
+        let empty: HashSet<String> = HashSet::new();
+        assert_eq!(
+            parent_visible(&dropped_oid, &empty, Some(&snap), ObjectFormat::Sha1),
+            Err(ParentRejected::Unknown),
+            "a truncated fold cannot prove a dropped parent existed (docs/D1_PROTOCOL.md §9.3)"
+        );
     }
 }

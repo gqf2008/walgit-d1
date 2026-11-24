@@ -1278,7 +1278,7 @@ async fn collab_entries(
     let body: CollabPost = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid collab post: {e}")))?;
     let handle = open(&st, &headers, &owner, &repo_name).await?;
-    let r = view(&st, handle.clone(), Need::Refs, Reporter::none()).await?;
+    let mut r = view(&st, handle.clone(), Need::Refs, Reporter::none()).await?;
     let entry = body.entry;
     // It has to *be* an entry (docs/D1_PROTOCOL.md §5). The read side tolerates
     // a non-entry blob (one corrupt ref must not take the dashboard down) and
@@ -1303,6 +1303,13 @@ async fn collab_entries(
         return Err(ApiError::BadRequest(format!(
             "actor {actor:?} is not a refname-safe segment"
         )));
+    }
+    // C25: a parent must name an entry a reader can resolve (inbox tail or the
+    // folded snapshot); a well-formed but invisible oid used to be accepted and
+    // became the orphan root of its thread (`docs/D1_PROTOCOL.md` §6.1/§6.3).
+    let parent = entry.get("parent").and_then(|v| v.as_str()).unwrap_or("");
+    if let Err(reason) = Box::pin(collab_parent_visible(&st, &mut r, parent)).await? {
+        return Err(ApiError::BadRequest(format!("parent rejected: {reason}")));
     }
     // Transition 门禁 (issue #75 ①, 方案 A):status=done 需前置 needs-review
     // + verified approve review;其余流转自由。非法流转 400 机器可读错误。
@@ -1947,6 +1954,119 @@ async fn collab_load(st: &AppState, r: &Repo) -> Result<CollabState, ApiError> {
         principals,
         rules,
     })
+}
+
+/// C25: whether `parent` names a **visible** collab entry.
+///
+/// `""` is the root. Otherwise the oid must be full-length lowercase hex in the
+/// repository's hash format and must be named by an inbox ref (answered from the
+/// refs index already in hand — no extra round trip) or by a record of the
+/// folded snapshot that passes `docs/D1_PROTOCOL.md` §9.2's content hash. The
+/// snapshot read is the only extra round trip and happens only when the tail
+/// misses (`docs/ROUNDTRIPS.md`, "Collab publish (parent check)").
+///
+/// Status split (C25): an invisible or malformed parent is the caller's `400`;
+/// a snapshot over the read cap is the read path's `503`; a snapshot the ref
+/// index advertises but the object store cannot produce — or one that fails to
+/// parse — is `500`, because nothing proves the parent exists and the server
+/// state itself is broken.
+async fn collab_parent_visible(
+    st: &AppState,
+    r: &mut Repo,
+    parent: &str,
+) -> Result<Result<(), String>, ApiError> {
+    use std::collections::HashSet;
+    // The empty parent is the root. The library (`parent_visible`) allows it
+    // too: the duplication is deliberate — this returns before the refs scan
+    // and any object work, and either side turning to a reject would make
+    // every root publish a 400 (mutation M4/M4b pin both).
+    if parent.is_empty() {
+        return Ok(Ok(()));
+    }
+    let all = &r.index.all;
+    let start = all.partition_point(|(name, _)| name.as_str() < "refs/collab/");
+    let mut inbox: HashSet<String> = HashSet::new();
+    let mut snapshot_oid: Option<String> = None;
+    for (name, oid) in all.iter().skip(start) {
+        if !name.starts_with("refs/collab/") {
+            break;
+        }
+        if name.starts_with("refs/collab/inbox/") {
+            inbox.insert(oid.clone());
+        } else if name == walgit_wal::collab::SNAPSHOT_REF {
+            snapshot_oid = Some(oid.clone());
+        }
+    }
+    let format = r.local.object_format();
+    match walgit_wal::collab::parent_visible(parent, &inbox, None, format) {
+        Ok(()) => return Ok(Ok(())),
+        Err(walgit_wal::collab::ParentRejected::NotCanonicalOid) => {
+            return Ok(Err(walgit_wal::collab::ParentRejected::NotCanonicalOid.to_string()));
+        }
+        Err(walgit_wal::collab::ParentRejected::Unknown) => {}
+    }
+    let Some(oid) = snapshot_oid else {
+        return Ok(Err(walgit_wal::collab::ParentRejected::Unknown.to_string()));
+    };
+    // D45 precheck, same shape as `collab_load`: refuse to materialize an
+    // oversized snapshot. Without it we cannot prove the parent exists.
+    //
+    // The publish endpoint works on a refs-level view (`Need::Refs`), whose
+    // `Repo::remote()` is `None` by construction: a snapshot that lives only in
+    // packs the cache cannot hold is invisible until the view is upgraded. Do
+    // that upgrade here and only here — the tail already answered the common
+    // case, so an ordinary append never pays for object access.
+    let mut size = object_size(r, &oid).await?;
+    if size.is_none() {
+        r.need_objects(st).await?;
+        size = object_size(r, &oid).await?;
+        if size.is_none() {
+            return Err(internal(format!(
+                "cannot verify parent: {} ({oid}) is advertised by the ref index but its blob is missing locally",
+                walgit_wal::collab::SNAPSHOT_REF
+            )));
+        }
+    }
+    if size.is_some_and(|size| {
+        size > u64::try_from(COLLAB_SNAPSHOT_MAX_BYTES).unwrap_or(u64::MAX)
+    }) {
+        return Err(ApiError::ServiceUnavailable(format!(
+            "cannot verify parent: collab snapshot exceeds {} MiB; aggregate offline with the `wg collab` CLI",
+            COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
+        )));
+    }
+    if let Some(remote) = r.remote() {
+        if let Ok(obj) = gix_hash::ObjectId::from_hex(oid.as_bytes()) {
+            remote.fault_many(&[obj]).await?;
+        }
+        r.local
+            .refresh_async()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    let mut blobs = git_cat_file_batch(&r.local, std::slice::from_ref(&oid), None).await?;
+    let Some(bytes) = blobs.remove(&oid) else {
+        return Err(internal(format!(
+            "cannot verify parent: {} ({oid}) is advertised by the ref index but its blob is missing locally",
+            walgit_wal::collab::SNAPSHOT_REF
+        )));
+    };
+    if bytes.len() > COLLAB_SNAPSHOT_MAX_BYTES {
+        return Err(ApiError::ServiceUnavailable(format!(
+            "cannot verify parent: collab snapshot exceeds {} MiB; aggregate offline with the `wg collab` CLI",
+            COLLAB_SNAPSHOT_MAX_BYTES / (1024 * 1024)
+        )));
+    }
+    let snap = walgit_wal::collab::parse_snapshot(&bytes).map_err(|e| {
+        internal(format!(
+            "cannot verify parent: {}: {e}",
+            walgit_wal::collab::SNAPSHOT_REF
+        ))
+    })?;
+    match walgit_wal::collab::parent_visible(parent, &inbox, Some(&snap), format) {
+        Ok(()) => Ok(Ok(())),
+        Err(e) => Ok(Err(e.to_string())),
+    }
 }
 
 /// The full observability report (`docs/D1_PROTOCOL.md` §7.4/§8): thread summaries, PR status + merge

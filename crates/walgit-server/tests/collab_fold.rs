@@ -16,6 +16,10 @@ use base64::Engine as _;
 use ed25519_dalek::SigningKey;
 use harness::Server;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use walgit_store::fault::FaultStore;
+use walgit_store::memory::MemoryStore;
 use walgit_git::RepoId;
 use walgit_wal::collab::{Entry, sign_entry};
 
@@ -263,4 +267,322 @@ async fn a_fold_refuses_a_key_the_registry_does_not_name() {
     let text = format!("{err:#}");
     assert!(text.contains("is not registered"), "{text}");
     assert!(text.contains("principal-register"), "{text}");
+}
+
+/// C25: after a fold the parent lives **only** inside the snapshot; appending
+/// to that chain must still pass the thin API's parent check (the check honours
+/// the snapshot's validated records — the reason a refs-only check was refused).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folded_parent_stays_appendlable() {
+    let key = seed(11);
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.server.auth.mode = walgit_config::AuthMode::Token;
+        cfg.server.auth.anonymous_read = false;
+        cfg.server.auth.tokens = vec![walgit_config::StaticToken {
+            principal: "worker".into(),
+            token: "worker-s3cret".into(),
+            token_env: None,
+            write: true,
+            admin: true,
+        }];
+    })
+    .await
+    .unwrap();
+    let (status, _) = http(&server, "PUT", "/t/c25fold", None).await;
+    assert!(status.is_success(), "{status}");
+    let (status, _) = http(
+        &server,
+        "POST",
+        "/t/c25fold/api-browser/collab/principal",
+        Some(json!({"principal": "worker", "public_key": public_key_b64(&key)})),
+    )
+    .await;
+    assert!(status.is_success(), "register principal: {status}");
+
+    let root = entry(&key, "worker", "issue", "c25", json!({"title": "root"}));
+    let (status, answer) = http(
+        &server,
+        "POST",
+        "/t/c25fold/api-browser/collab/entries",
+        Some(json!({"entry": root})),
+    )
+    .await;
+    assert!(status.is_success(), "publish root: {status} {answer}");
+    let root_oid = answer["oid"].as_str().expect("root oid").to_string();
+
+    let mut child = entry(&key, "worker", "comment", "c25", json!({"note": "child"}));
+    child.parent = root_oid.clone();
+    let (status, answer) = http(
+        &server,
+        "POST",
+        "/t/c25fold/api-browser/collab/entries",
+        Some(json!({"entry": child})),
+    )
+    .await;
+    assert!(status.is_success(), "publish child: {status} {answer}");
+
+    let id = RepoId::new("t", "c25fold").unwrap();
+    let signer = walgit_server::collab_fold::Signer {
+        principal: "worker".into(),
+        key: key.clone(),
+    };
+    let log = |_: String| {};
+    let outcome = walgit_server::collab_fold::fold(&server.state, &id, &signer, &log)
+        .await
+        .expect("fold");
+    assert_eq!(outcome.folded, 2, "{outcome:?}");
+    let after = collab_refs(&server, "t/c25fold").await;
+    assert!(
+        after.iter().any(|n| n == walgit_server::collab_fold::SNAPSHOT_REF),
+        "{after:?}"
+    );
+    assert!(
+        !after.iter().any(|n| n.starts_with("refs/collab/inbox/")),
+        "both entries folded and pruned: {after:?}"
+    );
+
+    // The parent now exists only in the snapshot. A refs-only check would reject
+    // this append; the snapshot-aware check must accept it.
+    let mut grandchild = entry(&key, "worker", "comment", "c25", json!({"note": "after fold"}));
+    grandchild.parent = root_oid;
+    let (status, answer) = http(
+        &server,
+        "POST",
+        "/t/c25fold/api-browser/collab/entries",
+        Some(json!({"entry": grandchild})),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "a folded parent is still visible: {status} {answer}"
+    );
+}
+/// POST one entry to the thin API on `repo` ("/t/<name>" or "/o/<name>").
+async fn publish(server: &Server, repo: &str, entry: Entry) -> (reqwest::StatusCode, Value) {
+    http(
+        server,
+        "POST",
+        &format!("{repo}/api-browser/collab/entries"),
+        Some(json!({"entry": entry})),
+    )
+    .await
+}
+
+/// C25 measurement, backing the `Collab publish, parent check` row of
+/// `docs/ROUNDTRIPS.md`. It reads the same `FaultStore` counter the budget sim
+/// uses (`healthy_request_round_trip_budgets`); the sim itself cannot reach
+/// this path — it drives the WAL, not the HTTP thin API.
+///
+/// Returns `(tail hit, empty-parent control, snapshot miss)` store-request
+/// deltas of three publishes on the same warm repo.
+async fn measure_parent_check(
+    server: &Server,
+    link: &Arc<FaultStore>,
+    key: &SigningKey,
+    repo: &str,
+) -> (u64, u64, u64) {
+    let ops = || link.stats().ops.load(Ordering::Relaxed);
+    let (status, _) = http(server, "PUT", repo, None).await;
+    assert!(status.is_success(), "create {repo}: {status}");
+    let (status, _) = http(
+        server,
+        "POST",
+        &format!("{repo}/api-browser/collab/principal"),
+        Some(json!({"principal": "worker", "public_key": public_key_b64(key)})),
+    )
+    .await;
+    assert!(status.is_success(), "register principal: {status}");
+
+    // Warm the publish path (repo creation, the first refs sync + publish).
+    let root = entry(key, "worker", "issue", "c25rt", json!({"title": "root"}));
+    let (status, answer) = publish(server, repo, root).await;
+    assert!(status.is_success(), "publish root: {status} {answer}");
+    let root_oid = answer["oid"].as_str().expect("root oid").to_string();
+    let mut warm = entry(key, "worker", "comment", "c25rt", json!({"note": "warm"}));
+    warm.parent = root_oid.clone();
+    let (status, answer) = publish(server, repo, warm).await;
+    assert!(status.is_success(), "publish warm child: {status} {answer}");
+
+    // Tail hit (parent visible in the inbox) vs a root publish (no parent to
+    // check at all): the difference is what the check itself costs.
+    let mut tail = entry(key, "worker", "comment", "c25rt", json!({"note": "tail"}));
+    tail.parent = root_oid.clone();
+    let before = ops();
+    let (status, answer) = publish(server, repo, tail).await;
+    assert!(status.is_success(), "publish tail child: {status} {answer}");
+    let d_tail = ops() - before;
+
+    let root2 = entry(key, "worker", "issue", "c25rt2", json!({"title": "control"}));
+    let before = ops();
+    let (status, answer) = publish(server, repo, root2).await;
+    assert!(status.is_success(), "publish control root: {status} {answer}");
+    let d_root = ops() - before;
+
+    // Fold: `root_oid` now lives only inside the snapshot. Appending to it
+    // exercises the snapshot branch (`object_size` + fault + batched read).
+    let (owner, name) = repo
+        .trim_start_matches('/')
+        .split_once('/')
+        .expect("repo path is /owner/name");
+    let id = RepoId::new(owner, name).unwrap();
+    let signer = walgit_server::collab_fold::Signer {
+        principal: "worker".into(),
+        key: key.clone(),
+    };
+    let log = |_: String| {};
+    let outcome = walgit_server::collab_fold::fold(&server.state, &id, &signer, &log)
+        .await
+        .expect("fold");
+    assert!(outcome.folded >= 3, "{outcome:?}");
+    let after = collab_refs(server, &repo[1..]).await;
+    assert!(
+        !after.iter().any(|n| n.starts_with("refs/collab/inbox/")),
+        "the fold pruned the inbox: {after:?}"
+    );
+
+    let mut grandchild = entry(key, "worker", "comment", "c25rt", json!({"note": "after fold"}));
+    grandchild.parent = root_oid;
+    let before = ops();
+    let (status, answer) = publish(server, repo, grandchild).await;
+    assert!(
+        status.is_success(),
+        "a folded parent must stay appendlable: {status} {answer}"
+    );
+    let d_snap = ops() - before;
+    (d_tail, d_root, d_snap)
+}
+
+/// Hard assertion: a parent visible in the inbox tail costs **no store request
+/// beyond a root publish** — the check answers from the refs index already in
+/// hand, so a tail hit is +0 by construction, not a tuned number.
+///
+/// The snapshot-miss delta is printed, not pinned: on this harness it is the
+/// local path (`git cat-file -s` + one batched local read, no bucket request).
+/// The remote-reader delta — the number `docs/ROUNDTRIPS.md` quotes — is the
+/// second test below.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collab_publish_parent_check_round_trips() {
+    let key = seed(19);
+    let (server, link) = Server::start_with_link(MemoryStore::shared(), |cfg| {
+        cfg.server.auth.mode = walgit_config::AuthMode::Token;
+        cfg.server.auth.anonymous_read = false;
+        cfg.server.auth.tokens = vec![walgit_config::StaticToken {
+            principal: "worker".into(),
+            token: "worker-s3cret".into(),
+            token_env: None,
+            write: true,
+            admin: true,
+        }];
+    })
+    .await
+    .unwrap();
+    let (d_tail, d_root, d_snap) = measure_parent_check(&server, &link, &key, "/t/c25rt").await;
+    eprintln!(
+        "parent check store ops (local): tail={d_tail} root={d_root} snapshot={d_snap}"
+    );
+    assert_eq!(
+        d_tail, d_root,
+        "a tail parent must cost no request beyond a root publish (tail={d_tail}, root={d_root})"
+    );
+}
+
+/// The remote-reader measurement behind the docs' "miss +2". The seeding host
+/// keeps its packs local; the measured **sibling** has a fresh cache that can
+/// never hold them, so its object reads go through the remote reader and the
+/// snapshot folded by the seeding host is genuinely not local — the state a
+/// real remote front is in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collab_parent_check_remote_round_trips() {
+    // A plain fn item (not a capturing closure): it is passed to the seeding
+    // host and again to the sibling tweak, and fn items are Copy.
+    fn auth(cfg: &mut walgit_config::Config) {
+        cfg.server.auth.mode = walgit_config::AuthMode::Token;
+        cfg.server.auth.anonymous_read = false;
+        cfg.server.auth.tokens = vec![walgit_config::StaticToken {
+            principal: "worker".into(),
+            token: "worker-s3cret".into(),
+            token_env: None,
+            write: true,
+            admin: true,
+        }];
+    }
+    let key = seed(23);
+    let big = Server::start_with_tweak(auth).await.unwrap();
+    let repo = "/t/c25rt";
+    let (status, _) = http(&big, "PUT", repo, None).await;
+    assert!(status.is_success(), "create {repo}: {status}");
+    let (status, _) = http(
+        &big,
+        "POST",
+        &format!("{repo}/api-browser/collab/principal"),
+        Some(json!({"principal": "worker", "public_key": public_key_b64(&key)})),
+    )
+    .await;
+    assert!(status.is_success(), "register principal: {status}");
+    let root = entry(&key, "worker", "issue", "c25rt", json!({"title": "root"}));
+    let (status, answer) = publish(&big, repo, root).await;
+    assert!(status.is_success(), "publish root: {status} {answer}");
+    let root_oid = answer["oid"].as_str().expect("root oid").to_string();
+    let mut child = entry(&key, "worker", "comment", "c25rt", json!({"note": "child"}));
+    child.parent = root_oid.clone();
+    let (status, answer) = publish(&big, repo, child).await;
+    assert!(status.is_success(), "publish child: {status} {answer}");
+    let signer = walgit_server::collab_fold::Signer {
+        principal: "worker".into(),
+        key: key.clone(),
+    };
+    let log = |_: String| {};
+    let id = RepoId::new("t", "c25rt").unwrap();
+    let outcome = walgit_server::collab_fold::fold(&big.state, &id, &signer, &log)
+        .await
+        .expect("fold");
+    assert!(outcome.folded >= 2, "{outcome:?}");
+
+    let (small, link) = big
+        .start_sibling_with_link(|cfg| {
+            auth(cfg);
+            // Never enough room for the packs: every object read is remote.
+            cfg.cache.max_bytes = bytesize::ByteSize::b(1);
+        })
+        .await
+        .unwrap();
+    let ops = || link.stats().ops.load(Ordering::Relaxed);
+
+    // Warm the sibling (cold open, first refs sync + publish).
+    let warm_root = entry(&key, "worker", "issue", "c25rt", json!({"title": "warm"}));
+    let (status, answer) = publish(&small, repo, warm_root).await;
+    assert!(status.is_success(), "publish warm root: {status} {answer}");
+    let warm_oid = answer["oid"].as_str().expect("warm oid").to_string();
+
+    let mut tail = entry(&key, "worker", "comment", "c25rt", json!({"note": "tail"}));
+    tail.parent = warm_oid;
+    let before = ops();
+    let (status, answer) = publish(&small, repo, tail).await;
+    assert!(status.is_success(), "publish tail child: {status} {answer}");
+    let d_tail = ops() - before;
+
+    let control = entry(&key, "worker", "issue", "c25rt2", json!({"title": "control"}));
+    let before = ops();
+    let (status, answer) = publish(&small, repo, control).await;
+    assert!(status.is_success(), "publish control root: {status} {answer}");
+    let d_root = ops() - before;
+
+    let mut grandchild = entry(&key, "worker", "comment", "c25rt", json!({"note": "after fold"}));
+    grandchild.parent = root_oid;
+    let before = ops();
+    let (status, answer) = publish(&small, repo, grandchild).await;
+    assert!(
+        status.is_success(),
+        "a folded parent must stay appendlable on a remote front: {status} {answer}"
+    );
+    let d_snap = ops() - before;
+    eprintln!("parent check store ops (remote): tail={d_tail} root={d_root} snapshot={d_snap}");
+    assert_eq!(
+        d_tail, d_root,
+        "a tail parent must cost no request beyond a root publish (tail={d_tail}, root={d_root})"
+    );
+    assert!(
+        d_snap.saturating_sub(d_tail) >= 1,
+        "the snapshot miss must pay at least one remote metadata round (tail={d_tail}, snapshot={d_snap})"
+    );
 }

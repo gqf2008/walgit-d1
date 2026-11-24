@@ -211,7 +211,7 @@ is_verified(er) =
 | `id` | string | 线程键，**不要求 refname-safe**（不进 ref 名）；同线程全部条目共用 |
 | `actor` | principal（§4.2） | 必须等于所在收件箱属主才可能 verified |
 | `ts` | i64 | unix 秒；写入端取当前时间。**不被认证**：只影响排序与展示（及 CI 子协议的 TTL 活性判断），不参与签名/身份等安全判定 |
-| `parent` | string | 上一条目 blob oid；根为 `""`。工具**不校验**指向是否存在（§6.3） |
+| `parent` | string | 上一条目 blob oid；根为 `""`。**写侧校验**：`""`，或命中 `refs/collab/inbox/*` 的 oid，或折叠快照中通过 §9.2 重算校验的记录（§6.1/§6.3）。已接线 = 服务端薄 API；CLI/Zig `wg` 与直接 `git push` 尚未覆盖 |
 | `refs` | object? | 可省略；`{base?, head?}`，patch 用 |
 | `body` | JSON | 协议约定为对象；字段抽取值仅对对象生效 |
 | `sig` | string | `ed25519:<base64>`，覆盖 canonical 形（§5.3/§5.4）；缺失/空 = 验签必然失败 |
@@ -356,14 +356,22 @@ verify = Ed25519_verify_strict( pubkey(actor), canonical(entry with sig="") , si
     退化取序首，§8.2）；未注册者注入的低 `ts` 根不会改写身份。已验证参与者仍可注入并影响
     投影——但它本来就能直接发条目，身份边界始终是写权限（§3/§14）。`status` 上下文按同一
     链序重放：任何已验证参与者都能追加 `status` 覆盖它，这是工具的设计行为，不是顺序缺陷。
-  - 写侧**不校验** `parent` 存在性：折叠后父条目只存在于快照里（不在 ref 上），按 ref 校验
-    会误拒合法追加；这是设计选择，不是遗漏。
+  - 写侧**校验** `parent` 的可见性（C25）：`""`，或命中 `refs/collab/inbox/*` 的 oid，或折叠
+    快照中**通过 §9.2 重算校验**的记录。只按 ref 校验会误拒折叠后的合法追加（父条目此时只在
+    快照里）——这是校验必须同时看快照的原因，不是遗漏。**已接线的写路径 = 服务端薄 API**
+    （`web/api.rs::collab_entries`：不可见或非规范 oid ⇒ 400）。该端点平时是 refs 级视图，
+    **只在 tail 落空且快照不在本地时**按需升级到对象视图（`need_objects`）再读快照——tail 命中
+    不产生任何对象访问，不要把发布端点当成始终只有 refs。CLI 与 Zig `wg` 的写路径尚未接线
+    （C25 阻塞项）；直接 `git push` 到 `refs/collab/inbox/*` 不经条目解析，仍绕过本校验（§14）。
 - **链头**（tip）= 输出末条，`last_oid`；后续条目以它为 `parent`。
 
 ### 6.3 链完整性（运维须知）
 
-- 写入工具**不校验** `parent` 是否存在、是否属于同一线程；手敲错 oid 会产生**孤儿条目**
-  （`collab thread` 把它列为额外根），工具不会拦。
+- 写入工具（服务端薄 API）**校验** `parent` 是否可见（§6.1）：根 `""`、inbox 里的 oid、或
+  快照里通过 §9.2 校验的记录；其余（含短号、大写 hex）一律 400，不猜。它**不校验**是否属于
+  同一线程，也不按 actor 收窄。CLI 与 Zig `wg` 的写路径尚未接线（C25 阻塞项），接线前手敲错
+  oid 仍可能产生**孤儿条目**（`collab thread` 把它列为额外根）；直接 `git push` 到 inbox 也
+  绕过。无论走哪条路径，收尾都要用 `collab thread <id>` 复核 `oid/parent` 链。
 - 批量建线程时先建 issue、再把其 oid 接住作为下一条的 `--parent`（不要先批量建 issue 再
   统一切状态，否则线程会出现两个根）。收尾前用 `collab thread <id>` 复核 `oid/parent` 链。
 - 条目不可变：写错的 parent 不能改，只能追加一条语义相同、parent 正确的条目并注明
@@ -848,7 +856,7 @@ body。`resources/subscribe` 的初始版本与随后每次轮询都走同一 fe
 | 快照文档损坏/超大 | fail-closed，读整体报错；超 64 MiB 拒绝物化 |
 | 撤销 key 的残留信任 | 服务端随 WAL 立即生效；客户端 fetch（`collab watch` 与 `ci run` 共用）带 `--prune`，远端已删的注册 ref 在本地同步消失；自行 `git fetch`（不带 prune）的 checkout 仍可能残留旧 key——聚合前需 `git fetch --prune`；`collab principal-fetch` 的 host 缓存会主动清除已消失项 |
 | 浏览器私钥 | WebCrypto 密钥存 localStorage（可导出 JWK）：同源 XSS 可盗用签名身份（签名函数就在页面里，改不可导出只防「把 key 带走」，拦不住即时滥用），服务端只能人工 tombstone。**可导出是刻意的**：验证只认此刻注册表里的那一把 key，key 丢失后换新 key（轮换）会让该身份的历史条目全部变 unverified，用旧 key 备份回注是唯一恢复路径；SPA 写入口提供「备份密钥」导出与「导入密钥」恢复（导入前完整校验、失败不覆盖现有 key），`docs/USER_GUIDE.md` §7 写明后果。 |
-| 排序投毒（`ts`/`parent` 不被认证） | 顺序是协作约定、不是安全边界（§6.2）。与代码核对后的现状：链序由 `parent` 拓扑决定，回拨 `ts` 只影响平行候选次序与 `last_ts`/`created_ts` 展示；卡片身份取 **首个 verified 根**（`canonical_root`），未注册者的回填根不能改写身份；已验证参与者能影响投影——等价于他们直接发条目的能力，边界仍是写权限（§3）。写侧不校验 `parent`（折叠后父只在快照里，按 ref 校验会误拒合法追加）。**不再计划**服务器时间戳/单调序号类防线（收益低、要改 schema）。 |
+| 排序投毒（`ts`/`parent` 不被认证） | 顺序是协作约定、不是安全边界（§6.2）。与代码核对后的现状：链序由 `parent` 拓扑决定，回拨 `ts` 只影响平行候选次序与 `last_ts`/`created_ts` 展示；卡片身份取 **首个 verified 根**（`canonical_root`），未注册者的回填根不能改写身份；已验证参与者能影响投影——等价于他们直接发条目的能力，边界仍是写权限（§3）。写侧**已校验** `parent` 可见性（`""` / inbox oid / 快照中通过 §9.2 校验的记录；只按 ref 校验会误拒折叠后的合法追加）——当前强制点 = 服务端薄 API，CLI 与 Zig `wg` 写路径未接线（C25 阻塞项），直接 `git push` 到 inbox 仍绕过。**不再计划**服务器时间戳/单调序号类防线（收益低、要改 schema）。 |
 | 自审/重复批准 | **已收紧**：merge 规则按**去重后的非作者**批准者数计（§7.3），`done` 门禁同样排除 patch 作者；同伙串谋刷 approve 仍是流程边界内的事（写权限与身份是安全边界） |
 | gc 写出超限快照 | **已强制**：CLI 渲染后 >64 MiB 默认拒绝，`--truncate` 丢弃最老记录并置 `complete=false`，服务端立即恢复可读；本地 `load` 同样 fail-closed。快照字节是唯一载体，禁止先删 ref |
 | 时钟 | `ts` 不被认证；只影响排序/展示（及 CI TTL 活性），不参与签名/身份等安全判定；但投影顺序依赖它，见上一行 |
