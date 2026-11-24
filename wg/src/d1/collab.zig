@@ -8,6 +8,7 @@ const std = @import("std");
 const jval = std.json;
 const entry_mod = @import("entry.zig");
 const ci_mod = @import("ci.zig");
+const snapshot_mod = @import("snapshot.zig");
 const util = @import("../util.zig");
 
 pub const EntryRef = entry_mod.EntryRef;
@@ -74,6 +75,79 @@ pub fn thread(alloc: std.mem.Allocator, entries: []const EntryRef) ![]EntryRef {
     try out.append_slice(pending);
     alloc.free(pending);
     return try out.to_owned_slice();
+}
+
+// ---- parent visibility (C25) ----------------------------------------------------------------
+
+/// Why a `parent` was refused (C25). Mirrors `walgit-wal/src/collab.rs`
+/// `ParentRejected` **by contract, not by code sharing**: the Zig client keeps
+/// its own parser and this its own gate, so a cross-implementation disagreement
+/// shows up as a failing test on one side instead of hiding in a shared library.
+pub const ParentVerdict = enum {
+    ok,
+    /// Not a full-length lowercase object id in the repository's hash format
+    /// (`sha1` 40 / `sha256` 64). Short ids are deliberately never resolved:
+    /// "which object did the author mean" is exactly the ambiguity the C24
+    /// audit found people typing wrong by hand.
+    not_canonical_oid,
+    /// Well-formed, but neither an inbox ref nor a validated snapshot record
+    /// names it — a parent no reader can resolve.
+    unknown,
+};
+
+/// The readable reason, character-for-character the Rust `ParentRejected`
+/// `Display` text (the reason is part of the two implementations' contract).
+pub fn parent_rejected_text(v: ParentVerdict) []const u8 {
+    return switch (v) {
+        .ok => "",
+        .not_canonical_oid => "parent is not a full-length lowercase object id (sha1: 40 hex chars, sha256: 64)",
+        .unknown => "parent is not a visible collab entry (absent from refs/collab/inbox/* or the folded snapshot's validated records); fetch refs/collab/* before publishing",
+    };
+}
+
+/// Full-length lowercase hex in the repository's object format.
+pub fn is_canonical_oid(oid: []const u8, format: entry_mod.ObjectFormat) bool {
+    if (oid.len != format.oid_len()) return false;
+    for (oid) |b| {
+        const lower_hex = (b >= '0' and b <= '9') or (b >= 'a' and b <= 'f');
+        if (!lower_hex) return false;
+    }
+    return true;
+}
+
+/// Whether `parent` names a **visible** collab entry (C25), the same judgement
+/// `walgit-wal/src/collab.rs::parent_visible` makes on the server:
+/// - `""` (root) is always allowed;
+/// - otherwise it must be a full-length lowercase oid that either an inbox ref
+///   names (`inbox_oids`, the ref tips — not the parsed entries: a corrupt blob
+///   is still named by its ref, exactly as the Rust side treats it), or a
+///   snapshot record carries **and** that record passes §9.2's content-hash
+///   check (`SnapshotRecord.entry_ref`) — "it appears in the snapshot" alone is
+///   not trust.
+///
+/// A truncated fold (`complete=false`) cannot vouch for a parent its records do
+/// not carry (the dropped ones), which falls out of the record scan; a record
+/// it does carry still vouches, matching the Rust tests
+/// (`truncated_snapshot_does_not_vouch_for_dropped_parents`).
+pub fn parent_visible(
+    alloc: std.mem.Allocator,
+    parent: []const u8,
+    inbox_oids: []const []const u8,
+    snapshot: ?*const snapshot_mod.Snapshot,
+    format: entry_mod.ObjectFormat,
+) ParentVerdict {
+    if (parent.len == 0) return .ok;
+    if (!is_canonical_oid(parent, format)) return .not_canonical_oid;
+    for (inbox_oids) |oid| {
+        if (std.mem.eql(u8, oid, parent)) return .ok;
+    }
+    if (snapshot) |snap| {
+        for (snap.entries) |rec| {
+            if (!std.mem.eql(u8, rec.oid, parent)) continue;
+            if (rec.entry_ref(alloc, format) != null) return .ok;
+        }
+    }
+    return .unknown;
 }
 
 pub const ThreadHead = struct { id: []const u8, head: []const u8 };
@@ -1222,8 +1296,6 @@ fn contains_str(list: []const []const u8, s: []const u8) bool {
 // ---- tests (the §16 anchors that live next to the aggregation) ------------------
 
 const testing = std.testing;
-const snapshot_mod = @import("snapshot.zig");
-
 const NOW: i64 = 1_800_000_000;
 
 fn kp(seed: u8) entry_mod.SigningKey {
@@ -1642,4 +1714,111 @@ test "card claims: unverified and malformed claims never own a card" {
     try testing.expectEqualStrings("", card.owner);
     try testing.expect(card.claim != null);
     try testing.expectEqualStrings("pending", card.claim.?.state);
+}
+
+// ---- C25: parent visibility (mirror of walgit-wal collab.rs's unit tests) -------------------
+
+const no_inbox: []const []const u8 = &.{};
+
+fn snapshot_with(entries: []snapshot_mod.SnapshotRecord, complete: bool) snapshot_mod.Snapshot {
+    return .{
+        .version = 1,
+        .kind = "collab_snapshot",
+        .actor = "alice",
+        .ts = 1_760_000_000,
+        .entries = entries,
+        .complete = complete,
+        .dropped_entries = 0,
+        .sig = "",
+    };
+}
+
+/// The record `wg collab gc` would write for `e`: the declared oid is the real
+/// blob oid of the bytes (so `entry_ref` accepts it).
+fn record_of(arena: std.mem.Allocator, e: *const Entry) snapshot_mod.SnapshotRecord {
+    const bytes = entry_mod.entry_json(arena, e, true);
+    return .{
+        .oid = entry_mod.git_blob_oid(arena, bytes, .sha1),
+        .principal = e.actor,
+        .json = bytes,
+    };
+}
+
+test "parent gate: empty parent is the root and always allowed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(ParentVerdict.ok, parent_visible(arena, "", no_inbox, null, .sha1));
+    // Degenerate: an empty inbox set and no snapshot must not change it.
+    const empty = [_][]const u8{};
+    try testing.expectEqual(ParentVerdict.ok, parent_visible(arena, "", &empty, null, .sha1));
+}
+
+test "parent gate: a parent named by an inbox ref is visible" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const e = unsigned_entry(arena, "t", "comment", "alice", "", 1, body1(arena, "text", "x"));
+    const inbox = [_][]const u8{e.oid};
+    try testing.expectEqual(ParentVerdict.ok, parent_visible(arena, e.oid, &inbox, null, .sha1));
+}
+
+test "parent gate: a validated snapshot record vouches, a mismatched record does not" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const e = unsigned_entry(arena, "t", "comment", "alice", "", 1, body1(arena, "text", "x"));
+    const good = record_of(arena, &e.entry);
+    var bad = record_of(arena, &e.entry);
+    bad.oid = "0000000000000000000000000000000000000000";
+    var records = [_]snapshot_mod.SnapshotRecord{ good, bad };
+    var snap = snapshot_with(&records, true);
+    const empty = no_inbox;
+    // A parent that lives only inside the folded snapshot (post-fold append).
+    try testing.expectEqual(ParentVerdict.ok, parent_visible(arena, good.oid, empty, &snap, .sha1));
+    // Declared oid that does not hash its bytes: the record is not trust (§9.2).
+    try testing.expectEqual(ParentVerdict.unknown, parent_visible(arena, bad.oid, empty, &snap, .sha1));
+}
+
+test "parent gate: an unknown well-formed parent is rejected" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var buf: [40]u8 = undefined;
+    @memset(&buf, 'a');
+    try testing.expectEqual(ParentVerdict.unknown, parent_visible(arena, &buf, no_inbox, null, .sha1));
+}
+
+test "parent gate: short, uppercase and wrong-length parents are not canonical" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const inbox = [_][]const u8{"deadbeef"};
+    try testing.expectEqual(ParentVerdict.not_canonical_oid, parent_visible(arena, "deadbeef", &inbox, null, .sha1));
+    var upper: [40]u8 = undefined;
+    @memset(&upper, 'A');
+    try testing.expectEqual(ParentVerdict.not_canonical_oid, parent_visible(arena, &upper, no_inbox, null, .sha1));
+    var long41: [41]u8 = undefined;
+    @memset(&long41, 'a');
+    try testing.expectEqual(ParentVerdict.not_canonical_oid, parent_visible(arena, &long41, no_inbox, null, .sha1));
+    var hex64: [64]u8 = undefined;
+    @memset(&hex64, 'a');
+    // Length is the repository's hash format: 64 is malformed under sha1…
+    try testing.expectEqual(ParentVerdict.not_canonical_oid, parent_visible(arena, &hex64, no_inbox, null, .sha1));
+    // …but well-formed (and merely unknown) under sha256.
+    try testing.expectEqual(ParentVerdict.unknown, parent_visible(arena, &hex64, no_inbox, null, .sha256));
+    try testing.expectEqual(ParentVerdict.ok, parent_visible(arena, &hex64, &.{&hex64}, null, .sha256));
+}
+
+test "parent gate: a truncated snapshot does not vouch for dropped parents" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const e = unsigned_entry(arena, "t", "comment", "alice", "", 1, body1(arena, "text", "x"));
+    var records = [_]snapshot_mod.SnapshotRecord{};
+    var snap = snapshot_with(&records, false);
+    snap.dropped_entries = 1;
+    const empty = no_inbox;
+    // The record was dropped at the fold; complete=false proves nothing about it.
+    try testing.expectEqual(ParentVerdict.unknown, parent_visible(arena, e.oid, empty, &snap, .sha1));
 }

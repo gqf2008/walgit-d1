@@ -285,6 +285,7 @@ test {
     _ = @import("cmd_mcp.zig");
     _ = @import("cmd_principal.zig");
     _ = @import("collabreader.zig");
+    _ = @import("d1/collab.zig");
     _ = @import("cron.zig");
     _ = @import("gitx.zig");
     _ = @import("httpc.zig");

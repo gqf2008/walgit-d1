@@ -436,6 +436,28 @@ pub fn entry(c: *Ctx, p: *args.Parsed) !u8 {
         }
     }
 
+    // **C25**：发布前拒绝不可见的 parent（与 `walgit-wal` `collab.rs::parent_visible`
+    // 同口径：`""` 放行、全长度小写 hex、inbox refs ∪ 通过 §9.2 校验的 snapshot 记录）。
+    // 位置在签名/写 blob 之前 ⇒ 拒绝不产生本地 ref、也不 push。
+    if (e.parent.len > 0) {
+        if (p.opt("push")) |remote| {
+            gitx.fetch_collab_bounded(c.alloc, c.io, repo, remote) catch |err| {
+                std.debug.print("wg: cannot fetch refs/collab/* before the parent check ({t}); the parent must be visible before publishing\n", .{err});
+                return error.ParentCheckFetchFailed;
+            };
+        }
+        const parent_reader = collabreader.Reader.init(c.alloc, c.io, repo);
+        const parent_loaded = parent_reader.load(c.alloc) catch return error.LoadFailed;
+        const verdict = parent_reader.parentVerdict(c.alloc, &parent_loaded, e.parent);
+        if (verdict != .ok) {
+            std.debug.print("wg: {s}\n", .{collab.parent_rejected_text(verdict)});
+            if (!parent_loaded.snapshot_complete and verdict == .unknown) {
+                std.debug.print("wg: note: the local snapshot is truncated (complete=false); a dropped parent cannot be proven — fetch refs/collab/* and retry\n", .{});
+            }
+            return error.ParentRejected;
+        }
+    }
+
     const key = identity.read_signing_key(c.alloc, c.io, resolved.key_path) catch |err| {
         std.debug.print("wg: key {s}: {t}\n", .{ resolved.key_path, err });
         return error.BadKey;

@@ -1435,6 +1435,27 @@ fn toolPublish(s: *Server, a: std.mem.Allocator, o: std.json.ObjectMap) ToolCall
         return .{ .out = .{ .err = publishErrorText(a, e) } };
     };
 
+    // **C25**：拒绝不可见 parent，且在**任何副作用之前**——MCP 写序是先 push
+    // (toolPublish 末段的 `gitx.push`) 再 update_ref，所以只“早于 blob”不够，
+    // 这里必须早于 push；判定沿用 CLI/服务端的 `parent_visible` 口径。
+    if (parsed.parent.len > 0) {
+        gitx.fetch_collab_bounded(a, s.c.io, s.repo, s.remote) catch |e| {
+            const detail = gitErrorDetail(e);
+            return .{ .out = .{ .err = std.fmt.allocPrint(a, "cannot fetch refs/collab/* before the parent check ({s}): {s}", .{ @errorName(e), detail }) catch "cannot fetch before the parent check" } };
+        };
+        const parent_reader = collabreader.Reader.init(a, s.c.io, s.repo);
+        const parent_loaded = parent_reader.load(a) catch |e| return .{ .out = .{ .err = aggError(a, e) } };
+        const verdict = parent_reader.parentVerdict(a, &parent_loaded, parsed.parent);
+        if (verdict != .ok) {
+            const reason = collab.parent_rejected_text(verdict);
+            const truncated_note = if (!parent_loaded.snapshot_complete and verdict == .unknown)
+                " (the local snapshot is truncated: complete=false, so a dropped parent cannot be proven)"
+            else
+                "";
+            return .{ .out = .{ .err = std.fmt.allocPrint(a, "{s}{s}", .{ reason, truncated_note }) catch reason } };
+        }
+    }
+
     const kind = parsed.kind;
     const body = parsed.body;
     // The done gate (§7.5): identical to `wg collab entry` / the thin API.

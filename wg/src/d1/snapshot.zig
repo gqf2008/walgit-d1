@@ -370,7 +370,7 @@ test "snapshot canonical and signature match the serde golden vector" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const key = SigningKey.generateDeterministic(@splat(9)) catch unreachable;
-    const recs: [1]SnapshotRecord = .{.{ .oid = "aa", .principal = "alice", .json = "{}" }};
+    var recs: [1]SnapshotRecord = .{.{ .oid = "aa", .principal = "alice", .json = "{}" }};
 
     var snap = Snapshot{
         .version = 1,
@@ -400,7 +400,7 @@ test "truncated snapshot canonical covers complete and dropped_entries" {
     const arena = arena_state.allocator();
     const key = SigningKey.generateDeterministic(@splat(9)) catch unreachable;
     const pk = entry_mod.public_key_b64(arena, key);
-    const recs: [1]SnapshotRecord = .{.{ .oid = "aa", .principal = "alice", .json = "{}" }};
+    var recs: [1]SnapshotRecord = .{.{ .oid = "aa", .principal = "alice", .json = "{}" }};
 
     var trunc = Snapshot{
         .version = 1,

@@ -19,6 +19,18 @@ pub const Principals = entry_mod.Principals;
 pub const Loaded = struct {
     entries: []EntryRef,
     principals: *Principals,
+    /// The oids **named by `refs/collab/inbox/*`** (ref tips, before any
+    /// parse) — the ref half of the C25 parent-visibility check. A ref naming a
+    /// corrupt blob still names it, exactly as the Rust server's ref index does.
+    inbox_oids: []const []const u8,
+    /// The parsed folded snapshot, when `refs/collab/meta/snapshot` exists.
+    snapshot: ?snapshot_mod.Snapshot = null,
+    /// Whether that snapshot carries the whole ledger it folded (`true` when the
+    /// ref is absent — a pre-marker snapshot). A truncated fold (`false`) cannot
+    /// vouch for the parents it dropped (C25, §9.3).
+    snapshot_complete: bool = true,
+    /// The repository's object format, resolved once by [`load`].
+    object_format: entry_mod.ObjectFormat = .sha1,
 };
 
 pub const SnapshotBlob = struct { oid: []const u8, bytes: []u8 };
@@ -204,6 +216,7 @@ pub const Reader = struct {
             .sha256 => .sha256,
         };
         var set = entry_mod.EntrySet.init(arena);
+        var snapshot_doc: ?snapshot_mod.Snapshot = null;
         if (try self.snapshot_blob()) |snap| {
             if (snap.bytes.len > entry_mod.COLLAB_SNAPSHOT_MAX_BYTES) {
                 std.debug.print(
@@ -221,11 +234,16 @@ pub const Reader = struct {
                     set.insert(er);
                 }
             }
+            snapshot_doc = parsed;
         }
         // One `cat-file --batch` for the whole tail.
         const inbox = try self.inbox_refs();
         var oids: util.List([]const u8) = .init(arena);
-        for (inbox) |tip| try oids.append(tip.oid);
+        var inbox_oids: util.List([]const u8) = .init(arena);
+        for (inbox) |tip| {
+            try oids.append(tip.oid);
+            try inbox_oids.append(try arena.dupe(u8, tip.oid));
+        }
         const blobs = try self.blobs_batch(oids.items, entry_mod.COLLAB_ENTRY_MAX_BYTES);
         for (inbox) |tip| {
             // The inbox path names the principal; a corrupt or oversized
@@ -237,7 +255,30 @@ pub const Reader = struct {
             const e = entry_mod.parse_entry_arena(arena, blob) catch continue;
             set.insert(.{ .oid = tip.oid, .principal = principal, .entry = e });
         }
-        return .{ .entries = set.slice(), .principals = registry };
+        return .{
+            .entries = set.slice(),
+            .principals = registry,
+            .inbox_oids = inbox_oids.items,
+            .snapshot = snapshot_doc,
+            .snapshot_complete = if (snapshot_doc) |d| d.complete else true,
+            .object_format = obj_format,
+        };
+    }
+
+    /// C25: the parent-visibility judgement over this checkout's **visible
+    /// set** (inbox ref tips ∪ validated snapshot records). Never fetches — a
+    /// writing caller that has a remote fetches first
+    /// (`gitx.fetch_collab_bounded`), exactly like the `done` gate.
+    pub fn parentVerdict(
+        self: *const Reader,
+        arena: std.mem.Allocator,
+        loaded: *const Loaded,
+        parent: []const u8,
+    ) collab.ParentVerdict {
+        _ = self;
+        var snap_copy = loaded.snapshot;
+        const snap_ptr: ?*const snapshot_mod.Snapshot = if (snap_copy) |*sp| sp else null;
+        return collab.parent_visible(arena, parent, loaded.inbox_oids, snap_ptr, loaded.object_format);
     }
 };
 
